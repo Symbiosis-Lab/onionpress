@@ -710,19 +710,22 @@ class OnionPressApp(rumps.App):
 
             # Check 3: Verify hidden service descriptor has been uploaded
             # This is critical - Tor can be bootstrapped but the HS descriptor might not be published yet
+            # With info-level logging enabled, we can see descriptor upload messages
             # Look for various descriptor-related messages that indicate the service is published
             descriptor_uploaded = (
                 "Uploaded rendezvous descriptor" in result.stdout or
                 "Uploading descriptor" in result.stdout or
                 "Uploaded v3 onion service descriptor" in result.stdout or
                 "Publishing v3 onion service descriptor" in result.stdout or
-                "HS DESC UPLOADED" in result.stdout
+                "HS DESC UPLOADED" in result.stdout or
+                "Uploading hidden service descriptor" in result.stdout or
+                "Hidden service descriptor successfully uploaded" in result.stdout
             )
+
             if not descriptor_uploaded:
                 if log_result:
-                    self.log(f"✗ Hidden service descriptor not found in logs (might be uploaded earlier)")
-                # Don't fail immediately - continue to other checks
-                # The descriptor may have been uploaded earlier and rotated out of the log buffer
+                    self.log(f"✗ Hidden service descriptor not uploaded yet")
+                return False
 
             # Check 4: Verify no critical errors in recent logs
             if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
@@ -730,25 +733,9 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor errors detected in logs")
                 return False
 
-            # Check 5: Verify the hidden service circuit is established
-            # The Tor container runs with SocksPort 0 (SOCKS disabled), so we can't test
-            # via SOCKS proxy. Instead, check that Tor has established a circuit for the
-            # hidden service by looking for circuit establishment messages.
-            circuit_established = (
-                "Bootstrapped 100%" in result.stdout and
-                "circuit_create" in result.stdout.lower()
-            )
-
-            # If we have bootstrap 100%, hostname exists, and no errors, consider it ready
-            # The descriptor upload message may have rotated out of the log buffer
-            if not descriptor_uploaded and not circuit_established:
-                # Neither descriptor upload nor circuit establishment confirmed
-                # But if we've been running for a while and have no errors, it's likely working
-                pass  # Continue to final check
-
-            # All basic checks passed - service should be accessible
+            # All checks passed - descriptor is uploaded and service should be accessible
             if log_result:
-                self.log(f"✓ All checks passed - {self.onion_address} is fully operational!")
+                self.log(f"✓ Hidden service descriptor uploaded - {self.onion_address} is ready!")
             return True
 
         except Exception as e:
