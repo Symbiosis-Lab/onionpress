@@ -1,0 +1,573 @@
+#!/bin/bash
+
+# onion.press launcher script
+# This script manages the WordPress + Tor hidden service containers
+
+set -e
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+APP_DIR="$(dirname "$SCRIPT_DIR")"
+RESOURCES_DIR="$APP_DIR/Resources"
+DOCKER_DIR="$RESOURCES_DIR/docker"
+SCRIPTS_DIR="$RESOURCES_DIR/scripts"
+DATA_DIR="$HOME/.onion.press"
+BIN_DIR="$RESOURCES_DIR/bin"
+COLIMA_HOME="$DATA_DIR/colima"
+
+# Ensure data directory exists
+mkdir -p "$DATA_DIR"
+
+# Create Docker config without credential store (avoids docker-credential-osxkeychain errors)
+mkdir -p "$DATA_DIR/docker-config"
+if [ ! -f "$DATA_DIR/docker-config/config.json" ]; then
+    cat > "$DATA_DIR/docker-config/config.json" <<'EOFCONFIG'
+{
+	"auths": {},
+	"currentContext": "colima"
+}
+EOFCONFIG
+fi
+
+# Install docker-compose plugin: prefer bundled, fall back to system
+mkdir -p "$DATA_DIR/docker-config/cli-plugins"
+if [ -f "$BIN_DIR/docker-compose" ] && [ ! -e "$DATA_DIR/docker-config/cli-plugins/docker-compose" ]; then
+    ln -sf "$BIN_DIR/docker-compose" "$DATA_DIR/docker-config/cli-plugins/docker-compose"
+elif [ -L "$HOME/.docker/cli-plugins/docker-compose" ] && [ ! -e "$DATA_DIR/docker-config/cli-plugins/docker-compose" ]; then
+    ln -sf "$HOME/.docker/cli-plugins/docker-compose" "$DATA_DIR/docker-config/cli-plugins/docker-compose"
+fi
+
+# Create default config if it doesn't exist
+if [ ! -f "$DATA_DIR/config" ]; then
+    if [ -f "$RESOURCES_DIR/config-template.txt" ]; then
+        cp "$RESOURCES_DIR/config-template.txt" "$DATA_DIR/config"
+    else
+        cat > "$DATA_DIR/config" <<EOF
+VANITY_PREFIX=op2
+INSTALL_IA_PLUGIN=yes
+UPDATE_ON_LAUNCH=no
+LAUNCH_ON_LOGIN=no
+EOF
+    fi
+fi
+
+# Prefer bundled binaries
+export PATH="$BIN_DIR:$PATH"
+export COLIMA_HOME="$COLIMA_HOME"
+export LIMA_HOME="$COLIMA_HOME/_lima"
+export LIMA_INSTANCE="onionpress"
+export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+export DOCKER_CONFIG="$DATA_DIR/docker-config"
+
+# Log file
+LOG_FILE="$DATA_DIR/onion.press.log"
+
+# Function to log messages
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to generate and load database passwords
+setup_db_passwords() {
+    local secrets_file="$DATA_DIR/secrets"
+
+    # Create secrets file if it doesn't exist
+    if [ ! -f "$secrets_file" ]; then
+        log "Generating random database passwords..."
+
+        # Generate random 32-character passwords using /dev/urandom
+        # Use only alphanumeric chars to avoid shell quoting issues when sourcing
+        local wordpress_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+        local root_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+
+        # Write passwords to secrets file with restricted permissions
+        # Values are single-quoted to prevent shell interpretation on source
+        touch "$secrets_file"
+        chmod 600 "$secrets_file"
+
+        cat > "$secrets_file" <<EOF
+# Database passwords - generated on $(date)
+# DO NOT SHARE THESE PASSWORDS
+WORDPRESS_DB_PASSWORD='$wordpress_pass'
+MYSQL_PASSWORD='$wordpress_pass'
+MYSQL_ROOT_PASSWORD='$root_pass'
+EOF
+
+        log "Database passwords generated and saved to $secrets_file"
+    fi
+
+    # Load passwords from secrets file
+    if [ -f "$secrets_file" ]; then
+        source "$secrets_file"
+        export WORDPRESS_DB_PASSWORD
+        export MYSQL_PASSWORD
+        export MYSQL_ROOT_PASSWORD
+    else
+        log "ERROR: Secrets file not found at $secrets_file"
+        exit 1
+    fi
+}
+
+# Function to detect container runtime
+detect_container_runtime() {
+    # Use bundled Colima
+    if command_exists colima; then
+        if [ -f "$COLIMA_HOME/.initialized" ]; then
+            if "$BIN_DIR/colima" status >/dev/null 2>&1; then
+                echo "colima-bundled"
+                return 0
+            else
+                # Start Colima if stopped
+                log "Starting bundled Colima..."
+                "$BIN_DIR/colima" start >> "$LOG_FILE" 2>&1
+                if [ $? -eq 0 ]; then
+                    echo "colima-bundled"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
+    # Fallback to system Docker (for development)
+    if command_exists docker && docker info >/dev/null 2>&1; then
+        echo "docker-system"
+        return 0
+    fi
+
+    return 1
+}
+
+# Function to generate vanity onion address
+generate_vanity_address() {
+    local prefix="${1:-op2}"
+    # Use shared directory so Docker/Colima can access it
+    local output_dir="$DATA_DIR/shared/vanity-keys"
+
+    log "Generating vanity onion address with prefix '$prefix'..." >&2
+
+    # Create output directory
+    mkdir -p "$output_dir"
+
+    # Check if mkp224o is available
+    if [ ! -f "$BIN_DIR/mkp224o" ]; then
+        log "WARNING: mkp224o not found, using random address" >&2
+        return 1
+    fi
+
+    # Generate vanity address (single threaded for consistency)
+    cd "$output_dir"
+    "$BIN_DIR/mkp224o" -d . -n 1 -t 4 "$prefix" >> "$LOG_FILE" 2>&1
+
+    # Find generated directory
+    VANITY_DIR=$(find "$output_dir" -type d -name "${prefix}*" | head -1)
+
+    if [ -z "$VANITY_DIR" ]; then
+        log "ERROR: Failed to generate vanity address" >&2
+        return 1
+    fi
+
+    VANITY_ADDRESS=$(basename "$VANITY_DIR")
+    log "Generated vanity address: $VANITY_ADDRESS" >&2
+
+    # Return the directory path (only thing on stdout)
+    echo "$VANITY_DIR"
+    return 0
+}
+
+# Function to install and activate Internet Archive Wayback Machine Link Fixer plugin
+install_ia_plugin() {
+    # Check if plugin installation is enabled in config
+    local install_plugin="yes"
+    if [ -f "$DATA_DIR/config" ]; then
+        local config_value=$(grep "^INSTALL_IA_PLUGIN=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ ! -z "$config_value" ]; then
+            install_plugin="$config_value"
+        fi
+    fi
+
+    if [ "$install_plugin" != "yes" ]; then
+        log "Internet Archive plugin installation disabled in config"
+        return 0
+    fi
+
+    # Check if installation scripts exist
+    if [ ! -d "$SCRIPTS_DIR" ] || [ ! -f "$SCRIPTS_DIR/install_plugin.sh" ]; then
+        log "Plugin installation scripts not available, skipping"
+        return 0
+    fi
+
+    log "Checking Internet Archive Wayback Machine Link Fixer plugin..."
+
+    cd "$DOCKER_DIR"
+
+    # Check if plugin is already installed
+    if docker compose exec -T wordpress test -f /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php 2>/dev/null; then
+        # Plugin is installed, try to activate if WordPress is configured
+        log "Internet Archive plugin already installed, checking activation status..."
+        if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
+            "internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php" >>"$LOG_FILE" 2>&1; then
+            log "✓ Internet Archive Wayback Machine Link Fixer plugin is active"
+        else
+            log "Plugin will auto-activate after WordPress setup"
+        fi
+        return 0
+    fi
+
+    log "Installing Internet Archive Wayback Machine Link Fixer plugin..."
+
+    # Create temp directory for plugin download
+    local temp_dir=$(mktemp -d)
+
+    # Download and verify plugin using bash script with checksum verification
+    if "$SCRIPTS_DIR/install_plugin.sh" "internet-archive-wayback-machine-link-fixer" "$temp_dir" >>"$LOG_FILE" 2>&1; then
+        # Copy plugin to WordPress container
+        if docker cp "$temp_dir/internet-archive-wayback-machine-link-fixer" onionpress-wordpress:/var/www/html/wp-content/plugins/ 2>>"$LOG_FILE" && \
+            cd "$DOCKER_DIR" && \
+            docker compose exec -T wordpress chown -R www-data:www-data /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer 2>>"$LOG_FILE"; then
+            log "✓ Internet Archive Wayback Machine Link Fixer plugin installed with verified checksum!"
+
+            # Try to activate immediately if WordPress is configured
+            if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
+                "internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php" >>"$LOG_FILE" 2>&1; then
+                log "✓ Plugin automatically activated!"
+            else
+                log "Plugin will auto-activate after WordPress setup"
+            fi
+        else
+            log "Failed to copy plugin to container"
+        fi
+    else
+        log "Failed to download and verify plugin - check log for details"
+    fi
+
+    # Clean up
+    rm -rf "$temp_dir"
+
+    return 0
+}
+
+# Function to fix permissions for onionpress persistent data directory
+fix_onionpress_permissions() {
+    log "Fixing permissions for onionpress persistent data directory..."
+
+    cd "$DOCKER_DIR"
+
+    # Ensure the directory exists and is owned by www-data
+    # Use 750 (rwxr-x---) to prevent other users from reading the directory
+    if docker compose exec -T wordpress sh -c 'chown -R www-data:www-data /var/lib/onionpress && chmod 750 /var/lib/onionpress' 2>>"$LOG_FILE"; then
+        log "✓ Onionpress data directory permissions fixed"
+        return 0
+    else
+        log "WARNING: Could not fix onionpress data directory permissions"
+        return 1
+    fi
+}
+
+# Function to initialize container runtime
+install_docker() {
+    log "Container runtime initialization required"
+
+    # Should not happen if launcher worked, but handle it
+    "$BIN_DIR/colima" start \
+        --vm-type vz \
+        --mount-type virtiofs \
+        --cpu 2 \
+        --memory 4 \
+        --disk 60 \
+        --arch aarch64 \
+        --network-address \
+        >> "$LOG_FILE" 2>&1
+
+    if [ $? -eq 0 ]; then
+        touch "$COLIMA_HOME/.initialized"
+        log "Container runtime initialized successfully"
+        return 0
+    else
+        log "ERROR: Failed to initialize container runtime"
+        echo "ERROR: Failed to initialize container runtime." >&2
+        echo "Check the logs for details: $LOG_FILE" >&2
+        echo "Or file an issue at: https://github.com/brewsterkahle/onion.press/issues" >&2
+        exit 1
+    fi
+}
+
+# Function to update Docker images if enabled
+update_images() {
+    # Check if auto-update is enabled in config
+    local update_enabled="no"
+    if [ -f "$DATA_DIR/config" ]; then
+        local config_value=$(grep "^UPDATE_ON_LAUNCH=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ ! -z "$config_value" ]; then
+            update_enabled="$config_value"
+        fi
+    fi
+
+    if [ "$update_enabled" != "yes" ]; then
+        return 0
+    fi
+
+    log "Checking for Docker image updates..."
+
+    cd "$DOCKER_DIR"
+
+    # Pull latest images (WordPress, MariaDB, Tor)
+    local images=("wordpress:6.7" "mariadb:11.6" "goldy/tor-hidden-service:v0.4.7.12-54c0e54")
+    local updated=false
+
+    for image in "${images[@]}"; do
+        log "Pulling $image..."
+        if docker pull "$image" >> "$LOG_FILE" 2>&1; then
+            log "✓ $image up to date"
+            updated=true
+        else
+            log "WARNING: Failed to pull $image (continuing with cached version)"
+        fi
+    done
+
+    if [ "$updated" = true ]; then
+        log "✓ Image update check complete"
+    fi
+
+    return 0
+}
+
+# Function to start containers
+start_containers() {
+    log "Starting onion.press containers..."
+
+    cd "$DOCKER_DIR"
+
+    # Check if this is first run (no tor keys exist)
+    if ! docker volume ls | grep -q "onionpress-tor-keys"; then
+        log "First run detected - generating vanity onion address..."
+
+        # Read prefix from config, default to "op2"
+        VANITY_PREFIX="op2"
+        if [ -f "$DATA_DIR/config" ]; then
+            CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ ! -z "$CUSTOM_PREFIX" ]; then
+                VANITY_PREFIX="$CUSTOM_PREFIX"
+            fi
+        fi
+
+        log "Using vanity prefix: '$VANITY_PREFIX'"
+
+        # Generate vanity address
+        if VANITY_DIR=$(generate_vanity_address "$VANITY_PREFIX"); then
+            log "Vanity address generated successfully"
+
+            # Create volume and copy keys
+            if ! docker volume create onionpress-tor-keys >> "$LOG_FILE" 2>&1; then
+                log "ERROR: Failed to create tor-keys volume"
+                return 1
+            fi
+            if ! docker run --rm \
+                -v onionpress-tor-keys:/dest \
+                --mount type=bind,source="$VANITY_DIR",target=/src \
+                alpine sh -c 'mkdir -p /dest/wordpress && cp -r /src/* /dest/wordpress/' >> "$LOG_FILE" 2>&1; then
+                log "ERROR: Failed to copy vanity keys to tor volume"
+                return 1
+            fi
+
+            log "Vanity keys installed to tor volume"
+        else
+            log "Using random onion address"
+        fi
+    fi
+
+    # Update images if enabled in config
+    update_images
+
+    # Start containers with retry on transient failures (e.g. network hiccups during image pull)
+    local max_attempts=3
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        if docker compose up -d >> "$LOG_FILE" 2>&1; then
+            break
+        fi
+        log "WARNING: 'docker compose up -d' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
+        if [ $attempt -eq $max_attempts ]; then
+            log "ERROR: 'docker compose up -d' failed after $max_attempts attempts."
+            return 1
+        fi
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    log "Containers starting (images will download if needed)"
+
+    # Install Internet Archive Wayback Machine Link Fixer plugin
+    install_ia_plugin
+
+    # Fix permissions for onionpress persistent data directory
+    fix_onionpress_permissions
+}
+
+# Function to stop containers
+stop_containers() {
+    log "Stopping onion.press containers..."
+    cd "$DOCKER_DIR"
+    docker compose down 2>&1 | tee -a "$LOG_FILE"
+    log "Containers stopped"
+}
+
+# Function to get container status
+get_status() {
+    cd "$DOCKER_DIR"
+    # Convert newline-delimited JSON to JSON array
+    docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
+}
+
+# Function to get onion address (non-blocking, single attempt)
+get_onion_address() {
+    cd "$DOCKER_DIR"
+    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+    if [ ! -z "$ONION_ADDR" ]; then
+        echo "$ONION_ADDR"
+        return 0
+    fi
+    echo "Generating..."
+    return 1
+}
+
+# Function to wait for services to be ready using active probing
+wait_for_services() {
+    cd "$DOCKER_DIR"
+    local max_wait=120
+    local waited=0
+    local wp_ready=false
+    local onion_ready=false
+    local onion_addr=""
+
+    log "Waiting for services to be ready (polling with curl)..."
+
+    while [ $waited -lt $max_wait ]; do
+        # Step 1: Get onion address if we don't have it yet
+        if [ -z "$onion_addr" ] || [ "$onion_addr" = "Generating..." ]; then
+            onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+        fi
+
+        # Step 2: Check if WordPress is responding locally
+        if [ "$wp_ready" = false ]; then
+            if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
+                log "✓ WordPress is responding on localhost:8080"
+                wp_ready=true
+            fi
+        fi
+
+        # Step 3: Check Tor bootstrap and WordPress reachable from Tor container
+        # (SOCKS proxy doesn't work through Colima VM port forwarding,
+        # so we test the actual path: tor -> wordpress via Docker network)
+        if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+            # Check Tor is bootstrapped
+            if docker compose logs tor 2>/dev/null | grep -q "Bootstrapped 100% (done)"; then
+                # Check WordPress is reachable from Tor container
+                if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
+                    log "✓ Onion service ready: ${onion_addr}"
+                    onion_ready=true
+                fi
+            fi
+        fi
+
+        # Both ready — done
+        if [ "$wp_ready" = true ] && [ "$onion_ready" = true ]; then
+            log "All services are ready after ${waited}s"
+            ONION_ADDR="$onion_addr"
+            return 0
+        fi
+
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    # Timed out — report what we have
+    log "WARNING: Services not fully ready after ${max_wait}s (wp=${wp_ready}, onion=${onion_ready})"
+    if [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+        ONION_ADDR="$onion_addr"
+    else
+        ONION_ADDR="Generating..."
+    fi
+    return 1
+}
+
+# Main execution
+main() {
+    case "${1:-start}" in
+        start)
+            # Detect container runtime
+            if ! RUNTIME=$(detect_container_runtime); then
+                install_docker
+                exit $?
+            fi
+
+            log "Detected container runtime: $RUNTIME"
+
+            # Create symlink for Docker socket if needed
+            # Colima forwards the socket to ~/.colima/default/docker.sock
+            # but we configure DOCKER_HOST to use ~/.onion.press/colima/default/docker.sock
+            # Create symlink to bridge this gap
+            SOCKET_DIR="$COLIMA_HOME/default"
+            SOCKET_PATH="$SOCKET_DIR/docker.sock"
+            COLIMA_SOCKET="$HOME/.colima/default/docker.sock"
+
+            if [ -S "$COLIMA_SOCKET" ]; then
+                if [ ! -e "$SOCKET_PATH" ] || [ ! -S "$SOCKET_PATH" ]; then
+                    log "Creating Docker socket symlink..."
+                    mkdir -p "$SOCKET_DIR"
+                    ln -sf "$COLIMA_SOCKET" "$SOCKET_PATH"
+                    log "Docker socket symlink created: $SOCKET_PATH -> $COLIMA_SOCKET"
+                fi
+            fi
+
+            # Setup database passwords (generates random passwords on first run)
+            setup_db_passwords
+
+            # Start containers
+            start_containers
+
+            # Actively poll until services are ready (replaces fixed sleep)
+            wait_for_services
+
+            log "onion.press is running!"
+            log "Onion address: $ONION_ADDR"
+            log "Local access: http://localhost:8080"
+            log "onion.press is now running! Check the menu bar for status."
+            ;;
+
+        stop)
+            setup_db_passwords
+            stop_containers
+            ;;
+
+        restart)
+            setup_db_passwords
+            stop_containers
+            start_containers
+            wait_for_services
+            ;;
+
+        status)
+            get_status
+            ;;
+
+        address)
+            get_onion_address
+            ;;
+
+        logs)
+            cd "$DOCKER_DIR"
+            docker compose logs -f
+            ;;
+
+        *)
+            echo "Usage: $0 {start|stop|restart|status|address|logs}"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,77 @@
+# onion.press Configuration
+# This file is automatically copied to ~/.onion.press/config on first run
+
+# Vanity Onion Address Prefix
+# Default: "op2" (generates addresses like op2xxxxxxxxxxxxx.onion)
+#
+# You can customize this to any lowercase alphanumeric string.
+# Note: Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.
+# Longer prefixes take exponentially longer to generate:
+# - 2 chars (op): < 1 second
+# - 3 chars (op2): < 1 second
+# - 4 chars (op24): 5-30 seconds
+# - 5 chars (op2024): 10-30 minutes
+# - 6+ chars: hours to days
+#
+# To use a custom prefix:
+# 1. Stop onion.press
+# 2. Edit this file: ~/.onion.press/config
+# 3. Delete ~/.onion.press/vanity-keys directory
+# 4. Delete the tor-keys volume: docker volume rm onionpress-tor-keys
+# 5. Restart onion.press (will generate new vanity address)
+#
+VANITY_PREFIX=op2
+
+# Internet Archive Wayback Machine Link Fixer Plugin
+# Default: "yes" (automatically installs and activates the plugin)
+#
+# The Internet Archive Wayback Machine Link Fixer plugin helps combat link rot by:
+# - Automatically scanning your posts for outbound links
+# - Creating archived versions in the Wayback Machine
+# - Redirecting to archived versions when links break
+# - Archiving your own posts on every update
+#
+# Set to "no" to disable automatic installation of this plugin.
+# More info: https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/
+#
+INSTALL_IA_PLUGIN=yes
+
+# Update Docker Images on Launch
+# Default: "no" (manual updates only via Check for Updates menu)
+#
+# When enabled, onion.press will automatically check for and download updated
+# WordPress, MariaDB, and Tor container images when the app launches.
+# This ensures you have the latest security patches and features.
+#
+# Set to "yes" to enable automatic updates on launch.
+# Note: Updates only occur when containers are stopped.
+#
+UPDATE_ON_LAUNCH=no
+
+# Launch on Login
+# Default: "no" (manual launch required)
+#
+# When enabled, Onion.Press will automatically start when you log in to macOS.
+# The app will appear in your menu bar and your WordPress site will start automatically.
+#
+# Set to "yes" to launch on login.
+# Note: You can also manage this in System Settings → General → Login Items
+#
+LAUNCH_ON_LOGIN=no
+
+# Prevent Mac Sleep While Running (AC Power Only)
+# Default: "yes" (keeps Mac awake when plugged in)
+#
+# When enabled, Onion.Press will prevent your Mac from sleeping while the
+# WordPress + Tor service is running AND you're plugged into AC power.
+# This ensures your .onion site remains accessible 24/7 when connected to power.
+#
+# IMPORTANT: On battery power, your Mac will sleep normally to preserve battery.
+# Your site will go offline when running on battery and Mac sleeps.
+#
+# Uses the built-in 'caffeinate' command with -s flag (AC power only).
+# Display sleep is not affected - screen can still turn off.
+#
+# Set to "no" to allow your Mac to sleep even when plugged in.
+#
+PREVENT_SLEEP=yes
