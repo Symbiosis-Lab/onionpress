@@ -593,6 +593,17 @@ EOF
     if [ "$all_ready" = false ]; then
         log "WARNING: Not all polling clients bootstrapped, using what's available"
     fi
+
+    # Start HS_DESC event logging on poll clients for diagnostics
+    for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        docker_cmd exec "stress-poll-client-${i}" sh -c "
+            cookie=\$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\n')
+            [ -z \"\$cookie\" ] && exit 0
+            (printf 'AUTHENTICATE %s\r\nSETEVENTS HS_DESC\r\n' \"\$cookie\"; sleep 86400) \
+                | nc 127.0.0.1 9051 > /tmp/hsdesc-events.log 2>&1 &
+        " &
+    done
+    log "  HS_DESC event logging started on poll clients"
 }
 
 stop_poll_clients() {
@@ -1419,6 +1430,75 @@ flush_client_descriptor_cache() {
     for pid in $flush_pids; do wait "$pid" 2>/dev/null; done
 }
 
+# Cure a straggler by rotating its introduction points (DEL_ONION + ADD_ONION).
+# When a service has HS_DESC RECEIVED but poll clients get 000, the intro points
+# are unreachable. Rotating forces new intro points and a fresh descriptor.
+cure_straggler() {
+    local addr="$1"
+
+    # Look up which container/worker owns this address
+    local ctr_idx=-1
+    local local_idx=-1
+    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        local found
+        found=$(python3 -c "
+import json, sys
+try:
+    with open('${OUTPUT_DIR}/worker-${idx}-info.json') as f:
+        workers = json.load(f)
+    for w in workers:
+        if w.get('content_address') == '${addr}':
+            print(w['local_index'])
+            sys.exit(0)
+except: pass
+print(-1)
+" 2>/dev/null)
+        if [ "$found" != "-1" ] && [ -n "$found" ]; then
+            ctr_idx=$idx
+            local_idx=$found
+            break
+        fi
+    done
+
+    if [ "$ctr_idx" -lt 0 ]; then
+        log "  cure_straggler: cannot find container for ${addr:0:20}..."
+        return
+    fi
+
+    local ctr_name="stress-worker-${ctr_idx}"
+    if [ "$TOR_IMPL" = "tor" ]; then
+        docker_cmd exec "$ctr_name" \
+            curl -s -X POST http://127.0.0.1:9000/del_onion \
+            -H "Content-Type: application/json" \
+            -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
+        sleep 2
+        docker_cmd exec "$ctr_name" \
+            curl -s -X POST http://127.0.0.1:9000/add_onion \
+            -H "Content-Type: application/json" \
+            -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
+    fi
+    log "  cure_straggler: rotated intro points for ${addr:0:20}... (worker-${ctr_idx}/${local_idx})"
+}
+
+# Diagnose stragglers at timeout — identify which addresses are stuck and why.
+diagnose_stragglers() {
+    local content_addrs="$1"
+    local expected_code="$2"  # "200" or "302"
+
+    log "Straggler diagnostic:"
+    while IFS= read -r addr; do
+        addr=$(echo "$addr" | tr -d '\r\n ')
+        [ -z "$addr" ] && continue
+        local code
+        code=$(docker_cmd exec "stress-poll-client-0" \
+            curl -s --http1.0 --socks5-hostname "diag_${RANDOM}:x@127.0.0.1:9050" --max-time 10 \
+            -o /dev/null -w "%{http_code}" "http://${addr}/" 2>/dev/null) || code="000"
+        if [ "$code" != "$expected_code" ]; then
+            log "  STRAGGLER: ${addr:0:30}... → HTTP ${code} (wanted ${expected_code})"
+        fi
+    done <<< "$content_addrs"
+}
+
 wait_for_takeover() {
     local expected="$1"
     local timeout_secs="${2:-600}"
@@ -1484,6 +1564,7 @@ wait_for_takeover() {
     [ -n "$PHASE_LOG" ] && echo " ${taken_over:-0}/${expected} (timed out)" >> "$PHASE_LOG"
     WAIT_RESULT="${taken_over:-0}/${expected} taken over, timed out after $(fmt_duration $elapsed)"
     log "Takeover: Timed out — ${taken_over:-0} returning 302 (wanted ${expected})"
+    diagnose_stragglers "$content_addrs" "302"
     print_dashboard
     return 1
 }
@@ -1501,9 +1582,13 @@ wait_for_recovery() {
     local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
     local last_flush=0
+    local last_cure=0
+    local last_progress_count=0
+    local last_progress_time=0
     local recovered=0
     local still_taken=0
     local prev_recovered=0
+    local cured_addrs=""  # addresses already cured (don't cure twice)
 
     # Get content addresses of the sites that were disabled
     local content_addrs
@@ -1512,8 +1597,6 @@ wait_for_recovery() {
     while [ "$(date +%s)" -lt "$deadline" ]; do
         # Periodically flush descriptor caches (NEWNYM + HSFETCH) so poll clients
         # pick up the worker's newly-published descriptor as it propagates to HSDirs.
-        # A single flush before the loop fires too early — the descriptor isn't on
-        # HSDirs yet. Repeating every 30s catches it once propagation completes.
         local now_flush
         now_flush=$(date +%s)
         if [ $((now_flush - last_flush)) -ge 30 ]; then
@@ -1525,6 +1608,40 @@ wait_for_recovery() {
         recovered=$PCHECK_200
         still_taken=$PCHECK_302
         local total_checked=$PCHECK_TOTAL
+
+        # Track progress for straggler detection
+        if [ "$recovered" -gt "$last_progress_count" ]; then
+            last_progress_count=$recovered
+            last_progress_time=$(date +%s)
+        fi
+
+        # Cure stragglers: if no progress for 90s, identify stuck addresses
+        # and rotate their intro points (DEL_ONION + ADD_ONION)
+        local now_cure
+        now_cure=$(date +%s)
+        if [ "$recovered" -lt "$expected_healthy" ] && [ "$last_progress_time" -gt 0 ] \
+            && [ $((now_cure - last_progress_time)) -ge 90 ] \
+            && [ $((now_cure - last_cure)) -ge 90 ]; then
+            log "  Recovery stalled at ${recovered}/${expected_healthy} for 90s — curing stragglers..."
+            # Check each address individually to find the stuck ones
+            while IFS= read -r addr; do
+                addr=$(echo "$addr" | tr -d '\r\n ')
+                [ -z "$addr" ] && continue
+                # Skip already-cured addresses
+                echo "$cured_addrs" | grep -q "$addr" && continue
+                local code
+                code=$(docker_cmd exec "stress-poll-client-0" \
+                    curl -s --http1.0 --socks5-hostname "cure_${RANDOM}:x@127.0.0.1:9050" --max-time 10 \
+                    -o /dev/null -w "%{http_code}" "http://${addr}/" 2>/dev/null) || code="000"
+                if [ "$code" != "200" ]; then
+                    cure_straggler "$addr"
+                    cured_addrs="${cured_addrs} ${addr}"
+                fi
+            done <<< "$content_addrs"
+            last_cure=$now_cure
+            # Flush after curing to pick up new descriptors
+            flush_client_descriptor_cache "$poll_start" "$poll_count"
+        fi
 
         # Progress dots
         if [ -n "$PHASE_LOG" ] && [ "$recovered" -gt "$prev_recovered" ]; then
@@ -1557,6 +1674,7 @@ wait_for_recovery() {
     [ -n "$PHASE_LOG" ] && echo " ${recovered:-0}/${FAILING} (timed out)" >> "$PHASE_LOG"
     WAIT_RESULT="${recovered:-0}/${FAILING} recovered, ${still_taken:-0} still taken over, timed out after $(fmt_duration $elapsed)"
     log "Recovery: Timed out — ${recovered:-0} recovered, ${still_taken:-0} still taken over"
+    diagnose_stragglers "$content_addrs" "200"
     print_dashboard
     return 1
 }
