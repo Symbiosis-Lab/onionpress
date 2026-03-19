@@ -183,6 +183,28 @@ oh_api() {
     fi
 }
 
+# Safely fetch a field from /status/<address> with retry.
+# Usage: oh_entry_field <address> <python-expr> [default]
+# Example: oh_entry_field "$ADDR" "d['entries'][0]['status']" "error"
+oh_entry_field() {
+    local addr="$1"
+    local expr="$2"
+    local default="${3:-error}"
+    local raw="" result=""
+    for _r in 1 2 3; do
+        raw=$(oh_api GET "/status/${addr}" 2>/dev/null || echo "")
+        if [ -n "$raw" ]; then
+            result=$(echo "$raw" | python3 -c "import sys,json; d=json.load(sys.stdin); print($expr)" 2>/dev/null || echo "")
+            if [ -n "$result" ]; then
+                echo "$result"
+                return 0
+            fi
+        fi
+        [ "$_r" -lt 3 ] && sleep 5
+    done
+    echo "$default"
+}
+
 # Generate a signed payload using the Python helper
 sign_payload() {
     local cmd="$1"
@@ -359,7 +381,7 @@ else
 fi
 
 # Verify /status/<address> shows online
-ENTRY_STATUS=$(oh_api GET "/status/${CONTENT_ADDR}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['entries'][0]['status'])")
+ENTRY_STATUS=$(oh_entry_field "$CONTENT_ADDR" "d['entries'][0]['status']" "error")
 if [ "$ENTRY_STATUS" = "online" ]; then
     pass "/status/<address> shows status=online"
 else
@@ -382,7 +404,7 @@ TAKEOVER_DETECTED=false
 for i in $(seq 1 30); do
     sleep 10
     ELAPSED=$(( $(date +%s) - TAKEOVER_START ))
-    ENTRY_STATUS=$(oh_api GET "/status/${CONTENT_ADDR}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['entries'][0]['status'])" 2>/dev/null || echo "error")
+    ENTRY_STATUS=$(oh_entry_field "$CONTENT_ADDR" "d['entries'][0]['status']" "error")
     log "  [${ELAPSED}s] status=$ENTRY_STATUS"
     if [ "$ENTRY_STATUS" = "taken-over" ]; then
         TAKEOVER_DETECTED=true
@@ -402,7 +424,7 @@ fi
 step 4 "Verify takeover (API state + 302 redirect via Tor)"
 
 # Check /status/<address> has last_taken_over timestamp
-TAKEN_OVER_AT=$(oh_api GET "/status/${CONTENT_ADDR}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['entries'][0].get('last_taken_over', 'none'))")
+TAKEN_OVER_AT=$(oh_entry_field "$CONTENT_ADDR" "d['entries'][0].get('last_taken_over', 'none')" "none")
 if [ "$TAKEN_OVER_AT" != "none" ] && [ "$TAKEN_OVER_AT" != "None" ] && [ "$TAKEN_OVER_AT" != "null" ]; then
     pass "last_taken_over timestamp set: $TAKEN_OVER_AT"
 else
@@ -459,7 +481,7 @@ else
 fi
 
 # Verify status changed back to online
-ENTRY_STATUS=$(oh_api GET "/status/${CONTENT_ADDR}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['entries'][0]['status'])")
+ENTRY_STATUS=$(oh_entry_field "$CONTENT_ADDR" "d['entries'][0]['status']" "error")
 if [ "$ENTRY_STATUS" = "online" ]; then
     pass "/status/<address> shows status=online (released)"
 else
@@ -467,7 +489,7 @@ else
 fi
 
 # Check last_released timestamp
-RELEASED_AT=$(oh_api GET "/status/${CONTENT_ADDR}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['entries'][0].get('last_released', 'none'))")
+RELEASED_AT=$(oh_entry_field "$CONTENT_ADDR" "d['entries'][0].get('last_released', 'none')" "none")
 if [ "$RELEASED_AT" != "none" ] && [ "$RELEASED_AT" != "None" ] && [ "$RELEASED_AT" != "null" ]; then
     pass "last_released timestamp set: $RELEASED_AT"
 else
