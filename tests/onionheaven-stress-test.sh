@@ -55,7 +55,7 @@ CLEANUP_STALE=false
 STALE_HOURS=2
 PER_CTR=20        # sites per container
 BATCH_SIZE=0      # 0 = start all containers at once
-NUM_POLL_CLIENTS=5  # dedicated Tor SOCKS clients for polling reachability (scale with site count)
+NUM_POLL_CLIENTS=0  # auto-scaled: 1 per 10 sites (set after TOTAL is parsed)
 STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
 IS_ONIONHEAVEN_HOST=false  # auto-detected in preflight
@@ -105,6 +105,12 @@ fi
 
 # Compute number of containers
 NUM_CONTAINERS=$(( (TOTAL + PER_CTR - 1) / PER_CTR ))
+
+# Auto-scale poll clients: 1 per 10 sites, minimum 3
+if [ "$NUM_POLL_CLIENTS" -eq 0 ]; then
+    NUM_POLL_CLIENTS=$(( (TOTAL + 9) / 10 ))
+    [ "$NUM_POLL_CLIENTS" -lt 3 ] && NUM_POLL_CLIENTS=3
+fi
 
 if [ "$TOTAL" -lt 1 ]; then
     echo "ERROR: --total must be at least 1"
