@@ -55,7 +55,7 @@ CLEANUP_STALE=false
 STALE_HOURS=2
 PER_CTR=20        # sites per container
 BATCH_SIZE=0      # 0 = start all containers at once
-NUM_POLL_CLIENTS=3  # dedicated Tor SOCKS clients for polling reachability
+NUM_POLL_CLIENTS=5  # dedicated Tor SOCKS clients for polling reachability (scale with site count)
 STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
 IS_ONIONHEAVEN_HOST=false  # auto-detected in preflight
