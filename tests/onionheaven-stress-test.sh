@@ -540,11 +540,14 @@ start_poll_clients() {
             --entrypoint sh \
             "$ARTI_IMAGE" \
             -c "
+                apt-get update -qq && apt-get install -y -qq netcat-openbsd xxd >/dev/null 2>&1
                 mkdir -p /var/lib/tor
                 chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
                 chmod 700 /var/lib/tor
                 cat > /etc/tor/torrc << EOF
 SocksPort 0.0.0.0:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 EOF
@@ -928,7 +931,7 @@ parallel_check_addrs() {
 
         (
             code=$(docker_cmd exec "$ctr_name" \
-                curl -s --socks5-hostname "reach${idx}:x@127.0.0.1:9050" --max-time "$max_time" \
+                curl -s --http1.0 --socks5-hostname "reach${idx}:x@127.0.0.1:9050" --max-time "$max_time" \
                 -o /dev/null -w "%{http_code}" \
                 "http://${addr}/" 2>/dev/null) || code="000"
             echo "$code" > "${tmpdir}/${idx}"
@@ -1122,19 +1125,11 @@ disable_workers() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: DEL_ONION via control port — only affects these services,
-            # no SIGHUP, no descriptor re-publish for the other 48 services.
-            docker_cmd exec "$ctr_name" sh -c "
-                cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
-                content_addr=\$(cat /var/lib/tor/hidden_service/${content_nick}/hostname 2>/dev/null | tr -d '\n' | sed 's/.onion//')
-                if [ -n \"\$content_addr\" ]; then
-                    printf 'AUTHENTICATE %s\r\nDEL_ONION %s\r\nQUIT\r\n' \"\$cookie\" \"\$content_addr\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
-                fi
-                hc_addr=\$(cat /var/lib/tor/hidden_service/${hc_nick}/hostname 2>/dev/null | tr -d '\n' | sed 's/.onion//')
-                if [ -n \"\$hc_addr\" ]; then
-                    printf 'AUTHENTICATE %s\r\nDEL_ONION %s\r\nQUIT\r\n' \"\$cookie\" \"\$hc_addr\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
-                fi
-            " 2>/dev/null || true
+            # C Tor: DEL_ONION via worker-server control API
+            docker_cmd exec "$ctr_name" \
+                curl -s -X POST http://127.0.0.1:9000/del_onion \
+                -H "Content-Type: application/json" \
+                -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
         else
             # Arti: disable in config (no control port equivalent)
             docker_cmd exec "$ctr_name" \
@@ -1187,15 +1182,11 @@ enable_workers() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: ADD_ONION via control port — re-adds only these services.
-            # Read the saved ctor_key_b64 from worker-info.json (saved during bootstrap).
-            docker_cmd exec "$ctr_name" sh -c "
-                cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
-                content_key=\$(python3 -c \"import json; w=[x for x in json.load(open('/worker-info.json')) if x.get('local_index')==${local_idx}]; print(w[0].get('ctor_key_b64','') if w else '')\" 2>/dev/null)
-                if [ -n \"\$content_key\" ]; then
-                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Flags=Detach Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
-                fi
-            " 2>/dev/null || true
+            # C Tor: ADD_ONION via worker-server control API
+            docker_cmd exec "$ctr_name" \
+                curl -s -X POST http://127.0.0.1:9000/add_onion \
+                -H "Content-Type: application/json" \
+                -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
         else
             # Arti: re-enable in config
             docker_cmd exec "$ctr_name" \
@@ -1308,14 +1299,11 @@ enable_workers_silent() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: ADD_ONION via control port — re-adds only these services
-            docker_cmd exec "$ctr_name" sh -c "
-                cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
-                content_key=\$(python3 -c \"import json; w=[x for x in json.load(open('/worker-info.json')) if x.get('local_index')==${local_idx}]; print(w[0].get('ctor_key_b64','') if w else '')\" 2>/dev/null)
-                if [ -n \"\$content_key\" ]; then
-                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Flags=Detach Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
-                fi
-            " 2>/dev/null || true
+            # C Tor: ADD_ONION via worker-server control API
+            docker_cmd exec "$ctr_name" \
+                curl -s -X POST http://127.0.0.1:9000/add_onion \
+                -H "Content-Type: application/json" \
+                -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
         else
             # Arti: re-enable in config
             docker_cmd exec "$ctr_name" \
@@ -1354,15 +1342,41 @@ enable_workers_silent() {
     log "Re-enabled ${count} sites silently (${TOR_LABEL} $([ "$TOR_IMPL" = "tor" ] && echo "ADD_ONION" || echo "SIGHUP"), no notifications sent)"
 }
 
-# Restart Tor/Arti SOCKS proxies to flush HSDir descriptor caches.
-# Without this, clients keep connecting using old (stale) descriptors
-# even after takeover/release, making transitions appear much slower.
-# Flushes the test client descriptor cache.
+# Flush client descriptor caches via HSFETCH on polling clients.
+# After a handoff (takeover or release), clients may have stale cached
+# descriptors pointing to the old service. HSFETCH forces a fresh lookup.
 flush_client_descriptor_cache() {
-    # No-op: restarting tor-client kills all circuits and makes descriptor
-    # discovery slower, not faster. Let Tor discover new descriptors naturally.
-    # The polling loops will find them within seconds (ADD_ONION publishes immediately).
-    :
+    local start="${1:-}"
+    local count="${2:-}"
+
+    [ -z "$start" ] || [ -z "$count" ] && return
+
+    local addrs
+    addrs=$(get_worker_content_addrs "$start" "$count")
+    [ -z "$addrs" ] && return
+
+    local addr_count
+    addr_count=$(echo "$addrs" | grep -c . || echo 0)
+    log "HSFETCH for ${addr_count} addresses across ${NUM_POLL_CLIENTS} poll clients..."
+
+    # Build HSFETCH commands (strip .onion suffix)
+    local hsfetch_cmds=""
+    while IFS= read -r addr; do
+        addr=$(echo "$addr" | tr -d '\r\n ' | sed 's/\.onion$//')
+        [ -z "$addr" ] && continue
+        hsfetch_cmds="${hsfetch_cmds}HSFETCH ${addr}\r\n"
+    done <<< "$addrs"
+    [ -z "$hsfetch_cmds" ] && return
+
+    for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        local cname="stress-poll-client-${ci}"
+        docker_cmd exec "$cname" sh -c "
+            cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n' 2>/dev/null)
+            [ -z \"\$cookie\" ] && exit 0
+            printf 'AUTHENTICATE %s\r\n${hsfetch_cmds}QUIT\r\n' \"\$cookie\" | nc -w 10 127.0.0.1 9051
+        " >/dev/null 2>&1 || true &
+    done
+    wait
 }
 
 wait_for_takeover() {
@@ -2080,8 +2094,8 @@ run_worker() {
         echo ""
     fi
 
-    # Flush tor-client descriptor cache so it discovers new site onion services faster
-    flush_client_descriptor_cache
+    # HSFETCH all site addresses on poll clients to speed up descriptor discovery
+    flush_client_descriptor_cache 0 "$TOTAL"
 
     # Phase 3: Wait for onionheaven heartbeat monitor to confirm sites are healthy
     phase_start "3" "Waiting for heartbeat monitor to confirm all ${TOTAL} sites are healthy (est. 1m)"
@@ -2110,7 +2124,7 @@ run_worker() {
         # The 30s server-side cooldown prevents stale heartbeats from releasing it.
         disable_workers "$fail_start" "$FAILING"
         notify_offline "$fail_start" "$FAILING"
-        flush_client_descriptor_cache
+        flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase A.1: Waiting for takeovers..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
@@ -2133,7 +2147,7 @@ run_worker() {
         log "Phase A.2: Graceful recovery — re-enabling responders + sending /online..."
         enable_workers "$fail_start" "$FAILING"
         notify_online "$fail_start" "$FAILING"
-        flush_client_descriptor_cache
+        flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase A.2: Waiting for recovery..."
         if ! wait_for_recovery "$FAILING" 600; then
             log "WARNING: Not all sites recovered from graceful offline"
@@ -2158,7 +2172,7 @@ run_worker() {
         scenario_ts=$(date +%s)
         log "Phase B.1: Silent crash — disabling responders for ${FAILING} sites (no /offline)..."
         disable_workers "$fail_start" "$FAILING"
-        flush_client_descriptor_cache
+        flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase B.1: Waiting for heartbeat-detected takeovers..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
@@ -2180,7 +2194,7 @@ run_worker() {
         scenario_ts=$(date +%s)
         log "Phase B.2: Silent recovery — re-enabling responders (no /online, no /register)..."
         enable_workers_silent "$fail_start" "$FAILING"
-        flush_client_descriptor_cache
+        flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase B.2: Waiting for heartbeat-detected recovery..."
         if ! wait_for_recovery "$FAILING" 900; then
             log "WARNING: Not all sites recovered via heartbeat detection"

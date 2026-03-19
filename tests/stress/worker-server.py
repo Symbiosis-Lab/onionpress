@@ -18,6 +18,7 @@ Each worker i gets:
 
 import asyncio
 import json
+import subprocess
 import sys
 
 # Set of disabled ports (simulating failure)
@@ -25,6 +26,32 @@ disabled_ports = set()
 
 # Stats
 stats = {"requests": 0, "disabled_hits": 0, "healthy_hits": 0}
+
+# Cached worker info (loaded from /worker-info.json on demand)
+_worker_info = None
+
+
+def _load_worker_info():
+    global _worker_info
+    try:
+        with open("/worker-info.json") as f:
+            workers = json.load(f)
+        _worker_info = {w["local_index"]: w for w in workers if "local_index" in w}
+    except Exception:
+        _worker_info = {}
+    return _worker_info
+
+
+def _ctor_control(cmd):
+    """Send a command to C Tor's control port. Returns the raw response."""
+    result = subprocess.run(
+        ["sh", "-c",
+         f'cookie=$(xxd -p /var/lib/tor/control_auth_cookie | tr -d "\\n"); '
+         f'printf "AUTHENTICATE %s\\r\\n{cmd}\\r\\nQUIT\\r\\n" "$cookie" | '
+         f'nc -w 5 127.0.0.1 9051'],
+        capture_output=True, text=True, timeout=15,
+    )
+    return result.stdout
 
 
 async def handle_http(reader, writer, port):
@@ -104,6 +131,53 @@ async def handle_control(reader, writer):
             ports = data.get("ports", [])
             disabled_ports.difference_update(ports)
             resp = json.dumps({"ok": True, "disabled": sorted(disabled_ports)}).encode()
+        elif path == "/del_onion" and method == "POST":
+            data = json.loads(body)
+            worker_indices = data.get("workers", [])
+            _load_worker_info()
+            results = {}
+            for widx in worker_indices:
+                w = _worker_info.get(widx)
+                if not w or not w.get("content_address"):
+                    results[str(widx)] = "no_info"
+                    continue
+                sid = w["content_address"].replace(".onion", "")
+                out = await asyncio.get_event_loop().run_in_executor(
+                    None, _ctor_control, f"DEL_ONION {sid}")
+                results[str(widx)] = "ok" if "250 OK" in out else f"fail:{out[:80]}"
+                # Also DEL healthcheck if it exists and is a real service
+                hc = w.get("healthcheck_address", "")
+                if hc and hc.endswith(".onion") and not hc.startswith("hc"):
+                    hc_sid = hc.replace(".onion", "")
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, _ctor_control, f"DEL_ONION {hc_sid}")
+            resp = json.dumps({"ok": True, "results": results}).encode()
+        elif path == "/add_onion" and method == "POST":
+            data = json.loads(body)
+            worker_indices = data.get("workers", [])
+            _load_worker_info()
+            results = {}
+            for widx in worker_indices:
+                w = _worker_info.get(widx)
+                if not w or not w.get("ctor_key_b64"):
+                    results[str(widx)] = "no_key"
+                    continue
+                cp = w.get("content_port", 9100 + widx * 2)
+                key = w["ctor_key_b64"]
+                out = await asyncio.get_event_loop().run_in_executor(
+                    None, _ctor_control,
+                    f"ADD_ONION ED25519-V3:{key} Flags=Detach Port=80,127.0.0.1:{cp}")
+                ok = "250 OK" in out or "250-ServiceID=" in out
+                results[str(widx)] = "ok" if ok else f"fail:{out[:80]}"
+                # Also re-ADD healthcheck if it was a real service
+                hc = w.get("healthcheck_address", "")
+                hc_key = w.get("ctor_hc_key_b64", "")
+                if hc_key and hc.endswith(".onion"):
+                    hp = w.get("hc_port", cp + 1)
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, _ctor_control,
+                        f"ADD_ONION ED25519-V3:{hc_key} Flags=Detach Port=80,127.0.0.1:{hp}")
+            resp = json.dumps({"ok": True, "results": results}).encode()
         elif path == "/status":
             resp = json.dumps({
                 "disabled_count": len(disabled_ports),
