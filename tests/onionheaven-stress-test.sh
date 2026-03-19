@@ -279,13 +279,26 @@ preflight() {
         fi
     fi
 
-    # Get the Arti image from the running tor container
+    # Get the Arti image from the running tor container (used for poll clients)
     ARTI_IMAGE=$(docker_cmd inspect --format='{{.Config.Image}}' onionpress-tor 2>/dev/null)
     if [ -z "$ARTI_IMAGE" ]; then
         echo "ERROR: Cannot determine Arti image from onionpress-tor container"
         exit 1
     fi
     log "  Arti image: $ARTI_IMAGE"
+
+    # Stress worker image — pre-built with scripts, no apt-get at runtime
+    STRESS_IMAGE="ghcr.io/brewsterkahle/onionpress-stress-worker:latest"
+    if ! docker_cmd image inspect "$STRESS_IMAGE" >/dev/null 2>&1; then
+        log "  Building stress worker image locally..."
+        docker_cmd build -t "$STRESS_IMAGE" "${SCRIPT_DIR}/stress/" >> "$LOG_FILE" 2>&1 || true
+    fi
+    if docker_cmd image inspect "$STRESS_IMAGE" >/dev/null 2>&1; then
+        log "  Stress worker image: $STRESS_IMAGE"
+    else
+        STRESS_IMAGE="$ARTI_IMAGE"
+        log "  WARNING: Stress worker image not available, falling back to $ARTI_IMAGE"
+    fi
 
     # OnionHeaven-host-only checks: registration API, onionheaven container
     LAZY_ACTIVATION=false
@@ -417,14 +430,17 @@ EOF
         --network "$network" \
         --ulimit nofile=10000:10000 \
         --entrypoint sh \
-        "$ARTI_IMAGE" \
+        "$STRESS_IMAGE" \
         -c "sleep infinity" >/dev/null 2>&1
 
-    # Copy files into container
-    docker_cmd cp "${SCRIPT_DIR}/stress/worker-server.py" "${ctr_name}:/worker-server.py"
-    docker_cmd cp "${SCRIPT_DIR}/stress/worker-bootstrap.py" "${ctr_name}:/worker-bootstrap.py"
-    docker_cmd cp "${SCRIPT_DIR}/../src/onion_auth.py" "${ctr_name}:/onion_auth.py"
-    docker_cmd cp "${SCRIPT_DIR}/stress/tor-watchdog.sh" "${ctr_name}:/tor-watchdog.sh"
+    # Copy files into container (only needed if using base ARTI_IMAGE, not STRESS_IMAGE)
+    # Copy files + config into container
+    if [ "$STRESS_IMAGE" = "$ARTI_IMAGE" ]; then
+        docker_cmd cp "${SCRIPT_DIR}/stress/worker-server.py" "${ctr_name}:/worker-server.py"
+        docker_cmd cp "${SCRIPT_DIR}/stress/worker-bootstrap.py" "${ctr_name}:/worker-bootstrap.py"
+        docker_cmd cp "${SCRIPT_DIR}/../src/onion_auth.py" "${ctr_name}:/onion_auth.py"
+        docker_cmd cp "${SCRIPT_DIR}/stress/tor-watchdog.sh" "${ctr_name}:/tor-watchdog.sh"
+    fi
     if [ "$TOR_IMPL" = "tor" ]; then
         docker_cmd cp "$torrc" "${ctr_name}:/etc/tor/torrc"
     else
@@ -438,8 +454,10 @@ EOF
 #!/bin/sh
 set -e
 
-# Install Python + curl + netcat/xxd (for control port ADD_ONION/DEL_ONION)
-apt-get update -qq && apt-get install -y -qq python3-minimal curl netcat-openbsd xxd >/dev/null 2>&1
+# Install deps only if not using pre-built stress image
+if ! python3 --version >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq python3-minimal curl netcat-openbsd xxd >/dev/null 2>&1
+fi
 
 # Prepare C Tor data dir (no HiddenServiceDir — services created via ADD_ONION)
 mkdir -p /var/lib/tor
