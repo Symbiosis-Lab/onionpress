@@ -1369,6 +1369,7 @@ flush_client_descriptor_cache() {
     [ -z "$sids" ] && return
 
     # Step 1: NEWNYM on all poll clients (clears descriptor cache)
+    local flush_pids=""
     for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
         local cname="stress-poll-client-${ci}"
         docker_cmd exec "$cname" sh -c "
@@ -1376,11 +1377,13 @@ flush_client_descriptor_cache() {
             [ -z \"\$cookie\" ] && exit 0
             printf 'AUTHENTICATE %s\r\nSIGNAL NEWNYM\r\nQUIT\r\n' \"\$cookie\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
         " &
+        flush_pids="$flush_pids $!"
     done
-    wait
+    for pid in $flush_pids; do wait "$pid" 2>/dev/null; done
     sleep 3
 
     # Step 2: HSFETCH on all poll clients (fetches fresh descriptors)
+    flush_pids=""
     for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
         local cname="stress-poll-client-${ci}"
         docker_cmd exec "$cname" sh -c "
@@ -1395,8 +1398,9 @@ flush_client_descriptor_cache() {
                 printf 'QUIT\r\n'
             ) | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
         " &
+        flush_pids="$flush_pids $!"
     done
-    wait
+    for pid in $flush_pids; do wait "$pid" 2>/dev/null; done
 }
 
 wait_for_takeover() {
