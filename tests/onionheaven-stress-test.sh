@@ -594,16 +594,14 @@ EOF
         log "WARNING: Not all polling clients bootstrapped, using what's available"
     fi
 
-    # Start HS_DESC event logging on poll clients for diagnostics
+    # Copy verify-worker.py and install python3 on poll clients
     for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
-        docker_cmd exec "stress-poll-client-${i}" sh -c "
-            cookie=\$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\n')
-            [ -z \"\$cookie\" ] && exit 0
-            (printf 'AUTHENTICATE %s\r\nSETEVENTS HS_DESC\r\n' \"\$cookie\"; sleep 86400) \
-                | nc 127.0.0.1 9051 > /tmp/hsdesc-events.log 2>&1 &
-        " &
+        docker_cmd cp "${SCRIPT_DIR}/stress/verify-worker.py" "stress-poll-client-${i}:/verify-worker.py"
+        docker_cmd exec "stress-poll-client-${i}" sh -c \
+            "apt-get update -qq && apt-get install -y -qq python3-minimal >/dev/null 2>&1" &
     done
-    log "  HS_DESC event logging started on poll clients"
+    wait
+    log "  verify-worker.py + python3 installed on poll clients"
 }
 
 stop_poll_clients() {
@@ -1499,71 +1497,148 @@ diagnose_stragglers() {
     done <<< "$content_addrs"
 }
 
-wait_for_takeover() {
-    local expected="$1"
-    local timeout_secs="${2:-600}"
-    local poll_start="${3:-$((TOTAL - FAILING))}"
-    local poll_count="${4:-$FAILING}"
+# ── Event-driven verification via verify-worker.py ───────────────────────────
+# Launches verify-worker.py across ALL poll clients, each handling a subset of
+# addresses. Reads JSON results files and aggregates. At 1000+ sites, each
+# poll client verifies ~300 addresses instead of one client doing all of them.
 
-    log "Waiting for ${expected} takeovers — polling disabled sites' .onion addresses for 302 redirects (timeout: ${timeout_secs}s)..."
+run_verify_worker() {
+    local expected_code="$1"
+    local target_count="$2"
+    local timeout_secs="$3"
+    local poll_start="$4"
+    local poll_count="$5"
 
+    local addrs
+    addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
+    [ -z "$addrs" ] && return 1
+
+    # Split addresses across poll clients (round-robin)
+    local addr_arrays=""
+    local ci=0
+    for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        eval "poll_addrs_${i}=''"
+    done
+    while IFS= read -r addr; do
+        addr=$(echo "$addr" | tr -d '\r\n ')
+        [ -z "$addr" ] && continue
+        local target_ci=$((ci % NUM_POLL_CLIENTS))
+        eval "poll_addrs_${target_ci}=\"\${poll_addrs_${target_ci}} ${addr}\""
+        ci=$((ci + 1))
+    done <<< "$addrs"
+
+    # Kill any previous verify-workers and launch new ones
+    for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        local cname="stress-poll-client-${i}"
+        docker_cmd exec "$cname" sh -c 'pkill -f verify-worker.py 2>/dev/null; rm -f /tmp/verify-results.json' 2>/dev/null || true
+        local these_addrs
+        eval "these_addrs=\"\${poll_addrs_${i}}\""
+        [ -z "$these_addrs" ] && continue
+        docker_cmd exec "$cname" sh -c \
+            "python3 /verify-worker.py ${expected_code} ${these_addrs} > /tmp/verify-worker.log 2>&1 &" 2>/dev/null
+    done
+
+    # Poll all results files and aggregate
     local start_ts
     start_ts=$(date +%s)
     local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
-    local last_flush=0
-    local taken_over=0
-    local prev_taken=0
-
-    # Get content addresses of the sites we disabled
-    local content_addrs
-    content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
+    local prev_verified=0
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        # Periodically flush descriptor caches so poll clients discover
-        # the takeover container's newly-published descriptor.
-        local now_flush
-        now_flush=$(date +%s)
-        if [ $((now_flush - last_flush)) -ge 30 ]; then
-            flush_client_descriptor_cache "$poll_start" "$poll_count"
-            last_flush=$now_flush
-        fi
+        sleep 5
 
-        parallel_check_addrs "$content_addrs" "302"
-        taken_over=$PCHECK_302
-        local total_checked=$PCHECK_TOTAL
+        # Aggregate results from all poll clients
+        local total_verified=0
+        local total_pending=0
+        local all_cures=""
+        for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+            local cname="stress-poll-client-${i}"
+            local results
+            results=$(docker_cmd exec "$cname" cat /tmp/verify-results.json 2>/dev/null) || continue
+            [ -z "$results" ] && continue
+            local v p cures
+            v=$(echo "$results" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verified',0))" 2>/dev/null || echo 0)
+            p=$(echo "$results" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('pending',[])))" 2>/dev/null || echo 0)
+            cures=$(echo "$results" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for addr in d.get('cured', []):
+    r = d.get('results', {}).get(addr, {})
+    if not r.get('verified'): print(addr)
+" 2>/dev/null)
+            total_verified=$((total_verified + v))
+            total_pending=$((total_pending + p))
+            [ -n "$cures" ] && all_cures="${all_cures}\n${cures}"
+        done
 
         # Progress dots
-        if [ -n "$PHASE_LOG" ] && [ "$taken_over" -gt "$prev_taken" ]; then
-            local new_dots=$((taken_over - prev_taken))
+        if [ -n "$PHASE_LOG" ] && [ "$total_verified" -gt "$prev_verified" ]; then
+            local new_dots=$((total_verified - prev_verified))
             printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
-            prev_taken=$taken_over
+            prev_verified=$total_verified
         fi
 
         local now
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
-            log "  (taken over: ${taken_over}/${total_checked} — 302:${PCHECK_302} 200:${PCHECK_200} 000:${PCHECK_000})"
+            log "  (verified: ${total_verified}/${target_count}, pending: ${total_pending})"
             last_dashboard=$now
         fi
 
-        if [ "$taken_over" -ge "$expected" ] 2>/dev/null; then
-            local elapsed=$(( $(date +%s) - start_ts ))
-            [ -n "$PHASE_LOG" ] && echo " ${taken_over}/${expected}" >> "$PHASE_LOG"
-            WAIT_RESULT="${taken_over}/${expected} taken over in $(fmt_duration $elapsed)"
-            log "Takeover: ${taken_over}/${total_checked} returning 302 (target: ${expected})"
-            print_dashboard
-            return 0
+        # Execute cure requests from any verify-worker
+        if [ -n "$all_cures" ]; then
+            echo -e "$all_cures" | while IFS= read -r addr; do
+                [ -z "$addr" ] && continue
+                cure_straggler "$addr"
+            done
         fi
 
-        sleep 5
+        if [ "$total_verified" -ge "$target_count" ] 2>/dev/null; then
+            local elapsed=$(( $(date +%s) - start_ts ))
+            for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+                docker_cmd exec "stress-poll-client-${i}" sh -c 'pkill -f verify-worker.py 2>/dev/null' || true
+            done
+            WAIT_RESULT="${total_verified}/${target_count} verified in $(fmt_duration $elapsed)"
+            return 0
+        fi
     done
 
+    # Timed out — kill workers and dump diagnostics
     local elapsed=$(( $(date +%s) - start_ts ))
-    [ -n "$PHASE_LOG" ] && echo " ${taken_over:-0}/${expected} (timed out)" >> "$PHASE_LOG"
-    WAIT_RESULT="${taken_over:-0}/${expected} taken over, timed out after $(fmt_duration $elapsed)"
-    log "Takeover: Timed out — ${taken_over:-0} returning 302 (wanted ${expected})"
+    for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        docker_cmd exec "stress-poll-client-${i}" sh -c 'pkill -f verify-worker.py 2>/dev/null' || true
+        local worker_log
+        worker_log=$(docker_cmd exec "stress-poll-client-${i}" tail -5 /tmp/verify-worker.log 2>/dev/null)
+        [ -n "$worker_log" ] && log "  verify-worker-${i} log: $worker_log"
+    done
+
+    WAIT_RESULT="${total_verified:-0}/${target_count} verified, timed out after $(fmt_duration $elapsed)"
+    return 1
+}
+
+wait_for_takeover() {
+    local expected="$1"
+    local timeout_secs="${2:-600}"
+    local poll_start="${3:-$((TOTAL - FAILING))}"
+    local poll_count="${4:-$FAILING}"
+
+    log "Waiting for ${expected} takeovers via verify-worker (timeout: ${timeout_secs}s)..."
+
+    if run_verify_worker "302" "$expected" "$timeout_secs" "$poll_start" "$poll_count"; then
+        local elapsed_str
+        elapsed_str=$(echo "$WAIT_RESULT" | grep -o '[0-9]*m:[0-9]*s')
+        [ -n "$PHASE_LOG" ] && echo " ${expected}/${expected}" >> "$PHASE_LOG"
+        log "Takeover: $WAIT_RESULT"
+        print_dashboard
+        return 0
+    fi
+
+    [ -n "$PHASE_LOG" ] && echo " (timed out)" >> "$PHASE_LOG"
+    log "Takeover: $WAIT_RESULT"
+    local content_addrs
+    content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
     diagnose_stragglers "$content_addrs" "302"
     print_dashboard
     return 1
@@ -1575,105 +1650,19 @@ wait_for_recovery() {
     local poll_start="${3:-$((TOTAL - FAILING))}"
     local poll_count="${4:-$FAILING}"
 
-    log "Waiting for recovery — polling previously-failed sites for 200 OK (timeout: ${timeout_secs}s)..."
+    log "Waiting for recovery via verify-worker (${expected_healthy} sites, timeout: ${timeout_secs}s)..."
 
-    local start_ts
-    start_ts=$(date +%s)
-    local deadline=$((start_ts + timeout_secs))
-    local last_dashboard=0
-    local last_flush=0
-    local last_cure=0
-    local last_progress_count=0
-    local last_progress_time=0
-    local recovered=0
-    local still_taken=0
-    local prev_recovered=0
-    local cured_addrs=""  # addresses already cured (don't cure twice)
+    if run_verify_worker "200" "$expected_healthy" "$timeout_secs" "$poll_start" "$poll_count"; then
+        [ -n "$PHASE_LOG" ] && echo " ${expected_healthy}/${expected_healthy}" >> "$PHASE_LOG"
+        log "Recovery complete: $WAIT_RESULT"
+        print_dashboard
+        return 0
+    fi
 
-    # Get content addresses of the sites that were disabled
+    [ -n "$PHASE_LOG" ] && echo " (timed out)" >> "$PHASE_LOG"
+    log "Recovery: $WAIT_RESULT"
     local content_addrs
     content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
-
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        # Periodically flush descriptor caches (NEWNYM + HSFETCH) so poll clients
-        # pick up the worker's newly-published descriptor as it propagates to HSDirs.
-        local now_flush
-        now_flush=$(date +%s)
-        if [ $((now_flush - last_flush)) -ge 30 ]; then
-            flush_client_descriptor_cache "$poll_start" "$poll_count"
-            last_flush=$now_flush
-        fi
-
-        parallel_check_addrs "$content_addrs" "200 302"
-        recovered=$PCHECK_200
-        still_taken=$PCHECK_302
-        local total_checked=$PCHECK_TOTAL
-
-        # Track progress for straggler detection
-        if [ "$recovered" -gt "$last_progress_count" ]; then
-            last_progress_count=$recovered
-            last_progress_time=$(date +%s)
-        fi
-
-        # Cure stragglers: if no progress for 90s, identify stuck addresses
-        # and rotate their intro points (DEL_ONION + ADD_ONION)
-        local now_cure
-        now_cure=$(date +%s)
-        if [ "$recovered" -lt "$expected_healthy" ] && [ "$last_progress_time" -gt 0 ] \
-            && [ $((now_cure - last_progress_time)) -ge 90 ] \
-            && [ $((now_cure - last_cure)) -ge 90 ]; then
-            log "  Recovery stalled at ${recovered}/${expected_healthy} for 90s — curing stragglers..."
-            # Check each address individually to find the stuck ones
-            while IFS= read -r addr; do
-                addr=$(echo "$addr" | tr -d '\r\n ')
-                [ -z "$addr" ] && continue
-                # Skip already-cured addresses
-                echo "$cured_addrs" | grep -q "$addr" && continue
-                local code
-                code=$(docker_cmd exec "stress-poll-client-0" \
-                    curl -s --http1.0 --socks5-hostname "cure_${RANDOM}:x@127.0.0.1:9050" --max-time 10 \
-                    -o /dev/null -w "%{http_code}" "http://${addr}/" 2>/dev/null) || code="000"
-                if [ "$code" != "200" ]; then
-                    cure_straggler "$addr"
-                    cured_addrs="${cured_addrs} ${addr}"
-                fi
-            done <<< "$content_addrs"
-            last_cure=$now_cure
-            # Flush after curing to pick up new descriptors
-            flush_client_descriptor_cache "$poll_start" "$poll_count"
-        fi
-
-        # Progress dots
-        if [ -n "$PHASE_LOG" ] && [ "$recovered" -gt "$prev_recovered" ]; then
-            local new_dots=$((recovered - prev_recovered))
-            printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
-            prev_recovered=$recovered
-        fi
-
-        local now
-        now=$(date +%s)
-        if [ $((now - last_dashboard)) -ge 10 ]; then
-            print_dashboard
-            log "  (recovered: ${recovered}/${total_checked}, still taken over: ${still_taken})"
-            last_dashboard=$now
-        fi
-
-        if [ "$recovered" -ge "$expected_healthy" ] 2>/dev/null && [ "$still_taken" -eq 0 ] 2>/dev/null; then
-            local elapsed=$(( $(date +%s) - start_ts ))
-            [ -n "$PHASE_LOG" ] && echo " ${recovered}/${expected_healthy}" >> "$PHASE_LOG"
-            WAIT_RESULT="${recovered}/${expected_healthy} recovered in $(fmt_duration $elapsed)"
-            log "Recovery complete — ${recovered} sites back to 200 OK, 0 still redirecting"
-            print_dashboard
-            return 0
-        fi
-
-        sleep 5
-    done
-
-    local elapsed=$(( $(date +%s) - start_ts ))
-    [ -n "$PHASE_LOG" ] && echo " ${recovered:-0}/${FAILING} (timed out)" >> "$PHASE_LOG"
-    WAIT_RESULT="${recovered:-0}/${FAILING} recovered, ${still_taken:-0} still taken over, timed out after $(fmt_duration $elapsed)"
-    log "Recovery: Timed out — ${recovered:-0} recovered, ${still_taken:-0} still taken over"
     diagnose_stragglers "$content_addrs" "200"
     print_dashboard
     return 1
