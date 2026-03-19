@@ -415,6 +415,7 @@ EOF
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-server.py" "${ctr_name}:/worker-server.py"
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-bootstrap.py" "${ctr_name}:/worker-bootstrap.py"
     docker_cmd cp "${SCRIPT_DIR}/../src/onion_auth.py" "${ctr_name}:/onion_auth.py"
+    docker_cmd cp "${SCRIPT_DIR}/stress/tor-watchdog.sh" "${ctr_name}:/tor-watchdog.sh"
     if [ "$TOR_IMPL" = "tor" ]; then
         docker_cmd cp "$torrc" "${ctr_name}:/etc/tor/torrc"
     else
@@ -439,9 +440,24 @@ chmod 700 /var/lib/tor
 # Start Python HTTP server
 python3 /worker-server.py ${BASE_PORT} ${workers_in_ctr} &
 
-# Start C Tor (SOCKS + control port only, no onion services in torrc)
-su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
-TOR_PID=\$!
+# Start C Tor with bootstrap watchdog (retries on bad guard selection)
+MAX_TOR_RETRIES=3
+TOR_ATTEMPT=0
+while [ "\$TOR_ATTEMPT" -lt "\$MAX_TOR_RETRIES" ]; do
+    TOR_ATTEMPT=\$((TOR_ATTEMPT + 1))
+    rm -f /var/lib/tor/state /var/lib/tor/lock
+    su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
+    TOR_PID=\$!
+    sh /tor-watchdog.sh 120 &
+    WATCHDOG_PID=\$!
+    wait \$WATCHDOG_PID
+    WATCHDOG_EXIT=\$?
+    if [ "\$WATCHDOG_EXIT" -eq 0 ]; then
+        break
+    fi
+    echo "tor-watchdog: retry \$TOR_ATTEMPT/\$MAX_TOR_RETRIES" >&2
+    wait \$TOR_PID 2>/dev/null
+done
 
 # Wait for bootstrap, create services via ADD_ONION, then register with OnionHeaven
 STRESS_VERSION="${STRESS_VERSION}" NO_HEALTHCHECK="${NO_HEALTHCHECK}" TOR_IMPL=tor python3 -u /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} > /bootstrap.log 2>&1 &
