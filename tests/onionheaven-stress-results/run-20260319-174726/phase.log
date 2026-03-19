@@ -1,0 +1,687 @@
+====================================================================
+  OnionHeaven Stress Test
+  2026-03-19 17:47:26
+--------------------------------------------------------------------
+  Sites: 200 total (100 healthy, 100 failing)
+  Containers: 20 x 10 sites/container
+  OnionHeaven: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+  OnionHeaven server version: 2.4.35
+  Stress test version: stress-test-20260319-174725-66305
+====================================================================
+
+[17:47:26] === OnionHeaven Stress Test (C Tor) ===
+[17:47:26] OnionHeaven: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+[17:47:26] This machine: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+[17:47:26] Sites: 200 total (100 stay healthy, 100 will fail)
+[17:47:26] Stress containers: 20 × 10 sites/container
+[17:47:26] Output: ./onionheaven-stress-results/run-20260319-174726
+[17:47:26] PHASE 1: Starting 20 containers (200 sites) (est. <1m)
+[17:47:26] Phase 1: Starting 20 site containers + 34 polling clients...
+[17:47:26] Docker network: onionpress-network
+[17:47:26]   Starting container stress-worker-0 (10 sites)...
+[17:47:26]   Starting container stress-worker-1 (10 sites)...
+[17:47:26]   Starting container stress-worker-2 (10 sites)...
+[17:47:26]   Starting container stress-worker-3 (10 sites)...
+[17:47:27]   Starting container stress-worker-4 (10 sites)...
+[17:47:27]   Starting container stress-worker-5 (10 sites)...
+[17:47:27]   Starting container stress-worker-6 (10 sites)...
+[17:47:27]   Starting container stress-worker-7 (10 sites)...
+[17:47:27]   Starting container stress-worker-8 (10 sites)...
+[17:47:27]   Starting container stress-worker-9 (10 sites)...
+[17:47:28]   Starting container stress-worker-10 (10 sites)...
+[17:47:28]   Starting container stress-worker-11 (10 sites)...
+[17:47:28]   Starting container stress-worker-12 (10 sites)...
+[17:47:28]   Starting container stress-worker-13 (10 sites)...
+[17:47:28]   Starting container stress-worker-14 (10 sites)...
+[17:47:28]   Starting container stress-worker-15 (10 sites)...
+[17:47:29]   Starting container stress-worker-16 (10 sites)...
+[17:47:29]   Starting container stress-worker-17 (10 sites)...
+[17:47:29]   Starting container stress-worker-18 (10 sites)...
+[17:47:29]   Starting container stress-worker-19 (10 sites)...
+[17:47:30] Started 20 stress containers
+[17:47:30] Starting 34 polling clients...
+[17:47:34] Waiting for polling clients to bootstrap...
+[17:52:01]   All 34 polling clients ready (30s)
+[17:52:01]   Poll clients ready (pre-built image, no apt-get needed)
+[17:52:01]   -> Started 20 stress + 34 poll containers
+[17:52:01] PHASE 2: Waiting for sites to bootstrap and register over Tor (est. 2m)
+[17:52:01] Phase 2: Waiting for sites to bootstrap and register over Tor...
+[17:52:01] Waiting for all sites to bootstrap and register (timeout: 900s)...
+........................................................................................................................................................................................[17:52:03]   Bootstrap: 16/20 stress containers done, 184/200 sites registered
+[17:52:16]   Bootstrap: 16/20 stress containers done, 184/200 sites registered
+[17:52:30]   Bootstrap: 16/20 stress containers done, 184/200 sites registered
+[17:52:43]   Bootstrap: 16/20 stress containers done, 184/200 sites registered
+...........[17:52:57]   Bootstrap: 17/20 stress containers done, 195/200 sites registered
+.[17:53:10]   Bootstrap: 18/20 stress containers done, 196/200 sites registered
+[17:53:24]   Bootstrap: 18/20 stress containers done, 196/200 sites registered
+.[17:53:37]   Bootstrap: 19/20 stress containers done, 197/200 sites registered
+[17:53:51]   Bootstrap: 19/20 stress containers done, 197/200 sites registered
+[17:54:04]   Bootstrap: 19/20 stress containers done, 197/200 sites registered
+[17:54:18]   Bootstrap: 19/20 stress containers done, 197/200 sites registered
+[17:54:31]   Bootstrap: 19/20 stress containers done, 197/200 sites registered
+[17:54:45]   Bootstrap: 19/20 stress containers done, 197/200 sites registered
+...[17:54:58]   Bootstrap: 20/20 stress containers done, 200/200 sites registered
+ 200/200
+[17:54:58] All stress containers bootstrapped: 200 sites registered
+[17:54:58]   -> 200/200 registered in 2m:57s
+[17:54:58] Extracting site info from containers...
+[17:55:00] Total registered sites: 200
+[17:55:03] HSFETCH for 200 addresses across 34 poll clients...
+[17:55:12] PHASE 3: Waiting for heartbeat monitor to confirm all 200 sites are healthy (est. 1m)
+[17:55:12] Phase 3: Waiting for 200 sites to be reachable via Tor (timeout: 600s)...
+........................................................................................................................................................[17:56:31] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[17:56:31]   (reachable: 152/200 sites)
+[17:58:17] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[17:58:17]   (reachable: 136/200 sites)
+[17:59:33] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[17:59:33]   (reachable: 150/200 sites)
+...[18:00:30] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:00:30]   (reachable: 155/200 sites)
+[18:01:25] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:01:25]   (reachable: 152/200 sites)
+[18:02:34] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:02:34]   (reachable: 151/200 sites)
+[18:03:28] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:03:28]   (reachable: 154/200 sites)
+[18:04:15] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:04:15]   (reachable: 155/200 sites)
+[18:05:27] Registry: 202 entries | Tor mem: 46MB | WP mem: 164MB
+[18:05:27]   (reachable: 155/200 sites)
+ 155/200 (timed out)
+[18:05:32] Phase 3: Timed out — only 155 reachable (wanted 200)
+[18:05:37] Registry: 202 entries | Tor mem: 46MB | WP mem: 164MB
+[18:05:37] WARNING: Not all sites became healthy, continuing anyway...
+[18:05:37]   -> 155/200 healthy, timed out after 10m:20s
+[18:05:37] PHASE A: GRACEFUL OFFLINE/ONLINE (with /offline and /online notifications)
+[18:05:37] PHASE A.1: Graceful takeover: /offline + disable 100 sites, wait for takeover (est. 1-2m)
+[18:05:37] Phase A.1: Graceful offline — disabling responders + sending /offline for 100 sites...
+[18:05:37] Disabling responders for sites 100..199...
+[18:05:45] Disabled 100 sites (HTTP responders + C Tor DEL_ONION)
+[18:05:45] Sending /offline notifications for sites 100..199...
+[18:05:45]   Generated 100 /offline payload(s)
+[18:05:55]   notify_offline debug: 100 /offline payload(s) for sites 100..199
+[18:05:55] Sent /offline for 100 sites
+[18:05:57] HSFETCH for 100 addresses across 34 poll clients...
+[18:06:05] Phase A.1: Waiting for takeovers...
+[18:06:05] Waiting for 100 takeovers via verify-worker (timeout: 600s)...
+..........[18:06:53] Registry: 0 entries | Tor mem: 46MB | WP mem: 162MB
+[18:06:53]   (verified: 10/100, pending: 69)
+.............................[18:07:06] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:07:06]   (verified: 39/100, pending: 61)
+..........[18:07:19] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:07:19]   (verified: 49/100, pending: 51)
+.......[18:07:32] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:07:32]   (verified: 56/100, pending: 44)
+............[18:07:44] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:07:44]   (verified: 68/100, pending: 32)
+.........[18:07:57] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:07:57]   (verified: 77/100, pending: 23)
+...........[18:08:10] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:08:10]   (verified: 88/100, pending: 12)
+.......[18:08:22] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:08:22]   (verified: 95/100, pending: 4)
+[18:08:24]   cure_straggler: rotated intro points for p4laih6zktrvfks27ywb... (worker-17/0
+-1)
+[18:08:27]   cure_straggler: rotated intro points for bxx5557fk3xjbzhxaokb... (worker-17/2
+-1)
+...[18:08:40] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:08:40]   (verified: 98/100, pending: 1)
+[18:08:42]   cure_straggler: rotated intro points for qmh4t6377nbsisk52ksw... (worker-17/4
+-1)
+.[18:08:55] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:08:55]   (verified: 99/100, pending: 0)
+[18:09:08] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:09:08]   (verified: 99/100, pending: 0)
+[18:09:21] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:09:21]   (verified: 99/100, pending: 0)
+[18:09:33] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:09:33]   (verified: 99/100, pending: 0)
+[18:09:46] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:09:46]   (verified: 99/100, pending: 0)
+[18:09:59] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:09:59]   (verified: 99/100, pending: 0)
+[18:10:11] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:10:11]   (verified: 99/100, pending: 0)
+[18:10:24] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:10:24]   (verified: 99/100, pending: 0)
+[18:10:37] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:10:37]   (verified: 99/100, pending: 0)
+[18:10:49] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:10:49]   (verified: 99/100, pending: 0)
+[18:11:01] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:11:01]   (verified: 99/100, pending: 0)
+[18:11:14] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:11:14]   (verified: 99/100, pending: 0)
+[18:11:27] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:11:27]   (verified: 99/100, pending: 0)
+[18:11:39] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:11:39]   (verified: 99/100, pending: 0)
+[18:11:53] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:11:53]   (verified: 99/100, pending: 0)
+[18:12:06] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:12:06]   (verified: 99/100, pending: 0)
+[18:12:19] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:12:19]   (verified: 99/100, pending: 0)
+[18:12:31] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:12:31]   (verified: 99/100, pending: 0)
+[18:12:44] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:12:44]   (verified: 99/100, pending: 0)
+[18:12:57] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:12:57]   (verified: 99/100, pending: 0)
+[18:13:11] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:13:11]   (verified: 99/100, pending: 0)
+[18:13:25] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:13:25]   (verified: 99/100, pending: 0)
+[18:13:37] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:13:37]   (verified: 99/100, pending: 0)
+[18:13:50] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:13:50]   (verified: 99/100, pending: 0)
+[18:14:03] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:14:03]   (verified: 99/100, pending: 0)
+[18:14:16] Registry: 202 entries | Tor mem: 46MB | WP mem: 160MB
+[18:14:16]   (verified: 99/100, pending: 0)
+[18:14:29] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:14:29]   (verified: 99/100, pending: 0)
+[18:14:43] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:14:43]   (verified: 99/100, pending: 0)
+[18:14:56] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:14:56]   (verified: 99/100, pending: 0)
+[18:15:09] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:15:09]   (verified: 99/100, pending: 0)
+[18:15:22] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:15:22]   (verified: 99/100, pending: 0)
+[18:15:37] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:15:37]   (verified: 99/100, pending: 0)
+[18:15:49] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:15:49]   (verified: 99/100, pending: 0)
+[18:16:02] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:16:02]   (verified: 99/100, pending: 0)
+[18:16:16] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:16:16]   (verified: 99/100, pending: 0)
+[18:16:29] Registry: 202 entries | Tor mem: 46MB | WP mem: 162MB
+[18:16:29]   (verified: 99/100, pending: 0)
+[18:16:29]   verify-worker-0 log:   VERIFIED 4u4knqpuhwap2kstfvfb... → 302 (12.0s) [1/3]
+  VERIFIED f6lpjs5bxfvlgxm3paxq... → 302 (43.9s) [2/3]
+  VERIFIED rpknkq2b7mg2fwdffkig... → 302 (106.6s) [3/3]
+  VERIFIED rpknkq2b7mg2fwdffkig... → 302 (106.6s) [3/3]
+All 3 addresses verified!
+[18:16:29]   verify-worker-1 log:   VERIFIED fsix5fxqdxt33jaqueye... → 302 (24.1s) [1/3]
+  VERIFIED hau533wovupy4vdfjj5n... → 302 (25.8s) [2/3]
+  VERIFIED eibjdj2qnisyt455hmsh... → 302 (87.2s) [3/3]
+  VERIFIED eibjdj2qnisyt455hmsh... → 302 (87.3s) [3/3]
+All 3 addresses verified!
+[18:16:29]   verify-worker-2 log:   VERIFIED 4tio4ixzsup2hntfpcjk... → 302 (56.5s) [2/3]
+  STRAGGLER: p4laih6zktrvfks27ywb... failing for 90s — requesting cure
+  VERIFIED p4laih6zktrvfks27ywb... → 302 (129.2s) [3/3]
+  VERIFIED p4laih6zktrvfks27ywb... → 302 (129.8s) [3/3]
+All 3 addresses verified!
+[18:16:29]   verify-worker-3 log:   VERIFIED bixbmyouqtylj7dzmx7e... → 302 (21.3s) [1/3]
+  VERIFIED fkdgrl3q4ay2qmpogyqd... → 302 (22.8s) [2/3]
+  VERIFIED bsgy75k3zsblv3tg3a5n... → 302 (99.4s) [3/3]
+  VERIFIED bsgy75k3zsblv3tg3a5n... → 302 (99.5s) [3/3]
+All 3 addresses verified!
+[18:16:29]   verify-worker-4 log:   VERIFIED 2vofql242pvcfbovm64m... → 302 (15.8s) [1/3]
+  VERIFIED sxob4ppmu6clmiycvdqd... → 302 (45.0s) [2/3]
+  STRAGGLER: bxx5557fk3xjbzhxaokb... failing for 90s — requesting cure
+  VERIFIED bxx5557fk3xjbzhxaokb... → 302 (123.5s) [3/3]
+All 3 addresses verified!
+[18:16:29]   verify-worker-5 log:   VERIFIED uk5bfwawug7zcl2glssa... → 302 (12.2s) [1/3]
+  VERIFIED we35njgjtqkzaf46vp6v... → 302 (15.7s) [2/3]
+  VERIFIED mbtylqa2od6jj75hr34z... → 302 (83.1s) [3/3]
+  VERIFIED mbtylqa2od6jj75hr34z... → 302 (83.6s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-6 log:   VERIFIED gig5t5ta4tjh3aohpcbm... → 302 (32.1s) [2/3]
+  STRAGGLER: qmh4t6377nbsisk52ksw... failing for 90s — requesting cure
+  VERIFIED qmh4t6377nbsisk52ksw... → 302 (143.4s) [3/3]
+  VERIFIED qmh4t6377nbsisk52ksw... → 302 (143.4s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-7 log:   VERIFIED 3abhn7nhbexbvwhk6qyn... → 302 (85.6s) [1/3]
+  VERIFIED 2t74hdp3ut6jqvg5ey7h... → 302 (87.9s) [2/3]
+  VERIFIED kigeg5xnk4m4f5lvhdb7... → 302 (118.3s) [3/3]
+  VERIFIED kigeg5xnk4m4f5lvhdb7... → 302 (118.3s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-8 log:   VERIFIED x7fqydnyaunc2zgnomqi... → 302 (16.7s) [1/3]
+  VERIFIED p7evbwboetymcbzjve5z... → 302 (53.6s) [2/3]
+  VERIFIED p7evbwboetymcbzjve5z... → 302 (53.6s) [2/3]
+  VERIFIED dm654by4tuj2vdz5ua44... → 302 (108.5s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-9 log:   VERIFIED cj47ffqxdl7pbb7gk2nw... → 302 (58.1s) [2/3]
+  VERIFIED cj47ffqxdl7pbb7gk2nw... → 302 (58.1s) [2/3]
+  VERIFIED lrz35eyz2yxovdewulnm... → 302 (97.9s) [3/3]
+  VERIFIED lrz35eyz2yxovdewulnm... → 302 (97.9s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-10 log:   VERIFIED hde2zmef6zprmau3kaur... → 302 (68.0s) [2/3]
+  VERIFIED hde2zmef6zprmau3kaur... → 302 (68.0s) [2/3]
+  VERIFIED 3xejg6q7ksnsvgb3w2ro... → 302 (99.0s) [3/3]
+  VERIFIED 3xejg6q7ksnsvgb3w2ro... → 302 (99.0s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-11 log:   VERIFIED lg2z7njfkzsn7hh5uplb... → 302 (68.9s) [1/3]
+  VERIFIED khdr4dlkaskxif5ncgt4... → 302 (70.4s) [2/3]
+  VERIFIED khdr4dlkaskxif5ncgt4... → 302 (70.4s) [2/3]
+  VERIFIED z7txogm6ciwjpo4vzuwx... → 302 (81.6s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-12 log:   VERIFIED i22wj6x32asmeqmdi76v... → 302 (43.3s) [1/3]
+  VERIFIED i22wj6x32asmeqmdi76v... → 302 (47.4s) [1/3]
+  VERIFIED b3xsnpazwlmt7atbbr35... → 302 (51.0s) [2/3]
+  VERIFIED ryob644l2zwwhyusq4vn... → 302 (56.5s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-13 log:   VERIFIED 5iami3eoztd2wea3vjjr... → 302 (45.2s) [2/3]
+  VERIFIED 5iami3eoztd2wea3vjjr... → 302 (45.3s) [2/3]
+  VERIFIED axnm7eocli7pb3zetp6k... → 302 (47.1s) [3/3]
+  VERIFIED axnm7eocli7pb3zetp6k... → 302 (47.1s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-14 log:   VERIFIED l2x5fgx2kzjpe6vjxhmp... → 302 (69.9s) [1/3]
+  VERIFIED sv6vhpfshoo2p3wshep6... → 302 (70.7s) [2/3]
+  VERIFIED r4bzzdkwmkng2d7mqsbq... → 302 (71.8s) [3/3]
+  VERIFIED r4bzzdkwmkng2d7mqsbq... → 302 (71.8s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-15 log:   VERIFIED hlx6oa5egshtxpruqeno... → 302 (38.7s) [1/3]
+  VERIFIED pl5ebhixwzb3wcsmenbw... → 302 (55.4s) [2/3]
+  VERIFIED fvnvusmjzkw7imzuidwm... → 302 (92.7s) [3/3]
+  VERIFIED fvnvusmjzkw7imzuidwm... → 302 (92.8s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-16 log:   VERIFIED zi3g6fo3a4nqjw6eokbv... → 302 (6.0s) [1/3]
+  VERIFIED zcs2uhkhqaung2rgh36e... → 302 (69.5s) [2/3]
+  VERIFIED gi5nmsb4tu5tz6yexrgv... → 302 (117.7s) [3/3]
+  VERIFIED gi5nmsb4tu5tz6yexrgv... → 302 (117.8s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-17 log:   VERIFIED ie2hijjd6zgg2zyts6tf... → 302 (49.1s) [1/3]
+  VERIFIED knyffqptevhupu7iv52r... → 302 (50.5s) [2/3]
+  VERIFIED wu6r7bckaze6xixmcaf2... → 302 (96.2s) [3/3]
+  VERIFIED wu6r7bckaze6xixmcaf2... → 302 (96.2s) [3/3]
+All 3 addresses verified!
+[18:16:30]   verify-worker-18 log:   VERIFIED 42ma4g5qn7ol5mkpbwne... → 302 (30.9s) [1/3]
+  VERIFIED img6izdvk5rema3pk5dx... → 302 (49.9s) [2/3]
+  VERIFIED dszepxmznjszwa2samh3... → 302 (100.0s) [3/3]
+  VERIFIED dszepxmznjszwa2samh3... → 302 (100.0s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-19 log:   VERIFIED fuhmd5i6nf7iifnpoqje... → 302 (20.8s) [1/3]
+  VERIFIED 4lgbqq25ewr5o54e26dx... → 302 (22.6s) [2/3]
+  VERIFIED s7rvj44pbfwplmdkjn2m... → 302 (55.1s) [3/3]
+  VERIFIED s7rvj44pbfwplmdkjn2m... → 302 (55.1s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-20 log:   VERIFIED lrl73peykv5frgwdn4h5... → 302 (11.4s) [2/3]
+  VERIFIED lrl73peykv5frgwdn4h5... → 302 (11.4s) [2/3]
+  VERIFIED 3hj35ctglhporim3xbsp... → 302 (95.3s) [3/3]
+  VERIFIED 3hj35ctglhporim3xbsp... → 302 (95.3s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-21 log:   VERIFIED wsbc6pzyygwjpup2wfkp... → 302 (7.4s) [1/3]
+  VERIFIED xo6ac5u4dkulo2jmokuk... → 302 (70.4s) [2/3]
+  VERIFIED dl5djonxkowjxgzir7bg... → 302 (76.3s) [3/3]
+  VERIFIED dl5djonxkowjxgzir7bg... → 302 (76.3s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-22 log:   VERIFIED 43vb6n3lesqikvogt7pz... → 302 (7.7s) [1/3]
+  VERIFIED 3zxx7mtuzqyjllby5sl4... → 302 (24.0s) [2/3]
+  VERIFIED pf7vkfzbxnx3zxqro5hv... → 302 (100.6s) [3/3]
+  VERIFIED pf7vkfzbxnx3zxqro5hv... → 302 (100.6s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-23 log:   VERIFIED yn5djy2y4kundcvgxm5t... → 302 (6.4s) [1/3]
+  VERIFIED obxemodvzge6yo3egyg2... → 302 (7.8s) [2/3]
+  STRAGGLER: qq4loi27tbsf7cerjsps... failing for 90s — requesting cure
+  VERIFIED qq4loi27tbsf7cerjsps... → 302 (116.0s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-24 log:   VERIFIED qu2y52opssfznspibjku... → 302 (6.1s) [1/3]
+  VERIFIED ldd6ocz3boxcyn3bygqo... → 302 (11.2s) [2/3]
+  VERIFIED ldd6ocz3boxcyn3bygqo... → 302 (11.3s) [2/3]
+  VERIFIED tulweps5x3realsxd4hr... → 302 (72.0s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-25 log:   VERIFIED 2xdi2dc2koyzywyazftk... → 302 (61.3s) [2/3]
+  VERIFIED 2xdi2dc2koyzywyazftk... → 302 (61.4s) [2/3]
+  VERIFIED mztvexbfiramlqlt4ssz... → 302 (75.9s) [3/3]
+  VERIFIED mztvexbfiramlqlt4ssz... → 302 (76.0s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-26 log:   VERIFIED swityfpibmt4cr3oc3me... → 302 (68.9s) [1/3]
+  VERIFIED h65l5jh2cuj2aeffdfys... → 302 (82.7s) [2/3]
+  VERIFIED h65l5jh2cuj2aeffdfys... → 302 (82.7s) [2/3]
+  VERIFIED jsiftij5vol64miz2xrm... → 302 (90.0s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-27 log:   VERIFIED 3oxfpjcqjcbbm7dj2sj7... → 302 (5.7s) [1/3]
+  VERIFIED pz6p6adxmvpmkf3i7y43... → 302 (107.1s) [2/3]
+  VERIFIED y72ooimozn4vfzxq24uk... → 302 (112.4s) [3/3]
+  VERIFIED y72ooimozn4vfzxq24uk... → 302 (112.5s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-28 log:   VERIFIED lsaniohjemdgadruhngv... → 302 (62.8s) [1/3]
+  VERIFIED x2m427dzfdh7dt5o7qx2... → 302 (107.3s) [2/3]
+  VERIFIED bmhk5c23arev4utepox3... → 302 (110.7s) [3/3]
+  VERIFIED bmhk5c23arev4utepox3... → 302 (110.8s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-29 log:   STRAGGLER: kptlilnu5jj2hjqzzyox... failing for 90s — requesting cure
+  VERIFIED kptlilnu5jj2hjqzzyox... → 302 (114.0s) [2/3]
+  VERIFIED heqcnp4hi5efinhwtqxh... → 302 (123.9s) [3/3]
+  VERIFIED heqcnp4hi5efinhwtqxh... → 302 (123.9s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-30 log: Verify worker: 3 addresses, expect 302, timeout 600s
+  VERIFIED dlfiyfbkg5ouc7yufgis... → 302 (21.1s) [1/3]
+  VERIFIED 57bdfaddmwbnqb5qrruc... → 302 (57.2s) [2/3]
+  VERIFIED ikyiuvhii65kp5uwxtz7... → 302 (94.9s) [3/3]
+All 3 addresses verified!
+[18:16:31]   verify-worker-31 log:   VERIFIED ihzyuyawt62ttsycpnxp... → 302 (22.4s) [2/3]
+  VERIFIED ihzyuyawt62ttsycpnxp... → 302 (22.5s) [2/3]
+  VERIFIED ogil7tfkodb4j4cazkhz... → 302 (80.3s) [3/3]
+  VERIFIED ogil7tfkodb4j4cazkhz... → 302 (80.4s) [3/3]
+All 3 addresses verified!
+[18:16:32]   verify-worker-32 log: Verify worker: 2 addresses, expect 302, timeout 600s
+  VERIFIED h7rimzesynhlafpimoxe... → 302 (19.6s) [1/2]
+  VERIFIED h7rimzesynhlafpimoxe... → 302 (19.6s) [1/2]
+  VERIFIED fwrmvezr6rsbxjenzfwc... → 302 (94.0s) [2/2]
+All 2 addresses verified!
+[18:16:32]   verify-worker-33 log: Verify worker: 2 addresses, expect 302, timeout 600s
+  VERIFIED nb27n25kqsih65sl5lk6... → 302 (12.5s) [1/2]
+  VERIFIED 6ljicmzh77jecszi6diq... → 302 (89.8s) [2/2]
+All 2 addresses verified!
+ (timed out)
+[18:16:32] Takeover: 99/100 verified, timed out after 10m:08s
+[18:16:33] Straggler diagnostic:
+[18:17:16]   STRAGGLER: 42dulm5dxasv576o6zlpqpxxr3dxpz... → HTTP 000 (wanted 302)
+[18:18:17]   STRAGGLER: jsiftij5vol64miz2xrmp6sddcgkxq... → HTTP 000 (wanted 302)
+[18:18:37]   STRAGGLER: 4dfiancowe2kv6vcf3m3y6jqfuzmvt... → HTTP 000 (wanted 302)
+[18:21:03]   STRAGGLER: kigeg5xnk4m4f5lvhdb7uxhpytnl56... → HTTP 000 (wanted 302)
+[18:21:22]   STRAGGLER: z7txogm6ciwjpo4vzuwxw5gdr2q4es... → HTTP 000 (wanted 302)
+[18:21:56]   STRAGGLER: s7rvj44pbfwplmdkjn2mmc5e4bfbqj... → HTTP 000 (wanted 302)
+[18:22:39]   STRAGGLER: 57bdfaddmwbnqb5qrruckk3jho45sq... → HTTP 000 (wanted 302)
+[18:22:47] Registry: 202 entries | Tor mem: 47MB | WP mem: 117MB
+[18:22:47] WARNING: Not all expected takeovers happened
+[18:22:47]   -> Takeover: 99/100 verified, timed out after 10m:08s (17m:10s e2e)
+[18:22:47] PHASE A.1v: Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)
+[18:22:47] A.1v: Verifying 302 redirects on sample of taken-over addresses...
+[18:22:47]   Waiting 30s for onion descriptor propagation...
+[18:23:29]   PASS: 2xdi2dc2koyzywyazftk3xw2wwu5t7vdeki6cmbej5fu3i2lqekjacqd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://2xdi2dc2koyzywyazftk3xw2wwu5t7vdeki6cmbej5fu3i2lqekjacqd.onion/
+[18:23:29]   PASS: 42dulm5dxasv576o6zlpqpxxr3dxpzecbegg3qb6e6abpsy52hraqkad.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://42dulm5dxasv576o6zlpqpxxr3dxpzecbegg3qb6e6abpsy52hraqkad.onion/
+[18:23:29]   PASS: jsiftij5vol64miz2xrmp6sddcgkxqzqb5ry4nn6ykaqwqweanzsoyad.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://jsiftij5vol64miz2xrmp6sddcgkxqzqb5ry4nn6ykaqwqweanzsoyad.onion/
+[18:23:29]   PASS: r4bzzdkwmkng2d7mqsbq6ahcgbsw75or3zulylq7px2wh2uzwh3gabyd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://r4bzzdkwmkng2d7mqsbq6ahcgbsw75or3zulylq7px2wh2uzwh3gabyd.onion/
+[18:23:29]   PASS: unm45kizent575o7gzz7m26craoe7k3b6htnbhkkih3p3cc4bcnpkaqd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://unm45kizent575o7gzz7m26craoe7k3b6htnbhkkih3p3cc4bcnpkaqd.onion/
+[18:23:29] A.1v: Redirect verification — 5/5 passed, 0 failed (103 total taken over)
+[18:23:29] A.1v: Redirect debug log:
+[18:23:29]   -> 5/5 passed, 0 failed in 0m:42s
+[18:23:29] PHASE A.2: Graceful recovery: re-enable + /online for 100 sites, wait for recovery (est. 1-2m)
+[18:23:29] Phase A.2: Graceful recovery — re-enabling responders + sending /online...
+[18:23:29] Re-enabling responders and re-registering sites 100..199...
+[18:23:41] Re-enabled 100 sites, C Tor ADD_ONION + re-registrations over Tor (1s apart)
+[18:23:41] Sending /online notifications for sites 100..199...
+[18:23:41]   Generated 100 /online payload(s)
+[18:23:57]   notify_online debug: 100 /online payload(s) for sites 100..199
+[18:23:57] Sent /online for 100 sites
+[18:23:59] HSFETCH for 100 addresses across 34 poll clients...
+[18:24:07] Phase A.2: Waiting for recovery...
+[18:24:07] Waiting for recovery via verify-worker (100 sites, timeout: 600s)...
+...........................[18:24:35] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:24:35]   (verified: 27/100, pending: 73)
+.............................[18:24:50] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:24:50]   (verified: 56/100, pending: 44)
+.......................[18:25:02] Registry: 202 entries | Tor mem: 49MB | WP mem: 120MB
+[18:25:02]   (verified: 79/100, pending: 21)
+.....[18:25:14] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:25:14]   (verified: 84/100, pending: 16)
+[18:25:27] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:25:27]   (verified: 84/100, pending: 16)
+...[18:25:40] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:25:40]   (verified: 87/100, pending: 13)
+[18:25:54] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:25:54]   (verified: 87/100, pending: 13)
+.[18:26:08] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:26:08]   (verified: 88/100, pending: 12)
+...[18:26:26] Registry: 0 entries | Tor mem: 48MB | WP mem: 120MB
+[18:26:26]   (verified: 91/100, pending: 9)
+[18:26:29]   cure_straggler: rotated intro points for l2x5fgx2kzjpe6vjxhmp... (worker-11/4
+-1)
+[18:26:31]   cure_straggler: rotated intro points for knyffqptevhupu7iv52r... (worker-11/7
+-1)
+[18:26:44] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:26:44]   (verified: 91/100, pending: 9)
+[18:26:47]   cure_straggler: rotated intro points for lg2z7njfkzsn7hh5uplb... (worker-11/1
+-1)
+[18:26:49]   cure_straggler: rotated intro points for hlx6oa5egshtxpruqeno... (worker-11/5
+-1)
+[18:26:51]   cure_straggler: rotated intro points for 42ma4g5qn7ol5mkpbwne... (worker-11/8
+-1)
+[18:26:54]   cure_straggler: rotated intro points for 4lgbqq25ewr5o54e26dx... (worker-11/9
+-1)
+[18:27:08] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:27:08]   (verified: 91/100, pending: 9)
+[18:27:11]   cure_straggler: rotated intro points for b3xsnpazwlmt7atbbr35... (worker-11/2
+-1)
+[18:27:13]   cure_straggler: rotated intro points for 7ypbz5ssz6zrm6lsxldi... (worker-11/3
+-1)
+[18:27:15]   cure_straggler: rotated intro points for zcs2uhkhqaung2rgh36e... (worker-11/6
+-1)
+[18:27:28] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:27:28]   (verified: 91/100, pending: 9)
+[18:27:42] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:27:42]   (verified: 91/100, pending: 9)
+[18:27:55] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:27:55]   (verified: 91/100, pending: 9)
+[18:28:08] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:28:08]   (verified: 91/100, pending: 9)
+[18:28:23] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:28:23]   (verified: 91/100, pending: 9)
+[18:28:36] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:28:36]   (verified: 91/100, pending: 9)
+.........[18:28:49] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:28:49]   (verified: 100/100, pending: 0)
+ 100/100
+[18:28:50] Recovery complete: 100/100 verified in 4m:26s
+[18:28:56] Registry: 202 entries | Tor mem: 47MB | WP mem: 118MB
+[18:28:56]   -> Recovery: 100/100 verified in 4m:26s (5m:27s e2e)
+[18:28:56]   -> Graceful: takeover 17m:10s, recovery 5m:27s
+[18:28:56] PHASE B: SILENT CRASH/RECOVERY (no notifications, heartbeat-only detection)
+[18:28:56] PHASE B.1: Silent crash: disable 100 sites (no /offline), wait for heartbeat monitor takeover (est. 9m)
+[18:28:56] Phase B.1: Silent crash — disabling responders for 100 sites (no /offline)...
+[18:28:56] Disabling responders for sites 100..199...
+[18:29:04] Disabled 100 sites (HTTP responders + C Tor DEL_ONION)
+[18:29:06] HSFETCH for 100 addresses across 34 poll clients...
+[18:29:13] Phase B.1: Waiting for heartbeat-detected takeovers...
+[18:29:13] Waiting for 100 takeovers via verify-worker (timeout: 600s)...
+..........................[18:29:39] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:29:39]   (verified: 26/100, pending: 74)
+[18:29:52] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:29:52]   (verified: 2/100, pending: 98)
+[18:30:45] Registry: 202 entries | Tor mem: 47MB | WP mem: 120MB
+[18:30:45]   (verified: 3/100, pending: 97)
+[18:31:42] Registry: 0 entries | Tor mem: 47MB | WP mem: 120MB
+[18:31:42]   (verified: 7/100, pending: 93)
+[18:32:40] Registry: 0 entries | Tor mem: 47MB | WP mem: 118MB
+[18:32:40]   (verified: 23/100, pending: 77)
+[18:32:43]   cure_straggler: rotated intro points for rpknkq2b7mg2fwdffkig... (worker-16/8
+-1)
+[18:32:45]   cure_straggler: rotated intro points for eibjdj2qnisyt455hmsh... (worker-16/9
+-1)
+[18:32:48]   cure_straggler: rotated intro points for fsix5fxqdxt33jaqueye... (worker-13/5
+-1)
+[18:32:50]   cure_straggler: rotated intro points for hau533wovupy4vdfjj5n... (worker-10/1
+-1)
+[18:32:52]   cure_straggler: rotated intro points for 4tio4ixzsup2hntfpcjk... (worker-10/2
+-1)
+[18:32:55]   cure_straggler: rotated intro points for nsuz3usyigxmr5jlrmbh... (worker-13/6
+-1)
+[18:32:57]   cure_straggler: rotated intro points for bixbmyouqtylj7dzmx7e... (worker-10/3
+-1)
+[18:33:00]   cure_straggler: rotated intro points for fkdgrl3q4ay2qmpogyqd... (worker-13/7
+-1)
+[18:33:02]   cure_straggler: rotated intro points for 2vofql242pvcfbovm64m... (worker-10/4
+-1)
+[18:33:04]   cure_straggler: rotated intro points for 2t74hdp3ut6jqvg5ey7h... (worker-10/7
+-1)
+[18:33:07]   cure_straggler: rotated intro points for kigeg5xnk4m4f5lvhdb7... (worker-17/5
+-1)
+[18:33:09]   cure_straggler: rotated intro points for dm654by4tuj2vdz5ua44... (worker-17/6
+-1)
+[18:33:11]   cure_straggler: rotated intro points for lg2z7njfkzsn7hh5uplb... (worker-11/1
+-1)
+[18:33:14]   cure_straggler: rotated intro points for 5iami3eoztd2wea3vjjr... (worker-18/1
+-1)
+[18:33:16]   cure_straggler: rotated intro points for 7ypbz5ssz6zrm6lsxldi... (worker-11/3
+-1)
+[18:33:19]   cure_straggler: rotated intro points for axnm7eocli7pb3zetp6k... (worker-14/7
+-1)
+[18:33:21]   cure_straggler: rotated intro points for fvnvusmjzkw7imzuidwm... (worker-18/3
+-1)
+[18:33:24]   cure_straggler: rotated intro points for gi5nmsb4tu5tz6yexrgv... (worker-18/4
+-1)
+[18:33:26]   cure_straggler: rotated intro points for zcs2uhkhqaung2rgh36e... (worker-11/6
+-1)
+[18:33:28]   cure_straggler: rotated intro points for wu6r7bckaze6xixmcaf2... (worker-18/5
+-1)
+[18:33:31]   cure_straggler: rotated intro points for 42ma4g5qn7ol5mkpbwne... (worker-11/8
+-1)
+[18:33:33]   cure_straggler: rotated intro points for dszepxmznjszwa2samh3... (worker-18/6
+-1)
+[18:33:36]   cure_straggler: rotated intro points for 4lgbqq25ewr5o54e26dx... (worker-11/9
+-1)
+[18:33:38]   cure_straggler: rotated intro points for s7rvj44pbfwplmdkjn2m... (worker-18/7
+-1)
+[18:33:40]   cure_straggler: rotated intro points for 3hj35ctglhporim3xbsp... (worker-18/8
+-1)
+[18:33:43]   cure_straggler: rotated intro points for ouxqnkpfet2aqdctuqji... (worker-12/0
+-1)
+[18:33:45]   cure_straggler: rotated intro points for wsbc6pzyygwjpup2wfkp... (worker-12/1
+-1)
+[18:33:48]   cure_straggler: rotated intro points for 43vb6n3lesqikvogt7pz... (worker-12/2
+-1)
+[18:33:50]   cure_straggler: rotated intro points for pf7vkfzbxnx3zxqro5hv... (worker-19/0
+-1)
+[18:33:53]   cure_straggler: rotated intro points for qq4loi27tbsf7cerjsps... (worker-19/1
+-1)
+[18:33:55]   cure_straggler: rotated intro points for yn5djy2y4kundcvgxm5t... (worker-12/3
+-1)
+[18:33:57]   cure_straggler: rotated intro points for ldd6ocz3boxcyn3bygqo... (worker-12/4
+-1)
+[18:34:00]   cure_straggler: rotated intro points for tulweps5x3realsxd4hr... (worker-19/2
+-1)
+[18:34:02]   cure_straggler: rotated intro points for 4wp6oerkrc3cxuiju4h2... (worker-12/5
+-1)
+[18:34:05]   cure_straggler: rotated intro points for mztvexbfiramlqlt4ssz... (worker-19/3
+-1)
+[18:34:07]   cure_straggler: rotated intro points for 3oxfpjcqjcbbm7dj2sj7... (worker-12/7
+-1)
+[18:34:09]   cure_straggler: rotated intro points for bmhk5c23arev4utepox3... (worker-16/2
+-1)
+[18:34:12]   cure_straggler: rotated intro points for heqcnp4hi5efinhwtqxh... (worker-16/3
+-1)
+[18:34:14]   cure_straggler: rotated intro points for ovvx35pju5hqntmol5bx... (worker-19/7
+-1)
+[18:34:17]   cure_straggler: rotated intro points for fwrmvezr6rsbxjenzfwc... (worker-16/6
+-1)
+[18:34:19]   cure_straggler: rotated intro points for h7rimzesynhlafpimoxe... (worker-13/2
+-1)
+[18:34:21]   cure_straggler: rotated intro points for 6ljicmzh77jecszi6diq... (worker-16/7
+-1)
+[18:34:24]   cure_straggler: rotated intro points for nb27n25kqsih65sl5lk6... (worker-13/3
+-1)
+..........................................................................[18:34:37] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:34:37]   (verified: 100/100, pending: 0)
+ 100/100
+[18:34:38] Takeover: 100/100 verified in 5m:10s
+[18:34:42] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:34:42]   -> Takeover: 100/100 verified in 5m:10s (5m:46s e2e)
+[18:34:42] PHASE B.1v: Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)
+[18:34:42] B.1v: Verifying 302 redirects on sample of taken-over addresses...
+[18:34:42]   Waiting 30s for onion descriptor propagation...
+[18:35:19]   PASS: 2xdi2dc2koyzywyazftk3xw2wwu5t7vdeki6cmbej5fu3i2lqekjacqd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://2xdi2dc2koyzywyazftk3xw2wwu5t7vdeki6cmbej5fu3i2lqekjacqd.onion/
+[18:35:19]   PASS: gi5nmsb4tu5tz6yexrgvje4cy363ubck3j67bpzxx34mt4ttaq6vkmid.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://gi5nmsb4tu5tz6yexrgvje4cy363ubck3j67bpzxx34mt4ttaq6vkmid.onion/
+[18:35:19]   PASS: h7rimzesynhlafpimoxe6whhvtisjt2pkfabka5b4zy2zzbvgrhsymid.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://h7rimzesynhlafpimoxe6whhvtisjt2pkfabka5b4zy2zzbvgrhsymid.onion/
+[18:35:19]   PASS: ldd6ocz3boxcyn3bygqorhvoqszb273iwx5tmucg3ivmagoudfpmvbad.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://ldd6ocz3boxcyn3bygqorhvoqszb273iwx5tmucg3ivmagoudfpmvbad.onion/
+[18:35:19]   PASS: we35njgjtqkzaf46vp6vjsxsktsq4t6k4bnw7erbptbshpbf3b4bkuyd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://we35njgjtqkzaf46vp6vjsxsktsq4t6k4bnw7erbptbshpbf3b4bkuyd.onion/
+[18:35:19] B.1v: Redirect verification — 5/5 passed, 0 failed (159 total taken over)
+[18:35:19] B.1v: Redirect debug log:
+[18:35:19]   -> 5/5 passed, 0 failed in 0m:37s
+[18:35:19] PHASE B.2: Silent recovery: re-enable 100 sites (no /online), wait for heartbeat monitor recovery (est. 1m)
+[18:35:19] Phase B.2: Silent recovery — re-enabling responders (no /online, no /register)...
+[18:35:19] Re-enabling responders for sites 100..199 (no /online, no /register)...
+[18:35:29] Re-enabled 100 sites silently (C Tor ADD_ONION, no notifications sent)
+[18:35:31] HSFETCH for 100 addresses across 34 poll clients...
+[18:35:40] Phase B.2: Waiting for heartbeat-detected recovery...
+[18:35:40] Waiting for recovery via verify-worker (100 sites, timeout: 900s)...
+...............................[18:36:08] Registry: 202 entries | Tor mem: 46MB | WP mem: 118MB
+[18:36:08]   (verified: 31/100, pending: 69)
+.........................................[18:36:20] Registry: 202 entries | Tor mem: 46MB | WP mem: 118MB
+[18:36:20]   (verified: 72/100, pending: 28)
+......[18:36:33] Registry: 202 entries | Tor mem: 46MB | WP mem: 118MB
+[18:36:33]   (verified: 78/100, pending: 22)
+....[18:36:46] Registry: 202 entries | Tor mem: 46MB | WP mem: 116MB
+[18:36:46]   (verified: 82/100, pending: 18)
+.[18:36:59] Registry: 202 entries | Tor mem: 46MB | WP mem: 116MB
+[18:36:59]   (verified: 83/100, pending: 17)
+..[18:37:13] Registry: 202 entries | Tor mem: 46MB | WP mem: 115MB
+[18:37:13]   (verified: 85/100, pending: 15)
+.[18:37:26] Registry: 202 entries | Tor mem: 46MB | WP mem: 115MB
+[18:37:26]   (verified: 86/100, pending: 14)
+[18:37:39] Registry: 202 entries | Tor mem: 46MB | WP mem: 115MB
+[18:37:39]   (verified: 86/100, pending: 14)
+...[18:37:55] Registry: 202 entries | Tor mem: 46MB | WP mem: 115MB
+[18:37:55]   (verified: 89/100, pending: 11)
+[18:37:57]   cure_straggler: rotated intro points for 4lgbqq25ewr5o54e26dx... (worker-11/9
+-1)
+[18:38:10] Registry: 202 entries | Tor mem: 46MB | WP mem: 115MB
+[18:38:10]   (verified: 89/100, pending: 11)
+[18:38:12]   cure_straggler: rotated intro points for dm654by4tuj2vdz5ua44... (worker-17/6
+-1)
+[18:38:14]   cure_straggler: rotated intro points for lg2z7njfkzsn7hh5uplb... (worker-11/1
+-1)
+[18:38:17]   cure_straggler: rotated intro points for l2x5fgx2kzjpe6vjxhmp... (worker-11/4
+-1)
+[18:38:19]   cure_straggler: rotated intro points for hlx6oa5egshtxpruqeno... (worker-11/5
+-1)
+.[18:38:32] Registry: 202 entries | Tor mem: 46MB | WP mem: 115MB
+[18:38:32]   (verified: 90/100, pending: 10)
+[18:38:35]   cure_straggler: rotated intro points for ekv7si3ivknhl65hntnn... (worker-11/0
+-1)
+[18:38:37]   cure_straggler: rotated intro points for b3xsnpazwlmt7atbbr35... (worker-11/2
+-1)
+[18:38:39]   cure_straggler: rotated intro points for 7ypbz5ssz6zrm6lsxldi... (worker-11/3
+-1)
+[18:38:42]   cure_straggler: rotated intro points for zcs2uhkhqaung2rgh36e... (worker-11/6
+-1)
+[18:38:44]   cure_straggler: rotated intro points for knyffqptevhupu7iv52r... (worker-11/7
+-1)
+[18:38:46]   cure_straggler: rotated intro points for 42ma4g5qn7ol5mkpbwne... (worker-11/8
+-1)
+[18:38:59] Registry: 202 entries | Tor mem: 46MB | WP mem: 115MB
+[18:38:59]   (verified: 90/100, pending: 10)
+[18:39:14] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:39:14]   (verified: 90/100, pending: 10)
+[18:39:27] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:39:27]   (verified: 90/100, pending: 10)
+[18:39:40] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:39:40]   (verified: 90/100, pending: 10)
+[18:39:52] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:39:52]   (verified: 90/100, pending: 10)
+[18:40:07] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:40:07]   (verified: 90/100, pending: 10)
+[18:40:20] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:40:20]   (verified: 90/100, pending: 10)
+[18:40:33] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:40:33]   (verified: 90/100, pending: 10)
+......[18:40:52] Registry: 0 entries | Tor mem: 46MB | WP mem: 117MB
+[18:40:52]   (verified: 96/100, pending: 4)
+....[18:41:05] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:41:05]   (verified: 100/100, pending: 0)
+ 100/100
+[18:41:06] Recovery complete: 100/100 verified in 5m:10s
+[18:41:11] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:41:11]   -> Recovery: 100/100 verified in 5m:10s (5m:52s e2e)
+[18:41:11]   -> Silent: takeover 5m:46s, recovery 5m:52s
+
+====================================================================
+  SUMMARY — 2026-03-19 18:41:11 — total 53m:45s
+--------------------------------------------------------------------
+  Phase 2 (bootstrap):   200/200 registered in 2m:57s
+  Phase 3 (healthy):     155/200 healthy, timed out after 10m:20s
+  ---
+  A. Graceful (/offline + /online):
+     A.1  Takeover:       99/100 verified, timed out after 10m:08s (17m:10s e2e)
+     A.1v Verify 302s:    5/5 passed, 0 failed in 0m:42s
+     A.2  Recovery:       100/100 verified in 4m:26s (5m:27s e2e)
+     => takeover 17m:10s, recovery 5m:27s
+  ---
+  B. Silent (heartbeat-only, no notifications):
+     B.1  Takeover:       100/100 verified in 5m:10s (5m:46s e2e)
+     B.1v Verify 302s:    5/5 passed, 0 failed in 0m:37s
+     B.2  Recovery:       100/100 verified in 5m:10s (5m:52s e2e)
+     => takeover 5m:46s, recovery 5m:52s
+====================================================================
+[18:41:11] PHASE done: Final metrics and cleanup
+[18:41:11] === Final metrics ===
+[18:41:16] Registry: 202 entries | Tor mem: 46MB | WP mem: 117MB
+[18:41:16]   -> Stress test complete
+[18:41:16] Cleaning up stress test artifacts...
+[18:41:21]   Removed stress + polling containers
