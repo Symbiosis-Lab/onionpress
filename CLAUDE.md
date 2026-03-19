@@ -98,3 +98,28 @@
 - WordPress container also has `curl`
 - Test onion service reachability: `docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 http://<onion-address>/`
 - Test internal WordPress path: `docker exec onionpress-tor curl -s http://wordpress:80/`
+
+## Tor Descriptor Propagation & HSFETCH
+- **After ADD_ONION, descriptors take 10-60s to propagate to HSDirs** — clients can't connect until then
+- **HSFETCH** forces a client to fetch a descriptor from HSDirs, but if the new descriptor hasn't landed on HSDirs yet, HSFETCH just re-fetches the old one
+- **SIGNAL NEWNYM clears the client-side descriptor cache** — must be issued BEFORE HSFETCH, or Tor returns the cached (stale) descriptor instead of fetching fresh
+- **Correct sequence**: `SIGNAL NEWNYM` → wait 3s → `HSFETCH <service-id>` → then try connecting. Must be two separate control port connections (can't sleep inside an `nc` pipe)
+- **One-shot flush is insufficient** — after a DEL_ONION/ADD_ONION handoff, the descriptor may not be on HSDirs yet when the first flush fires. Flush must be repeated periodically (every 30s) inside polling loops until the client gets the new descriptor
+- **NEWNYM is rate-limited** to once per 10 seconds by Tor — don't call it more frequently
+
+## Onion Service Handoff (DEL_ONION/ADD_ONION)
+- **Clean handoff = 10-20s transitions. Competing descriptors = minutes of failure.**
+- When transferring an onion address (e.g. takeover/recovery), the old holder MUST `DEL_ONION` before the new holder does `ADD_ONION`. If both publish descriptors simultaneously, clients get confused and connections fail for minutes
+- ADD_ONION with `ED25519-V3:<key> Flags=Detach` keeps the same .onion address across handoffs
+- Detached services survive the control connection closing (`GETINFO onions/detached` to list them)
+
+## Tor Bootstrap Resilience
+- **Guard selection is luck-based** — Tor can pick bad/slow guards and get stuck at 5% ("Connecting to a relay") indefinitely
+- Deleting `/var/lib/tor/state` and restarting Tor forces fresh guard selection — usually bootstraps in seconds
+- Stress test containers have no persistent volumes, so stale state files are from the current session (not old runs)
+- **Recommended**: add a watchdog — if Tor doesn't reach 100% bootstrap within 120s, delete state and restart
+
+## Bash `wait` Gotcha
+- **Bare `wait` (no arguments) waits for ALL background children** — including `tail -f` processes, background log watchers, etc.
+- In scripts that spawn background monitoring processes, always capture PIDs and `wait "$pid"` on specific ones
+- This caused `flush_client_descriptor_cache` to hang indefinitely (fixed in commit `2c36656`)

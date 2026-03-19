@@ -1,0 +1,291 @@
+====================================================================
+  OnionHeaven Stress Test
+  2026-03-19 08:16:32
+--------------------------------------------------------------------
+  Sites: 50 total (25 healthy, 25 failing)
+  Containers: 2 x 25 sites/container
+  OnionHeaven: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+  OnionHeaven server version: 2.4.35
+  Stress test version: stress-test-20260319-081632-21893
+====================================================================
+
+[08:16:33] === OnionHeaven Stress Test (C Tor) ===
+[08:16:33] OnionHeaven: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+[08:16:33] This machine: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+[08:16:33] Sites: 50 total (25 stay healthy, 25 will fail)
+[08:16:33] Stress containers: 2 × 25 sites/container
+[08:16:33] Output: ./onionheaven-stress-results/run-20260319-081632
+[08:16:33] PHASE 1: Starting 2 containers (50 sites) (est. <1m)
+[08:16:33] Phase 1: Starting 2 site containers + 3 polling clients...
+[08:16:33] Docker network: onionpress-network
+[08:16:33]   Starting container stress-worker-0 (25 sites)...
+[08:16:33]   Starting container stress-worker-1 (25 sites)...
+[08:16:33] Started 2 stress containers
+[08:16:33] Starting 3 polling clients...
+[08:16:33] Waiting for polling clients to bootstrap...
+[08:16:44]   All 3 polling clients ready (20s)
+[08:16:44]   -> Started 2 stress + 3 poll containers
+[08:16:44] PHASE 2: Waiting for sites to bootstrap and register over Tor (est. 2m)
+[08:16:44] Phase 2: Waiting for sites to bootstrap and register over Tor...
+[08:16:44] Waiting for all sites to bootstrap and register (timeout: 900s)...
+[08:16:44]   Bootstrap: 0/2 stress containers done, 0/50 sites registered
+.........[08:16:55]   Bootstrap: 0/2 stress containers done, 9/50 sites registered
+................[08:17:05]   Bootstrap: 1/2 stress containers done, 25/50 sites registered
+[08:17:15]   Bootstrap: 1/2 stress containers done, 25/50 sites registered
+[08:17:26]   Bootstrap: 1/2 stress containers done, 25/50 sites registered
+[08:17:36]   Bootstrap: 1/2 stress containers done, 25/50 sites registered
+[08:17:46]   Bootstrap: 1/2 stress containers done, 25/50 sites registered
+[08:17:57]   Bootstrap: 1/2 stress containers done, 25/50 sites registered
+[08:18:07]   Bootstrap: 1/2 stress containers done, 25/50 sites registered
+.......................[08:18:18]   Bootstrap: 1/2 stress containers done, 48/50 sites registered
+.. 50/50
+[08:18:23] All stress containers bootstrapped: 50 sites registered
+[08:18:23]   -> 50/50 registered in 1m:39s
+[08:18:23] Extracting site info from containers...
+[08:18:23] Total registered sites: 50
+[08:18:24] HSFETCH for 50 addresses across 3 poll clients...
+[08:18:27] PHASE 3: Waiting for heartbeat monitor to confirm all 50 sites are healthy (est. 1m)
+[08:18:27] Phase 3: Waiting for 50 sites to be reachable via Tor (timeout: 600s)...
+................................[08:21:50] Registry: 50 entries | Tor mem: 52MB | WP mem: 106MB
+[08:21:50]   (reachable: 32/50 sites)
+...............[08:22:57] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:22:57]   (reachable: 47/50 sites)
+...[08:23:32] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:23:32]   (reachable: 50/50 sites)
+ 50/50
+[08:23:32] Phase 3: 50/50 sites reachable via Tor
+[08:23:37] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:23:37]   -> 50/50 healthy in 5m:05s
+[08:23:37] PHASE A: GRACEFUL OFFLINE/ONLINE (with /offline and /online notifications)
+[08:23:37] PHASE A.1: Graceful takeover: /offline + disable 25 sites, wait for takeover (est. 1-2m)
+[08:23:37] Phase A.1: Graceful offline — disabling responders + sending /offline for 25 sites...
+[08:23:37] Disabling responders for sites 25..49...
+[08:23:39] Disabled 25 sites (HTTP responders + C Tor DEL_ONION)
+[08:23:39] Sending /offline notifications for sites 25..49...
+[08:23:39]   Generated 25 /offline payload(s)
+[08:23:41]   notify_offline debug: 25 /offline payload(s) for sites 25..49
+[08:23:41] Sent /offline for 25 sites
+[08:23:42] HSFETCH for 25 addresses across 3 poll clients...
+[08:23:45] Phase A.1: Waiting for takeovers...
+[08:23:45] Waiting for 25 takeovers — polling disabled sites' .onion addresses for 302 redirects (timeout: 600s)...
+[08:23:46] HSFETCH for 25 addresses across 3 poll clients...
+..........[08:24:14] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:24:14]   (taken over: 10/25 — 302:10 200:0 000:15)
+[08:24:19] HSFETCH for 25 addresses across 3 poll clients...
+...............[08:24:42] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:24:42]   (taken over: 25/25 — 302:25 200:0 000:0)
+ 25/25
+[08:24:42] Takeover: 25/25 returning 302 (target: 25)
+[08:24:46] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:24:46]   -> Takeover: 25/25 taken over in 0m:57s (1m:09s e2e)
+[08:24:46] PHASE A.1v: Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)
+[08:24:46] A.1v: Verifying 302 redirects on sample of taken-over addresses...
+[08:24:46]   Waiting 30s for onion descriptor propagation...
+[08:27:16]   PASS: 2epcxdszq3f4w3pewwnuf7ytin6nvjfyk7bl7escabeebh2aegmstdyd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://2epcxdszq3f4w3pewwnuf7ytin6nvjfyk7bl7escabeebh2aegmstdyd.onion/
+[08:27:16]   PASS: 53bjsge2dgujtckzpwhakhgz4bdv5q5qcxgvgigjps6mmnaf46pjv4yd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://53bjsge2dgujtckzpwhakhgz4bdv5q5qcxgvgigjps6mmnaf46pjv4yd.onion/
+[08:27:16]   PASS: 6pcvx24xmy2en6nxjxdwb3c2rxd3nlxjitszrizxovwpzzxz5zkeqcad.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://6pcvx24xmy2en6nxjxdwb3c2rxd3nlxjitszrizxovwpzzxz5zkeqcad.onion/
+[08:27:16]   PASS: akiluybcr47eeh6mmrwddf65prnhkiispjb3uiskud4qt7tmfadpwvad.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://akiluybcr47eeh6mmrwddf65prnhkiispjb3uiskud4qt7tmfadpwvad.onion/
+[08:27:16]   FAIL: ejexoldiw4l47mgebtz4mjrrrfvii7pvqamhzgx4zqknlxiygx4zupyd.onion → HTTP-000
+[08:27:16] A.1v: Redirect verification — 4/5 passed, 1 failed (25 total taken over)
+[08:27:16] A.1v: Redirect debug log:
+[08:27:16]   -> 4/5 passed, 1 failed in 2m:30s
+[08:27:16] PHASE A.2: Graceful recovery: re-enable + /online for 25 sites, wait for recovery (est. 1-2m)
+[08:27:16] Phase A.2: Graceful recovery — re-enabling responders + sending /online...
+[08:27:16] Re-enabling responders and re-registering sites 25..49...
+[08:27:19] Re-enabled 25 sites, C Tor ADD_ONION + re-registrations over Tor (1s apart)
+[08:27:19] Sending /online notifications for sites 25..49...
+[08:27:19]   Generated 25 /online payload(s)
+[08:27:21]   notify_online debug: 25 /online payload(s) for sites 25..49
+[08:27:21] Sent /online for 25 sites
+[08:27:22] HSFETCH for 25 addresses across 3 poll clients...
+[08:27:25] Phase A.2: Waiting for recovery...
+[08:27:25] Waiting for recovery — polling previously-failed sites for 200 OK (timeout: 600s)...
+[08:27:26] HSFETCH for 25 addresses across 3 poll clients...
+[08:27:54] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:27:54]   (recovered: 0/25, still taken over: 0)
+[08:27:59] HSFETCH for 25 addresses across 3 poll clients...
+[08:28:27] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:28:27]   (recovered: 0/25, still taken over: 0)
+[08:28:33] HSFETCH for 25 addresses across 3 poll clients...
+......[08:29:00] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:29:00]   (recovered: 6/25, still taken over: 0)
+[08:29:06] HSFETCH for 25 addresses across 3 poll clients...
+.....[08:29:34] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:29:34]   (recovered: 11/25, still taken over: 0)
+[08:29:39] HSFETCH for 25 addresses across 3 poll clients...
+.[08:30:07] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:30:07]   (recovered: 12/25, still taken over: 0)
+[08:30:12] HSFETCH for 25 addresses across 3 poll clients...
+[08:30:40] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:30:40]   (recovered: 12/25, still taken over: 0)
+[08:30:46] HSFETCH for 25 addresses across 3 poll clients...
+[08:31:14] Registry: 51 entries | Tor mem: 52MB | WP mem: 104MB
+[08:31:14]   (recovered: 11/25, still taken over: 2)
+[08:31:19] HSFETCH for 25 addresses across 3 poll clients...
+[08:31:47] Registry: 51 entries | Tor mem: 52MB | WP mem: 104MB
+[08:31:47]   (recovered: 11/25, still taken over: 0)
+[08:31:52] HSFETCH for 25 addresses across 3 poll clients...
+[08:32:20] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:32:20]   (recovered: 11/25, still taken over: 0)
+[08:32:25] HSFETCH for 25 addresses across 3 poll clients...
+............[08:32:49] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:32:49]   (recovered: 24/25, still taken over: 0)
+[08:33:10] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:33:10]   (recovered: 24/25, still taken over: 0)
+[08:33:15] HSFETCH for 25 addresses across 3 poll clients...
+[08:33:37] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:33:37]   (recovered: 24/25, still taken over: 0)
+[08:33:59] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:33:59]   (recovered: 24/25, still taken over: 0)
+[08:34:05] HSFETCH for 25 addresses across 3 poll clients...
+[08:34:23] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:34:23]   (recovered: 24/25, still taken over: 0)
+[08:34:35] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:34:35]   (recovered: 24/25, still taken over: 0)
+[08:34:40] HSFETCH for 25 addresses across 3 poll clients...
+[08:35:03] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:35:03]   (recovered: 24/25, still taken over: 0)
+[08:35:14] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:35:14]   (recovered: 24/25, still taken over: 0)
+[08:35:20] HSFETCH for 25 addresses across 3 poll clients...
+[08:35:53] Registry: 0 entries | Tor mem: 52MB | WP mem: 106MB
+[08:35:53]   (recovered: 24/25, still taken over: 0)
+[08:35:59] HSFETCH for 25 addresses across 3 poll clients...
+[08:36:20] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:36:20]   (recovered: 24/25, still taken over: 0)
+[08:36:32] Registry: 51 entries | Tor mem: 52MB | WP mem: 104MB
+[08:36:32]   (recovered: 24/25, still taken over: 0)
+[08:36:37] HSFETCH for 25 addresses across 3 poll clients...
+[08:36:58] Registry: 51 entries | Tor mem: 52MB | WP mem: 104MB
+[08:36:58]   (recovered: 24/25, still taken over: 0)
+[08:37:10] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:37:10]   (recovered: 24/25, still taken over: 0)
+[08:37:15] HSFETCH for 25 addresses across 3 poll clients...
+[08:37:36] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:37:36]   (recovered: 24/25, still taken over: 0)
+ 24/25 (timed out)
+[08:37:41] Recovery: Timed out — 24 recovered, 0 still taken over
+[08:37:47] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:37:47] WARNING: Not all sites recovered from graceful offline
+[08:37:47]   -> Recovery: 24/25 recovered, 0 still taken over, timed out after 10m:16s (10m:31s e2e)
+[08:37:47]   -> Graceful: takeover 1m:09s, recovery 10m:31s
+[08:37:47] PHASE B: SILENT CRASH/RECOVERY (no notifications, heartbeat-only detection)
+[08:37:47] PHASE B.1: Silent crash: disable 25 sites (no /offline), wait for heartbeat monitor takeover (est. 9m)
+[08:37:47] Phase B.1: Silent crash — disabling responders for 25 sites (no /offline)...
+[08:37:47] Disabling responders for sites 25..49...
+[08:37:49] Disabled 25 sites (HTTP responders + C Tor DEL_ONION)
+[08:37:49] HSFETCH for 25 addresses across 3 poll clients...
+[08:37:52] Phase B.1: Waiting for heartbeat-detected takeovers...
+[08:37:52] Waiting for 25 takeovers — polling disabled sites' .onion addresses for 302 redirects (timeout: 600s)...
+[08:37:53] HSFETCH for 25 addresses across 3 poll clients...
+[08:38:21] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:38:21]   (taken over: 0/25 — 302:0 200:0 000:25)
+[08:38:26] HSFETCH for 25 addresses across 3 poll clients...
+[08:38:54] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:38:54]   (taken over: 0/25 — 302:0 200:0 000:25)
+[08:39:00] HSFETCH for 25 addresses across 3 poll clients...
+[08:39:28] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:39:28]   (taken over: 0/25 — 302:0 200:0 000:25)
+[08:39:34] HSFETCH for 25 addresses across 3 poll clients...
+......[08:40:02] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:40:02]   (taken over: 6/25 — 302:6 200:0 000:19)
+[08:40:07] HSFETCH for 25 addresses across 3 poll clients...
+[08:40:35] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:40:35]   (taken over: 6/25 — 302:6 200:0 000:19)
+[08:40:40] HSFETCH for 25 addresses across 3 poll clients...
+.[08:41:08] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:41:08]   (taken over: 7/25 — 302:7 200:0 000:18)
+[08:41:13] HSFETCH for 25 addresses across 3 poll clients...
+..................[08:41:32] Registry: 51 entries | Tor mem: 52MB | WP mem: 104MB
+[08:41:32]   (taken over: 25/25 — 302:25 200:0 000:0)
+ 25/25
+[08:41:32] Takeover: 25/25 returning 302 (target: 25)
+[08:41:36] Registry: 51 entries | Tor mem: 52MB | WP mem: 104MB
+[08:41:36]   -> Takeover: 25/25 taken over in 3m:40s (3m:49s e2e)
+[08:41:36] PHASE B.1v: Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)
+[08:41:36] B.1v: Verifying 302 redirects on sample of taken-over addresses...
+[08:41:36]   Waiting 30s for onion descriptor propagation...
+[08:42:09]   PASS: 2zjmgcuznk5rupqogxjesazqimqcwvm3lzli6obkoru3zouwbtw5fkid.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://2zjmgcuznk5rupqogxjesazqimqcwvm3lzli6obkoru3zouwbtw5fkid.onion/
+[08:42:09]   PASS: 6v7ttpxrnrtn52lfadinjygq37s2zegdvcs37roviydh4e5zttiwcwyd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://6v7ttpxrnrtn52lfadinjygq37s2zegdvcs37roviydh4e5zttiwcwyd.onion/
+[08:42:09]   PASS: ejexoldiw4l47mgebtz4mjrrrfvii7pvqamhzgx4zqknlxiygx4zupyd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://ejexoldiw4l47mgebtz4mjrrrfvii7pvqamhzgx4zqknlxiygx4zupyd.onion/
+[08:42:09]   PASS: itmycl63fjvshydbhbvsaxp7b7kmwei6tr5lgtn6k6buhsah4n732nyd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://itmycl63fjvshydbhbvsaxp7b7kmwei6tr5lgtn6k6buhsah4n732nyd.onion/
+[08:42:09]   PASS: u4o6zwn3isuaj7sf3n7m4afxl5pxuru6ujie64lf4gl623mvsdrnveyd.onion → 302 → http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/web/http://u4o6zwn3isuaj7sf3n7m4afxl5pxuru6ujie64lf4gl623mvsdrnveyd.onion/
+[08:42:09] B.1v: Redirect verification — 5/5 passed, 0 failed (25 total taken over)
+[08:42:09] B.1v: Redirect debug log:
+[08:42:09]   -> 5/5 passed, 0 failed in 0m:33s
+[08:42:09] PHASE B.2: Silent recovery: re-enable 25 sites (no /online), wait for heartbeat monitor recovery (est. 1m)
+[08:42:09] Phase B.2: Silent recovery — re-enabling responders (no /online, no /register)...
+[08:42:09] Re-enabling responders for sites 25..49 (no /online, no /register)...
+[08:42:11] Re-enabled 25 sites silently (C Tor ADD_ONION, no notifications sent)
+[08:42:12] HSFETCH for 25 addresses across 3 poll clients...
+[08:42:15] Phase B.2: Waiting for heartbeat-detected recovery...
+[08:42:15] Waiting for recovery — polling previously-failed sites for 200 OK (timeout: 900s)...
+[08:42:16] HSFETCH for 25 addresses across 3 poll clients...
+......[08:42:44] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:42:44]   (recovered: 6/25, still taken over: 15)
+[08:42:49] HSFETCH for 25 addresses across 3 poll clients...
+.[08:43:17] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:43:17]   (recovered: 7/25, still taken over: 16)
+[08:43:23] HSFETCH for 25 addresses across 3 poll clients...
+............[08:43:45] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:43:45]   (recovered: 19/25, still taken over: 3)
+[08:44:06] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:44:06]   (recovered: 19/25, still taken over: 0)
+[08:44:11] HSFETCH for 25 addresses across 3 poll clients...
+[08:44:39] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:44:39]   (recovered: 19/25, still taken over: 0)
+[08:44:45] HSFETCH for 25 addresses across 3 poll clients...
+[08:45:13] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:45:13]   (recovered: 19/25, still taken over: 0)
+[08:45:18] HSFETCH for 25 addresses across 3 poll clients...
+[08:45:41] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:45:41]   (recovered: 19/25, still taken over: 0)
+[08:46:01] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:46:01]   (recovered: 19/25, still taken over: 0)
+[08:46:06] HSFETCH for 25 addresses across 3 poll clients...
+[08:46:29] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:46:29]   (recovered: 18/25, still taken over: 0)
+[08:46:49] Registry: 51 entries | Tor mem: 52MB | WP mem: 104MB
+[08:46:49]   (recovered: 19/25, still taken over: 0)
+[08:46:55] HSFETCH for 25 addresses across 3 poll clients...
+[08:47:16] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:47:16]   (recovered: 19/25, still taken over: 0)
+...[08:47:37] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:47:37]   (recovered: 22/25, still taken over: 0)
+[08:47:43] HSFETCH for 25 addresses across 3 poll clients...
+...[08:48:01] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:48:01]   (recovered: 25/25, still taken over: 0)
+ 25/25
+[08:48:01] Recovery complete — 25 sites back to 200 OK, 0 still redirecting
+[08:48:05] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:48:05]   -> Recovery: 25/25 recovered in 5m:46s (5m:56s e2e)
+[08:48:05]   -> Silent: takeover 3m:49s, recovery 5m:56s
+
+====================================================================
+  SUMMARY — 2026-03-19 08:48:05 — total 31m:32s
+--------------------------------------------------------------------
+  Phase 2 (bootstrap):   50/50 registered in 1m:39s
+  Phase 3 (healthy):     50/50 healthy in 5m:05s
+  ---
+  A. Graceful (/offline + /online):
+     A.1  Takeover:       25/25 taken over in 0m:57s (1m:09s e2e)
+     A.1v Verify 302s:    4/5 passed, 1 failed in 2m:30s
+     A.2  Recovery:       24/25 recovered, 0 still taken over, timed out after 10m:16s (10m:31s e2e)
+     => takeover 1m:09s, recovery 10m:31s
+  ---
+  B. Silent (heartbeat-only, no notifications):
+     B.1  Takeover:       25/25 taken over in 3m:40s (3m:49s e2e)
+     B.1v Verify 302s:    5/5 passed, 0 failed in 0m:33s
+     B.2  Recovery:       25/25 recovered in 5m:46s (5m:56s e2e)
+     => takeover 3m:49s, recovery 5m:56s
+====================================================================
+[08:48:05] PHASE done: Final metrics and cleanup
+[08:48:05] === Final metrics ===
+[08:48:10] Registry: 51 entries | Tor mem: 52MB | WP mem: 106MB
+[08:48:10]   -> Stress test complete
+[08:48:10] Cleaning up stress test artifacts...
+[08:48:10]   Removed stress + polling containers
+[08:49:35]   Unregistered 50 entries
+[08:49:35] Cleanup complete
+[08:49:35] === Stress test complete ===
+[08:49:35] Results saved to: ./onionheaven-stress-results/run-20260319-081632/metrics.jsonl
