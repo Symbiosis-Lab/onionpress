@@ -101,6 +101,15 @@ if ! command -v unzip >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq zip unzip
 fi
 
+# ─── Stop existing services (if reinstalling) ────────────────────────
+
+if $SUDO systemctl is-active --quiet onionpress 2>/dev/null; then
+    echo "  Stopping existing OnionPress service..."
+    $SUDO systemctl stop onionpress-heartbeat 2>/dev/null || true
+    $SUDO systemctl stop onionpress-watcher.timer 2>/dev/null || true
+    $SUDO systemctl stop onionpress 2>/dev/null || true
+fi
+
 # ─── Install OnionPress files ────────────────────────────────────────
 
 echo ""
@@ -276,29 +285,39 @@ echo "  Starting OnionPress (this may take a few minutes on first run)..."
 echo "  Docker will pull container images for WordPress, MariaDB, and Tor."
 echo ""
 
-$SUDO systemctl start onionpress
+# Use restart (not start) so a stale service from a previous install is replaced.
+# If the service isn't running, restart acts like start.
+$SUDO systemctl restart onionpress
 
 # Start heartbeat client (will wait for containers to be ready)
-$SUDO systemctl start onionpress-heartbeat
+$SUDO systemctl restart onionpress-heartbeat
 
 # Wait for the service to finish starting
 echo "  Waiting for services..."
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
-# Wait for WordPress container to respond (DB can take 20-30s on first run)
+# Wait for WordPress container to respond.
+# First run on a Pi can take 2-3 minutes (image pulls + DB bootstrap).
+wp_ready=false
 wp_wait=0
-while [ $wp_wait -lt 60 ]; do
+while [ $wp_wait -lt 180 ]; do
     if curl -s --max-time 3 "http://localhost:8080" >/dev/null 2>&1; then
+        wp_ready=true
         break
     fi
-    sleep 2
-    wp_wait=$((wp_wait + 2))
+    sleep 3
+    wp_wait=$((wp_wait + 3))
 done
+
+if [ "$wp_ready" != "true" ]; then
+    echo "  WARNING: WordPress did not respond within 3 minutes."
+    echo "  It may still be starting. Check: sudo journalctl -u onionpress -f"
+fi
 
 # Check if it started successfully
 if $SUDO systemctl is-active --quiet onionpress; then
     # Try to get the onion address
-    onion_addr=$("$INSTALL_DIR/onionpress" address 2>/dev/null || echo "Generating...")
+    onion_addr=$("$INSTALL_DIR/onionpress" address 2>/dev/null) || true
 
     echo ""
     echo "  ======================================="
@@ -314,15 +333,9 @@ if $SUDO systemctl is-active --quiet onionpress; then
         echo "  Onion address: Still generating... (run 'onionpress address' to check)"
     fi
     echo ""
-    # Run first-time WordPress setup if not already installed
-    if ! docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1; then
-        # Run as the real user so DATA_DIR resolves correctly
-        if [ -n "$SUDO_USER" ]; then
-            sudo -u "$SUDO_USER" "$INSTALL_DIR/onionpress" setup
-        else
-            "$INSTALL_DIR/onionpress" setup
-        fi
-    fi
+    # Note: first-time WordPress setup (WP install, multisite, plugins) is handled
+    # automatically by start_containers when running headless (non-interactive).
+    # No need to call 'onionpress setup' here — it would race with the systemd service.
 
     echo ""
     echo "  Commands:"

@@ -76,7 +76,29 @@ if [ -f "$DATA_DIR/config" ]; then
     [ -n "$_val" ] && export ONIONHEAVEN_HUB_THRESHOLD="$_val"
 fi
 
+# ─── Parse global flags ────────────────────────────────────────────
+# --yes / -y skips interactive confirmations (for scripted/automated use)
+ONIONPRESS_YES=false
+_filtered_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --yes|-y) ONIONPRESS_YES=true ;;
+        *) _filtered_args+=("$_arg") ;;
+    esac
+done
+set -- "${_filtered_args[@]}"
+
 # ─── Helper functions ───────────────────────────────────────────────
+
+confirm_or_skip() {
+    # Usage: confirm_or_skip "prompt text"
+    # Returns 0 (proceed) if --yes or user confirms, 1 if declined
+    if [ "$ONIONPRESS_YES" = "true" ]; then
+        return 0
+    fi
+    echo "$1"
+    read -r
+}
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
@@ -1678,6 +1700,27 @@ create_backup() {
         return 1
     fi
 
+    # Verify password matches a WordPress admin account before creating backup
+    # (backup contains Tor private keys — only WP admins should be able to export them)
+    log "Backup: verifying WordPress admin password..."
+    local pw_valid
+    pw_valid=$(docker exec onionpress-wordpress wp eval "
+        \$users = get_users(array('role' => 'administrator'));
+        foreach (\$users as \$u) {
+            if (wp_check_password('${password//\'/\\\'}', \$u->user_pass)) {
+                echo 'VALID';
+                exit;
+            }
+        }
+        echo 'INVALID';
+    " --allow-root 2>/dev/null | tr -d '\n')
+    if [ "$pw_valid" != "VALID" ]; then
+        log "ERROR: Password does not match any WordPress admin account"
+        echo "ERROR: Password does not match any WordPress admin account" >&2
+        return 1
+    fi
+    log "Backup: password verified"
+
     staging=$(mktemp -d -t onionpress-backup-XXXXXX)
     trap "rm -rf '$staging'" RETURN
 
@@ -2427,9 +2470,11 @@ main() {
                 echo "Restores from an OnionPress backup. Containers must be running."
                 exit 1
             fi
-            echo "WARNING: This will overwrite your current database, wp-content, and Tor keys."
-            echo "Press Enter to continue or Ctrl+C to cancel..."
-            read -r
+            if [ "$ONIONPRESS_YES" != "true" ]; then
+                echo "WARNING: This will overwrite your current database, wp-content, and Tor keys."
+                echo "Press Enter to continue or Ctrl+C to cancel..."
+                read -r
+            fi
             restore_backup "$restore_pass" "$restore_path"
             echo "Restore complete. Restarting OnionPress..."
             stop_containers
@@ -2794,12 +2839,14 @@ main() {
         reset)
             # Wipe WordPress, database, and Tor state but keep onion keys and config.
             # After reset, run 'onionpress setup' to re-initialize WordPress.
-            echo ""
-            echo "  This will ERASE your WordPress site, database, and Tor state."
-            echo "  Your onion address keys and config will be preserved."
-            echo ""
-            echo "  Press Enter to continue or Ctrl+C to cancel..."
-            read -r
+            if [ "$ONIONPRESS_YES" != "true" ]; then
+                echo ""
+                echo "  This will ERASE your WordPress site, database, and Tor state."
+                echo "  Your onion address keys and config will be preserved."
+                echo ""
+                echo "  Press Enter to continue or Ctrl+C to cancel..."
+                read -r
+            fi
 
             log "Resetting OnionPress (keeping keys and config)..."
 
@@ -2842,8 +2889,109 @@ main() {
             _validate_oh_address "$2"
             ;;
 
+        uninstall)
+            echo ""
+            echo "OnionPress Uninstaller"
+            echo "======================"
+            echo ""
+            echo "CRITICAL WARNING"
+            echo ""
+            echo "Uninstalling will PERMANENTLY DELETE:"
+            echo "  - Your onion address and private key"
+            echo "  - All WordPress content and data"
+            echo "  - Database and configuration"
+            echo "  - Systemd services"
+            echo "  - /opt/onionpress installation"
+            echo ""
+            echo "Your site CANNOT BE RECOVERED unless you have a backup."
+            echo ""
+
+            if [ "$ONIONPRESS_YES" != "true" ]; then
+                # Offer backup first (like Mac version)
+                read -r -p "Create a backup before uninstalling? [Y/n] " backup_choice
+                if [ "$backup_choice" != "n" ] && [ "$backup_choice" != "N" ]; then
+                    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
+                        read -r -s -p "WordPress admin password (for backup): " bp_pass
+                        echo ""
+                        bp_path="/tmp/OnionPress-backup-$(date +%Y-%m-%d-%H-%M).zip"
+                        if create_backup "$bp_pass" "$bp_path"; then
+                            echo "Backup saved to: $bp_path"
+                            echo ""
+                            echo "IMPORTANT: Copy this file somewhere safe before continuing!"
+                            echo "  e.g.: scp $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}'):$bp_path ."
+                            echo ""
+                        else
+                            echo "Backup failed. Fix the issue or press Ctrl-C to abort."
+                            echo ""
+                        fi
+                    else
+                        echo "Containers are not running — cannot create backup."
+                        echo "Start OnionPress first, or skip backup."
+                        echo ""
+                        read -r -p "Continue without backup? [y/N] " skip_backup
+                        if [ "$skip_backup" != "y" ] && [ "$skip_backup" != "Y" ]; then
+                            echo "Cancelled."
+                            exit 0
+                        fi
+                    fi
+                fi
+
+                # Final confirmation — require typing DELETE
+                read -r -p "Type DELETE to confirm uninstall: " confirm
+                if [ "$confirm" != "DELETE" ]; then
+                    echo "Uninstall cancelled."
+                    exit 0
+                fi
+            fi
+
+            echo ""
+
+            # Unregister from OnionHeaven before stopping (needs running containers)
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-tor; then
+                echo "Unregistering from OnionHeaven..."
+                # Send offline signal via the tor container's API server
+                docker exec onionpress-tor curl -s -X POST http://127.0.0.1:9077/unregister 2>/dev/null || true
+            fi
+
+            echo "Stopping services..."
+            sudo systemctl stop onionpress-heartbeat 2>/dev/null || true
+            sudo systemctl stop onionpress-watcher.timer 2>/dev/null || true
+            sudo systemctl stop onionpress 2>/dev/null || true
+
+            echo "Removing containers and volumes..."
+            setup_db_passwords 2>/dev/null || true
+            cd "$DOCKER_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
+
+            echo "Disabling and removing systemd services..."
+            sudo systemctl disable onionpress 2>/dev/null || true
+            sudo systemctl disable onionpress-heartbeat 2>/dev/null || true
+            sudo systemctl disable onionpress-watcher.timer 2>/dev/null || true
+            sudo rm -f /etc/systemd/system/onionpress.service
+            sudo rm -f /etc/systemd/system/onionpress-heartbeat.service
+            sudo rm -f /etc/systemd/system/onionpress-watcher.service
+            sudo rm -f /etc/systemd/system/onionpress-watcher.timer
+            sudo systemctl daemon-reload
+
+            echo "Removing /opt/onionpress..."
+            sudo rm -rf /opt/onionpress
+
+            echo "Removing /usr/local/bin/onionpress symlink..."
+            sudo rm -f /usr/local/bin/onionpress
+
+            echo "Removing data directory ($DATA_DIR)..."
+            rm -rf "$DATA_DIR"
+
+            echo ""
+            echo "OnionPress has been uninstalled."
+            if [ -n "${bp_path:-}" ] && [ -f "${bp_path:-}" ]; then
+                echo ""
+                echo "Your backup is at: $bp_path"
+                echo "Use it to restore: onionpress restore <password> $bp_path"
+            fi
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|import-key|backup|restore|update|logs|write-status|apply-config|handle-action|validate-oh-address}"
+            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|import-key|backup|restore|update|logs|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
             exit 1
             ;;
     esac
