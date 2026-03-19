@@ -452,7 +452,7 @@ EOF
     if [ "$TOR_IMPL" = "tor" ]; then
         cat > "$startup" << STARTEOF
 #!/bin/sh
-set -e
+# No set -e — individual failures should not kill the container
 
 # Install deps only if not using pre-built stress image
 if ! python3 --version >/dev/null 2>&1; then
@@ -494,7 +494,7 @@ STARTEOF
     else
         cat > "$startup" << STARTEOF
 #!/bin/sh
-set -e
+# No set -e — individual failures should not kill the container
 
 # Install Python + curl (Arti image is Debian trixie-slim)
 apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
