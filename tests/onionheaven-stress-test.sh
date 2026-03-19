@@ -1552,6 +1552,7 @@ run_verify_worker() {
     local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
     local prev_verified=0
+    local orchestrator_cured=""  # track addresses already cured by orchestrator
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         sleep 5
@@ -1595,11 +1596,14 @@ for addr in d.get('cured', []):
             last_dashboard=$now
         fi
 
-        # Execute cure requests from any verify-worker
+        # Execute cure requests from any verify-worker (max once per address)
         if [ -n "$all_cures" ]; then
-            echo -e "$all_cures" | while IFS= read -r addr; do
-                [ -z "$addr" ] && continue
-                cure_straggler "$addr"
+            local cure_addr
+            for cure_addr in $(echo -e "$all_cures" | tr '\n' ' '); do
+                [ -z "$cure_addr" ] && continue
+                echo "$orchestrator_cured" | grep -q "$cure_addr" && continue
+                cure_straggler "$cure_addr"
+                orchestrator_cured="${orchestrator_cured} ${cure_addr}"
             done
         fi
 
