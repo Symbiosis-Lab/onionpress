@@ -1411,6 +1411,7 @@ wait_for_takeover() {
     start_ts=$(date +%s)
     local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
+    local last_flush=0
     local taken_over=0
     local prev_taken=0
 
@@ -1419,6 +1420,15 @@ wait_for_takeover() {
     content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
+        # Periodically flush descriptor caches so poll clients discover
+        # the takeover container's newly-published descriptor.
+        local now_flush
+        now_flush=$(date +%s)
+        if [ $((now_flush - last_flush)) -ge 30 ]; then
+            flush_client_descriptor_cache "$poll_start" "$poll_count"
+            last_flush=$now_flush
+        fi
+
         parallel_check_addrs "$content_addrs" "302"
         taken_over=$PCHECK_302
         local total_checked=$PCHECK_TOTAL
@@ -1470,6 +1480,7 @@ wait_for_recovery() {
     start_ts=$(date +%s)
     local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
+    local last_flush=0
     local recovered=0
     local still_taken=0
     local prev_recovered=0
@@ -1479,6 +1490,17 @@ wait_for_recovery() {
     content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
+        # Periodically flush descriptor caches (NEWNYM + HSFETCH) so poll clients
+        # pick up the worker's newly-published descriptor as it propagates to HSDirs.
+        # A single flush before the loop fires too early — the descriptor isn't on
+        # HSDirs yet. Repeating every 30s catches it once propagation completes.
+        local now_flush
+        now_flush=$(date +%s)
+        if [ $((now_flush - last_flush)) -ge 30 ]; then
+            flush_client_descriptor_cache "$poll_start" "$poll_count"
+            last_flush=$now_flush
+        fi
+
         parallel_check_addrs "$content_addrs" "200 302"
         recovered=$PCHECK_200
         still_taken=$PCHECK_302
