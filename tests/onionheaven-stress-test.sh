@@ -106,10 +106,13 @@ fi
 # Compute number of containers
 NUM_CONTAINERS=$(( (TOTAL + PER_CTR - 1) / PER_CTR ))
 
-# Auto-scale poll clients: 1 per 10 sites, minimum 3
+# Auto-scale poll clients: 1 per 3 failing sites (each Tor client handles ~4
+# concurrent onion service lookups reliably, so 2-3 per client leaves headroom).
+# At 100 sites (50 failing): ~17 poll clients. At 200: ~34.
 if [ "$NUM_POLL_CLIENTS" -eq 0 ]; then
-    NUM_POLL_CLIENTS=$(( (TOTAL + 9) / 10 ))
+    NUM_POLL_CLIENTS=$(( (TOTAL / 2 + 2) / 3 ))  # 1 per 3 failing sites (half of total)
     [ "$NUM_POLL_CLIENTS" -lt 3 ] && NUM_POLL_CLIENTS=3
+    [ "$NUM_POLL_CLIENTS" -gt 50 ] && NUM_POLL_CLIENTS=50  # cap for VM resources
 fi
 
 if [ "$TOTAL" -lt 1 ]; then
