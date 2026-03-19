@@ -1368,10 +1368,21 @@ flush_client_descriptor_cache() {
     done <<< "$addrs"
     [ -z "$sids" ] && return
 
+    # Step 1: NEWNYM on all poll clients (clears descriptor cache)
     for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
         local cname="stress-poll-client-${ci}"
-        # Write HSFETCH commands to a temp file inside the container, then pipe to nc.
-        # This avoids shell quoting issues with printf + \r\n in sh/dash.
+        docker_cmd exec "$cname" sh -c "
+            cookie=\$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\n')
+            [ -z \"\$cookie\" ] && exit 0
+            printf 'AUTHENTICATE %s\r\nSIGNAL NEWNYM\r\nQUIT\r\n' \"\$cookie\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+        " &
+    done
+    wait
+    sleep 3
+
+    # Step 2: HSFETCH on all poll clients (fetches fresh descriptors)
+    for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        local cname="stress-poll-client-${ci}"
         docker_cmd exec "$cname" sh -c "
             cookie=\$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\n')
             [ -z \"\$cookie\" ] && exit 0
