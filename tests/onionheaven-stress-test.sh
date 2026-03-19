@@ -581,9 +581,8 @@ start_poll_clients() {
             --network "$network" \
             --ulimit nofile=10000:10000 \
             --entrypoint sh \
-            "$ARTI_IMAGE" \
+            "$STRESS_IMAGE" \
             -c "
-                apt-get update -qq && apt-get install -y -qq netcat-openbsd xxd >/dev/null 2>&1
                 mkdir -p /var/lib/tor
                 chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
                 chmod 700 /var/lib/tor
@@ -621,16 +620,8 @@ EOF
         log "WARNING: Not all polling clients bootstrapped, using what's available"
     fi
 
-    # Copy verify-worker.py and install python3 on poll clients
-    local install_pids=""
-    for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
-        docker_cmd cp "${SCRIPT_DIR}/stress/verify-worker.py" "stress-poll-client-${i}:/verify-worker.py"
-        docker_cmd exec "stress-poll-client-${i}" sh -c \
-            "apt-get update -qq && apt-get install -y -qq python3-minimal >/dev/null 2>&1" &
-        install_pids="$install_pids $!"
-    done
-    for pid in $install_pids; do wait "$pid" 2>/dev/null; done
-    log "  verify-worker.py + python3 installed on poll clients"
+    # verify-worker.py and python3 are pre-installed in STRESS_IMAGE
+    log "  Poll clients ready (pre-built image, no apt-get needed)"
 }
 
 stop_poll_clients() {
