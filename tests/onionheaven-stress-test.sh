@@ -595,12 +595,14 @@ EOF
     fi
 
     # Copy verify-worker.py and install python3 on poll clients
+    local install_pids=""
     for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
         docker_cmd cp "${SCRIPT_DIR}/stress/verify-worker.py" "stress-poll-client-${i}:/verify-worker.py"
         docker_cmd exec "stress-poll-client-${i}" sh -c \
             "apt-get update -qq && apt-get install -y -qq python3-minimal >/dev/null 2>&1" &
+        install_pids="$install_pids $!"
     done
-    wait
+    for pid in $install_pids; do wait "$pid" 2>/dev/null; done
     log "  verify-worker.py + python3 installed on poll clients"
 }
 
