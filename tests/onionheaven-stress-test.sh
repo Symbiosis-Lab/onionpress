@@ -1359,22 +1359,31 @@ flush_client_descriptor_cache() {
     addr_count=$(echo "$addrs" | grep -c . || echo 0)
     log "HSFETCH for ${addr_count} addresses across ${NUM_POLL_CLIENTS} poll clients..."
 
-    # Build HSFETCH commands (strip .onion suffix)
-    local hsfetch_cmds=""
+    # Build newline-separated list of service IDs (strip .onion suffix)
+    local sids=""
     while IFS= read -r addr; do
         addr=$(echo "$addr" | tr -d '\r\n ' | sed 's/\.onion$//')
         [ -z "$addr" ] && continue
-        hsfetch_cmds="${hsfetch_cmds}HSFETCH ${addr}\r\n"
+        sids="${sids}${addr}\n"
     done <<< "$addrs"
-    [ -z "$hsfetch_cmds" ] && return
+    [ -z "$sids" ] && return
 
     for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
         local cname="stress-poll-client-${ci}"
+        # Write HSFETCH commands to a temp file inside the container, then pipe to nc.
+        # This avoids shell quoting issues with printf + \r\n in sh/dash.
         docker_cmd exec "$cname" sh -c "
-            cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n' 2>/dev/null)
+            cookie=\$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\n')
             [ -z \"\$cookie\" ] && exit 0
-            printf 'AUTHENTICATE %s\r\n${hsfetch_cmds}QUIT\r\n' \"\$cookie\" | nc -w 10 127.0.0.1 9051
-        " >/dev/null 2>&1 || true &
+            (
+                printf 'AUTHENTICATE %s\r\n' \"\$cookie\"
+                printf '${sids}' | while IFS= read -r sid; do
+                    [ -z \"\$sid\" ] && continue
+                    printf 'HSFETCH %s\r\n' \"\$sid\"
+                done
+                printf 'QUIT\r\n'
+            ) | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+        " &
     done
     wait
 }
