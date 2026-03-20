@@ -1007,6 +1007,11 @@ _start_takeover_worker() {
 }
 
 start_onionheaven_farm() {
+    # Guard: don't spawn a second monitor if one is already running
+    if [ -n "$ONIONHEAVEN_FARM_MONITOR_PID" ] && kill -0 "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null; then
+        return
+    fi
+
     # Start with 0 takeover workers — they'll be spawned on demand when
     # the heartbeat monitor writes to farm_scale_requests.
     log "OnionHeaven farm: launching scaling monitor (0 initial workers)"
