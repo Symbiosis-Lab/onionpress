@@ -562,7 +562,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.36"
+        self.version = "2.4.37"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1609,11 +1609,14 @@ class OnionPressApp(rumps.App):
     def _pulse(self, generation):
         """Periodic external reachability check. Purple if reachable, yellow if not.
         Runs after _start_services achieves first-ready. Exits on generation change."""
+        pulse_count = 0
         while generation == self._run_generation and not self._quitting:
             time.sleep(30)
 
             if generation != self._run_generation or self._quitting:
                 break
+
+            pulse_count += 1
 
             try:
                 # Check for reopen signal
@@ -1660,8 +1663,8 @@ class OnionPressApp(rumps.App):
 
                 self.update_menu()
 
-                # When ready, poll various services
-                if self.is_ready:
+                # Slow polls — every 10th cycle (5 minutes at 30s intervals)
+                if self.is_ready and pulse_count % 10 == 0:
                     self.poll_onionheaven_messages()
                     self.poll_wayback_queue()
                     self.drain_wayback_queue()
@@ -4189,22 +4192,9 @@ License: AGPL v3"""
             else:
                 state = "starting"
 
-            # Get container states
+            # Container states — use cached knowledge instead of docker ps.
+            # We know containers are running if we're in pulse (is_running=True).
             containers = {}
-            try:
-                result = subprocess.run(
-                    ["docker", "ps", "--format", "{{.Names}}\t{{.State}}",
-                     "--filter", "name=onionpress"],
-                    capture_output=True, text=True, encoding='utf-8', errors='replace',
-                    timeout=5
-                )
-                if result.returncode == 0:
-                    for line in result.stdout.strip().splitlines():
-                        parts = line.split("\t", 1)
-                        if len(parts) == 2:
-                            containers[parts[0]] = parts[1]
-            except Exception:
-                pass
 
             # Get uptime
             uptime_seconds = int(time.time() - self.startup_time) if self.is_running else 0
@@ -4874,7 +4864,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.36 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.37 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
