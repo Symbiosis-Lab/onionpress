@@ -342,8 +342,9 @@ def main():
 
                 elif entry["status"] == "taken-over":
                     # Unassigned taken-over entry — assign to a container so it gets ADD_ONION'd.
-                    # This happens after restart when reconciliation clears assignments.
-                    if entry.get("takeover_pending") and not entry.get("takeover_container"):
+                    # This happens after restart when reconciliation clears assignments,
+                    # or if entries were orphaned (both fields NULL).
+                    if not entry.get("takeover_container"):
                         container = assign_takeover_container(conn)
                         if container:
                             conn.execute(
