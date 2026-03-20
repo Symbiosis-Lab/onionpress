@@ -1497,7 +1497,8 @@ start_containers() {
     fi
 
     # Check if this is first run (no arti-state volume exists)
-    if ! docker volume ls | grep -q "onionpress-arti-state"; then
+    # Use --format + exact grep to avoid matching onionpress-arti-state-client
+    if ! docker volume ls --format '{{.Name}}' | grep -qx "onionpress-arti-state"; then
         log "First run detected - generating custom onion address..."
 
         # Read address prefix from config, default to "op2"
@@ -1934,6 +1935,424 @@ _validate_oh_address() {
     return 0
 }
 
+# ===========================================================================
+# CLI subcommands: setup, backup, restore, reset
+# ===========================================================================
+
+setup_wordpress_cli() {
+    local wp_user="" wp_pass="" wp_email="" wp_title="OnionPress"
+    local from_backup_pass="" from_backup_path=""
+
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --user)  wp_user="$2";  shift 2 ;;
+            --pass)  wp_pass="$2";  shift 2 ;;
+            --email) wp_email="$2"; shift 2 ;;
+            --title) wp_title="$2"; shift 2 ;;
+            --from-backup)
+                from_backup_pass="$2"
+                from_backup_path="$3"
+                shift 3 ;;
+            *) shift ;;
+        esac
+    done
+
+    # --from-backup mode: extract config from backup, use dummy WP credentials
+    # (restore will overwrite the database with real users afterward)
+    if [ -n "$from_backup_pass" ]; then
+        if [ -z "$from_backup_path" ] || [ ! -f "$from_backup_path" ]; then
+            echo "Usage: $0 setup --from-backup <password> <backup.zip>"
+            return 1
+        fi
+        echo "  Extracting config from backup..."
+        local staging
+        staging=$(mktemp -d -t onionpress-setup-XXXXXX)
+        trap "rm -rf '$staging'" RETURN
+        if ! unzip -P "$from_backup_pass" -o "$from_backup_path" -d "$staging" >>"$LOG_FILE" 2>&1; then
+            echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
+            return 1
+        fi
+        # Restore config if present
+        if [ -f "$staging/config" ]; then
+            cp "$staging/config" "$DATA_DIR/config"
+            log "Setup: restored config from backup"
+            echo "  Config restored from backup."
+        fi
+        # Restore vanity keys if present
+        if [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] && [ -f "$staging/metadata.json" ]; then
+            local onion_address
+            onion_address=$(bundled_python -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
+            if [ -n "$onion_address" ]; then
+                rm -rf "$DATA_DIR/shared/vanity-keys/"
+                local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
+                mkdir -p "$addr_dir"
+                cp "$staging/tor-keys/hs_ed25519_secret_key" "$addr_dir/"
+                [ -f "$staging/tor-keys/hs_ed25519_public_key" ] && cp "$staging/tor-keys/hs_ed25519_public_key" "$addr_dir/"
+                [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ] && cp "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" "$addr_dir/"
+                echo "$onion_address" > "$addr_dir/hostname"
+                log "Setup: restored Tor keys for $onion_address from backup"
+                echo "  Tor keys restored from backup ($onion_address)."
+            fi
+        fi
+        # Use dummy credentials — restore will overwrite the database
+        wp_user="admin"
+        wp_pass="$from_backup_pass"
+        wp_email="admin@onionpress.local"
+        echo "  Installing WordPress with temporary credentials (restore will overwrite)..."
+    fi
+
+    # If credentials not provided, prompt interactively
+    if [ -z "$wp_user" ] || [ -z "$wp_pass" ]; then
+        echo ""
+        echo "  ======================================="
+        echo "  OnionPress First-Time Setup"
+        echo "  ======================================="
+        echo ""
+        echo "  Create your WordPress admin account."
+        echo "  You'll use these credentials to log in at /wp-admin."
+        echo ""
+
+        if [ -z "$wp_user" ]; then
+            while [ -z "$wp_user" ]; do
+                printf "  Admin username: "
+                read wp_user
+                if [ -z "$wp_user" ]; then
+                    echo "  Username cannot be empty."
+                fi
+            done
+        fi
+
+        if [ -z "$wp_pass" ]; then
+            local wp_pass2=""
+            while [ -z "$wp_pass" ]; do
+                printf "  Admin password: "
+                stty -echo 2>/dev/null
+                read wp_pass
+                stty echo 2>/dev/null
+                echo ""
+                if [ -z "$wp_pass" ]; then
+                    echo "  Password cannot be empty."
+                    continue
+                fi
+                printf "  Confirm password: "
+                stty -echo 2>/dev/null
+                read wp_pass2
+                stty echo 2>/dev/null
+                echo ""
+                if [ "$wp_pass" != "$wp_pass2" ]; then
+                    echo "  Passwords do not match. Try again."
+                    wp_pass=""
+                fi
+            done
+        fi
+
+        printf "  Site title [OnionPress]: "
+        read wp_title_input
+        if [ -n "$wp_title_input" ]; then
+            wp_title="$wp_title_input"
+        fi
+    fi
+
+    if [ -z "$wp_email" ]; then
+        wp_email="${wp_user}@onionpress.local"
+    fi
+
+    echo ""
+    echo "  Installing WordPress (multisite)..."
+    log "Running WP-CLI core multisite-install for first-time setup"
+
+    if docker exec onionpress-wordpress wp core multisite-install \
+        --url="http://localhost" \
+        --title="$wp_title" \
+        --admin_user="$wp_user" \
+        --admin_password="$wp_pass" \
+        --admin_email="$wp_email" \
+        --skip-email \
+        --allow-root >> "$LOG_FILE" 2>&1; then
+        log "WordPress multisite installed successfully via WP-CLI"
+        echo "  WordPress installed successfully!"
+    else
+        log "ERROR: WP-CLI core multisite-install failed"
+        echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."
+        return 1
+    fi
+}
+
+create_backup() {
+    # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
+    # Usage: create_backup <password> <output_path>
+    local password="$1"
+    local output_path="$2"
+    local staging
+
+    if [ -z "$password" ]; then
+        echo "ERROR: Password is required" >&2
+        return 1
+    fi
+
+    # Verify password matches a WordPress admin account before creating backup
+    log "Backup: verifying WordPress admin password..."
+    local pw_valid
+    pw_valid=$(docker exec onionpress-wordpress wp eval "
+        \$users = get_users(array('role' => 'administrator'));
+        foreach (\$users as \$u) {
+            if (wp_check_password('${password//\'/\\\'}', \$u->user_pass)) {
+                echo 'VALID';
+                exit;
+            }
+        }
+        echo 'INVALID';
+    " --allow-root 2>/dev/null | tr -d '\n')
+    if [ "$pw_valid" != "VALID" ]; then
+        log "ERROR: Password does not match any WordPress admin account"
+        echo "ERROR: Password does not match any WordPress admin account" >&2
+        return 1
+    fi
+    log "Backup: password verified"
+
+    staging=$(mktemp -d -t onionpress-backup-XXXXXX)
+    trap "rm -rf '$staging'" RETURN
+
+    # 1. Extract Tor keys
+    log "Backup: extracting Tor keys..."
+    mkdir -p "$staging/tor-keys"
+
+    # C Tor format keys from vanity-keys directory
+    local ctor_key
+    ctor_key=$(find "$DATA_DIR/shared/vanity-keys" -name "hs_ed25519_secret_key" 2>/dev/null | head -1)
+    if [ -n "$ctor_key" ]; then
+        cp "$ctor_key" "$staging/tor-keys/"
+        local ctor_pub="${ctor_key%secret_key}public_key"
+        [ -f "$ctor_pub" ] && cp "$ctor_pub" "$staging/tor-keys/"
+    else
+        # Try extracting from the tor container
+        docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
+        if [ ! -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
+            rm -f "$staging/tor-keys/hs_ed25519_secret_key"
+            log "WARNING: No C Tor secret key found"
+        else
+            docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
+            [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
+        fi
+    fi
+
+    # Arti format key
+    local arti_key
+    arti_key=$(find "$DATA_DIR/shared/vanity-keys" -name "ks_hs_id.ed25519_expanded_private" 2>/dev/null | head -1)
+    if [ -n "$arti_key" ]; then
+        cp "$arti_key" "$staging/tor-keys/"
+    fi
+
+    if [ -z "$(ls -A "$staging/tor-keys/" 2>/dev/null)" ]; then
+        log "WARNING: No Tor keys found — backup will not include keys"
+    fi
+
+    # 2. Dump WordPress database
+    log "Backup: exporting database..."
+    mkdir -p "$staging/database"
+    local db_pass="${WORDPRESS_DB_PASSWORD:-}"
+    if [ -z "$db_pass" ]; then
+        setup_db_passwords
+        db_pass="$WORDPRESS_DB_PASSWORD"
+    fi
+    docker exec onionpress-db mariadb-dump -u wordpress "-p${db_pass}" wordpress > "$staging/database/wordpress.sql" 2>>"$LOG_FILE"
+    if [ $? -ne 0 ] || [ ! -s "$staging/database/wordpress.sql" ]; then
+        log "ERROR: Database export failed"
+        return 1
+    fi
+
+    # 3. Copy wp-content from container
+    log "Backup: copying wp-content (themes, plugins, uploads)..."
+    docker cp onionpress-wordpress:/var/www/html/wp-content/. "$staging/wp-content" 2>>"$LOG_FILE"
+
+    # 4. Save config
+    if [ -f "$DATA_DIR/config" ]; then
+        log "Backup: saving config..."
+        cp "$DATA_DIR/config" "$staging/config"
+    fi
+
+    # 5. OnionHeaven registry + keys (if this instance is an OnionHeaven hub)
+    if docker inspect onionheaven >/dev/null 2>&1; then
+        log "Backup: saving OnionHeaven registry and keys..."
+        mkdir -p "$staging/onionheaven"
+        docker cp onionheaven:/var/lib/onionpress/onionheaven/registry.db "$staging/onionheaven/registry.db" 2>>"$LOG_FILE" || true
+        docker cp onionheaven:/var/lib/onionpress/onionheaven/keys/. "$staging/onionheaven/keys" 2>>"$LOG_FILE" || true
+        if [ -s "$staging/onionheaven/registry.db" ]; then
+            local oh_count
+            oh_count=$(docker exec onionheaven sqlite3 /var/lib/onionpress/onionheaven/registry.db "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL" 2>/dev/null || echo "?")
+            log "Backup: OnionHeaven registry saved ($oh_count active registrations)"
+        else
+            rm -rf "$staging/onionheaven"
+            log "Backup: OnionHeaven container exists but no registry data"
+        fi
+    fi
+
+    # 6. Get onion address and write metadata
+    local onion_addr
+    onion_addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' || echo "")
+    local has_onionheaven="false"
+    [ -d "$staging/onionheaven" ] && has_onionheaven="true"
+
+    log "Backup: writing metadata..."
+    cat > "$staging/metadata.json" <<METAEOF
+{
+  "onion_address": "$onion_addr",
+  "backup_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "onionpress_version": "$ONIONPRESS_VERSION",
+  "platform": "macos",
+  "has_onionheaven": $has_onionheaven
+}
+METAEOF
+
+    # 7. Create password-protected zip
+    log "Backup: creating encrypted zip archive..."
+    rm -f "$output_path"
+    (cd "$staging" && zip -r -P "$password" "$output_path" .) >>"$LOG_FILE" 2>&1
+    if [ $? -ne 0 ]; then
+        log "ERROR: zip failed"
+        return 1
+    fi
+
+    local size
+    size=$(du -h "$output_path" | cut -f1)
+    log "Backup: complete ($size) -> $output_path"
+}
+
+restore_backup() {
+    # Restores from a password-protected backup zip.
+    # Usage: restore_backup <password> <zip_path>
+    local password="$1"
+    local zip_path="$2"
+    local staging
+
+    if [ -z "$password" ] || [ -z "$zip_path" ]; then
+        echo "ERROR: Password and zip path are required" >&2
+        return 1
+    fi
+    if [ ! -f "$zip_path" ]; then
+        echo "ERROR: Backup file not found: $zip_path" >&2
+        return 1
+    fi
+
+    staging=$(mktemp -d -t onionpress-restore-XXXXXX)
+    trap "rm -rf '$staging'" RETURN
+
+    # Extract zip
+    log "Restore: extracting backup archive..."
+    if ! unzip -P "$password" -o "$zip_path" -d "$staging" >>"$LOG_FILE" 2>&1; then
+        log "ERROR: Failed to extract backup (wrong password or corrupt zip)"
+        echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
+        return 1
+    fi
+
+    # Verify metadata exists
+    if [ ! -f "$staging/metadata.json" ]; then
+        log "ERROR: Not a valid OnionPress backup (no metadata.json)"
+        echo "ERROR: Not a valid OnionPress backup (no metadata.json)" >&2
+        return 1
+    fi
+
+    local onion_address
+    onion_address=$(bundled_python -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
+    log "Restore: backup from $onion_address"
+
+    # 1. Restore Tor keys
+    local ctor_secret="$staging/tor-keys/hs_ed25519_secret_key"
+    if [ -f "$ctor_secret" ] && [ -n "$onion_address" ]; then
+        log "Restore: writing Tor keys..."
+        rm -rf "$DATA_DIR/shared/vanity-keys/"
+
+        local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
+        mkdir -p "$addr_dir"
+        cp "$ctor_secret" "$addr_dir/"
+
+        local ctor_public="$staging/tor-keys/hs_ed25519_public_key"
+        [ -f "$ctor_public" ] && cp "$ctor_public" "$addr_dir/"
+
+        # Copy Arti format key if present
+        local arti_key="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
+        [ -f "$arti_key" ] && cp "$arti_key" "$addr_dir/"
+
+        echo "$onion_address" > "$addr_dir/hostname"
+
+        # Update ADDRESS_PREFIX in config to match restored address
+        local addr_base="${onion_address%.onion}"
+        if [ -f "$DATA_DIR/config" ]; then
+            local old_prefix
+            old_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2 || echo "")
+            if [ -n "$old_prefix" ]; then
+                local prefix_len=${#old_prefix}
+                local new_prefix="${addr_base:0:$prefix_len}"
+                sed -i '' "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$new_prefix/" "$DATA_DIR/config"
+                log "Restore: updated ADDRESS_PREFIX to $new_prefix"
+            fi
+        fi
+        log "Restore: Tor keys written for $onion_address"
+    else
+        log "WARNING: No Tor keys in backup — skipping key restore"
+    fi
+
+    # 2. Restore database
+    local sql_file="$staging/database/wordpress.sql"
+    if [ -f "$sql_file" ]; then
+        log "Restore: importing database..."
+        local db_pass="${WORDPRESS_DB_PASSWORD:-}"
+        if [ -z "$db_pass" ]; then
+            setup_db_passwords
+            db_pass="$WORDPRESS_DB_PASSWORD"
+        fi
+        docker cp "$sql_file" onionpress-db:/tmp/wordpress.sql 2>>"$LOG_FILE"
+        docker exec onionpress-db mariadb -u wordpress "-p${db_pass}" wordpress -e "source /tmp/wordpress.sql" 2>>"$LOG_FILE"
+        if [ $? -ne 0 ]; then
+            log "ERROR: Database import failed"
+            echo "ERROR: Database import failed" >&2
+            return 1
+        fi
+        docker exec onionpress-db rm -f /tmp/wordpress.sql 2>/dev/null
+        log "Restore: database imported"
+    else
+        log "WARNING: No database dump in backup — skipping"
+    fi
+
+    # 3. Restore wp-content
+    local wpcontent_dir="$staging/wp-content"
+    if [ -d "$wpcontent_dir" ]; then
+        log "Restore: copying wp-content (themes, plugins, uploads)..."
+        docker cp "$wpcontent_dir/." onionpress-wordpress:/var/www/html/wp-content/ 2>>"$LOG_FILE"
+        docker exec onionpress-wordpress chown -R www-data:www-data /var/www/html/wp-content/ 2>>"$LOG_FILE"
+        log "Restore: wp-content restored"
+    else
+        log "WARNING: No wp-content in backup — skipping"
+    fi
+
+    # 4. Restore config
+    if [ -f "$staging/config" ]; then
+        log "Restore: restoring config..."
+        cp "$staging/config" "$DATA_DIR/config"
+        log "Restore: config restored"
+    fi
+
+    # 5. Restore OnionHeaven registry + keys (if present in backup)
+    if [ -d "$staging/onionheaven" ] && [ -s "$staging/onionheaven/registry.db" ]; then
+        if docker inspect onionheaven >/dev/null 2>&1; then
+            log "Restore: restoring OnionHeaven registry and keys..."
+            docker cp "$staging/onionheaven/registry.db" onionheaven:/var/lib/onionpress/onionheaven/registry.db 2>>"$LOG_FILE"
+            if [ -d "$staging/onionheaven/keys" ]; then
+                docker exec onionheaven mkdir -p /var/lib/onionpress/onionheaven/keys 2>>"$LOG_FILE"
+                docker cp "$staging/onionheaven/keys/." onionheaven:/var/lib/onionpress/onionheaven/keys/ 2>>"$LOG_FILE"
+            fi
+            log "Restore: OnionHeaven data restored"
+        else
+            log "WARNING: Backup contains OnionHeaven data but onionheaven container is not running — skipping"
+            echo "WARNING: OnionHeaven data found in backup but container not running. Start with OnionHeaven enabled to restore." >&2
+        fi
+    fi
+
+    log "Restore: complete (from $onion_address)"
+    echo "Restore complete: $onion_address"
+}
+
 main() {
     case "${1:-start}" in
         start)
@@ -1994,11 +2413,6 @@ main() {
             log "Onion address: $ONION_ADDR"
             log "Local access: http://localhost:${ONIONPRESS_WP_PORT:-8080}"
             log "OnionPress is now running! Check the menu bar for status."
-
-            # Stay alive so background jobs (lazy OnionHeaven watcher, farm
-            # monitor) keep running. Without this, main() returns and the
-            # EXIT trap kills all background children.
-            wait
             ;;
 
         stop)
@@ -2051,8 +2465,134 @@ main() {
             _validate_oh_address "$2"
             ;;
 
+        setup)
+            # Usage: onionpress setup [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE]
+            #        onionpress setup --from-backup <password> <backup.zip>
+            setup_db_passwords
+            cd "$DOCKER_DIR"
+            if wp_is_installed; then
+                echo "WordPress is already installed."
+                exit 0
+            fi
+            # Make sure WordPress container is running
+            if ! docker exec onionpress-wordpress wp --info --allow-root >/dev/null 2>&1; then
+                echo "WordPress container is not running. Start OnionPress first."
+                exit 1
+            fi
+            shift  # remove "setup" from args
+            local has_from_backup=""
+            for arg in "$@"; do
+                [ "$arg" = "--from-backup" ] && has_from_backup=1 && break
+            done
+            setup_wordpress_cli "$@"
+            if [ -n "$has_from_backup" ]; then
+                # --from-backup restored keys to vanity-keys/ — need to reinstall
+                # into the arti-state volume so Tor uses the restored address.
+                # Use .import-key-pending flag so start_containers removes the old
+                # arti-state volume and installs the restored key.
+                log "Setup --from-backup: flagging key reimport..."
+                touch "$DATA_DIR/.import-key-pending"
+                stop_containers
+                start_containers
+                wait_for_services
+            else
+                # Start Tor if not running
+                if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
+                    echo "  Starting Tor..."
+                    docker compose up -d tor tor-client >> "$LOG_FILE" 2>&1
+                fi
+            fi
+            echo ""
+            echo "  Setup complete! Your site is now running."
+            echo "  Admin panel: http://localhost:${ONIONPRESS_WP_PORT}/wp-admin"
+            ;;
+
+        backup)
+            setup_db_passwords
+            local backup_pass="${2:-}"
+            local backup_path="${3:-}"
+            if [ -z "$backup_pass" ]; then
+                echo "Usage: $0 backup <password> [output_path]"
+                echo "Creates a password-protected backup of your OnionPress site."
+                exit 1
+            fi
+            if [ -z "$backup_path" ]; then
+                backup_path="$HOME/Downloads/onionpress-$(date +%Y-%m-%d)-$$.zip"
+            fi
+            create_backup "$backup_pass" "$backup_path"
+            echo "Backup saved to: $backup_path"
+            ;;
+
+        restore)
+            setup_db_passwords
+            local restore_pass="${2:-}"
+            local restore_path="${3:-}"
+            if [ -z "$restore_pass" ] || [ -z "$restore_path" ]; then
+                echo "Usage: $0 restore <password> <backup_file.zip>"
+                echo "Restores from an OnionPress backup. Containers must be running."
+                exit 1
+            fi
+            restore_backup "$restore_pass" "$restore_path"
+            echo "Restarting containers..."
+            # Flag key reimport so start_containers removes the old
+            # arti-state volume and installs the restored key
+            touch "$DATA_DIR/.import-key-pending"
+            stop_containers
+            start_containers
+            wait_for_services
+            echo "Done! OnionPress restarted with restored data."
+            ;;
+
+        reset)
+            # Wipe everything: WordPress, database, Tor state, keys, config, secrets.
+            # After reset + start + setup, restore from backup to get data back.
+            if [ "$ONIONPRESS_YES" != "true" ]; then
+                echo ""
+                echo "  This will ERASE everything: WordPress, database, Tor state,"
+                echo "  onion address keys, config, and secrets."
+                echo ""
+                echo "  To preserve your data, run 'onionpress backup' first."
+                echo ""
+                echo "  Press Enter to continue or Ctrl+C to cancel..."
+                read -r
+            fi
+
+            log "Resetting OnionPress (full wipe)..."
+
+            # Stop everything
+            setup_db_passwords 2>/dev/null || true
+            stop_containers 2>/dev/null || true
+
+            # Remove all Docker volumes
+            cd "$DOCKER_DIR"
+            log "Removing Docker volumes..."
+            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
+                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 && log "Removed volume: $vol" || log "WARNING: Failed to remove volume: $vol"
+            done
+
+            # Wipe data directory (keep colima VM and docker-config)
+            rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
+            rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
+            rm -f "$DATA_DIR/onionheaven-registration.json"
+            rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
+            rm -rf "$DATA_DIR/shared/vanity-keys/"
+            log "Removed keys, config, secrets, and logs"
+
+            echo ""
+            echo "  Reset complete. Everything wiped. Starting fresh containers..."
+            echo ""
+
+            # Start fresh containers
+            setup_db_passwords
+            start_containers
+            wait_for_services
+
+            log "OnionPress reset and restarted"
+            echo "  Containers running. Run 'onionpress setup' to initialize WordPress."
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs|validate-oh-address}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs|setup|backup|restore|reset}"
             exit 1
             ;;
     esac
