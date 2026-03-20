@@ -1442,16 +1442,36 @@ class OnionPressApp(rumps.App):
             return False
 
     def check_tor_reachability(self, log_result=True):
-        """Check if the .onion service is properly configured and published"""
-        self._tor_internally_ready = False
+        """Check if the .onion service is properly configured and published.
+        Once internal checks pass, only re-checks external reachability."""
         if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
+            self._tor_internally_ready = False
             return False
 
         try:
+            hc = self._health_checker
+
+            # Once all internal checks pass, only re-check external reachability
+            if self._tor_internally_ready:
+                reachable, http_code = hc.check_external_reachability(self.onion_address)
+                if reachable:
+                    return True
+                # External failed — fall through to full check in case
+                # something internal broke (container restarted, etc.)
+                if log_result:
+                    if http_code in ("000", ""):
+                        self.log("✗ Onion service not yet reachable through Tor network")
+                    else:
+                        self.log(f"✗ Onion service returned HTTP {http_code}")
+                # Reset internal state so full check runs next cycle
+                self._tor_internally_ready = False
+                return False
+
+            # Full check — runs until all internal checks pass
             if log_result:
                 self.log(f"Checking Tor onion service status for: {self.onion_address}")
 
-            hr = self._health_checker.full_check(expected_address=self.onion_address)
+            hr = hc.full_check(expected_address=self.onion_address)
             self._tor_internally_ready = hr.tor_internally_ready
             self._last_full_check = hr
 
@@ -1564,22 +1584,23 @@ class OnionPressApp(rumps.App):
                 self.handle_reopen()
 
             # Check if containers are running
-            result = self._docker.run(
-                ["ps", "--filter", "name=onionpress-", "--format", "json"],
-                timeout=10
-            )
-            services = []
-            if result.ok and result.output:
-                for line in result.output.splitlines():
-                    line = line.strip()
-                    if line:
-                        try:
-                            services.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            pass
-            self.is_running = len(services) > 0 and all(
-                s.get("State", "").lower() == "running" for s in services
-            )
+            if True:  # TODO: optimize to skip once confirmed
+                result = self._docker.run(
+                    ["ps", "--filter", "name=onionpress-", "--format", "json"],
+                    timeout=10
+                )
+                services = []
+                if result.ok and result.output:
+                    for line in result.output.splitlines():
+                        line = line.strip()
+                        if line:
+                            try:
+                                services.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                pass
+                self.is_running = len(services) > 0 and all(
+                    s.get("State", "").lower() == "running" for s in services
+                )
 
             # Get onion address if running
             if self.is_running:
