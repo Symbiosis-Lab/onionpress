@@ -1073,10 +1073,35 @@ _onionheaven_farm_monitor() {
         while IFS='|' read -r req_id req_type; do
             case "$req_type" in
                 takeover)
-                    log "OnionHeaven farm: scaling up — adding 2 takeover workers (starting at index $next_takeover)"
-                    _start_takeover_worker "$next_takeover"
-                    _start_takeover_worker "$((next_takeover + 1))"
-                    next_takeover=$((next_takeover + 2))
+                    # Before spawning, check if existing containers already have
+                    # enough total capacity for all taken-over entries. Newly
+                    # spawned containers may not have registered yet — the DB
+                    # knows the real situation, so trust it over the request.
+                    local taken_over_count total_capacity
+                    taken_over_count=$(docker exec onionheaven sqlite3 "$db" \
+                        "SELECT COUNT(*) FROM registry WHERE status = 'taken-over' AND unregistered_at IS NULL" 2>/dev/null) || taken_over_count=0
+                    total_capacity=$(docker exec onionheaven sqlite3 "$db" \
+                        "SELECT COALESCE(SUM(max_services), 0) FROM takeover_containers WHERE status = 'active'" 2>/dev/null) || total_capacity=0
+                    # Also count running takeover containers not yet registered in the DB
+                    local running_workers
+                    running_workers=$(docker ps --filter "name=onionheaven-takeover-" --format '{{.Names}}' 2>/dev/null | wc -l) || running_workers=0
+                    local registered_workers
+                    registered_workers=$(docker exec onionheaven sqlite3 "$db" \
+                        "SELECT COUNT(*) FROM takeover_containers WHERE status = 'active'" 2>/dev/null) || registered_workers=0
+                    local unregistered=$((running_workers - registered_workers))
+                    if [ "$unregistered" -lt 0 ]; then unregistered=0; fi
+                    # Assume unregistered workers will each contribute max_services slots
+                    local max_svc="${ONIONHEAVEN_MAX_SERVICES:-50}"
+                    total_capacity=$((total_capacity + unregistered * max_svc))
+
+                    if [ "$total_capacity" -ge "$taken_over_count" ] 2>/dev/null && [ "$taken_over_count" -gt 0 ]; then
+                        log "OnionHeaven farm: scale-up not needed — capacity $total_capacity >= $taken_over_count taken-over ($unregistered workers still registering)"
+                    else
+                        log "OnionHeaven farm: scaling up — adding 2 takeover workers (starting at index $next_takeover) [capacity $total_capacity < $taken_over_count taken-over]"
+                        _start_takeover_worker "$next_takeover"
+                        _start_takeover_worker "$((next_takeover + 1))"
+                        next_takeover=$((next_takeover + 2))
+                    fi
                     ;;
                 *)
                     log "WARNING: Unknown farm scale request type: $req_type"

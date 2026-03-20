@@ -551,11 +551,12 @@ _takeover_rr_containers = None
 
 
 def assign_takeover_container(conn):
-    """Assign to a takeover container that has capacity.
+    """Assign to a takeover container, preferring ones under max_services.
 
-    Uses round-robin but skips containers that are at max_services.
-    Returns None if all containers are full (caller should set takeover_pending
-    and wait for scale-up).
+    Uses round-robin but prefers containers below max_services. If all are
+    at or above max_services, assigns to the least-loaded one anyway — going
+    slightly over capacity is fine and avoids unnecessary scale-up requests.
+    Returns None only if there are no active containers at all.
     """
     global _takeover_rr_cycle, _takeover_rr_containers
 
@@ -568,9 +569,11 @@ def assign_takeover_container(conn):
         _takeover_rr_containers = containers
         _takeover_rr_cycle = itertools.cycle(containers)
 
-    # Try each container once — skip any that are full.
+    # Try each container once — prefer any that are under max_services.
     # Count assigned rows in the DB (not just active_services) to avoid
     # over-assigning during a single heartbeat pass before the worker updates.
+    least_loaded = None
+    least_loaded_count = None
     for _ in range(len(containers)):
         candidate = next(_takeover_rr_cycle)
         try:
@@ -588,10 +591,14 @@ def assign_takeover_container(conn):
             ).fetchone()[0]
             if assigned < row["max_services"]:
                 return candidate
+            # Track least-loaded in case all are full
+            if least_loaded_count is None or assigned < least_loaded_count:
+                least_loaded = candidate
+                least_loaded_count = assigned
         except sqlite3.OperationalError:
             continue
 
-    return None  # all full
+    return least_loaded  # over-assign to least-loaded rather than refusing
 
 
 def check_farm_scaling(conn, active_entries):
