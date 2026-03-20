@@ -132,20 +132,24 @@ class TestCheckInternalConnectivity(unittest.TestCase):
 class TestCheckExternalReachability(unittest.TestCase):
     def test_reachable(self):
         docker = mock.Mock()
-        docker.exec.return_value = _ok("<html>")
+        docker.exec.return_value = _ok("200")
         hc = HealthChecker(docker)
-        self.assertTrue(hc.check_external_reachability("op2abc.onion"))
+        reachable, code = hc.check_external_reachability("op2abc.onion")
+        self.assertTrue(reachable)
+        self.assertEqual(code, "200")
 
     def test_unreachable(self):
         docker = mock.Mock()
         docker.exec.return_value = _fail()
         hc = HealthChecker(docker)
-        self.assertFalse(hc.check_external_reachability("op2abc.onion"))
+        reachable, code = hc.check_external_reachability("op2abc.onion")
+        self.assertFalse(reachable)
 
     def test_empty_address(self):
         docker = mock.Mock()
         hc = HealthChecker(docker)
-        self.assertFalse(hc.check_external_reachability(""))
+        reachable, code = hc.check_external_reachability("")
+        self.assertFalse(reachable)
 
 
 class TestTorContainerUnhealthy(unittest.TestCase):
@@ -184,7 +188,7 @@ class TestFullCheck(unittest.TestCase):
             _ok("<html>"),           # check_wordpress_local
             _ok("op2abc.onion\n"),   # check_tor_hostname
             _ok(),                   # check_internal_connectivity
-            _ok("<html>"),           # check_external_reachability
+            _ok("200"),              # check_external_reachability
         ]
         docker.run.return_value = _ok("Bootstrapped 100% (done)")
         hc = HealthChecker(docker)

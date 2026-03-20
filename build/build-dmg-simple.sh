@@ -305,6 +305,7 @@ cp "$SCRIPTS_DIR/key_manager.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/backup_manager.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/setup_window.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/onion_auth.py" "$SITE_PACKAGES/"
+cp -r "$SCRIPTS_DIR/onionpress" "$SITE_PACKAGES/"
 
 # Run py2app build using the root setup.py
 cd "$PROJECT_DIR"

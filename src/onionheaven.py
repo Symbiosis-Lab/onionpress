@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-# OnionHeaven's .onion address — placeholder until a real address is generated
+# OnionHeaven hub address — updated from config at startup
 ONIONHEAVEN_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 
 # Registration API port (served by onionheaven-server.py in the onionheaven container)
@@ -570,10 +570,19 @@ def start_online_notification_thread(app):
 # OnionHeaven mode detection and UI helpers (heartbeat monitor runs in onionheaven container)
 # ---------------------------------------------------------------------------
 
+# The well-known OnionHeaven hub address — used to detect if this instance
+# IS the hub (separate from which hub we register with).
+_KNOWN_ONIONHEAVEN_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+
+
 def is_onionheaven_instance(onion_address):
-    """Check if this instance's address matches the onionheaven address."""
+    """Check if this instance is the OnionHeaven hub.
+
+    Compares against the well-known hub address, not the config field
+    (which controls registration, not identity).
+    """
     if not onion_address or not onion_address.endswith('.onion'):
         return False
-    return onion_address.strip() == ONIONHEAVEN_ADDRESS.strip()
+    return onion_address.strip() == _KNOWN_ONIONHEAVEN_ADDRESS
 
 
