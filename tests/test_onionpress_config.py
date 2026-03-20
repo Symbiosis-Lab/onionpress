@@ -1,0 +1,281 @@
+"""Tests for src/onionpress/config.py."""
+
+import os
+import stat
+import sys
+import tempfile
+import shutil
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from onionpress.config import (
+    DEFAULTS,
+    read_config, read_value, write_value, write_config,
+    validate_address_prefix,
+    Secrets, load_secrets, ensure_secrets,
+    PortConfig, detect_port_offset,
+    ensure_config,
+)
+from onionpress.platform import OnionPressPaths, resolve_paths
+
+
+class TestReadConfig(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.tmpdir, "config")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_read_simple(self):
+        with open(self.config_file, "w") as f:
+            f.write("ADDRESS_PREFIX=op2\nVM_MEMORY=2\n")
+        result = read_config(self.config_file)
+        self.assertEqual(result["ADDRESS_PREFIX"], "op2")
+        self.assertEqual(result["VM_MEMORY"], "2")
+
+    def test_skip_comments(self):
+        with open(self.config_file, "w") as f:
+            f.write("# comment\nKEY=value\n\n# another\n")
+        result = read_config(self.config_file)
+        self.assertEqual(result, {"KEY": "value"})
+
+    def test_missing_file(self):
+        result = read_config("/nonexistent/config")
+        self.assertEqual(result, {})
+
+    def test_value_with_equals(self):
+        with open(self.config_file, "w") as f:
+            f.write("TOKEN=abc=def=ghi\n")
+        result = read_config(self.config_file)
+        self.assertEqual(result["TOKEN"], "abc=def=ghi")
+
+
+class TestReadValue(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.tmpdir, "config")
+        with open(self.config_file, "w") as f:
+            f.write("ADDRESS_PREFIX=op2\nVM_MEMORY=2\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_existing_key(self):
+        self.assertEqual(read_value(self.config_file, "ADDRESS_PREFIX"), "op2")
+
+    def test_missing_key(self):
+        self.assertEqual(read_value(self.config_file, "MISSING", "default"), "default")
+
+    def test_missing_file(self):
+        self.assertEqual(read_value("/nonexistent", "KEY", "fallback"), "fallback")
+
+
+class TestWriteValue(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.tmpdir, "config")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_update_existing(self):
+        with open(self.config_file, "w") as f:
+            f.write("KEY=old\n")
+        write_value(self.config_file, "KEY", "new")
+        self.assertEqual(read_value(self.config_file, "KEY"), "new")
+
+    def test_append_new(self):
+        with open(self.config_file, "w") as f:
+            f.write("KEY1=val1\n")
+        write_value(self.config_file, "KEY2", "val2")
+        self.assertEqual(read_value(self.config_file, "KEY1"), "val1")
+        self.assertEqual(read_value(self.config_file, "KEY2"), "val2")
+
+    def test_write_to_new_file(self):
+        write_value(self.config_file, "NEW_KEY", "new_val")
+        self.assertEqual(read_value(self.config_file, "NEW_KEY"), "new_val")
+
+    def test_preserves_comments(self):
+        with open(self.config_file, "w") as f:
+            f.write("# header\nKEY=old\n# footer\n")
+        write_value(self.config_file, "KEY", "new")
+        with open(self.config_file) as f:
+            content = f.read()
+        self.assertIn("# header", content)
+        self.assertIn("# footer", content)
+        self.assertIn("KEY=new", content)
+
+
+class TestWriteConfig(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.tmpdir, "config")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_write_multiple(self):
+        write_config(self.config_file, {"A": "1", "B": "2"})
+        self.assertEqual(read_value(self.config_file, "A"), "1")
+        self.assertEqual(read_value(self.config_file, "B"), "2")
+
+
+class TestValidateAddressPrefix(unittest.TestCase):
+    def test_valid_prefix(self):
+        valid, err, suggestion = validate_address_prefix("op2")
+        self.assertTrue(valid)
+        self.assertEqual(err, "")
+        self.assertEqual(suggestion, "op2")
+
+    def test_empty_prefix(self):
+        valid, err, suggestion = validate_address_prefix("")
+        self.assertTrue(valid)
+
+    def test_too_long(self):
+        valid, err, suggestion = validate_address_prefix("abcdef")
+        self.assertFalse(valid)
+        self.assertIn("too long", err)
+        self.assertEqual(suggestion, "abcde")
+
+    def test_invalid_chars(self):
+        valid, err, suggestion = validate_address_prefix("Op1")
+        self.assertFalse(valid)
+        self.assertIn("invalid", err.lower())
+        # suggestion strips invalid chars (1) and lowercases (O→o, p stays)
+        self.assertEqual(suggestion, "op")
+
+    def test_invalid_digits(self):
+        valid, err, suggestion = validate_address_prefix("test0189")
+        self.assertFalse(valid)
+        self.assertIn("0", err)
+        self.assertEqual(suggestion, "test")
+
+    def test_base32_chars_only(self):
+        valid, _, _ = validate_address_prefix("ab2cd")
+        self.assertTrue(valid)
+
+    def test_uppercase_suggestion(self):
+        valid, err, suggestion = validate_address_prefix("OP2")
+        self.assertFalse(valid)
+        self.assertIn("Uppercase", err)
+        self.assertEqual(suggestion, "op2")
+
+
+class TestSecrets(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.secrets_file = os.path.join(self.tmpdir, "secrets")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_load_secrets_single_quoted(self):
+        with open(self.secrets_file, "w") as f:
+            f.write("# comment\n")
+            f.write("WORDPRESS_DB_PASSWORD='mypass123'\n")
+            f.write("MYSQL_PASSWORD='mypass123'\n")
+            f.write("MYSQL_ROOT_PASSWORD='rootpass456'\n")
+        s = load_secrets(self.secrets_file)
+        self.assertEqual(s.wordpress_db_password, "mypass123")
+        self.assertEqual(s.mysql_password, "mypass123")
+        self.assertEqual(s.mysql_root_password, "rootpass456")
+
+    def test_load_secrets_bare_values(self):
+        with open(self.secrets_file, "w") as f:
+            f.write("WORDPRESS_DB_PASSWORD=barepass\n")
+            f.write("MYSQL_PASSWORD=barepass\n")
+            f.write("MYSQL_ROOT_PASSWORD=rootbare\n")
+        s = load_secrets(self.secrets_file)
+        self.assertEqual(s.wordpress_db_password, "barepass")
+
+    def test_as_env(self):
+        s = Secrets(
+            wordpress_db_password="wp",
+            mysql_password="mysql",
+            mysql_root_password="root",
+        )
+        env = s.as_env()
+        self.assertEqual(env["WORDPRESS_DB_PASSWORD"], "wp")
+        self.assertEqual(env["MYSQL_PASSWORD"], "mysql")
+        self.assertEqual(env["MYSQL_ROOT_PASSWORD"], "root")
+
+    def test_ensure_secrets_creates_file(self):
+        s = ensure_secrets(self.secrets_file)
+        self.assertTrue(os.path.exists(self.secrets_file))
+        self.assertTrue(len(s.wordpress_db_password) == 32)
+        self.assertTrue(len(s.mysql_root_password) == 32)
+        # wp and mysql passwords should match (same value)
+        self.assertEqual(s.wordpress_db_password, s.mysql_password)
+
+    def test_ensure_secrets_permissions(self):
+        ensure_secrets(self.secrets_file)
+        mode = stat.S_IMODE(os.stat(self.secrets_file).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_ensure_secrets_idempotent(self):
+        s1 = ensure_secrets(self.secrets_file)
+        s2 = ensure_secrets(self.secrets_file)
+        self.assertEqual(s1.wordpress_db_password, s2.wordpress_db_password)
+        self.assertEqual(s1.mysql_root_password, s2.mysql_root_password)
+
+    def test_ensure_secrets_unique_passwords(self):
+        s = ensure_secrets(self.secrets_file)
+        # WP and root passwords should be different
+        self.assertNotEqual(s.wordpress_db_password, s.mysql_root_password)
+
+
+class TestEnsureConfig(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_creates_default_config(self):
+        paths = resolve_paths(data_dir=self.tmpdir, app_bundle=None)
+        # Ensure parent dir exists
+        os.makedirs(os.path.dirname(paths.config_file), exist_ok=True)
+        ensure_config(paths)
+        self.assertTrue(os.path.exists(paths.config_file))
+        config = read_config(paths.config_file)
+        self.assertEqual(config["ADDRESS_PREFIX"], "op2")
+
+    def test_does_not_overwrite(self):
+        paths = resolve_paths(data_dir=self.tmpdir, app_bundle=None)
+        os.makedirs(os.path.dirname(paths.config_file), exist_ok=True)
+        with open(paths.config_file, "w") as f:
+            f.write("ADDRESS_PREFIX=custom\n")
+        ensure_config(paths)
+        config = read_config(paths.config_file)
+        self.assertEqual(config["ADDRESS_PREFIX"], "custom")
+
+
+class TestPortDetection(unittest.TestCase):
+    def test_detect_default_offset(self):
+        """Port detection should return a valid PortConfig."""
+        pc = detect_port_offset()
+        self.assertIsInstance(pc, PortConfig)
+        self.assertEqual(pc.wp_port, 8080 + pc.offset)
+        self.assertEqual(pc.socks_port, 9050 + pc.offset)
+        self.assertEqual(pc.proxy_port, 9077 + pc.offset)
+        self.assertTrue(pc.offset >= 0)
+        self.assertTrue(pc.offset % 10000 == 0)
+
+    def test_port_config_values(self):
+        pc = PortConfig(offset=10000, wp_port=18080, socks_port=19050, proxy_port=19077)
+        self.assertEqual(pc.offset, 10000)
+        self.assertEqual(pc.wp_port, 18080)
+
+
+class TestDefaults(unittest.TestCase):
+    def test_has_expected_keys(self):
+        self.assertIn("ADDRESS_PREFIX", DEFAULTS)
+        self.assertIn("TOR_IMPL", DEFAULTS)
+        self.assertIn("VM_MEMORY", DEFAULTS)
+        self.assertEqual(DEFAULTS["ADDRESS_PREFIX"], "op2")
+
+
+if __name__ == "__main__":
+    unittest.main()

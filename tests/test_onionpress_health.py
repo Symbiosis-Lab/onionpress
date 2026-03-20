@@ -1,0 +1,354 @@
+"""Tests for src/onionpress/health.py."""
+
+import os
+import sys
+import time
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from onionpress.docker import DockerResult
+from onionpress.health import (
+    HealthChecker, HealthResult, HealthMonitor, HealthState,
+    ServiceState, SICK_PATTERNS, HEALTHY_PATTERNS,
+    YELLOW_TO_STUCK_SECONDS, YELLOW_TO_RESTART_SECONDS,
+    RESTART_COOLDOWN_SECONDS, RECLAIM_RETRY_SECONDS,
+    POLL_READY_SECONDS, POLL_STARTING_SECONDS, POLL_OFFLINE_SECONDS,
+)
+
+
+def _ok(stdout="", stderr=""):
+    return DockerResult(returncode=0, stdout=stdout, stderr=stderr)
+
+
+def _fail(stderr="error", code=1):
+    return DockerResult(returncode=code, stdout="", stderr=stderr)
+
+
+class TestHealthResult(unittest.TestCase):
+    def test_ready_when_all_checks_pass(self):
+        hr = HealthResult(wp_healthy=True, tor_externally_reachable=True)
+        self.assertTrue(hr.ready)
+
+    def test_not_ready_missing_wp(self):
+        hr = HealthResult(wp_healthy=False, tor_externally_reachable=True)
+        self.assertFalse(hr.ready)
+
+    def test_not_ready_missing_tor(self):
+        hr = HealthResult(wp_healthy=True, tor_externally_reachable=False)
+        self.assertFalse(hr.ready)
+
+    def test_defaults(self):
+        hr = HealthResult()
+        self.assertFalse(hr.ready)
+        self.assertEqual(hr.errors, [])
+
+
+class TestCheckWordpressLocal(unittest.TestCase):
+    def test_healthy(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("<html>WordPress</html>")
+        hc = HealthChecker(docker)
+        self.assertTrue(hc.check_wordpress_local())
+
+    def test_database_error(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("Error establishing a database connection")
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.check_wordpress_local())
+
+    def test_unreachable(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _fail()
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.check_wordpress_local())
+
+
+class TestCheckTorBootstrap(unittest.TestCase):
+    def test_100_percent(self):
+        docker = mock.Mock()
+        docker.run.return_value = _ok("Bootstrapped 100% (done): Done")
+        hc = HealthChecker(docker)
+        bootstrapped, pct = hc.check_tor_bootstrap()
+        self.assertTrue(bootstrapped)
+        self.assertEqual(pct, 100)
+
+    def test_partial(self):
+        docker = mock.Mock()
+        docker.run.return_value = _ok("PROGRESS=50 TAG=loading")
+        hc = HealthChecker(docker)
+        bootstrapped, pct = hc.check_tor_bootstrap()
+        self.assertFalse(bootstrapped)
+        self.assertEqual(pct, 50)
+
+    def test_arti_sufficiently_bootstrapped(self):
+        docker = mock.Mock()
+        docker.run.return_value = _ok("Sufficiently bootstrapped to build circuits")
+        hc = HealthChecker(docker)
+        bootstrapped, pct = hc.check_tor_bootstrap()
+        self.assertTrue(bootstrapped)
+
+    def test_no_logs(self):
+        docker = mock.Mock()
+        docker.run.return_value = _fail()
+        hc = HealthChecker(docker)
+        bootstrapped, pct = hc.check_tor_bootstrap()
+        self.assertFalse(bootstrapped)
+        self.assertEqual(pct, 0)
+
+
+class TestCheckTorHostname(unittest.TestCase):
+    def test_returns_address(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("op2abc.onion\n")
+        hc = HealthChecker(docker)
+        self.assertEqual(hc.check_tor_hostname(), "op2abc.onion")
+
+    def test_mismatch_logs_warning(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("different.onion\n")
+        logs = []
+        hc = HealthChecker(docker, log_func=logs.append)
+        addr = hc.check_tor_hostname(expected_address="expected.onion")
+        self.assertEqual(addr, "different.onion")
+        self.assertTrue(any("mismatch" in l for l in logs))
+
+
+class TestCheckInternalConnectivity(unittest.TestCase):
+    def test_reachable(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok()
+        hc = HealthChecker(docker)
+        self.assertTrue(hc.check_internal_connectivity())
+
+    def test_unreachable(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _fail()
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.check_internal_connectivity())
+
+
+class TestCheckExternalReachability(unittest.TestCase):
+    def test_reachable(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("<html>")
+        hc = HealthChecker(docker)
+        self.assertTrue(hc.check_external_reachability("op2abc.onion"))
+
+    def test_unreachable(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _fail()
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.check_external_reachability("op2abc.onion"))
+
+    def test_empty_address(self):
+        docker = mock.Mock()
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.check_external_reachability(""))
+
+
+class TestTorContainerUnhealthy(unittest.TestCase):
+    def test_sick_patterns(self):
+        for pattern in SICK_PATTERNS:
+            docker = mock.Mock()
+            docker.run.return_value = _ok(f"some log\n{pattern}\nmore log")
+            hc = HealthChecker(docker)
+            self.assertTrue(hc.tor_container_unhealthy(), f"Should be unhealthy for: {pattern}")
+
+    def test_healthy_pattern(self):
+        docker = mock.Mock()
+        docker.run.return_value = _ok("Sufficiently bootstrapped to build circuits")
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.tor_container_unhealthy())
+
+    def test_no_patterns_returns_healthy(self):
+        docker = mock.Mock()
+        docker.run.return_value = _ok("some random log output")
+        hc = HealthChecker(docker)
+        # No clear signals → don't restart (conservative approach)
+        self.assertFalse(hc.tor_container_unhealthy())
+
+    def test_log_failure_returns_unhealthy(self):
+        docker = mock.Mock()
+        docker.run.return_value = _fail()
+        hc = HealthChecker(docker)
+        self.assertTrue(hc.tor_container_unhealthy())
+
+
+class TestFullCheck(unittest.TestCase):
+    def test_all_healthy(self):
+        docker = mock.Mock()
+        # WP local
+        docker.exec.side_effect = [
+            _ok("<html>"),           # check_wordpress_local
+            _ok("op2abc.onion\n"),   # check_tor_hostname
+            _ok(),                   # check_internal_connectivity
+            _ok("<html>"),           # check_external_reachability
+        ]
+        docker.run.return_value = _ok("Bootstrapped 100% (done)")
+        hc = HealthChecker(docker)
+        hr = hc.full_check()
+        self.assertTrue(hr.ready)
+        self.assertTrue(hr.wp_healthy)
+        self.assertTrue(hr.tor_bootstrapped)
+        self.assertTrue(hr.tor_internally_ready)
+        self.assertTrue(hr.tor_externally_reachable)
+        self.assertEqual(hr.onion_address, "op2abc.onion")
+
+    def test_wp_down_skips_later_checks(self):
+        docker = mock.Mock()
+        docker.exec.side_effect = [
+            _fail(),               # check_wordpress_local
+            _ok("op2abc.onion\n"), # check_tor_hostname
+        ]
+        docker.run.return_value = _ok("Bootstrapped 100%")
+        hc = HealthChecker(docker)
+        hr = hc.full_check()
+        self.assertFalse(hr.ready)
+        self.assertFalse(hr.tor_internally_ready)
+
+
+class TestHealthMonitorEvaluate(unittest.TestCase):
+    def test_stopped(self):
+        hm = HealthMonitor()
+        state = hm.evaluate(HealthResult(), is_running=False)
+        self.assertEqual(state, ServiceState.STOPPED)
+
+    def test_available(self):
+        hm = HealthMonitor()
+        hr = HealthResult(wp_healthy=True, tor_externally_reachable=True)
+        state = hm.evaluate(hr)
+        self.assertEqual(state, ServiceState.AVAILABLE)
+        self.assertTrue(hm.state.was_ready)
+        self.assertIsNone(hm.state.yellow_since)
+
+    def test_starting(self):
+        hm = HealthMonitor()
+        hr = HealthResult(wp_healthy=True, tor_externally_reachable=False, bootstrap_pct=50)
+        state = hm.evaluate(hr)
+        self.assertEqual(state, ServiceState.STARTING)
+        self.assertIsNotNone(hm.state.yellow_since)
+
+    def test_degraded_from_ready(self):
+        hm = HealthMonitor()
+        # First: available
+        hm.evaluate(HealthResult(wp_healthy=True, tor_externally_reachable=True))
+        # Then: degraded
+        state = hm.evaluate(HealthResult(wp_healthy=True, tor_externally_reachable=False))
+        self.assertEqual(state, ServiceState.STARTING)
+        self.assertIsNotNone(hm.state.yellow_since)
+
+    def test_stuck_after_timeout(self):
+        hm = HealthMonitor()
+        hm.state.yellow_since = time.time() - YELLOW_TO_STUCK_SECONDS - 1
+        hr = HealthResult(wp_healthy=True, tor_externally_reachable=False, bootstrap_pct=50)
+        state = hm.evaluate(hr)
+        self.assertEqual(state, ServiceState.STUCK)
+
+    def test_offline(self):
+        hm = HealthMonitor()
+        hm.state.has_internet = False
+        hm.state.yellow_since = time.time()
+        hr = HealthResult()
+        state = hm.evaluate(hr)
+        self.assertEqual(state, ServiceState.OFFLINE)
+
+    def test_wordpress_confirmed_persists(self):
+        hm = HealthMonitor()
+        hm.evaluate(HealthResult(wp_healthy=True))
+        self.assertTrue(hm.state.wordpress_confirmed)
+        hm.evaluate(HealthResult(wp_healthy=False))
+        self.assertTrue(hm.state.wordpress_confirmed)  # still True
+
+    def test_bootstrap_stall_tracking(self):
+        hm = HealthMonitor()
+        hm.evaluate(HealthResult(bootstrap_pct=50))
+        self.assertEqual(hm.state.last_bootstrap_pct, 50)
+        self.assertEqual(hm.state.bootstrap_stall_count, 0)
+        # Same percentage → stall
+        hm.evaluate(HealthResult(bootstrap_pct=50))
+        self.assertEqual(hm.state.bootstrap_stall_count, 1)
+        # Progress → reset
+        hm.evaluate(HealthResult(bootstrap_pct=75))
+        self.assertEqual(hm.state.bootstrap_stall_count, 0)
+
+
+class TestShouldRestartTor(unittest.TestCase):
+    def test_no_restart_when_not_yellow(self):
+        hm = HealthMonitor()
+        self.assertFalse(hm.should_restart_tor(tor_unhealthy=True))
+
+    def test_restart_after_thresholds(self):
+        hm = HealthMonitor()
+        hm.state.yellow_since = time.time() - YELLOW_TO_RESTART_SECONDS - 1
+        hm.state.last_auto_restart = time.time() - RESTART_COOLDOWN_SECONDS - 1
+        self.assertTrue(hm.should_restart_tor(tor_unhealthy=True))
+        # Should update last_auto_restart
+        self.assertGreater(hm.state.last_auto_restart, 0)
+
+    def test_no_restart_during_cooldown(self):
+        hm = HealthMonitor()
+        hm.state.yellow_since = time.time() - YELLOW_TO_RESTART_SECONDS - 1
+        hm.state.last_auto_restart = time.time()  # Just restarted
+        self.assertFalse(hm.should_restart_tor(tor_unhealthy=True))
+
+    def test_no_restart_if_healthy(self):
+        hm = HealthMonitor()
+        hm.state.yellow_since = time.time() - YELLOW_TO_RESTART_SECONDS - 1
+        hm.state.last_auto_restart = time.time() - RESTART_COOLDOWN_SECONDS - 1
+        self.assertFalse(hm.should_restart_tor(tor_unhealthy=False))
+
+
+class TestShouldReclaim(unittest.TestCase):
+    def test_reclaim_when_internally_ready(self):
+        hm = HealthMonitor()
+        hm.state.tor_internally_ready = True
+        hm.state.reclaim_last_attempt = 0
+        self.assertTrue(hm.should_reclaim())
+        self.assertTrue(hm.state.reclaim_in_flight)
+
+    def test_no_reclaim_not_internally_ready(self):
+        hm = HealthMonitor()
+        hm.state.tor_internally_ready = False
+        self.assertFalse(hm.should_reclaim())
+
+    def test_no_reclaim_already_succeeded(self):
+        hm = HealthMonitor()
+        hm.state.tor_internally_ready = True
+        hm.state.reclaim_succeeded = True
+        self.assertFalse(hm.should_reclaim())
+
+    def test_no_reclaim_in_flight(self):
+        hm = HealthMonitor()
+        hm.state.tor_internally_ready = True
+        hm.state.reclaim_in_flight = True
+        self.assertFalse(hm.should_reclaim())
+
+    def test_no_reclaim_too_soon(self):
+        hm = HealthMonitor()
+        hm.state.tor_internally_ready = True
+        hm.state.reclaim_last_attempt = time.time()
+        self.assertFalse(hm.should_reclaim())
+
+
+class TestPollInterval(unittest.TestCase):
+    def test_ready(self):
+        hm = HealthMonitor()
+        self.assertEqual(hm.poll_interval(ServiceState.AVAILABLE), POLL_READY_SECONDS)
+
+    def test_offline(self):
+        hm = HealthMonitor()
+        self.assertEqual(hm.poll_interval(ServiceState.OFFLINE), POLL_OFFLINE_SECONDS)
+
+    def test_starting(self):
+        hm = HealthMonitor()
+        self.assertEqual(hm.poll_interval(ServiceState.STARTING), POLL_STARTING_SECONDS)
+
+    def test_stuck(self):
+        hm = HealthMonitor()
+        self.assertEqual(hm.poll_interval(ServiceState.STUCK), POLL_STARTING_SECONDS)
+
+
+if __name__ == "__main__":
+    unittest.main()
