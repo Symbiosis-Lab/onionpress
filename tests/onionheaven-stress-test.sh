@@ -2332,7 +2332,14 @@ run_worker() {
         phase_result "A.1" "Takeover: $r_a1"
         echo ""
 
-        # A1v: Verify 302 redirects
+        # A1v: Verify 302 redirects — wait at least 10 minutes from A.1 start
+        local min_propagation=600  # 10 minutes
+        local elapsed_since_a1=$(( $(date +%s) - scenario_ts ))
+        if [ "$elapsed_since_a1" -lt "$min_propagation" ]; then
+            local wait_more=$(( min_propagation - elapsed_since_a1 ))
+            log "A.1v: Waiting ${wait_more}s more for descriptor propagation (${elapsed_since_a1}s elapsed, need ${min_propagation}s)..."
+            sleep "$wait_more"
+        fi
         phase_start "A.1v" "Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)"
         verify_redirects "A.1v" 5
         r_a1v="$WAIT_RESULT"
