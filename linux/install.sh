@@ -149,7 +149,7 @@ if [ -d "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
 
-# Copy scripts needed by heartbeat client daemon
+# Copy shared scripts
 $SUDO mkdir -p "$INSTALL_DIR/scripts"
 $SUDO cp "$REPO_DIR/src/onion_auth.py" "$INSTALL_DIR/scripts/"
 $SUDO cp "$REPO_DIR/src/key_manager.py" "$INSTALL_DIR/scripts/"

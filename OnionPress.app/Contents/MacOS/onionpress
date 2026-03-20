@@ -510,6 +510,13 @@ detect_container_runtime() {
     return 1
 }
 
+# Ensure both C Tor and Arti key formats exist in a directory.
+# Derives whichever is missing from whichever is present.
+ensure_key_formats() {
+    local dir="$1"
+    bundled_python "$SCRIPTS_DIR/key_manager.py" ensure-formats "$dir" >> "$LOG_FILE" 2>&1
+}
+
 # Function to generate custom onion address with prefix
 generate_vanity_address() {
     local prefix="${1:-op2}"
@@ -542,72 +549,12 @@ generate_vanity_address() {
     VANITY_ADDRESS=$(basename "$VANITY_DIR")
     log "Generated custom address: $VANITY_ADDRESS" >&2
 
-    # Convert mkp224o C Tor format to Arti OpenSSH format
+    # Ensure both key formats exist (mkp224o generates C Tor format, derive Arti PEM)
     if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ] && [ -f "$VANITY_DIR/hs_ed25519_public_key" ]; then
-        bundled_python -c "
-import base64, os, struct, sys
-
-secret_path = sys.argv[1]
-public_path = sys.argv[2]
-output_path = sys.argv[3]
-
-# Read C Tor format: 32-byte header + key
-with open(secret_path, 'rb') as f:
-    secret_data = f.read()
-private_key = secret_data[32:]  # 64 bytes
-
-with open(public_path, 'rb') as f:
-    public_data = f.read()
-public_key = public_data[32:]  # 32 bytes
-
-KEY_TYPE = b'ed25519-expanded@spec.torproject.org'
-MAGIC = b'openssh-key-v1\x00'
-
-def pack(data):
-    return struct.pack('>I', len(data)) + data
-
-pub_blob = pack(KEY_TYPE) + pack(public_key)
-
-check = struct.pack('>I', int.from_bytes(os.urandom(4), 'big'))
-priv_blob = (
-    check + check +
-    pack(KEY_TYPE) +
-    pack(public_key) +
-    pack(private_key) +
-    pack(b'')
-)
-pad_len = (8 - len(priv_blob) % 8) % 8
-priv_blob += bytes(range(1, pad_len + 1))
-
-binary = (
-    MAGIC +
-    pack(b'none') +
-    pack(b'none') +
-    pack(b'') +
-    struct.pack('>I', 1) +
-    pack(pub_blob) +
-    pack(priv_blob)
-)
-
-b64 = base64.b64encode(binary).decode('ascii')
-lines = [b64[i:i+70] for i in range(0, len(b64), 70)]
-pem = '-----BEGIN OPENSSH PRIVATE KEY-----\n'
-pem += '\n'.join(lines) + '\n'
-pem += '-----END OPENSSH PRIVATE KEY-----\n'
-
-with open(output_path, 'wb') as f:
-    f.write(pem.encode('utf-8'))
-os.chmod(output_path, 0o600)
-" "$VANITY_DIR/hs_ed25519_secret_key" "$VANITY_DIR/hs_ed25519_public_key" "$VANITY_DIR/ks_hs_id.ed25519_expanded_private" >> "$LOG_FILE" 2>&1
-
-        if [ $? -eq 0 ]; then
-            # Remove old C Tor format files
-            rm -f "$VANITY_DIR/hs_ed25519_secret_key" "$VANITY_DIR/hs_ed25519_public_key"
-            log "Converted vanity key to Arti OpenSSH format" >&2
-        else
-            log "ERROR: Failed to convert vanity key to Arti format" >&2
+        if ! ensure_key_formats "$VANITY_DIR"; then
             return 1
         fi
+        log "Ensured both key formats for vanity key"
     fi
 
     # Return the directory path (only thing on stdout)
@@ -667,93 +614,12 @@ HELPEOF
         return 0
     fi
 
-    # Decode base32, validate length, derive public key and address — all in one call
-    # The public key must be derived via ed25519 scalar multiplication (not a simple slice)
-    local result
-    result=$(bundled_python -c "
-import base64, hashlib, sys, binascii
-
-key_b32 = sys.argv[1]
-
-# Decode base32
-try:
-    key_bytes = base64.b32decode(key_b32, casefold=True)
-except Exception as e:
-    print(f'ERROR: Invalid base32 encoding: {e}', file=sys.stderr)
-    sys.exit(1)
-
-# Accept 96 bytes (full file with 32-byte header) or 64 bytes (key only)
-if len(key_bytes) == 96 and key_bytes[:29] == b'== ed25519v1-secret: type0 ==':
-    key_bytes = key_bytes[32:]
-elif len(key_bytes) != 64:
-    print(f'ERROR: Key must be exactly 64 bytes (or 96 with header), got {len(key_bytes)}', file=sys.stderr)
-    sys.exit(1)
-
-# Derive public key from expanded secret key via ed25519 scalar multiplication
-p = 2**255 - 19
-def inv(x): return pow(x, p-2, p)
-d = -121665 * inv(121666) % p
-
-def recover_x(y, sign):
-    x2 = (y*y-1) * inv(d*y*y+1) % p
-    x = pow(x2, (p+3)//8, p)
-    if (x*x - x2) % p != 0:
-        x = x * pow(2, (p-1)//4, p) % p
-    if x % 2 != sign: x = p - x
-    return x
-
-By = 4 * inv(5) % p
-Bx = recover_x(By, 0)
-B = (Bx, By, 1, Bx*By % p)
-
-def point_add(P, Q):
-    x1,y1,z1,t1 = P; x2,y2,z2,t2 = Q
-    a=(y1-x1)*(y2-x2)%p; b=(y1+x1)*(y2+x2)%p
-    c=2*t1*t2*d%p; dd=2*z1*z2%p
-    e=b-a; f=dd-c; g=dd+c; h=b+a
-    return (e*f%p, g*h%p, f*g%p, e*h%p)
-
-def scalar_mult(s, P):
-    Q = (0, 1, 1, 0)
-    while s > 0:
-        if s & 1: Q = point_add(Q, P)
-        P = point_add(P, P)
-        s >>= 1
-    return Q
-
-def encode_point(P):
-    x,y,z,_ = P; zi = inv(z)
-    x,y = x*zi%p, y*zi%p
-    r = bytearray(y.to_bytes(32,'little'))
-    r[31] ^= (x&1) << 7
-    return bytes(r)
-
-scalar = int.from_bytes(key_bytes[:32], 'little')
-pubkey = encode_point(scalar_mult(scalar, B))
-
-# Derive .onion address (v3 spec)
-checksum = hashlib.sha3_256(b'.onion checksum' + pubkey + b'\x03').digest()[:2]
-address = base64.b32encode(pubkey + checksum + b'\x03').decode().lower() + '.onion'
-
-# Output: address on line 1, hex key on line 2, hex pubkey on line 3
-print(address)
-print(binascii.hexlify(key_bytes).decode())
-print(binascii.hexlify(pubkey).decode())
-" "$key_b32" 2>&1)
+    # Decode base32 key and derive .onion address (no files written yet)
+    local address
+    address=$(bundled_python "$SCRIPTS_DIR/key_manager.py" decode-key "$key_b32" 2>&1)
 
     if [ $? -ne 0 ]; then
-        echo "$result" >&2
-        return 1
-    fi
-
-    # Parse python output
-    local address hex_key hex_pubkey
-    address=$(echo "$result" | sed -n '1p')
-    hex_key=$(echo "$result" | sed -n '2p')
-    hex_pubkey=$(echo "$result" | sed -n '3p')
-
-    if [ -z "$address" ] || [ -z "$hex_key" ] || [ -z "$hex_pubkey" ]; then
-        echo "ERROR: Failed to derive address from key" >&2
+        echo "$address" >&2
         return 1
     fi
 
@@ -813,71 +679,11 @@ print(binascii.hexlify(pubkey).decode())
     # (needed when Docker isn't running and we can't remove the volume now)
     touch "$DATA_DIR/.import-key-pending"
 
-    # Create output directory
-    local output_dir="$DATA_DIR/shared/vanity-keys/$address"
-    mkdir -p "$output_dir"
-
-    # Write OpenSSH PEM key file for Arti (same format as key_manager.build_openssh_key)
-    bundled_python -c "
-import base64, binascii, os, struct, sys
-
-hex_key = sys.argv[1]
-hex_pubkey = sys.argv[2]
-output_path = sys.argv[3]
-
-private_key = binascii.unhexlify(hex_key)   # 64 bytes
-public_key = binascii.unhexlify(hex_pubkey)  # 32 bytes
-
-KEY_TYPE = b'ed25519-expanded@spec.torproject.org'
-MAGIC = b'openssh-key-v1\x00'
-
-def pack(data):
-    return struct.pack('>I', len(data)) + data
-
-# Public key blob
-pub_blob = pack(KEY_TYPE) + pack(public_key)
-
-# Private key blob
-check = struct.pack('>I', int.from_bytes(os.urandom(4), 'big'))
-priv_blob = (
-    check + check +
-    pack(KEY_TYPE) +
-    pack(public_key) +
-    pack(private_key) +
-    pack(b'')  # empty comment
-)
-pad_len = (8 - len(priv_blob) % 8) % 8
-priv_blob += bytes(range(1, pad_len + 1))
-
-binary = (
-    MAGIC +
-    pack(b'none') +
-    pack(b'none') +
-    pack(b'') +
-    struct.pack('>I', 1) +
-    pack(pub_blob) +
-    pack(priv_blob)
-)
-
-b64 = base64.b64encode(binary).decode('ascii')
-lines = [b64[i:i+70] for i in range(0, len(b64), 70)]
-pem = '-----BEGIN OPENSSH PRIVATE KEY-----\n'
-pem += '\n'.join(lines) + '\n'
-pem += '-----END OPENSSH PRIVATE KEY-----\n'
-
-with open(output_path, 'wb') as f:
-    f.write(pem.encode('utf-8'))
-os.chmod(output_path, 0o600)
-" "$hex_key" "$hex_pubkey" "$output_dir/ks_hs_id.ed25519_expanded_private"
-
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to write OpenSSH key file" >&2
+    # Write all key files (Arti PEM + C Tor + hostname)
+    if ! bundled_python "$SCRIPTS_DIR/key_manager.py" import-key "$key_b32" "$DATA_DIR/shared/vanity-keys" 2>>"$LOG_FILE"; then
+        echo "ERROR: Failed to write key files" >&2
         return 1
     fi
-
-    # Write hostname file
-    echo "$address" > "$output_dir/hostname"
-    chmod 644 "$output_dir/hostname"
 
     # Update ADDRESS_PREFIX in config to match the imported address
     # so the startup prefix check doesn't flag a mismatch
@@ -891,7 +697,7 @@ os.chmod(output_path, 0o600)
 
     log "Imported key for address: $address"
     echo "Imported key for: $address"
-    echo "Key files written to: $output_dir"
+    echo "Key files written to: $DATA_DIR/shared/vanity-keys/$address"
     echo ""
     echo "Launch OnionPress to use this address."
     return 0
@@ -1982,15 +1788,15 @@ setup_wordpress_cli() {
             log "Setup: restored config from backup"
             echo "  Config restored from backup."
         fi
-        # Restore vanity keys if present
-        if [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] && [ -f "$staging/metadata.json" ]; then
+        # Restore vanity keys if present (accept either C Tor or Arti format)
+        if { [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] || [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; } && [ -f "$staging/metadata.json" ]; then
             local onion_address
             onion_address=$(bundled_python -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
             if [ -n "$onion_address" ]; then
                 rm -rf "$DATA_DIR/shared/vanity-keys/"
                 local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
                 mkdir -p "$addr_dir"
-                cp "$staging/tor-keys/hs_ed25519_secret_key" "$addr_dir/"
+                [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] && cp "$staging/tor-keys/hs_ed25519_secret_key" "$addr_dir/"
                 [ -f "$staging/tor-keys/hs_ed25519_public_key" ] && cp "$staging/tor-keys/hs_ed25519_public_key" "$addr_dir/"
                 [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ] && cp "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" "$addr_dir/"
                 echo "$onion_address" > "$addr_dir/hostname"
@@ -2260,22 +2066,25 @@ restore_backup() {
     onion_address=$(bundled_python -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
     log "Restore: backup from $onion_address"
 
-    # 1. Restore Tor keys
+    # 1. Restore Tor keys — accept either C Tor or Arti format.
+    #    Mac uses Arti only; if backup has only C Tor keys, convert to Arti PEM.
     local ctor_secret="$staging/tor-keys/hs_ed25519_secret_key"
-    if [ -f "$ctor_secret" ] && [ -n "$onion_address" ]; then
+    local ctor_public="$staging/tor-keys/hs_ed25519_public_key"
+    local arti_key="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
+    if { [ -f "$ctor_secret" ] || [ -f "$arti_key" ]; } && [ -n "$onion_address" ]; then
         log "Restore: writing Tor keys..."
         rm -rf "$DATA_DIR/shared/vanity-keys/"
 
         local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
         mkdir -p "$addr_dir"
-        cp "$ctor_secret" "$addr_dir/"
 
-        local ctor_public="$staging/tor-keys/hs_ed25519_public_key"
+        # Copy all key formats present in backup
+        [ -f "$arti_key" ] && cp "$arti_key" "$addr_dir/"
+        [ -f "$ctor_secret" ] && cp "$ctor_secret" "$addr_dir/"
         [ -f "$ctor_public" ] && cp "$ctor_public" "$addr_dir/"
 
-        # Copy Arti format key if present
-        local arti_key="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
-        [ -f "$arti_key" ] && cp "$arti_key" "$addr_dir/"
+        # Ensure both key formats exist (derives whichever is missing)
+        ensure_key_formats "$addr_dir" || log "WARNING: Failed to synchronize key formats"
 
         echo "$onion_address" > "$addr_dir/hostname"
 

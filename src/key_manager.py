@@ -283,16 +283,265 @@ def write_private_key(private_key, public_key):
         raise Exception(f"Failed to write private key: {e}")
 
 
+CTOR_HEADER_SECRET = b'== ed25519v1-secret: type0 ==\x00\x00\x00'  # 32 bytes
+CTOR_HEADER_PUBLIC = b'== ed25519v1-public: type0 ==\x00\x00\x00'  # 32 bytes
+
+
+def read_ctor_keys(key_dir):
+    """Read C Tor format keys from directory. Returns (private_64, public_32)."""
+    import os
+    secret_path = os.path.join(key_dir, 'hs_ed25519_secret_key')
+    public_path = os.path.join(key_dir, 'hs_ed25519_public_key')
+
+    with open(secret_path, 'rb') as f:
+        secret_data = f.read()
+    if len(secret_data) < 64:
+        raise ValueError(f"Secret key file too short: {len(secret_data)} bytes")
+    private_key = secret_data[32:]  # skip 32-byte C Tor header
+
+    with open(public_path, 'rb') as f:
+        public_data = f.read()
+    if len(public_data) < 32:
+        raise ValueError(f"Public key file too short: {len(public_data)} bytes")
+    public_key = public_data[32:]  # skip 32-byte C Tor header
+
+    return private_key, public_key
+
+
+def write_ctor_keys(key_dir, private_key, public_key):
+    """Write C Tor format hs_ed25519_secret_key + hs_ed25519_public_key."""
+    import os
+    secret_path = os.path.join(key_dir, 'hs_ed25519_secret_key')
+    with open(secret_path, 'wb') as f:
+        f.write(CTOR_HEADER_SECRET + private_key)
+    os.chmod(secret_path, 0o600)
+
+    public_path = os.path.join(key_dir, 'hs_ed25519_public_key')
+    with open(public_path, 'wb') as f:
+        f.write(CTOR_HEADER_PUBLIC + public_key)
+    os.chmod(public_path, 0o644)
+
+
+def read_arti_key(key_dir):
+    """Read Arti PEM from directory. Returns (private_64, public_32)."""
+    import os
+    pem_path = os.path.join(key_dir, 'ks_hs_id.ed25519_expanded_private')
+    with open(pem_path, 'rb') as f:
+        data = f.read()
+    return parse_openssh_key(data)
+
+
+def write_arti_key(key_dir, private_key, public_key):
+    """Write ks_hs_id.ed25519_expanded_private (OpenSSH PEM)."""
+    import os
+    pem_data = build_openssh_key(private_key, public_key)
+    output_path = os.path.join(key_dir, 'ks_hs_id.ed25519_expanded_private')
+    with open(output_path, 'wb') as f:
+        f.write(pem_data)
+    os.chmod(output_path, 0o600)
+
+
+def ensure_key_formats(key_dir):
+    """Ensure both C Tor and Arti formats exist in key_dir.
+    Derives whichever is missing from whichever is present.
+    Returns True if any conversion was done."""
+    import os
+    has_ctor = (os.path.isfile(os.path.join(key_dir, 'hs_ed25519_secret_key'))
+                and os.path.isfile(os.path.join(key_dir, 'hs_ed25519_public_key')))
+    has_arti = os.path.isfile(os.path.join(key_dir, 'ks_hs_id.ed25519_expanded_private'))
+
+    if has_ctor and has_arti:
+        return False
+
+    if has_ctor and not has_arti:
+        private_key, public_key = read_ctor_keys(key_dir)
+        write_arti_key(key_dir, private_key, public_key)
+        return True
+
+    if has_arti and not has_ctor:
+        private_key, public_key = read_arti_key(key_dir)
+        write_ctor_keys(key_dir, private_key, public_key)
+        return True
+
+    raise ValueError(f"No key files found in {key_dir}")
+
+
+def decode_base32_key(key_b32):
+    """Decode a base32-encoded ed25519 expanded secret key.
+    Accepts 64 raw bytes or 96 bytes (with 32-byte C Tor header).
+    Returns the 64-byte expanded private key."""
+    key_bytes = base64.b32decode(key_b32, casefold=True)
+    if len(key_bytes) == 96 and key_bytes[:29] == b'== ed25519v1-secret: type0 ==':
+        key_bytes = key_bytes[32:]
+    elif len(key_bytes) != 64:
+        raise ValueError(f"Key must be exactly 64 bytes (or 96 with header), got {len(key_bytes)}")
+    return key_bytes
+
+
+def derive_public_key(private_key):
+    """Derive ed25519 public key from expanded private key via scalar multiplication.
+    Returns 32-byte public key."""
+    p = 2**255 - 19
+    def inv(x): return pow(x, p - 2, p)
+    d = -121665 * inv(121666) % p
+
+    def recover_x(y, sign):
+        x2 = (y * y - 1) * inv(d * y * y + 1) % p
+        x = pow(x2, (p + 3) // 8, p)
+        if (x * x - x2) % p != 0:
+            x = x * pow(2, (p - 1) // 4, p) % p
+        if x % 2 != sign:
+            x = p - x
+        return x
+
+    By = 4 * inv(5) % p
+    Bx = recover_x(By, 0)
+    B = (Bx, By, 1, Bx * By % p)
+
+    def point_add(P, Q):
+        x1, y1, z1, t1 = P
+        x2, y2, z2, t2 = Q
+        a = (y1 - x1) * (y2 - x2) % p
+        b = (y1 + x1) * (y2 + x2) % p
+        c = 2 * t1 * t2 * d % p
+        dd = 2 * z1 * z2 % p
+        e = b - a
+        f = dd - c
+        g = dd + c
+        h = b + a
+        return (e * f % p, g * h % p, f * g % p, e * h % p)
+
+    def scalar_mult(s, P):
+        Q = (0, 1, 1, 0)
+        while s > 0:
+            if s & 1:
+                Q = point_add(Q, P)
+            P = point_add(P, P)
+            s >>= 1
+        return Q
+
+    def encode_point(P):
+        x, y, z, _ = P
+        zi = inv(z)
+        x, y = x * zi % p, y * zi % p
+        r = bytearray(y.to_bytes(32, 'little'))
+        r[31] ^= (x & 1) << 7
+        return bytes(r)
+
+    import hashlib
+    scalar = int.from_bytes(private_key[:32], 'little')
+    return encode_point(scalar_mult(scalar, B))
+
+
+def derive_onion_address(public_key):
+    """Derive v3 .onion address from 32-byte public key."""
+    import hashlib
+    checksum = hashlib.sha3_256(b'.onion checksum' + public_key + b'\x03').digest()[:2]
+    return base64.b32encode(public_key + checksum + b'\x03').decode().lower() + '.onion'
+
+
+def import_key_b32(key_b32, output_dir):
+    """Import a base32-encoded key: decode, derive address, write all key files.
+    Creates output_dir/<address>/ with key files + hostname.
+    Returns the .onion address."""
+    import os
+
+    private_key = decode_base32_key(key_b32)
+    public_key = derive_public_key(private_key)
+    address = derive_onion_address(public_key)
+
+    addr_dir = os.path.join(output_dir, address)
+    os.makedirs(addr_dir, exist_ok=True)
+
+    write_arti_key(addr_dir, private_key, public_key)
+    write_ctor_keys(addr_dir, private_key, public_key)
+
+    hostname_path = os.path.join(addr_dir, 'hostname')
+    with open(hostname_path, 'w') as f:
+        f.write(address + '\n')
+    os.chmod(hostname_path, 0o644)
+
+    return address
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "extract":
-        try:
+
+    def _usage():
+        print("Usage:")
+        print("  key_manager.py extract")
+        print("  key_manager.py ensure-formats <key_dir>")
+        print("  key_manager.py ctor-to-arti <key_dir>")
+        print("  key_manager.py arti-to-ctor <key_dir>")
+        print("  key_manager.py write-keys <hex_privkey> <hex_pubkey> <key_dir>")
+        print("  key_manager.py import-key <base32_key> <output_dir>")
+        print("  key_manager.py decode-key <base32_key>")
+        sys.exit(1)
+
+    if len(sys.argv) < 2:
+        _usage()
+
+    cmd = sys.argv[1]
+    try:
+        if cmd == "extract":
             key_bytes = extract_private_key()
             print(f"Successfully extracted {len(key_bytes)}-byte private key")
             pub_bytes = extract_public_key()
             print(f"Successfully extracted {len(pub_bytes)}-byte public key")
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        print("Usage: key_manager.py extract")
+
+        elif cmd == "ensure-formats":
+            if len(sys.argv) < 3:
+                _usage()
+            key_dir = sys.argv[2]
+            if ensure_key_formats(key_dir):
+                print(f"Converted key formats in {key_dir}")
+            else:
+                print(f"Both formats already present in {key_dir}")
+
+        elif cmd == "ctor-to-arti":
+            if len(sys.argv) < 3:
+                _usage()
+            key_dir = sys.argv[2]
+            private_key, public_key = read_ctor_keys(key_dir)
+            write_arti_key(key_dir, private_key, public_key)
+            print(f"Wrote Arti PEM to {key_dir}")
+
+        elif cmd == "arti-to-ctor":
+            if len(sys.argv) < 3:
+                _usage()
+            key_dir = sys.argv[2]
+            private_key, public_key = read_arti_key(key_dir)
+            write_ctor_keys(key_dir, private_key, public_key)
+            print(f"Wrote C Tor keys to {key_dir}")
+
+        elif cmd == "write-keys":
+            if len(sys.argv) < 5:
+                _usage()
+            import binascii
+            private_key = binascii.unhexlify(sys.argv[2])
+            public_key = binascii.unhexlify(sys.argv[3])
+            key_dir = sys.argv[4]
+            write_arti_key(key_dir, private_key, public_key)
+            write_ctor_keys(key_dir, private_key, public_key)
+            print(f"Wrote key files to {key_dir}")
+
+        elif cmd == "import-key":
+            if len(sys.argv) < 4:
+                _usage()
+            address = import_key_b32(sys.argv[2], sys.argv[3])
+            print(address)
+
+        elif cmd == "decode-key":
+            if len(sys.argv) < 3:
+                _usage()
+            private_key = decode_base32_key(sys.argv[2])
+            public_key = derive_public_key(private_key)
+            address = derive_onion_address(public_key)
+            print(address)
+
+        else:
+            _usage()
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
