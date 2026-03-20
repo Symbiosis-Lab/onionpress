@@ -1154,6 +1154,7 @@ disable_workers() {
     log "Disabling responders for sites ${fail_start}..$(( fail_start + fail_count - 1 ))..."
 
     local affected_containers=""
+    local del_failures=0
 
     for i in $(seq "$fail_start" $((fail_start + fail_count - 1))); do
         # Figure out which container and local index
@@ -1164,10 +1165,13 @@ disable_workers() {
         local hp=$((BASE_PORT + local_idx * 2 + 1))
 
         # Disable both content and healthcheck ports
-        docker_cmd exec "$ctr_name" \
+        local disable_resp
+        disable_resp=$(docker_cmd exec "$ctr_name" \
             curl -s -X POST http://127.0.0.1:9000/disable \
             -H "Content-Type: application/json" \
-            -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
+            -d "{\"ports\": [${cp}, ${hp}]}" 2>&1) || {
+            log "WARNING: Failed to disable ports ${cp},${hp} on ${ctr_name}: ${disable_resp}"
+        }
 
         # Also shut down Tor onion services for this site so OnionHeaven's
         # takeover worker becomes the sole publisher for these .onion addresses.
@@ -1175,10 +1179,26 @@ disable_workers() {
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
             # C Tor: DEL_ONION via worker-server control API
-            docker_cmd exec "$ctr_name" \
+            local del_resp
+            del_resp=$(docker_cmd exec "$ctr_name" \
                 curl -s -X POST http://127.0.0.1:9000/del_onion \
                 -H "Content-Type: application/json" \
-                -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
+                -d "{\"workers\": [${local_idx}]}" 2>&1)
+            if [ $? -ne 0 ] || echo "$del_resp" | grep -qi "fail\|error"; then
+                log "WARNING: DEL_ONION failed for site ${i} (worker ${local_idx} on ${ctr_name}): ${del_resp}"
+                # Retry once after 2s
+                sleep 2
+                del_resp=$(docker_cmd exec "$ctr_name" \
+                    curl -s -X POST http://127.0.0.1:9000/del_onion \
+                    -H "Content-Type: application/json" \
+                    -d "{\"workers\": [${local_idx}]}" 2>&1)
+                if [ $? -ne 0 ] || echo "$del_resp" | grep -qi "fail\|error"; then
+                    log "ERROR: DEL_ONION retry failed for site ${i}: ${del_resp}"
+                    del_failures=$((del_failures + 1))
+                else
+                    log "  DEL_ONION retry succeeded for site ${i}: ${del_resp}"
+                fi
+            fi
         else
             # Arti: disable in config (no control port equivalent)
             docker_cmd exec "$ctr_name" \
@@ -1209,6 +1229,9 @@ disable_workers() {
         done
     fi
 
+    if [ "$del_failures" -gt 0 ]; then
+        log "WARNING: ${del_failures}/${fail_count} DEL_ONION calls failed — competing descriptors may slow takeover"
+    fi
     log "Disabled ${fail_count} sites (HTTP responders + ${TOR_LABEL} $([ "$TOR_IMPL" = "tor" ] && echo "DEL_ONION" || echo "SIGHUP"))"
 }
 
@@ -1219,6 +1242,7 @@ enable_workers() {
     log "Re-enabling responders and re-registering sites ${start}..$(( start + count - 1 ))..."
 
     local affected_containers=""
+    local add_failures=0
 
     for i in $(seq "$start" $((start + count - 1))); do
         local ctr_idx=$((i / PER_CTR))
@@ -1232,10 +1256,25 @@ enable_workers() {
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
             # C Tor: ADD_ONION via worker-server control API
-            docker_cmd exec "$ctr_name" \
+            local add_resp
+            add_resp=$(docker_cmd exec "$ctr_name" \
                 curl -s -X POST http://127.0.0.1:9000/add_onion \
                 -H "Content-Type: application/json" \
-                -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
+                -d "{\"workers\": [${local_idx}]}" 2>&1)
+            if [ $? -ne 0 ] || echo "$add_resp" | grep -qi "fail\|error"; then
+                log "WARNING: ADD_ONION failed for site ${i} (worker ${local_idx} on ${ctr_name}): ${add_resp}"
+                sleep 2
+                add_resp=$(docker_cmd exec "$ctr_name" \
+                    curl -s -X POST http://127.0.0.1:9000/add_onion \
+                    -H "Content-Type: application/json" \
+                    -d "{\"workers\": [${local_idx}]}" 2>&1)
+                if [ $? -ne 0 ] || echo "$add_resp" | grep -qi "fail\|error"; then
+                    log "ERROR: ADD_ONION retry failed for site ${i}: ${add_resp}"
+                    add_failures=$((add_failures + 1))
+                else
+                    log "  ADD_ONION retry succeeded for site ${i}: ${add_resp}"
+                fi
+            fi
         else
             # Arti: re-enable in config
             docker_cmd exec "$ctr_name" \
@@ -1251,10 +1290,13 @@ enable_workers() {
         fi
 
         # Re-enable HTTP responders
-        docker_cmd exec "$ctr_name" \
+        local enable_resp
+        enable_resp=$(docker_cmd exec "$ctr_name" \
             curl -s -X POST http://127.0.0.1:9000/enable \
             -H "Content-Type: application/json" \
-            -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
+            -d "{\"ports\": [${cp}, ${hp}]}" 2>&1) || {
+            log "WARNING: Failed to re-enable ports ${cp},${hp} on ${ctr_name}: ${enable_resp}"
+        }
 
         # Re-register with OnionHeaven over Tor (like a real OnionPress restart).
         # This triggers immediate release of the taken-over address.
@@ -1323,6 +1365,9 @@ print(f'Re-registered {w[\"content_address\"]}')
         done
     fi
 
+    if [ "$add_failures" -gt 0 ]; then
+        log "WARNING: ${add_failures}/${count} ADD_ONION calls failed — some sites may not recover"
+    fi
     log "Re-enabled ${count} sites, ${TOR_LABEL} $([ "$TOR_IMPL" = "tor" ] && echo "ADD_ONION" || echo "SIGHUP") + re-registrations over Tor (1s apart)"
 }
 
@@ -1336,6 +1381,7 @@ enable_workers_silent() {
     log "Re-enabling responders for sites ${start}..$(( start + count - 1 )) (no /online, no /register)..."
 
     local affected_containers=""
+    local add_failures=0
 
     for i in $(seq "$start" $((start + count - 1))); do
         local ctr_idx=$((i / PER_CTR))
@@ -1349,10 +1395,25 @@ enable_workers_silent() {
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
             # C Tor: ADD_ONION via worker-server control API
-            docker_cmd exec "$ctr_name" \
+            local add_resp
+            add_resp=$(docker_cmd exec "$ctr_name" \
                 curl -s -X POST http://127.0.0.1:9000/add_onion \
                 -H "Content-Type: application/json" \
-                -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
+                -d "{\"workers\": [${local_idx}]}" 2>&1)
+            if [ $? -ne 0 ] || echo "$add_resp" | grep -qi "fail\|error"; then
+                log "WARNING: ADD_ONION failed for site ${i} (worker ${local_idx} on ${ctr_name}): ${add_resp}"
+                sleep 2
+                add_resp=$(docker_cmd exec "$ctr_name" \
+                    curl -s -X POST http://127.0.0.1:9000/add_onion \
+                    -H "Content-Type: application/json" \
+                    -d "{\"workers\": [${local_idx}]}" 2>&1)
+                if [ $? -ne 0 ] || echo "$add_resp" | grep -qi "fail\|error"; then
+                    log "ERROR: ADD_ONION retry failed for site ${i}: ${add_resp}"
+                    add_failures=$((add_failures + 1))
+                else
+                    log "  ADD_ONION retry succeeded for site ${i}: ${add_resp}"
+                fi
+            fi
         else
             # Arti: re-enable in config
             docker_cmd exec "$ctr_name" \
@@ -1368,10 +1429,13 @@ enable_workers_silent() {
         fi
 
         # Re-enable HTTP responders
-        docker_cmd exec "$ctr_name" \
+        local enable_resp
+        enable_resp=$(docker_cmd exec "$ctr_name" \
             curl -s -X POST http://127.0.0.1:9000/enable \
             -H "Content-Type: application/json" \
-            -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
+            -d "{\"ports\": [${cp}, ${hp}]}" 2>&1) || {
+            log "WARNING: Failed to re-enable ports ${cp},${hp} on ${ctr_name}: ${enable_resp}"
+        }
     done
 
     # Arti only: SIGHUP to reload config (C Tor uses ADD_ONION above)
@@ -1388,6 +1452,9 @@ enable_workers_silent() {
         done
     fi
 
+    if [ "$add_failures" -gt 0 ]; then
+        log "WARNING: ${add_failures}/${count} ADD_ONION calls failed — some sites may not recover"
+    fi
     log "Re-enabled ${count} sites silently (${TOR_LABEL} $([ "$TOR_IMPL" = "tor" ] && echo "ADD_ONION" || echo "SIGHUP"), no notifications sent)"
 }
 
