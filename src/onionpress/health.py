@@ -164,7 +164,7 @@ class HealthChecker:
         if not result.ok:
             return False, "000"
         http_code = result.output.strip()
-        return http_code in ("200", "301", "302"), http_code
+        return http_code in ("200", "301"), http_code
 
     def check_internet_connectivity(self) -> bool:
         """Check if the host has internet access."""

@@ -1349,6 +1349,9 @@ install_multisite_domain_map() {
             docker exec onionpress-wordpress chown www-data:www-data \
                 /var/www/html/wp-content/sunrise.php >> "$LOG_FILE" 2>&1 \
                 || log "WARNING: Failed to chown sunrise.php"
+            # Ensure SUNRISE constant is in wp-config.php (required for sunrise.php to load)
+            docker exec onionpress-wordpress wp config set SUNRISE true \
+                --raw --type=constant --allow-root >> "$LOG_FILE" 2>&1 || true
             log "✓ sunrise.php installed"
         else
             log "WARNING: Failed to copy sunrise.php"
