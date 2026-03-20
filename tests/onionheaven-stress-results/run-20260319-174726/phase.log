@@ -685,3 +685,7 @@ All 2 addresses verified!
 [18:41:16]   -> Stress test complete
 [18:41:16] Cleaning up stress test artifacts...
 [18:41:21]   Removed stress + polling containers
+[18:47:38]   Unregistered 200 entries
+[18:47:38] Cleanup complete
+[18:47:38] === Stress test complete ===
+[18:47:38] Results saved to: ./onionheaven-stress-results/run-20260319-174726/metrics.jsonl

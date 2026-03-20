@@ -10,47 +10,55 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/Python</key>
 		<data>
-		kDoMxncLk+IiYtWDQ7wVPQLj0UE=
+		lKXAW6uBcDQv5YJxfR2hrdEGxT0=
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/Resources/Info.plist</key>
 		<data>
-		ackaCJxJKKDP/QFJRo4o34qjlA4=
+		ORrEwNmaGsDxUD4993l524owhxU=
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/_CodeSignature/CodeResources</key>
 		<data>
-		l/JAR0nccZgXOCqEMd9tmj+69GM=
+		Ozpx8EHK/+Z3CGY2kdBrSu3/qyM=
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/include/python3.14/pyconfig.h</key>
 		<data>
-		d7vHMIUlzg8t7OonO7qApDllFks=
+		PdnTMAffsOiJ38HIiYCOuRG8s1k=
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/lib/python3.14/config-3.14-darwin/Makefile</key>
 		<data>
-		P3aphxXuauepIPz2wDxeq+HZobo=
+		0R8WgBLVebpHys9lqsGMLeN2Yr8=
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/libcrypto.3.dylib</key>
 		<data>
-		AMX8cVYsC8yKtJ+4NmpAD2CTCSo=
+		E+3epaAiVFIBhhMATIkU5hP8CJU=
+		</data>
+		<key>Resources/MenubarApp/Contents/Frameworks/liblzma.5.dylib</key>
+		<data>
+		BsoMtZ+Vm8X3iYePzl25Hbsnh/8=
+		</data>
+		<key>Resources/MenubarApp/Contents/Frameworks/libmpdec.4.0.1.dylib</key>
+		<data>
+		jAWmaw16ST9xYZA5LbzwhgG6BRA=
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/libssl.3.dylib</key>
 		<data>
-		Gi5ggg4nC097uRt0lPeRn8hJStQ=
+		DF3u1q9s7Q0ZR1rDhmC/mngczMY=
 		</data>
 		<key>Resources/MenubarApp/Contents/Frameworks/libzstd.1.5.7.dylib</key>
 		<data>
-		kJCsEWIPVO1i/3Q6EeMZ1X1C99g=
+		kDIYW5LQxqT4Zk3TfG1c4ZWdFsY=
 		</data>
 		<key>Resources/MenubarApp/Contents/Info.plist</key>
 		<data>
-		mguVnRhyeu1B8HDaC5cFGGr2+xY=
+		++cREhgQAjllbIjJKnq4RCnW6Mc=
 		</data>
 		<key>Resources/MenubarApp/Contents/MacOS/OnionPress</key>
 		<data>
-		I1Lmd/tMgkbZ2g8J6xtQmN4Wc4o=
+		Pu0PsSvCsZPSZxdjrwVcXS5Oh2Q=
 		</data>
 		<key>Resources/MenubarApp/Contents/MacOS/python</key>
 		<data>
-		aEpRHyEW0jYuAb72WvnRjBBhPPc=
+		ua6DAi19Uhs3DYhz7nGWOUTs5QU=
 		</data>
 		<key>Resources/MenubarApp/Contents/PkgInfo</key>
 		<data>
@@ -62,7 +70,7 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/__boot__.py</key>
 		<data>
-		o36lncQAiI+U2CDa8lOWJYz0GJY=
+		uNJOR3XDSfOqGZYELlIR27OWFyk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/__error__.sh</key>
 		<data>
@@ -70,7 +78,7 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/__pycache__/site.cpython-314.pyc</key>
 		<data>
-		BmA8y+k/hVO2m0qo8kgPudfT6Hs=
+		Yz7pJF+fEeK1TreshwRV7HbTS4U=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/app-icon.png</key>
 		<data>
@@ -86,7 +94,7 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/include/python3.14/pyconfig.h</key>
 		<data>
-		d7vHMIUlzg8t7OonO7qApDllFks=
+		PdnTMAffsOiJ38HIiYCOuRG8s1k=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/_AppKit.cpython-314-darwin.so</key>
 		<data>
@@ -98,15 +106,15 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		QOHZmWo5v7l5Y8d5SleNJ7jDtQQ=
+		sszD5qc3IvELp+XPDMtjl7OuaTg=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/__pycache__/_metadata.cpython-314.pyc</key>
 		<data>
-		bd+IAHOyZNyOaATm49bomR78jbA=
+		HaYS8v/D0e3ctGFoD/sr3+83NRI=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/__pycache__/_nsapp.cpython-314.pyc</key>
 		<data>
-		YyN1UL2CK6E5uSMvi9w9kkQ0OVk=
+		XSOVKJLATNWkqeh0x6vBjHO0UOA=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/_inlines.cpython-314-darwin.so</key>
 		<data>
@@ -122,55 +130,19 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__init__.py</key>
 		<data>
-		NyDeTUox48D+mqiMMTkzHR0WJII=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/__init__.cpython-314.opt-1.pyc</key>
-		<data>
-		j7stvIHIvsSBMwGo9R/4LuXOQxo=
+		bzlo0BRF7wOjc6ul2cIjU84bfnI=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		j7stvIHIvsSBMwGo9R/4LuXOQxo=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_aix.cpython-314.opt-1.pyc</key>
-		<data>
-		Sp2aRh1Yw2LWo7aN/4SzK5sxkzc=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_aix.cpython-314.pyc</key>
-		<data>
-		Sp2aRh1Yw2LWo7aN/4SzK5sxkzc=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_endian.cpython-314.opt-1.pyc</key>
-		<data>
-		Bgu2smeBSWMaxirK1sgNh3yi88E=
+		xQZR23kxfGG6l6PfqOHNzpZVvrQ=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_endian.cpython-314.pyc</key>
 		<data>
-		Bgu2smeBSWMaxirK1sgNh3yi88E=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_layout.cpython-314.opt-1.pyc</key>
-		<data>
-		gB6AsLXNIu0wFjpEGvwCvwSzt04=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_layout.cpython-314.pyc</key>
-		<data>
-		6lt3dlChceUYGQHEha+vDylomGc=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/util.cpython-314.opt-1.pyc</key>
-		<data>
-		wTY2Dv+2JH44mqy+fgHMyqdLJqg=
+		rOy/xJALNxKoU3uDl1U3BKJPSis=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/util.cpython-314.pyc</key>
 		<data>
-		wTY2Dv+2JH44mqy+fgHMyqdLJqg=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/wintypes.cpython-314.opt-1.pyc</key>
-		<data>
-		9wOcbIcYoROTOlxKLbVEJF2d8Fo=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/wintypes.cpython-314.pyc</key>
-		<data>
-		9wOcbIcYoROTOlxKLbVEJF2d8Fo=
+		UJQsWeR5MTLtdGBhss1rorubX44=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/_aix.py</key>
 		<data>
@@ -192,41 +164,25 @@
 		<data>
 		D7wCapdx2WdecJR5C1uUUzTTy1M=
 		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/__init__.cpython-314.opt-1.pyc</key>
-		<data>
-		ykMdH/W+hQtOGzzZjM1s9YVqBK4=
-		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		ykMdH/W+hQtOGzzZjM1s9YVqBK4=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dyld.cpython-314.opt-1.pyc</key>
-		<data>
-		cFeIL/vJ5Vwj8HEfxd6FzVTEYYs=
+		UyftW/C3DkZjuSFB2ss985I11FQ=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dyld.cpython-314.pyc</key>
 		<data>
-		cFeIL/vJ5Vwj8HEfxd6FzVTEYYs=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dylib.cpython-314.opt-1.pyc</key>
-		<data>
-		ngkHpZuVGFGPApJZONN+H4uBtSI=
+		a9aoz5MbUSDoW85AQ7PRkGZkJ3k=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dylib.cpython-314.pyc</key>
 		<data>
-		ngkHpZuVGFGPApJZONN+H4uBtSI=
-		</data>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/framework.cpython-314.opt-1.pyc</key>
-		<data>
-		96EzzdN74h+W6ULicpHCAol6Qqs=
+		AKL/Xp3X1L3F/uxaraNlDJFPkeI=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/framework.cpython-314.pyc</key>
 		<data>
-		96EzzdN74h+W6ULicpHCAol6Qqs=
+		aepjKXdT1aZAdzK9zirdrJ6ZlpE=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/dyld.py</key>
 		<data>
-		Snjr1zzkFnxyJol4GhX+C0V46Wc=
+		esUa8i9lRnSHB+eQv6HpQ247Mdg=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/dylib.py</key>
 		<data>
@@ -270,203 +226,203 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_asyncio.so</key>
 		<data>
-		Mq336LjQFq85gj+ehn11BuRktRc=
+		ftQDQZX4AipDr8UlMSmuV8RZxHo=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_bisect.so</key>
 		<data>
-		4BeTEvioAplg7ViM2+vpC5PY0wk=
+		L39/CB6YNpAPhzO9rHRTZnb3Ejc=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_blake2.so</key>
 		<data>
-		LEdKABD1oI11Ce+UPjBCNfnQnjE=
+		Ywofe1XOzkUlxsLC9YTY5a4+mSk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_bz2.so</key>
 		<data>
-		Rnib68OXwTw0JS4Kqw0G3Nr3JFM=
+		fpCgp2fqm6vyh8Z5BE1xAPcOrb0=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_cn.so</key>
 		<data>
-		62MEyRPjjb+BNvi639oUXfcg7nw=
+		Lrl1vjFwowOhof4Q+RLyYueYCHg=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_hk.so</key>
 		<data>
-		bSDXbvLJ18whFq5o88FfZGONSmM=
+		czzh2jDWp/1h4ovR6Wlu2BO+kg4=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_iso2022.so</key>
 		<data>
-		FGMUXn++sEtx+cuRC9fuKB8oO4Y=
+		/gVkvxphqXhy8LoboSsefahYKC0=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_jp.so</key>
 		<data>
-		k7WtG59WSksxN6OMA4P+hJLKNv0=
+		3dJ7jmlNs4muVXY7yweh9BXYEA0=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_kr.so</key>
 		<data>
-		6+M7HNCL3GcEv5aQMnpxNeIsGTU=
+		qZodibJep/uF64X/YMcZ2BLRq/4=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_tw.so</key>
 		<data>
-		TaPxJ8N2oKtit0FwdA16i2MNzuM=
+		5424SIU0ztMO9HmlIanGl4ZiVYk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_csv.so</key>
 		<data>
-		iNdFfTSPZ8NNmqMAJB15FFVkV6o=
+		QDx+9GsqYn4fzsBkl6ITmvmyPdQ=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_ctypes.so</key>
 		<data>
-		0ByjebJc6CwXO7b5IAVr+PjucAo=
+		u3KSism+b30DjGXvtANksjx2egw=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_decimal.so</key>
 		<data>
-		z55YtrXUcAuQ7Jqh7v7eALmnFo0=
+		S3lGv9d5US0KHwtTpCScQ8MuFJo=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_elementtree.so</key>
 		<data>
-		YSLIuecAUv3egYwN7jj3YKT9h/E=
+		FibFn/9K9kdsDuPulAfX2ERJ1H4=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_hashlib.so</key>
 		<data>
-		Pdi0ftHWNHaInVwBym9oxR910bU=
+		Yr7Y5Z3kZ3y3ozDNPtG5DoAdQlw=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_heapq.so</key>
 		<data>
-		cMwDw7gYF/7n/YpZDq9/Fh05GCc=
+		K1wWdRCxEt5/JTL+4hZDnJHrHfA=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_hmac.so</key>
 		<data>
-		KsG6pjHXgggZaYW0Gg07LZCNYqQ=
+		QXiC8ZJAxca/8HUZv6IN3ztaDjg=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_interpqueues.so</key>
 		<data>
-		PDBR87I254tVXoz0vJQzu2lweQs=
+		w/Q7t569NQZpE8F60hZ3Pobdg1k=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_interpreters.so</key>
 		<data>
-		Va8jNIGl4OPF84A3GyYOY/oXhzE=
+		u6Ak6H2rt6bmiuXkP7Er652OwMM=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_json.so</key>
 		<data>
-		GYlf2iXlbcC1fXlZHniylN7LPps=
+		YpPk/BuxoxYOC6Qvun5UnW4U9ew=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_lzma.so</key>
 		<data>
-		uJBoVhgFZJ5WJYWhZ55ugSKja1U=
+		JxU1tV1oR6ghPJ8qUWxoQb3GxFQ=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_md5.so</key>
 		<data>
-		PBdM4Ipd8pBgw+yaMZH+QeB2S20=
+		nvcvURji5unkLEtA4hYSlSTNvWQ=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_multibytecodec.so</key>
 		<data>
-		AWuLZ5HyFRCTeAPl9X9IQn8Kn1Q=
+		gaYztdNPwNrMc+C7gVCsVZtcuRk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_multiprocessing.so</key>
 		<data>
-		ssuA8WPDd/9Bz09lRtV8C0KYh5s=
+		BdNc6tscY05yloS8LFqkXIHWW2E=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_pickle.so</key>
 		<data>
-		85MeNVFy5fwlgnI8jR5qh7oPVZE=
+		WMv/87jGFpogR9VMDiR8MFMtM4Q=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_posixshmem.so</key>
 		<data>
-		9tno6FnFxjCV/VI/HEZg7TC69Ac=
+		H0g/Oxs3FGjVWgjAWp9/1099bP4=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_posixsubprocess.so</key>
 		<data>
-		jrLhljDoFoH97/97Rmen6HoGbYE=
+		JpTcvsMycNYUCpWH+OkqliEvEVM=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_queue.so</key>
 		<data>
-		OdGl5fO3WUR08BTd0+1t37vYX7k=
+		y+PZZCg9D3GFq6jxJJAPiZeIe8g=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_random.so</key>
 		<data>
-		wA7iUIIJAFeAXKkiE7+s59njp5Y=
+		2SIcuahgk2szC3l2qlTC6ZWTYc0=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_scproxy.so</key>
 		<data>
-		ovsz3grEoSqxqDdGzKROByYdXr8=
+		brlRwEqkM/AeN4VGVKv9u00Lb78=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_sha1.so</key>
 		<data>
-		duOcCo1XI8Ut/j/ciztHPAcvmGk=
+		9BJH6xSlLbidzww3tfzsQXKlafo=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_sha2.so</key>
 		<data>
-		V4dyw0mrs5gEAu57b2qCOxZTP1s=
+		HQcvR73ra4Ig866GCZFvkroLrHw=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_sha3.so</key>
 		<data>
-		XzSH415ElL3GhI4OLvqQGgNKq9I=
+		gHLvx67gPVaVH9zjxsydAwiT5Zk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_socket.so</key>
 		<data>
-		Kp9RdToZNGBRTLfWm0v+uPeOQys=
+		Xlb5i2DsETrA6KWVe8cjjWy9crY=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_ssl.so</key>
 		<data>
-		Miv4T4JBM5f1Ouc7prK05Ybr5Y4=
+		2eyjuDIDG4R9xUVuNreh8e6G6ag=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_statistics.so</key>
 		<data>
-		5/OoX9L6aA5JhzNI93kpX80Je1U=
+		SNMdEAtuq+jm+vw6mt8Hpf5Nj90=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_struct.so</key>
 		<data>
-		RIa7MDl/y0eCqtaw0jbHVI6GQv0=
+		WzNiW8Q+gD7NELd3SgfHY99X9jo=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_zstd.so</key>
 		<data>
-		L9G2fe6mWnr76wz++DGqaE1ekEc=
+		N7rGzEPRxRqkLICFPZKnAVIZH30=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/array.so</key>
 		<data>
-		WeewRji4+5hK629XuK01nZYjrbo=
+		wGYp4GwPwbdM01nDbbX8n8TtphY=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/binascii.so</key>
 		<data>
-		8jVEsjfTIQlFaR8lDGQc9zkfjto=
+		wt1uyqkoIj9C670aX4+dcIwCatE=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/fcntl.so</key>
 		<data>
-		bjwvmxBSWEz2GZ4AnL7FGVnztKY=
+		0jibR963umPIZ0raxM/zPRSibgo=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/grp.so</key>
 		<data>
-		0t4WvbCJ8iWSBi9vgmee2Ce9W3I=
+		TyAO8YD15oakmxOh0NVn600AWrs=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/math.so</key>
 		<data>
-		DB1WZGxB6jV9i4jj/Oi52Lgrf3o=
+		Lkg1iXDmOz+lA6uA72zRESZKBnU=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/mmap.so</key>
 		<data>
-		FOeGWGfMVWccDbUAV9xdt3IrqBE=
+		iISG8iV9AD4h6Ern2wQLvz73RSc=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/pyexpat.so</key>
 		<data>
-		7Nuha+gN1akaZqeZnuk/+3DfEwo=
+		WbBimqTp3Lv5XlXGXseRdrux05M=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/resource.so</key>
 		<data>
-		fQxdpIfWEhPlNJwp0Tdoiw1KLPE=
+		BZz4P0AoftwPxv+w1/LJq5AikeA=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/select.so</key>
 		<data>
-		Y4cf70n1b9AKHCYwQHqFJ0rJS+U=
+		ykLYS3mICRB4wEo982EzqW01BXg=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/termios.so</key>
 		<data>
-		BAl+b02ZIBLU8Jm3IKkpVKqv/1k=
+		HNL1lV22hg1iym9zmkoklmQG0JA=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/unicodedata.so</key>
 		<data>
-		ehEE9kBL9myN4Bj1MWpbSMFTK4I=
+		5jmaCmYn+YL2TcALwQGKV2M8Jxc=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/zlib.so</key>
 		<data>
-		Xu1T8DV27+K9oC1opvINiGRDTPg=
+		iJ18QR3akK5dgRiwnIFzU3sVcWY=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__init__.py</key>
 		<data>
@@ -474,131 +430,131 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		jHM1Ig9Bp0vDyROxjsbz2jGO4YI=
+		iooEmJbTUCZsnWTWf2DQJy6g/Do=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_bridges.cpython-314.pyc</key>
 		<data>
-		tthY/4Uz6KrBwTW2rZjuyOCEX88=
+		xtM/Q2ju3EBByK91tNP0A83q5Ug=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_bridgesupport.cpython-314.pyc</key>
 		<data>
-		UPv4tP0rpnEtGwYn936wKrEKgk0=
+		wOqfHJ54KaDdBhPT7udDmdnvEms=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_callable_docstr.cpython-314.pyc</key>
 		<data>
-		kiOo/zpqTA8i62RmCUsz5YCQy2E=
+		fZ/Jr8YvaL9rJEiPjCycdJV4OVI=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_category.cpython-314.pyc</key>
 		<data>
-		15nL88ZnmGsuke+A1wDPU1omShw=
+		+X/WX+K4N4SJwWhiTz6Br6T8L9Q=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_compat.cpython-314.pyc</key>
 		<data>
-		YfFybHdVrU5F+VFHk0ZLo4uc2O8=
+		wMluoMCp3CzWC9gPMra0ycjvEFE=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_context.cpython-314.pyc</key>
 		<data>
-		oWyfoNt1LpKtfBk+eKKfkkj999M=
+		77roGhhKtUHA1+voIeeYhDKa1ac=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience.cpython-314.pyc</key>
 		<data>
-		WCucuuHIkhOJ1q2Wlgk3wsEVuhA=
+		DhQLMrQgY7FEc7S057/npNkZ/fA=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_mapping.cpython-314.pyc</key>
 		<data>
-		syvCH3owpf8Fm1MDkGn0BgzgW2w=
+		BDksKGAgtg55J+n+BZoVTdplROU=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsarray.cpython-314.pyc</key>
 		<data>
-		SEWcsknPnbvxp7ZT1FQALu/0IBo=
+		wQqYXAfJgYAVhYP/9b+6BA7q8gg=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsdata.cpython-314.pyc</key>
 		<data>
-		nwpqH0zUNfU17Tb7HxrNpibYqxw=
+		xzykgBzOc3iCUu/2KNNGvteQU7Y=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsdecimal.cpython-314.pyc</key>
 		<data>
-		E0xl1TQkmiql0YXKO/IR87i95Fk=
+		76mja6zC2FpHEtApvsUQLtKboYc=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsdictionary.cpython-314.pyc</key>
 		<data>
-		ipfJtufB+t0F5QAk2D9i5VcG1tU=
+		hSYPiQQWu2rY2RvYEVbdsRbM2mk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsobject.cpython-314.pyc</key>
 		<data>
-		dK9nRaWaK8Ja3t9AxCvkJVsth7A=
+		1ysPuf1pCcHeMgIKUys4J8871Jc=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsset.cpython-314.pyc</key>
 		<data>
-		rtlygtpxF1rZVDovdLLi94zIlNc=
+		8jdrxpY7DOjQ7pzni0SsTFHXV2o=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsstring.cpython-314.pyc</key>
 		<data>
-		Eo4zWET+XtO+0QIFyy9n0LUIK6g=
+		AV3dSHlW7bfg8wD95ARKA3NvVZQ=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_sequence.cpython-314.pyc</key>
 		<data>
-		C+WZ/3jVHg/QUGFho/GAoW+r74M=
+		+zhkAN1/dx0hnjtifnog23xuzek=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_descriptors.cpython-314.pyc</key>
 		<data>
-		xVNhyuGmOLPz1Fq73HkDXIB59cM=
+		c44oEmyN2VyIZIkozuKtoj46Kd4=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_dyld.cpython-314.pyc</key>
 		<data>
-		PswDna8KVVFtEfFf54GCbr4C8Jc=
+		zOX94IX1XtI4rA1GkYIwgI6A34o=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_framework.cpython-314.pyc</key>
 		<data>
-		+UMH93mScXDP4tipWr7A89U36JA=
+		kabGdK5FQrX4oEvsUcMksduWiys=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_informal_protocol.cpython-314.pyc</key>
 		<data>
-		UoqrFwtANpJNj126DC2smtGXcAU=
+		n/S/cGnBctzJXQy6cGuT5ORDDNs=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_lazyimport.cpython-314.pyc</key>
 		<data>
-		rdRGn14fAbtkXsSXAUWVPt/qZws=
+		KaaIJwPJi91t6dvMBz3mrucIz5k=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_locking.cpython-314.pyc</key>
 		<data>
-		oedXGt1vEeCzpdOMGXc0rQKNyQ8=
+		qmjV6MnhLQJ7cAmWsgrFlih85MM=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_new.cpython-314.pyc</key>
 		<data>
-		gEwnrR44exGwh2LMeOYXfx99sEI=
+		a6+stQsvzvKk5cHAdUba5+rxKy8=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_properties.cpython-314.pyc</key>
 		<data>
-		7FH8TaEfgEDpHoeXYOPo6ztKdH4=
+		sw9uhpPW8lsG+NoIhwxrUK9GPmA=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_protocols.cpython-314.pyc</key>
 		<data>
-		2/Perv69ADycB7LQic3TIySE/qo=
+		mR8Pmt7WrZqTt6BbbFIki8oop8k=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_pycoder.cpython-314.pyc</key>
 		<data>
-		b747MP6Vij3PF5DyS4c92wwzKi0=
+		ek9ksVbeTmIeYD/XgazSgOX82kc=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_pythonify.cpython-314.pyc</key>
 		<data>
-		NeEpmxArM+dSUrboC4Q8v5ZrY3g=
+		FC7T3bLL4K3z5t/1ilvYoztF5DU=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_structtype.cpython-314.pyc</key>
 		<data>
-		QeNZ+CPlYqIuWDKJ3dAYQdKmEQM=
+		tAPW7B2YQ4+wL3ZrGN57MWRFTu4=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_transform.cpython-314.pyc</key>
 		<data>
-		wsGOjcve6V0srlopEKnMsOO4G8A=
+		rf7r+PESthctoFFyINkHvmxm8hk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_types.cpython-314.pyc</key>
 		<data>
-		3KRVcPVf6zSH9rJQlLwkdhzwNjg=
+		PrN0dz9f2QJt68eF0em2GaZE78k=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/simd.cpython-314.pyc</key>
 		<data>
-		JXK9hYkZYeRB6jgqMIimTwxdX1A=
+		R6ewhg6TV3ieTcbxmZGmqzbNKvM=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/_bridges.py</key>
 		<data>
@@ -732,45 +688,121 @@
 		<data>
 		+cH2Uvxo1R0zaYrkgomrd6rqub4=
 		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__init__.py</key>
+		<data>
+		HH0kel1pcnlMRaSJ2IVXcFxqW/8=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__main__.py</key>
+		<data>
+		snONR7AzKI4BA9PCgDY7an8kpWo=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/__init__.cpython-314.pyc</key>
+		<data>
+		h4y05z53vnbV40rrJXxFJm5CqS0=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/cli.cpython-314.pyc</key>
+		<data>
+		yVj6scuWNRpD5dOyBTd0jOQuFgk=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/colima.cpython-314.pyc</key>
+		<data>
+		s5k53OK+IRH+9uYEKIWXDoJCFLU=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/config.cpython-314.pyc</key>
+		<data>
+		2t8icoMr6fVVLYYJ7dT42+AzQrk=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/containers.cpython-314.pyc</key>
+		<data>
+		gXW06QyUOISJIxBII36xifMYTLA=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/docker.cpython-314.pyc</key>
+		<data>
+		0lRfRbYMbHtWeyy4lcPlRvDfmcE=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/health.cpython-314.pyc</key>
+		<data>
+		+z67qGmOaGYewcIf6PlOLftH+64=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/platform.cpython-314.pyc</key>
+		<data>
+		5EL4ckV5FpMDD02jR4JgJKPHs/U=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/tor.cpython-314.pyc</key>
+		<data>
+		cZkBlpqyIcy8rA0+WXhnPstBW44=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/cli.py</key>
+		<data>
+		upOiH/sTQf9qenu7l/OqH/+kMSE=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/colima.py</key>
+		<data>
+		uGA9pNJSSut1Q6r0/9Zt2BPS0Ow=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/config.py</key>
+		<data>
+		TZ6ebOKcCA+ZvblAZbw7KSUuE4I=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/containers.py</key>
+		<data>
+		HcsYKfjy3hIn73zNZ36E3FZodUc=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/docker.py</key>
+		<data>
+		79HtWFoiFM64sLAyZn9AfNyyDWc=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/health.py</key>
+		<data>
+		aJgggbAwZbniHDH3frv8DKzH8GE=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/platform.py</key>
+		<data>
+		ed6J2LfAzmZ/TcRGRb7+pmYv7Js=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/tor.py</key>
+		<data>
+		FjCdRXdkGrOadZ3T+h0Kwqbs/Ao=
+		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__init__.py</key>
 		<data>
 		oW7VPtCCifNOf3siVj6Pge4dRd8=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		+oyM7hQxpuUUwL6q2CRLSVBG80Y=
+		WVlvz+EX8VDzFsR1Kzw/ze3/7ac=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/_internal.cpython-314.pyc</key>
 		<data>
-		b1ZNxe5jr8cg07JD/+g9UbjSr6s=
+		phrHQn8dbGfUEW2z1w4ReZ2RKXM=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/compat.cpython-314.pyc</key>
 		<data>
-		t+TSUf8+J3WZpxmFifUu/vewDxY=
+		4R5YSRYYfC6tcp16Zg89h03nK0c=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/events.cpython-314.pyc</key>
 		<data>
-		IrxcQBpSinnY7wjnDEIqxw8k26w=
+		f2U7kS1hcVx1xpySLBbALRmS96g=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/exceptions.cpython-314.pyc</key>
 		<data>
-		ucsKNIZhn5pOxphFhU92LN3uKRU=
+		Lrcpg9pTf187RMDJfGtwEx7bKao=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/notifications.cpython-314.pyc</key>
 		<data>
-		7vH70ZXvBq9hNpOhMmDJLzctnB0=
+		inRpFx8udAcD8DcUBGsHUkJS80A=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/rumps.cpython-314.pyc</key>
 		<data>
-		iNMfMDEU2bliPReLOKgzETKxKlM=
+		mxZ2gZvJKy/R/eWfUpBlpKiL7SM=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/text_field.cpython-314.pyc</key>
 		<data>
-		ZrDzazz77OZGhAe1afONxztK4aA=
+		O6ju9h7lE8tdwKvfMYitrqqVAag=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/utils.cpython-314.pyc</key>
 		<data>
-		ngWGoPJuZ3t6t1gEHSkPNN9DyKM=
+		iSN+AuSQGfsoWtC05BIUM4MTMAY=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/_internal.py</key>
 		<data>
@@ -798,11 +830,11 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/packages/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		ZEhKYOkdTPKB+NbyBPHUAN3UMXo=
+		guTcC/QvuTCK+6gVm1b2vHriFJw=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/packages/__pycache__/ordereddict.cpython-314.pyc</key>
 		<data>
-		R9M/RaZvdl6htVsfZnN2fG9yTn4=
+		keF7m8f77vw3hXChVO2LgTpu6BU=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/packages/ordereddict.py</key>
 		<data>
@@ -822,7 +854,7 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python314.zip</key>
 		<data>
-		GJNE0lG1L99deTIXOeNvWK16wYY=
+		fk9pkjfN8rJvTp84sVaX1Se+zDc=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/menubar-icon-running.png</key>
 		<data>
@@ -838,7 +870,7 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/menubar.py</key>
 		<data>
-		5cE9z6OfEcET1eG/yov7ILvWET0=
+		en0nLFBMTh/3E2L8DgK3TvkpEj0=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/onion-forward.php</key>
 		<data>
@@ -846,19 +878,23 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/openssl.ca/cert.pem</key>
 		<data>
-		tH1+GWAeqT2B3R+tL94pFlV/Kwc=
+		T6jXY5cP8MLtxFuPH993uGlY+P0=
+		</data>
+		<key>Resources/MenubarApp/Contents/Resources/openssl.ca/certs/.keepme</key>
+		<data>
+		2jmj7l5rSw0yVb/vlWAYkK/YBwk=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/site.pyc</key>
 		<data>
-		04ZkAAOIzEwzEyBo3YMjT4YP658=
+		QSRsFLeWfmRge4CAjLeXA6gpGOg=
 		</data>
 		<key>Resources/MenubarApp/Contents/Resources/zlib.cpython-314-darwin.so</key>
 		<data>
-		BdhmrGhenhwI6K6lTqCOtn9nzx0=
+		83nfpoucUZPXzzG4hZ57Zd+S+9Q=
 		</data>
 		<key>Resources/MenubarApp/Contents/_CodeSignature/CodeResources</key>
 		<data>
-		u3TwXEDclWUeWJLABpd+JhY8e14=
+		q+aYVk9eUXEm4vq69aIJQAtbiKo=
 		</data>
 		<key>Resources/app-icon-source.png</key>
 		<data>
@@ -902,35 +938,27 @@
 		</data>
 		<key>Resources/docker/docker-compose.yml</key>
 		<data>
-		78ePOnn9KyUELh7/YCavCLXCEes=
+		IWNPzUsDOa9poArKAbfZm/8UzEc=
 		</data>
 		<key>Resources/docker/tor/Dockerfile</key>
 		<data>
 		YytBig+VZR53FZwKOAbR6rawR08=
 		</data>
-		<key>Resources/docker/tor/__pycache__/key-convert.cpython-314.pyc</key>
-		<data>
-		vs650z5RirOng5WUTCQoYa6YwYU=
-		</data>
 		<key>Resources/docker/tor/__pycache__/onion_auth.cpython-314.pyc</key>
 		<data>
-		sp/krE+FcXGDiqhw3VaDKTZZ89k=
-		</data>
-		<key>Resources/docker/tor/__pycache__/onionheaven-heartbeat.cpython-314.pyc</key>
-		<data>
-		ZH95K0T3vrqVEKvMlVBJ/545lME=
+		tgLXJnrJ3ldvL1Du+5AeLIkemZA=
 		</data>
 		<key>Resources/docker/tor/__pycache__/onionheaven-server.cpython-314.pyc</key>
 		<data>
-		TRRqKchfrqYq8Htk1isoknLxtTU=
+		DifP5Nm4KOvmlnLNIDmrSxNQft4=
 		</data>
 		<key>Resources/docker/tor/__pycache__/onionheaven-takeover-worker.cpython-314.pyc</key>
 		<data>
-		JAV4ubVDE8qzxV5R5x9Yf94vOq8=
+		02AMVb8n5GVZ06vUeszwmUh+Gis=
 		</data>
 		<key>Resources/docker/tor/__pycache__/onionheaven_common.cpython-314.pyc</key>
 		<data>
-		niGoGvpsq+u2kM2jC5R1T1XPnXc=
+		Tc0qbQK4vYwL3unCnbnjSsJzJM8=
 		</data>
 		<key>Resources/docker/tor/arti-onionheaven.toml</key>
 		<data>
@@ -970,11 +998,39 @@
 		</data>
 		<key>Resources/docker/tor/onionheaven-server.py</key>
 		<data>
-		mvifovjYyVlysd/tx1p4UFNnknU=
+		+BCptuv5AZ0wHlNLb6rFEpO/PUc=
+		</data>
+		<key>Resources/docker/tor/onionheaven-stress-results/metrics.jsonl</key>
+		<data>
+		a+/mZfcqi4SMW5q4GcjuesVNpfw=
+		</data>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-0-arti.toml</key>
+		<data>
+		1dtP0WOm3xjMPovINzA5T5jX8cE=
+		</data>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-0-start.sh</key>
+		<data>
+		sQKCNZJFzzHXdlFADFDVpOlL/lo=
+		</data>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-1-arti.toml</key>
+		<data>
+		darQqBaQBhcQIAjwDgOvLeAXY4E=
+		</data>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-1-start.sh</key>
+		<data>
+		0FcOSeoOab6I2Dil9G3ON18+e+I=
+		</data>
+		<key>Resources/docker/tor/onionheaven-stress-results/worker-0-info.json</key>
+		<data>
+		xADNy+0hhfcTnIXbaXD4M539KnE=
+		</data>
+		<key>Resources/docker/tor/onionheaven-stress-results/worker-1-info.json</key>
+		<data>
+		6wTJAbKSxmcL3nQtJAGaD4zhT7E=
 		</data>
 		<key>Resources/docker/tor/onionheaven-takeover-worker.py</key>
 		<data>
-		429wovYjGtWu+VEToZCzId5ayCg=
+		nA7/PVjRt0wm6YI0IBlyNiIEB5I=
 		</data>
 		<key>Resources/docker/tor/onionheaven-tor-manager.sh</key>
 		<data>
@@ -1026,7 +1082,7 @@
 		</data>
 		<key>Resources/plugins/onionpress-settings.php</key>
 		<data>
-		b8jYVv/fR5DcsW6JFUh8mkqqpSc=
+		RM/ROEmmMUmeDY7zjPmca2V+QXM=
 		</data>
 		<key>Resources/plugins/onionpress-status.php</key>
 		<data>
@@ -1039,10 +1095,6 @@
 		<key>Resources/plugins/onionpress-wayback-archive.php</key>
 		<data>
 		2keKSpLRR9u1JDFjNVUPTZqdSv4=
-		</data>
-		<key>Resources/scripts/__pycache__/menubar.cpython-314.pyc</key>
-		<data>
-		sKJH8rd6iiw7N8KmBSQyZDCSSmU=
 		</data>
 		<key>Resources/scripts/activate_plugin.sh</key>
 		<data>
@@ -1062,7 +1114,7 @@
 		</data>
 		<key>Resources/scripts/key_manager.py</key>
 		<data>
-		x8Gom/6jN26WNZZgYpz3T7R0ke8=
+		uau2EwxJ68zRe7ViWjEL+n58Cxk=
 		</data>
 		<key>Resources/scripts/menubar.py</key>
 		<data>
@@ -1487,10 +1539,10 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			GZU7EVthodXnuODX89AH1XW+h5o=
+			GHNlGk1coWYTRStzNXvUEtYgenU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"19953b115b61a1d5e7b8e0d7f3d007d575be879a"</string>
+			<string>cdhash H"1873651a4d5ca16613452b73357bd412d6207a75"</string>
 		</dict>
 		<key>MacOS/onionpress-cli</key>
 		<dict>
@@ -1531,35 +1583,35 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			EupAhKyB0BP6p9eANLuy/1HuDZSiQS8e5jL635t9tbo=
+			MaN0gHxQcjG4OKePX3fZ8hKwvR5yDWjGVOIoUXa/oJs=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/Resources/Info.plist</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			rcX+jjlsIHhKMcTkgB5Mvs7wWury7YxOxDjSSIBnNWY=
+			qlGK2eeBvYbOsrG+Xdok09HuJkcQVIPvWg58qI4AW1E=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/_CodeSignature/CodeResources</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			zwLPfVxS1dn8Po6EfZZUOzHTdOMl57aEsXD8k0fCym4=
+			C6vUBLI2ROGAf9YNwfMw6/pSVw048hI6AxPT/DdOqK4=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/include/python3.14/pyconfig.h</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			bjRONnPPPKUV1kC/Pmo8Bai5qEMJVsZu7eNux+RThAo=
+			6HW1RcXWWpWY8rP0qMLBqN+4H8e6rOJazCKq+vnitCE=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/3.14/lib/python3.14/config-3.14-darwin/Makefile</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			EhVaAHG+UZfhAl1nshr14tSc7JDkc4BPp+8l5taTfG4=
+			0YcAfYYdFINE/5WwGhsPAVGFMXyz+kiOSIOX5jBB904=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/Python.framework/Versions/Current</key>
@@ -1571,21 +1623,40 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			NcixZerGYFfhg0GUgdByHB7V1eqZyKHxg717Ds61qJs=
+			/UWzbOEVFCnlHg0kobq1u3EOxqLm0DBuF1BFiA5ZIPE=
 			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Frameworks/liblzma.5.dylib</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			HYvIsTPY8AgLv9KEOizeVevKEwtujGS71zBclNlqRKQ=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Frameworks/libmpdec.4.0.1.dylib</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			guU9Eu9+xNq5dXp2c0mUD17FANbg8sSUmAUx56QHSJY=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Frameworks/libmpdec.4.dylib</key>
+		<dict>
+			<key>symlink</key>
+			<string>libmpdec.4.0.1.dylib</string>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/libssl.3.dylib</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			9CWHX+VUXstkkJoKDaGSk4k3+27Ai563IiLRBTT5a2E=
+			TKiHPRLPEN98qkJCFOqK+HjiwhBEqLkop7bY3Ige4i4=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/libzstd.1.5.7.dylib</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			DSQuQJGh6XEdBgduwYuUenbz+XzgELb+oDRtQ3KdYxE=
+			SdX18Iy6kDcsY5OxfQTskAaSKz+jAWAtvZaQpLplgiI=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Frameworks/libzstd.1.dylib</key>
@@ -1597,21 +1668,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			ukjqVrXjOgiXupGbueC5Jk3C82/Hb9m8YYQm2OI6xW8=
+			3v/RVYaPSoDqRVxaLUAvhNVfC4aoq0X5/Cr8sxW9hvw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/MacOS/OnionPress</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			WFKd8ewUSrWZW1VtVXiu5DbQz85nLI1ANBEEZb4qMGM=
+			bMN0JKOfmvcQuxmXBpc9LPXeJH1kqk0WhXH7i3/p6Fc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/MacOS/python</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			aGtO+Z5eRqGtLSVGAJGdjRiBQTo0RSUIIA6hVlaJWNk=
+			5c2GgJAKgMsiwseyjBOV3V8OmUYvWqPyn+yQ3jK2GqM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/PkgInfo</key>
@@ -1632,7 +1703,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			9+0R51fOzvSH/lNiLdDF3mrUhe+knt0DfkFdsCjhyL0=
+			ubzbs0tp1qpwG2XUzoOFdhd911yr8/rQZLXagAJBgII=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/__error__.sh</key>
@@ -1646,7 +1717,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			niG+jtUFPi5Mm9YbIZfyyYiMtJIX0q3UDkzbdUmS3qk=
+			2mW8tHDdpK+2+zarMKOkzsSKiPIAzRIF3hBKhwYeiyY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/app-icon.png</key>
@@ -1674,7 +1745,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			bjRONnPPPKUV1kC/Pmo8Bai5qEMJVsZu7eNux+RThAo=
+			6HW1RcXWWpWY8rP0qMLBqN+4H8e6rOJazCKq+vnitCE=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/_AppKit.cpython-314-darwin.so</key>
@@ -1695,21 +1766,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			4qrDRNdeHqJrU6tct0Ozx+FSifseqGh8Gfj/QKXtOdo=
+			WjLZl6gKMHqa3dbYvfleW8+ZP3Qf+Xf4rNANaIqDAYo=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/__pycache__/_metadata.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			ry/jtlwu+1j4uFjhW+dDbtTazcHm7LKw35EXDvGwB0o=
+			LUvtQdzxpFfBW18tjfr34IFuMexmpQiU8gN8mEhnLB4=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/__pycache__/_nsapp.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			d5pWFftfP7d0z/WbqupQ0YRuABxW0PhDC92WX7qyyi4=
+			SSR4QG19RHoggJu2fyEVpNJeW9TISKwgBPYHVjok9i8=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/AppKit/_inlines.cpython-314-darwin.so</key>
@@ -1737,91 +1808,28 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			TXlBGrEDwwcpCzCX2YfD1Dz7/nlgD6UEqvlTcmoX1lw=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/__init__.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			+LFY8N5NkEVXtce2gyKVvF8iWQ1Lcc8X6BXvILcTTr4=
+			d90rWQVlLR4ZYANLzkYyCpAIkRFtjBJ4w7J7z60ugJw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/__init__.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			+LFY8N5NkEVXtce2gyKVvF8iWQ1Lcc8X6BXvILcTTr4=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_aix.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			e+sGqhE34QuA15l4dvg2S+d+mwmeEazFp0AgfgmM94g=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_aix.cpython-314.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			e+sGqhE34QuA15l4dvg2S+d+mwmeEazFp0AgfgmM94g=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_endian.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			e+jiI3OAMelAAywnxvXJebj7SqLdlj2FZD6OPfny9es=
+			QC7hx+JVwpiyHajkcbuaaLODj7ixu7E0/Cj93nnTWIw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_endian.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			e+jiI3OAMelAAywnxvXJebj7SqLdlj2FZD6OPfny9es=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_layout.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			9vExSHtMF+hjU9O0XmIExjGyvvW/dMOb7UCgKo3E790=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/_layout.cpython-314.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			JKTnIJSu1XQH5MMynJsu9vSqqC4/3iTgxVMHo5msyDU=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/util.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			ySJFKyvzvY7K4pl+hr07HIIZkZTxMIlFd84VV2jgagk=
+			kwpN2DDCRGAYBr68lRR52fhIL+Ign5amctN2E79QNiU=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/util.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			ySJFKyvzvY7K4pl+hr07HIIZkZTxMIlFd84VV2jgagk=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/wintypes.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			3nEWGvG3mJoYCfJtPQTizvaj3+F11ml8DqZREXiqRd4=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/__pycache__/wintypes.cpython-314.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			3nEWGvG3mJoYCfJtPQTizvaj3+F11ml8DqZREXiqRd4=
+			ggudyGy2t4xBsk4axpItmN6kwL3M02RmhR0HvgiENEE=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/_aix.py</key>
@@ -1859,67 +1867,39 @@
 			HnfAHuyPFn7RC3VPFTwMdDyOUZaunIHf/AjxKatW2/0=
 			</data>
 		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/__init__.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			NzTOQKPa7cq0t2p9f0v8Gd+JmXyHmLXdWkzpJW4EogE=
-			</data>
-		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/__init__.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			NzTOQKPa7cq0t2p9f0v8Gd+JmXyHmLXdWkzpJW4EogE=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dyld.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			z0cRfPATigr6O7p8ttScV9fplxp9PJlRfrUgcj8UKQA=
+			XFv1QG2oSPiM5FTyJoQ53iviIUSSivNleKkvWbk7IJI=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dyld.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			z0cRfPATigr6O7p8ttScV9fplxp9PJlRfrUgcj8UKQA=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dylib.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			7NY9sp5GqSG2AGGeI5pystg4cbh9doNEB44/rBIWbDA=
+			3d7vGexXUzzxAWGGSWfey8N10lH3CgTMfOkWQfCUuYM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/dylib.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			7NY9sp5GqSG2AGGeI5pystg4cbh9doNEB44/rBIWbDA=
-			</data>
-		</dict>
-		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/framework.cpython-314.opt-1.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			ggodgZB103WPXwLMevMj0KkDPwgIJ0u+6x5GWomhyLs=
+			Oeg5MaV7I1UmGz/rMcJUPEMZMVAtWf2p1LEJRLj9Eyc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/__pycache__/framework.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			ggodgZB103WPXwLMevMj0KkDPwgIJ0u+6x5GWomhyLs=
+			f+Lh0dc06VIa0JJJztl3Gl5MiTpiYSMjtQ9tycOnkpY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/dyld.py</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			6457F/FTO8PobiPoaV96Xkt6me8bFXXRCvVPOJFhtlU=
+			dpbhxEsiUY4/7RFA/sp6PZQW2l96lDcshd7ST+jV64w=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/ctypes/macholib/dylib.py</key>
@@ -1996,350 +1976,350 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			zhG8Fll3pRj0kXkt/F1szvqB7Sbdll9Pa27zipTCfBU=
+			bjjN/clxtb0KuwdcncqCIWVWc1XedKRyxtzVZaqfGRE=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_bisect.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			cJu87az9A7xoF9a7Q5+f9ZbbybA1UFXWdibY9+kQBVo=
+			VVPfbZTjB7cy773+qdcaQpXMxhn9OgK7AbzQWHNyAhw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_blake2.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			JDfyZWy2Xqk1wzR6iHn5bfsiej+u+8kuKi3u8ZbnUnU=
+			tIdran3UoGsdm+4Hxsmkc+y6+1n5pOTghrnIbRe6xJc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_bz2.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			oFnWIOHVvFloBVRwTzlkQAu5JOgcI0DxeRzZTjBZQ4M=
+			U423SQoI4pCgpOCm4TJza964J8B9lWEDVPZhfwwhy4Y=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_cn.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			g4PmmMLtcvHzDCF4LRXk8BAFB/Zn3xwDbT062se4WoQ=
+			KfomuCQO2Qr6wX53bFifISRvb5WHoL0LvT0TOva1EP8=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_hk.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			jNfdEBbCj5O0LmQEKFOdGvMIZvXxLgI8lV0wVzKU8eE=
+			xPbHEUcvBi55gHJ1Z+z2BfTCVybjgP35oJm8n8LOvE0=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_iso2022.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			vElqM99GV0EgR1f/XO0i8ipXApjioSZzVUE3JW4E8AI=
+			uiS+Sz1I9sw3cBx762jrLU8ueqsROdm5bdo9zpMs4uE=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_jp.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			9ZapFGKhy3x6IAyIeo0FbFUynNlQigYCZgu8hDU/LVY=
+			hwq3jJa/DMGY1SFhxjVjMY/ZNKBKATLsPeJj+oqMluI=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_kr.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			T6MoUd5yrZQVRfdobBSIFm30UdCvmjtO46Nf3pwoK5Q=
+			Hb5iW1IVlFQiYn+3o9qet7KFIMA31Ecjo3y7vqO3UKQ=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_codecs_tw.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			5jAsgj1qUQoNIZ4oMjnxDZAsCWBdoU6HTNy86hsL2m0=
+			CRSXIUg+PJovsG3jZGsQPtMxKoSd4ynXuFN6BIucQ4o=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_csv.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			/XwMIlw23vLLOnhkRDenkbIkMHNSAMjhjlKJ6syEc/Y=
+			jQXUhq0vKKXs3SRomQhOXhCs8rCT/ik9tudIMd2XRAk=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_ctypes.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Tv7yJMaI4uyoJ/t36qOk+CGso3qwFHKw41njgdYHkfk=
+			rdyRYBAC1XaJlDYLstYm7w4kEHYbR9eX60aK21Ccqk0=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_decimal.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			HY3EqPz7GTCU0+YWkE4d/c9yNMNq4+CXBvZ7LYyuRoI=
+			USqf53pmjI6qTJ7ja/20/3RBfZMyLQ5oGGd7PzLmZgY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_elementtree.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			TlK/uqB0w5njRiGxvMal5X8dPkG3KIy8zBbNMhcSA0c=
+			6ayd2vnqiG3XKFMuY5zNscSv5Nc9EaUCcH7XhRc/PzU=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_hashlib.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			eotocgIzkpFulMay/RWSIO35f1Ce+ds+t+VmFkFipfU=
+			ol/OVFXPmVkjmBp/dVzc1MMaUDqvzSDg1G9zt5YPn5g=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_heapq.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			A2Ywor9o35zoPLvT+eypl4FczWAnCV6gFydmgZHjJfA=
+			SG116ShrjtRafOA4gh74pbhtIW5T6Aj/19bdK2xGY0Q=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_hmac.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			jr1ASwZnR5QGCA2yUm3Uc2Q2wz90GksndGJHvZHPHA4=
+			Nc/Khcs2x1HOi+F5SllQlGM5ov0cS8z56l8EoCARV98=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_interpqueues.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			AwFbc/EHOWJbbK6le16Qzin2SDBpeTZjXGtmJyaBdTM=
+			LLGZMyZ70Jh+Es7sPz2SVO3k9hfjrIfUgJLJptIg3XM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_interpreters.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			eiiA89AwXsy/Gl8C5UmEbNlyStAXySfnRXgtEUbMvHI=
+			GmyDErtVMHqOmbnvVLCtL6lFLf25W8Nt5MVA/cEg3+s=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_json.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Hhcij2TMJBLl+mbmhS9TT/yTe94FHnNBfZJaxGafDSs=
+			+R1lSs1K8M63+vvOiKLqdkuSiRe/w/k0apRTRB1YHhk=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_lzma.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			sTUGCK/09+dsRCO26eVfL96uPASuX/+cpKDKLt4OF58=
+			GG+BbyuA9ozgMaEsN0NnmC9MvB2jya5A/d/FZGlknTE=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_md5.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			koHLSEig9s7RzYccT+3lVGFtet31P1Rcu8GpEVvPkhk=
+			s8vC6gLZsT040XRUcr39K7VKvHjY1aimVwR1o4nUY1c=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_multibytecodec.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			soBTdP1UH7hkfC8jX74BHhFA+u9IFWktAyxGEfAy9m4=
+			K9rlGKK6FSPbUxu9dAFBp05uv2MuUBW/m0FqFcOff1Y=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_multiprocessing.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			ypi9TntsO6C4OJsMsU8DH1Ic7vQBU2GIyXygvj93NVE=
+			Codrg8dYs2u7d7MWwt0l6x4ALU+DcFqDmuu09U3n8rQ=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_pickle.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			kCLySwR6jSEYaFllYGVU0DSlYLuoLXafwg21/d8/1lo=
+			tDOGSzqYTOExORkc8DtIOYP9KxDubh+4eBkcpDBCU2A=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_posixshmem.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Z7lTXkc2sLPjTfUHDzuKYrfhXokvjDRYOjQf85Y5CV0=
+			f7s/7cSMzJRZE+r8BdsZ72Xg96wwuRVMcMoDDOhzqM0=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_posixsubprocess.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			UxaAxCjrxY4xyOk9cZbYxNLQ/Vg7VdMVQMRHl563akU=
+			8cuDf/rMkfbYSnz7Ug6EGoW5gk1s9/FaRiJ/kDf1yrc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_queue.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			muNLqKHBVupqC8TqnNXjwT/zpK21VVo63NisFOJsTJY=
+			FZnJWA1oXDoXxKgGWT9XDNEIwq8NREjsp2njQXmnqJc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_random.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			qpBEpNDV+fKub1UygJvjyerVSunZuKbTk2zfM+f3XdQ=
+			8oIrIyigz/YB1iuo716MjkH9DmQZ7F4n+yHRMu5QQ3E=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_scproxy.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			35Zuc6AMxeIYLZ7YDShm95FghSKvz58ppaJZHYGm0g8=
+			uQ3Tp7lPVf7HPiUy/rNp2JxA0XF9TAPTOgWx8L/WoqQ=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_sha1.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			XziHhXDq8mAAm0FI7lkRRWRKr2B6+BIbbIe1wkNLoxU=
+			YpR4G87ndVhKWTMQy5X7Mku6NF+VThSD6xEGTSgax5I=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_sha2.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			AZNRgj0R3WKJzlfJZ9JY4wSl28OPs11SwSHD9bgc1PY=
+			H1sicE9QAcDjJ10w7JGYakOM+Ui1mJCkq84GDpNVFpA=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_sha3.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			0BTKKk/jdejoizDAPFISY/TvP49lmdsONODwm5gglTY=
+			se3B8OMX4oLx16KzOBj316HmiCSbXx7KCvrc8xO4XJw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_socket.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			JjIgN86TdMBxzRV96VQa8/nfdyqP3M1VQlAT7PKMlwU=
+			dpXW1/BH+14HST48o8MncxtqH/k+Gybkcy8hD84NVNY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_ssl.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			1ryeXaZh745mtPGMMQIKMITea0lG7Tj7BTMLEian8Ig=
+			CFvnEVbzwMl/ezeIKLnrrUObZ3uC78RfvikNRO7ugVY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_statistics.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			IlD8qL0/tp478GGVhtSRVoshZy3FWu0tp+V78FpqrbY=
+			8g9kjAFIGzmMVHrSxIq/MVJjki5VCKtjuHo4UNqjNNA=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_struct.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			OOzXRFG/thguNVOoonbYPepYTIOCRDUlQgOorgMK2Bg=
+			RTq4lZcRLOQ1q9dG4RXUJW/r5KuIBcMj20w7cnK91ek=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/_zstd.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			vlMo6GvM2tYIkfLJmxuEcaPU62JkJAzUc4pLD417Z6g=
+			LYIgqfwdqUDeR0s5LxwxRyLeR+zjbcB0adW6lH878e4=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/array.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			1of/2HUu/oxxKKu869Uc/ctHlKBA1/yCrBkeOAOLAtQ=
+			NEmUIlCDFCQ1YtzAWklpBFp4PLnFZM4Kxhj1m82qq6M=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/binascii.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Bm2M9N8DbdyM4YP4RKnO1LErbjFr/EtFuqajiHkYXJg=
+			EAS9f4wj2aQAaJkKdP9G5coC2qPMM0gn8uIyju+oOnY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/fcntl.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			7BQB3HbehqCQL5QyyAAicNoyGZJZGn2mG+eJ66SipC4=
+			tc/4codbvVQBmOwWaWs37dJ8hUZELwhM6LHb9XRGCaw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/grp.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			RuZ+d/kAnrtznKS03sW/OHhBRAAqEuJRZwMHBhAp8XM=
+			zu9frmcgxL4SdhXJLgQSwvFeRlvzSz0R7y311vjx0Jg=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/math.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			R2+5NNUMtb6Maba0DWBibP8xoBlguY9ukBum2W2RB2A=
+			MICzkTB6hfBBhbuXbMDEITqpU07e+Z7vT8c475PlLG4=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/mmap.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			45FXA4i+5uXqhD8RifT8JTTyt7oE0FiRp2uC4zi8EtU=
+			4WFn99yK5d7wGOIdwqovvVXlRwtQJ2HJ17nj8C+u/0w=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/pyexpat.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			48GSAEgt/VyK3kA4mEj/Cst/Mck754ekHOMV1eXfGHk=
+			B4QPO9TEyp5d6PDxCXByLrHwxZNuXlnFXGttsY4ilLw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/resource.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			+nBb4HPMOGBgegXYwYUQRiV2mFlUxRSA48OUf0JQE2Y=
+			SR7y3bROINfA2jYXc08Gv7wf8fZ8Ul5jyWGBazoFo7A=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/select.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			iIYbZuJdie/oNesLnByF+v62yTf2KWd3wQr8Pip2dLg=
+			70zYNMUlzLO4VhMdvRHSgrVvHWJdjli9pu86/V3ONOM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/termios.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			kEeWeZgIQaRduAP5ssbosgGDDVaDebktmfotmxHzlKs=
+			IODl5l8kU0ZrmBlpYBTH+BazHDJH0ByBF9VbwspO5fU=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/unicodedata.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			ks+xU+vFo1nHdxC+MrIAIrFQTmJUWYukrSs/KNxYVrA=
+			wCmQ1iWdhE9taSRcUbyhuSr9ppzXM/Vf4fQLHCe58L8=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/lib-dynload/zlib.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Ne+uPE0wQqSCHMriFvRuOoNT2dpf0IBCiGg6bC13eIU=
+			1lOZoNf0+6NUZ8MukimaSWkPGl241UnJLSVHYrfwfAQ=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__init__.py</key>
@@ -2353,224 +2333,224 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			6WpsPLpp2oJ+BrByeXpGmdtxQOPFHrJ83eLB8PCX6Sk=
+			X/q7ZasT6qA2QC1dk1q5TRQfzHr6AchUuT83/bXwNrw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_bridges.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			OXThR0Kcun4wNHJzwLEzjlmgroiELnxH0rtSkhShOuw=
+			FV0Um8cDMdmQoR/FUiTqq/c5MG1icZCgbNRG3eRGT7M=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_bridgesupport.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			UWx+7whJDSSovacF/nsgFODztQzp7h5B7rIdOmgd/xQ=
+			dUaKR9xZHa615RfboiW2O1Z9z5unlAPm12NlrMzET+w=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_callable_docstr.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			B1VZ01DRZsEPK2mlZr1k6zhMLeXN9esgasiNHwotOkM=
+			I3mPipMeD6lLUao5pv1ocKQhjqLoqroFU6V561SkmCY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_category.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			7IbvJ2RJYP7ATLWU9sm+iy4d2hbQy4WBdFGTD3l6GzI=
+			VEQySgnoG60GZ2h1CYdHE9P/CU82ZhdYBxfR62zhtbc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_compat.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			xKNpBFDD8QyRX4EEz1NqZH8x0mas29uYeRkbMND6onk=
+			FaI8sV7E33iX/B96we0fVvRRtQCUJ+vYQ0ZABsgDBqc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_context.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			UXwjPPWv/y3j/4D01MNLK96C03QzAPfWwtyCix/DUG4=
+			Efo9McxgGjdN+K/yQi3AniW8oPaNFH8ZwG+m4OaKMlg=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			kickp123qVZbA5SsDOlExwTw89AzNCaNRWQuGlsardA=
+			hmNweROPD0JArQqXFGHYQSLZPG3mKXEvfBrs3WdB9eI=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_mapping.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			0YNEmMelCkAS8dgsXi1341Oxp/PVchcxVn5V0bC4eUY=
+			4qbcInIhrxRYx+qMJD/ajx3wMiR033A6dW3QXgbo47E=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsarray.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			8yZgzORLUx8lzlQPHlrnhQJo3Bp20nDw4yuKTTIGffk=
+			JOb11EbkO9AYUrGYE9PBy/L9ltV36CL7hkZcR03oM1I=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsdata.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			JxTn3y8HvD+xMLr7YAOAkcFnRiGlwJjtcG50xM/SggE=
+			5mNMhdKd6BbxvJYS2sBdtpquec5DtcICMUQoDtvFSTU=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsdecimal.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			81lKH+hYmYmDlfktsp8f5TdcihzKcvzIvVQDmY4abWs=
+			rYhNRsgZes4HiNMm5pxSBw5ZcXfHtP1edpJSBm6gIi8=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsdictionary.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			kNx6v8ATmPM0hKWMmguo19v6Z9QED1AxP4lMqVmAeNc=
+			j8PthRvxQMtvN+nZnKgTyYvx1z1xa1bX8TDVGqzbsGM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsobject.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			QplKvzqjPuLNyrLP9W3//chEpbRUzoNMGCRllvqYXCU=
+			stX1WkOlmET+XFMSvC4xww8LkBXNRREO+OiF1jKso6I=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsset.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			JqfmOM+rALlnerHCVxZ0A1UyRYtqagwnykQHCzN6OEg=
+			266AuOYky5sANxGo7VECyC/8QfNs1kD6GLPQOE5CraA=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_nsstring.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			vyY2ll2cqnyPcJ71v9SaGFiVW3cyE0Rl/PnkFg9LDsM=
+			YGFaYs3JWl6tpl00x65BuCqeOVDxJlbq/p9Ekig47Cs=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_convenience_sequence.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Am9EjDNzVwqYVk7/qISuMMwqVkoaD8ROg9m/7b10Z5A=
+			d8pJsI5V7AyJTL1eKFyYkR8xHrQ/hbcJ1qLvjEptX3M=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_descriptors.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			dSgyTHvZMXSp3UR9Fow18BwF8vXLrhxg2fIMwMmFZj0=
+			TtxhmnYYYt5gQ23yIVtzCBBYoNVthlLG3bjaDkC0fm4=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_dyld.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			aT/a4bzzflY06X7W4T6swddAPucTSylV5YQSLKneAdM=
+			+Nv5fZ3XW0qv6tSu1bWtqx5fcBF+pCOlWr/u3vOX5oQ=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_framework.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			ox0hXNh8mLsXuTLiay32zOcK+ygUHV4KBEX6FEtFsto=
+			mJZkN/Div5sIqTKFZot5/UBR1rHIxzPVsjK4Z1XgklA=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_informal_protocol.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Aq2LCE/GfA6nMOfgVX+305OtfzjjhDclVkYdyqkHHfo=
+			1m6KaNSdcHLWtXOhn9BR+BTytInERSMH7MNJHpeQMuo=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_lazyimport.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			EMh6jfMFa5LKrjqj6wFPoIYqZ+t9mBHo/yUINFRR2/c=
+			9GOS0nvsloq5N/RoKS7Wiem0wTvAri5c6bel+DeP+ME=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_locking.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			VMe1MdqZtx/XfbjPHv0lNFD1pd8vcWnXRZ/DvK5d4qY=
+			caZne1FCw/wSsqpyW0EWloujeU3PVN8Kx97iOepYelc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_new.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			UHyLAF57LntqlnwLAwBuOi2Z41NAKCtsWQLFWZsKJVY=
+			tWMxRqbA4KDH43qvOLiVx2bBwBJtrU4nk8/Hd6tKzdA=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_properties.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			ya2O///3lpDs7VF2TRTPkPRbnhDjyrYGIOy40lyjOMA=
+			ki+QfdwGbukquDA5P8JWswom36WBwW73TlJ6pN2CgRo=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_protocols.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			mq/RItdeUA5IMsbgkE77TEm/sGBDshQnbe9W0e1xz5Q=
+			L/FUt/6WrSB758sxU8wQCCkKKjhan0cRLIiB+80upcw=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_pycoder.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			3qtkGzB4xQNaplhKiQeOSwp04z74mGDY16t8G2QzbEk=
+			ZFdjc1TSreMutkcjnIhOVvheBxnVgJcYZezw+oaZOeg=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_pythonify.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			KeEw5To3T4JPKY3UJMJC38o830JwWwnZD3Idh3WQQk8=
+			KWefiTEXEkjYp7UhEafTEb7Ro4v2idDw+wF7r1mietY=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_structtype.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			g6fNUn0fsA9jC+vhUsZuJH5qB/875I5aMdKAv7aGavk=
+			anX5TGN/sMzkS1m2+ETKsIxAh3ipUKDyTqtb+YNq6fs=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_transform.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			UK7I7+Mlc3IvmW+QTx8EiNA/YnVNJKSQE+MZeDRZPNI=
+			ayFIkdXgJ0ukp0tzN7TM455MKjCmgA2VA/sWAESO3QA=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/_types.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			i4TsWNEArV9Mb7tDRzLgrNq+GwLI0boRWn6tVeYvDgM=
+			/BjKGcLlNYVIXqX/WxokwQY87HtI1zVhiD+/mj3GFec=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/__pycache__/simd.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Pr3uOG7WDRpBv4Bbk6RUuL4BfH1USsGvQx5BrNxvCgE=
+			gLKjFw+LgZvdmmE1a27Y9HHNjU+ZgfqRaNd5CDyCNPo=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/objc/_bridges.py</key>
@@ -2804,6 +2784,139 @@
 			VHGh9nqe08jiz+kAjzlyRGPiZJXFWJNCfPjPl3zob6w=
 			</data>
 		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__init__.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			CpeCc4Ay20MGgpMxB5c0DU6zog+69Pq3O6OTcgAEY94=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__main__.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			CDwFxqXJWA39n5OwSiLwpFSGXx1/yuVaGuku1nwhpkE=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/__init__.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			szn9UrWyRSoSY0/TeQCOXTo+aKQ8hkvg6G2IQevQD/g=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/cli.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ssSm+FA7bE016iMSinKPgirWC/hTE5U+9QJmp+UOsgQ=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/colima.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			AD03EaE0PdV3RSD4senPOAa4kOVcKt3Eqzji0g+4EeU=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/config.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ywz8rpDQ0QRbS7aAxbQkD7So8Nttr6G5osGGS/77R+U=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/containers.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			bS7a1JesDd4KQ6ROZASN0ZwXpeKxEPrNnqGdKBwgmi8=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/docker.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			UIOAxWWxhOtk/hv8jnULjaZTLshJm5WG/xz9i9Jda6A=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/health.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			vdBTcOUOkfBKKLtLB2Eq6ZHaEAV/Fj8mHGEIfnouFg4=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/platform.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			rxS8GEVXz9YTTrD5Y1TW6Ob7LnNXuVp1kj+goFkHVvA=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/__pycache__/tor.cpython-314.pyc</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			b0YwTUazxnTo5OmhC2XcF99A5JgFJ58Xvsmo8QuxiCI=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/cli.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			NfQbB+6oFKhEfeGtJ/zBeSWh4NbTxwkHAiyum/ZvSWY=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/colima.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			J6wkfP2KNdIq2OQRi2nfQ5Ry534W3OHMTNoB9Gys4aI=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/config.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			rEeSw+88IKy4CHSvGh7Suf+qj1XU8q5itY9yclGx264=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/containers.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			TSnM/NATfTU2OWdg/aMU5kPtRUZ3fhE5AY4f5urtdu4=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/docker.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			4FNJLDwt7+w0HUbO9JkvuLdYfuDWrfDgWilWBS2BEIc=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/health.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			BU5S+Bm3W9OHmDQFv2U0JldKBT2xGdOeONe7mFzxb0E=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/platform.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			vy/bs/oWzjoXg2sRU4UUzShqK43GhoZ4azczl45w3No=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/onionpress/tor.py</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			OHPvfGU2JuLduZ6sd/zW11IZWEbmm92YWlZZzafwtdU=
+			</data>
+		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__init__.py</key>
 		<dict>
 			<key>hash2</key>
@@ -2815,63 +2928,63 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			3wy/o5rTfh/Ar6PFBlgdpZGDFC2SP/TFzxKL4D9HMZo=
+			5KRVsm1hpw2+I6aAAFVEb4I7d0zxCL26ArCZWDrJuRc=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/_internal.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			eZ99nVDwjuARmfXQyfJhnmHY6fzwbX/JzXBWfVxlKEU=
+			jEJuzUETF0wnoBSs3oijwtlVTpdl0/3DzBAehb3Zi/s=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/compat.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			JVHVpt3OnUGqOUFS+X3IHFc7rGjzmOiR05APOBiUBDU=
+			dBWRu8wK/IWACmkCqexee+iJg4xYoIPZtvI7w3IrtvM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/events.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Cnwvb8eAyBu+hE2DUmCQ+mDml4SOWSYgynYUlCp9srs=
+			JvqRNxcqAd/XO1EHYPxKLaMF0o1LkeH3sZwV7fT4tGg=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/exceptions.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			nYB/g6x/K3/iZeauYeSlsXdbRAcfL6GODIhMVpamN6o=
+			YpWGKAqWrh7zp6W98u2zRh6eam9l51Z4GAveOXlR3lo=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/notifications.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			3Fu26CxZd/R7XiBO13xUZ7/bZhaavWrA//brOTHvR5A=
+			um5ACXNdUyAIWK4HtYruEveFohgoTyYqChwqaimyvOE=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/rumps.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			db73D7uyf0/+DcR4bwRS5kIsY+f0Oj4zSdcp2N+/g4c=
+			vR56u89PnJkgdsVu8dQPJTINj5goEKlQ6b1lMTLJ0ZM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/text_field.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			66XdwgX0P/N00Pv1h/xhzQIp3O7dnzcxB3LSZ1Ok0VI=
+			TSS5dbGjdIo0W0HQzYqBBMgu17z00iDusqgV0BzGClI=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/__pycache__/utils.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			0Xkd1rZrPvQTCBj9UqXpywS6ydTOZs2Udpn5d3AUEA8=
+			rN/oPBamVQY5Oschxx4XSQAwM0o0fzOgirXakerP9JQ=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/_internal.py</key>
@@ -2920,14 +3033,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			eCnLmnkChDrWYKfPl/Wf16AMaOaydJO/t+70fulRZ/w=
+			TqFIP+gNmMyntR+OLoGJUwpgbKwbmzw2g69V/1x3ZCM=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/packages/__pycache__/ordereddict.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			eVwjIl6h6rUPae1cmaGhu3lpQq8ePx1uld1dp0eCk6M=
+			wWV3fAzcRgT52iOreaZoD9PN9SKapphPTQRGg5tJlB4=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/lib/python3.14/rumps/packages/ordereddict.py</key>
@@ -2962,7 +3075,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			uH5oneokZ40Kb4CoUYHarISkioi+Xmu+4OR5ags6eH4=
+			riUS2Qwcr/qO3ixTxKYqERNA0qFgJkOSgTCEZ3RlRZk=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/menubar-icon-running.png</key>
@@ -2990,7 +3103,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			1TMOQt7SutMjTGBsFwiyri9b4hMc5W1teJZRVTznMSQ=
+			WN9SRJ1HS4VmyM1JGH3IH90Lwbe9uSlIZN+DKJPXF98=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/onion-forward.php</key>
@@ -3004,28 +3117,35 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			/JFloSQDJj5+v72te+ej6sD6XTJdPHBGXyjTaQByyig=
+			htttd1TpcGD717gUS4BPW6GU8y9R0Wf8kjn68Pur9F8=
+			</data>
+		</dict>
+		<key>Resources/MenubarApp/Contents/Resources/openssl.ca/certs/.keepme</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/site.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			tyjsp5NFJLHpdyTY11fkaKXQ/EOXIevgR+pdoimdFeQ=
+			uECwezHWoOlqPihap8QiRWXfiCiBKvb7iyWwJsxAP6M=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/Resources/zlib.cpython-314-darwin.so</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			DNYvEKvd05DzwAHDCY3N62aCR/H33TjZcCbSgmUtcSQ=
+			/0WbuJyzxthXsaEAZ5MppKuD7HZbtAp/LGDOEIg13g0=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/_CodeSignature/CodeResources</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			F2s7HwX/sqIiHpFkQ3UbLpn9kQYqC7dJKSgyE91wZMU=
+			Tb1xO4nij2xr2NGrFXwfHPJpPc98kiwbP+60J8lMPsg=
 			</data>
 		</dict>
 		<key>Resources/app-icon-source.png</key>
@@ -3102,7 +3222,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			gA4rs77mkfSPtttdK5sD4Qa4kmMSMOCgbJ3gK9N5Iak=
+			+HFFMXUIks4w2KhA1zbk2uZxWjs52DvXsIc5DqIWuaU=
 			</data>
 		</dict>
 		<key>Resources/docker/tor/Dockerfile</key>
@@ -3112,46 +3232,32 @@
 			/e4rRd/lqF4cbyo8USRvzGYMBDoDa0Xv1nnlsoQB16Q=
 			</data>
 		</dict>
-		<key>Resources/docker/tor/__pycache__/key-convert.cpython-314.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			W8vvoTBGAtTV7Dc6HsbtpGd9XE8kXaDSkGtWEZ//7eA=
-			</data>
-		</dict>
 		<key>Resources/docker/tor/__pycache__/onion_auth.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			75/srHO3SjJSrwFSMXJOzPJhqSpiBIs1DMn+BCfqd74=
-			</data>
-		</dict>
-		<key>Resources/docker/tor/__pycache__/onionheaven-heartbeat.cpython-314.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			CttU6FVpaUuaWmwzpFLXRNdGqgaOpv7Blb2VPzYTrQk=
+			RvaWiId7z0oSNU06nDYvJYJm2wGsP4pVEq955XUkY2U=
 			</data>
 		</dict>
 		<key>Resources/docker/tor/__pycache__/onionheaven-server.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			Cqd/5lgSXAfzC+LgKOe+niFqQQybJo+7FPz0xCgfFkc=
+			dwsFs7EyxVCwJVFBfJWE7WjkHl2UWLA56/RCCnC/SQs=
 			</data>
 		</dict>
 		<key>Resources/docker/tor/__pycache__/onionheaven-takeover-worker.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			dVyFQOy5gy+jm/FNuAebxyLfkn7MYwLKzk0H+EkdVEA=
+			1EwPA+oRydxXDh41YDmNxJu4R9z5RV9HTHGUBWcwqwE=
 			</data>
 		</dict>
 		<key>Resources/docker/tor/__pycache__/onionheaven_common.cpython-314.pyc</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			PEat6zKnaNJjAIGavxbtMblwxqf+z99Vlh7z7NxpcH8=
+			gnAKlM4emlHAhl4bVTm8WkI6QMJjuULxdkY5Qq16NAE=
 			</data>
 		</dict>
 		<key>Resources/docker/tor/arti-onionheaven.toml</key>
@@ -3221,14 +3327,63 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			k6e7eQFQSyaclWeRHBs2clsGcPa7wjabLDN9G8RK6Vc=
+			Vgesf/Q4ywqr9uZ3GSUXMk56AaU82l83RpAfthDlg/4=
+			</data>
+		</dict>
+		<key>Resources/docker/tor/onionheaven-stress-results/metrics.jsonl</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			RLR+9oxt1C4VcCFaJFFW3Kfwe9ceVnhlmwixwVdiTX0=
+			</data>
+		</dict>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-0-arti.toml</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			MsQhGO/n3xG0Ff+ckO4EMA99gWVjFZwIIMDs9yd12LU=
+			</data>
+		</dict>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-0-start.sh</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			MEFR1RBhONjUffr6mAep9qnAHPNjrITSytaUa0ai5fs=
+			</data>
+		</dict>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-1-arti.toml</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			q6CQj/oSKoAacDwaCM5UVKluIciideoAw8+t02vmThA=
+			</data>
+		</dict>
+		<key>Resources/docker/tor/onionheaven-stress-results/stress-worker-1-start.sh</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			FQnHsmXbRKVHyqrlpJz3htYfhiriGxEJkD8UCSn+IyU=
+			</data>
+		</dict>
+		<key>Resources/docker/tor/onionheaven-stress-results/worker-0-info.json</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			wvOV5ehmSZC89rtoGnC8Sn59TrsotsE3Ll9iewBUpL0=
+			</data>
+		</dict>
+		<key>Resources/docker/tor/onionheaven-stress-results/worker-1-info.json</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			wuV99I2gocVdQqAPKPRr31aDVnOUXlKaa7/SyX1iwK8=
 			</data>
 		</dict>
 		<key>Resources/docker/tor/onionheaven-takeover-worker.py</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			b+mccCBg6lQBcnUdnkYbIalYDzEnXfhj5WgUNJMHw4g=
+			b5BKAEkZ93AjX4N3fc+mH0bq6ytzCSpPIZ4dvene4vU=
 			</data>
 		</dict>
 		<key>Resources/docker/tor/onionheaven-tor-manager.sh</key>
@@ -3319,7 +3474,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			kpXgCDfdJdxlGsLehkqQdA0Nwe9bc56nhEUkQ/4EnSo=
+			Ie9mvbiw6aeZPTGg6YxbkRF1ws30+zU865gaobDVJSA=
 			</data>
 		</dict>
 		<key>Resources/plugins/onionpress-status.php</key>
@@ -3341,13 +3496,6 @@
 			<key>hash2</key>
 			<data>
 			hyOlxBI8QzewsKmRkPO02lpzGE3R1Q22CBnpyRf6I0E=
-			</data>
-		</dict>
-		<key>Resources/scripts/__pycache__/menubar.cpython-314.pyc</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			kXYc5DcIIBDEDPGdCUS0Rzvr8CLv9iqPCxijaWcr9jY=
 			</data>
 		</dict>
 		<key>Resources/scripts/activate_plugin.sh</key>
@@ -3382,7 +3530,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			XNRTYFV3xEI1P6hTdvZdvFqU6kKPaiY1eSpY5jESCQs=
+			UY6z48r+997oYwC2dFn4BpjGKwWzkztURdzwTeFkWlQ=
 			</data>
 		</dict>
 		<key>Resources/scripts/menubar.py</key>
