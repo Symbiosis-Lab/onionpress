@@ -1572,16 +1572,32 @@ print(-1)
     fi
 
     local ctr_name="stress-worker-${ctr_idx}"
+
+    # Check the container is reachable — it may be on a remote machine
+    if ! docker_cmd inspect --format='{{.State.Running}}' "$ctr_name" 2>/dev/null | grep -q true; then
+        log "  cure_straggler: container ${ctr_name} not reachable (remote machine?) — skipping ${addr:0:20}..."
+        return 1
+    fi
+
     if [ "$TOR_IMPL" = "tor" ]; then
-        docker_cmd exec "$ctr_name" \
+        local del_out add_out
+        del_out=$(docker_cmd exec "$ctr_name" \
             curl -s -X POST http://127.0.0.1:9000/del_onion \
             -H "Content-Type: application/json" \
-            -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
+            -d "{\"workers\": [${local_idx}]}" 2>&1)
+        if [ $? -ne 0 ]; then
+            log "  cure_straggler: DEL_ONION failed for ${addr:0:20}... (worker-${ctr_idx}/${local_idx}): ${del_out}"
+            return 1
+        fi
         sleep 2
-        docker_cmd exec "$ctr_name" \
+        add_out=$(docker_cmd exec "$ctr_name" \
             curl -s -X POST http://127.0.0.1:9000/add_onion \
             -H "Content-Type: application/json" \
-            -d "{\"workers\": [${local_idx}]}" >/dev/null 2>&1 || true
+            -d "{\"workers\": [${local_idx}]}" 2>&1)
+        if [ $? -ne 0 ]; then
+            log "  cure_straggler: ADD_ONION failed for ${addr:0:20}... (worker-${ctr_idx}/${local_idx}): ${add_out}"
+            return 1
+        fi
     fi
     log "  cure_straggler: rotated intro points for ${addr:0:20}... (worker-${ctr_idx}/${local_idx})"
 }
@@ -1702,8 +1718,11 @@ for addr in d.get('cured', []):
             for cure_addr in $(echo -e "$all_cures" | tr '\n' ' '); do
                 [ -z "$cure_addr" ] && continue
                 echo "$orchestrator_cured" | grep -q "$cure_addr" && continue
-                cure_straggler "$cure_addr"
-                orchestrator_cured="${orchestrator_cured} ${cure_addr}"
+                if cure_straggler "$cure_addr"; then
+                    orchestrator_cured="${orchestrator_cured} ${cure_addr}"
+                fi
+                # If cure failed (e.g. remote container), don't mark as cured —
+                # allows retry or at least accurate diagnostics
             done
         fi
 
