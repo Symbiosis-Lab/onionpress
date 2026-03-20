@@ -991,7 +991,7 @@ _start_takeover_worker() {
         --network onionpress-network \
         --ulimit nofile=10000:10000 \
         -e TZ="${TZ:-UTC}" \
-        -e TOR_IMPL="${TOR_IMPL:-arti}" \
+        -e TOR_IMPL="${TOR_IMPL:-tor}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}" \
