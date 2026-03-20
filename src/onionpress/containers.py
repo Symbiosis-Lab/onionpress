@@ -18,8 +18,8 @@ from .config import (
 from .platform import OnionPressPaths
 
 
-CORE_SERVICES = ["wordpress", "db", "tor-client"]
-ALL_SERVICES = ["wordpress", "db", "tor", "tor-client"]
+CORE_SERVICES = ["wordpress", "db", "tor-client", "onionheaven"]
+ALL_SERVICES = ["wordpress", "db", "tor", "tor-client", "onionheaven"]
 ONIONHEAVEN_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 
 
@@ -146,14 +146,13 @@ class ContainerManager:
         """Stop all containers.
 
         Args:
-            include_onionheaven: If True, also stop farm workers and
-                                 use the onionheaven profile.
+            include_onionheaven: If True, also stop farm workers.
         """
         if include_onionheaven:
             self.stop_farm()
 
         self._log("Stopping all containers...")
-        args = ["--profile", "onionheaven", "down"] if include_onionheaven else ["down"]
+        args = ["down"]
 
         cf_token = read_value(self.paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", "")
         compose_files = self._compose_files(include_cloudflare=bool(cf_token))

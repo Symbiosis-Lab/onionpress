@@ -163,17 +163,11 @@ else
     CF_COMPOSE=""
 fi
 
-# OnionHeaven — lazy activation only. Any OnionPress instance becomes an
-# OnionHeaven node when it receives its first registration/heartbeat.
-# The API server runs in onionpress-tor unconditionally; the watcher below
-# bootstraps the onionheaven container + farm when registrations arrive.
-export ONIONHEAVEN="0"
-
 # OnionHeaven farm — takeover worker containers
 # Each gets its own Arti instance (own guard pool) to prevent circuit exhaustion.
 # Starts with 2, scales up by 2 when threshold is hit.
-# Poll workers are no longer needed — heartbeat-based monitoring scans DB timestamps.
-# ONIONHEAVEN_IMAGE is set by _watch_onionheaven_activate() to the locally-built tag
+# The farm monitor and workers are managed by the onionheaven container itself
+# via farm_scale_requests in the registry DB.
 ONIONHEAVEN_FARM_MONITOR_PID=""
 
 # Start a single takeover worker container
@@ -198,7 +192,7 @@ _start_takeover_worker() {
         -v "${vol}:/var/lib/arti/" \
         -v "onionpress-persistent-data:/var/lib/onionpress" \
         --restart unless-stopped \
-        "$ONIONHEAVEN_IMAGE" >> "$LOG_FILE" 2>&1; then
+        "${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}" >> "$LOG_FILE" 2>&1; then
         log "OnionHeaven farm: started takeover worker $name"
     else
         log "WARNING: Failed to start takeover worker $name"
@@ -297,68 +291,6 @@ stop_onionheaven_farm() {
         docker stop "$container" >> "$LOG_FILE" 2>&1 || true
         docker rm "$container" >> "$LOG_FILE" 2>&1 || true
         log "OnionHeaven farm: stopped $container"
-    done
-}
-
-# Lazy OnionHeaven activation — watches for the activate flag written by
-# onionheaven-server.py when the first /register arrives. Bootstraps the
-# onionheaven container, takeover farm, and scaling monitor so any fresh
-# OnionPress instance can become an OnionHeaven node without pre-configuration.
-_watch_onionheaven_activate() {
-    # Disable errexit — this runs as a background function and any transient
-    # docker failure would silently kill the entire watcher loop (bash 4+).
-    set +e
-    while true; do
-        sleep 10
-        # Check if any registrations have arrived by querying the API server
-        local total
-        total=$(docker exec onionpress-tor curl -s --max-time 3 http://localhost:8083/status 2>/dev/null \
-            | sed 's/.*"total"[[:space:]]*:[[:space:]]*//' | sed 's/[^0-9].*//' | tr -d ' \n\r')
-        [ "${total:-0}" -gt 0 ] || continue
-
-        # Already running? Keep watching but don't re-bootstrap
-        if docker inspect --format='{{.State.Running}}' onionheaven 2>/dev/null | grep -q true; then
-            continue
-        fi
-
-        log "OnionHeaven: activate — $total registrations detected, bootstrapping..."
-
-        # Build the OnionHeaven image
-        local tor_dir
-        tor_dir="$(cd "$(dirname "$0")/../Resources/docker/tor" && pwd)"
-        export ONIONHEAVEN_IMAGE="onionpress-tor:onionheaven"
-        docker build -t "$ONIONHEAVEN_IMAGE" \
-            -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'ACTIVATE_DOCKERFILE'
-FROM ghcr.io/brewsterkahle/onionpress-tor:latest
-COPY entrypoint.sh /entrypoint.sh
-COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
-COPY onion_auth.py /onion_auth.py
-COPY onionheaven_common.py /onionheaven_common.py
-COPY onionheaven-heartbeat.py /onionheaven-heartbeat.py
-COPY onionheaven-server.py /onionheaven-server.py
-COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
-COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
-COPY onionheaven-redirect.sh /onionheaven-redirect.sh
-COPY key-convert.py /key-convert.py
-COPY torrc.template /etc/tor/torrc.template
-RUN chmod +x /entrypoint.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh /key-convert.py
-ACTIVATE_DOCKERFILE
-
-        # Start the onionheaven container
-        export ONIONHEAVEN="1"
-        cd "$DOCKER_DIR"
-        if docker compose --profile onionheaven up -d onionheaven >> "$LOG_FILE" 2>&1; then
-            log "OnionHeaven: started onionheaven container"
-        else
-            log "WARNING: Failed to start onionheaven container"
-            continue
-        fi
-
-        # Start the farm (takeover workers + scaling monitor)
-        start_onionheaven_farm
-
-        log "OnionHeaven: lazy activation complete"
-        # Keep looping — will re-bootstrap if container dies
     done
 }
 
@@ -1557,10 +1489,6 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
 
-    # OnionHeaven lazy activation: watch for registrations and bootstrap
-    # the onionheaven container + takeover farm when they arrive.
-    _watch_onionheaven_activate &
-
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
         log "Cloudflare Tunnel enabled, starting cloudflared..."
@@ -1577,8 +1505,8 @@ stop_containers() {
     # Stop farm containers first (they depend on the onionheaven container's DB)
     stop_onionheaven_farm
     cd "$DOCKER_DIR"
-    # Stop all containers (OnionHeaven via profile, cloudflared via override file if token set)
-    docker compose $CF_COMPOSE --profile onionheaven down 2>&1 | tee -a "$LOG_FILE"
+    # Stop all containers (including onionheaven; cloudflared via override file if token set)
+    docker compose $CF_COMPOSE down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
 }
 
