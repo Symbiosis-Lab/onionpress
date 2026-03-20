@@ -257,6 +257,17 @@ class ContainerManager:
         output = result.stdout
         return "Bootstrapped 100%" in output or "Sufficiently bootstrapped" in output
 
+    def is_stack_running(self) -> bool:
+        """Quick check: are all core OnionPress containers running?"""
+        result = self.docker.run(
+            ["ps", "--filter", "name=onionpress-", "--format", "{{.State}}"],
+            timeout=10,
+        )
+        if not result.ok or not result.output.strip():
+            return False
+        states = [s.strip().lower() for s in result.output.splitlines() if s.strip()]
+        return len(states) > 0 and all(s == "running" for s in states)
+
     # -- OnionHeaven farm --
 
     def start_farm_worker(self, idx: int, image: str = ONIONHEAVEN_IMAGE) -> bool:
