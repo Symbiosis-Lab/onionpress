@@ -137,6 +137,7 @@ docker_cmd() {
 # ── Logging ───────────────────────────────────────────────────────────────────
 log() {
     echo "[$(date '+%H:%M:%S')] $*"
+    [ -n "${LOG_FILE:-}" ] && echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE" || true
     [ -n "$PHASE_LOG" ] && echo "[$(date '+%H:%M:%S')] $*" >> "$PHASE_LOG" || true
 }
 
@@ -245,6 +246,9 @@ _wait_for_lazy_activation() {
 
 # ── Preflight checks ─────────────────────────────────────────────────────────
 preflight() {
+    # Ensure output directory and log file exist early (before run_worker creates the timestamped subdir)
+    mkdir -p "$OUTPUT_DIR"
+    LOG_FILE="${OUTPUT_DIR}/stress-test.log"
     log "Preflight checks..."
 
     if ! docker_cmd info >/dev/null 2>&1; then
@@ -291,7 +295,7 @@ preflight() {
     STRESS_IMAGE="ghcr.io/brewsterkahle/onionpress-stress-worker:latest"
     if ! docker_cmd image inspect "$STRESS_IMAGE" >/dev/null 2>&1; then
         log "  Building stress worker image locally..."
-        docker_cmd build -t "$STRESS_IMAGE" "${SCRIPT_DIR}/stress/" >> "$LOG_FILE" 2>&1 || true
+        docker_cmd build -t "$STRESS_IMAGE" "${SCRIPT_DIR}/stress/" >/dev/null 2>&1 || true
     fi
     if docker_cmd image inspect "$STRESS_IMAGE" >/dev/null 2>&1; then
         log "  Stress worker image: $STRESS_IMAGE"
@@ -2216,6 +2220,7 @@ run_worker() {
     # Maintain a "latest" symlink for convenience
     ln -sfn "run-${run_ts}" "$(dirname "$RUN_DIR")/latest"
 
+    LOG_FILE="${OUTPUT_DIR}/stress-test.log"
     PHASE_LOG="${OUTPUT_DIR}/phase.log"
     : > "$PHASE_LOG"  # start fresh
     write_phase_header
