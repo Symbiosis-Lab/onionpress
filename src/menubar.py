@@ -2526,7 +2526,7 @@ class OnionPressApp(rumps.App):
                  onion_url],
                 timeout=15
             )
-            if result.ok and result.output.strip() in ["200", "301", "302"]:
+            if result.ok and result.output.strip() in ["200", "301"]:
                 reachable = True
                 self.log(f"Onion service reachable via tor-client after {(attempt + 1) * 3}s")
                 break
