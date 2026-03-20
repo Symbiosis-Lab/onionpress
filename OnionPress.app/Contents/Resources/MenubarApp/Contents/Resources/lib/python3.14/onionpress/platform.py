@@ -1,0 +1,171 @@
+"""OS/arch detection and path resolution for OnionPress.
+
+No side effects — no mkdir, no env var mutation.
+"""
+
+import enum
+import os
+import subprocess
+from dataclasses import dataclass
+
+
+class OS(enum.Enum):
+    MACOS = "macos"
+    LINUX = "linux"
+
+
+class Arch(enum.Enum):
+    ARM64 = "aarch64"
+    X86_64 = "x86_64"
+
+
+def detect_os() -> OS:
+    """Detect the current operating system."""
+    import platform as _platform
+    system = _platform.system()
+    if system == "Darwin":
+        return OS.MACOS
+    if system == "Linux":
+        return OS.LINUX
+    raise RuntimeError(f"Unsupported OS: {system}")
+
+
+def detect_arch() -> Arch:
+    """Detect the hardware architecture.
+
+    On macOS, uses sysctl to get the real hardware arch (uname lies under
+    Rosetta). On Linux, uses uname -m.
+    """
+    import platform as _platform
+    system = _platform.system()
+    if system == "Darwin":
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.optional.arm64"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "1":
+                return Arch.ARM64
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        # Fallback to uname
+        if _platform.machine() == "x86_64":
+            return Arch.X86_64
+        return Arch.ARM64
+    else:
+        machine = _platform.machine()
+        if machine in ("aarch64", "arm64"):
+            return Arch.ARM64
+        return Arch.X86_64
+
+
+def detect_timezone() -> str:
+    """Detect the system timezone.
+
+    On macOS: reads /etc/localtime symlink.
+    On Linux: reads /etc/timezone, falls back to /etc/localtime symlink.
+    Returns 'UTC' if detection fails.
+    """
+    # Try /etc/localtime symlink (macOS and some Linux)
+    try:
+        target = os.readlink("/etc/localtime")
+        # Extract timezone from path like .../zoneinfo/America/New_York
+        idx = target.find("zoneinfo/")
+        if idx != -1:
+            return target[idx + len("zoneinfo/"):]
+    except OSError:
+        pass
+
+    # Try /etc/timezone (Debian/Ubuntu)
+    try:
+        with open("/etc/timezone", "r") as f:
+            tz = f.read().strip()
+            if tz:
+                return tz
+    except OSError:
+        pass
+
+    return "UTC"
+
+
+@dataclass(frozen=True)
+class OnionPressPaths:
+    """All OnionPress filesystem paths, computed once."""
+    data_dir: str
+    config_file: str
+    secrets_file: str
+    log_file: str
+    launcher_log_file: str
+    pid_file: str
+    shared_dir: str
+    docker_config_dir: str
+    bin_dir: str
+    docker_dir: str
+    colima_home: str
+    docker_socket: str
+    app_bundle: str  # root of OnionPress.app (or repo root if unbundled)
+
+
+def resolve_paths(data_dir: str = None, app_bundle: str = None) -> OnionPressPaths:
+    """Compute all OnionPress paths from data_dir and app_bundle root.
+
+    Args:
+        data_dir: Override for ~/.onionpress/. Defaults to ~/.onionpress/.
+        app_bundle: Path to OnionPress.app. If None, attempts find_app_bundle().
+    """
+    if data_dir is None:
+        data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    if app_bundle is None:
+        app_bundle = find_app_bundle() or ""
+
+    colima_home = os.path.join(data_dir, "colima")
+
+    # Resolve resource paths from app bundle
+    if app_bundle:
+        contents = os.path.join(app_bundle, "Contents")
+        resources = os.path.join(contents, "Resources")
+        bin_dir = os.path.join(resources, "bin")
+        docker_dir = os.path.join(resources, "docker")
+    else:
+        bin_dir = ""
+        docker_dir = ""
+
+    return OnionPressPaths(
+        data_dir=data_dir,
+        config_file=os.path.join(data_dir, "config"),
+        secrets_file=os.path.join(data_dir, "secrets"),
+        log_file=os.path.join(data_dir, "onionpress.log"),
+        launcher_log_file=os.path.join(data_dir, "launcher.log"),
+        pid_file=os.path.join(data_dir, "onionpress.pid"),
+        shared_dir=os.path.join(data_dir, "shared"),
+        docker_config_dir=os.path.join(data_dir, "docker-config"),
+        bin_dir=bin_dir,
+        docker_dir=docker_dir,
+        colima_home=colima_home,
+        docker_socket=os.path.join(colima_home, "default", "docker.sock"),
+        app_bundle=app_bundle,
+    )
+
+
+def find_app_bundle() -> str | None:
+    """Try to locate OnionPress.app.
+
+    Walks up from this file's location looking for an OnionPress.app directory,
+    then checks /Applications/OnionPress.app.
+    """
+    # Walk up from this module
+    current = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(10):
+        if os.path.basename(current) == "OnionPress.app" and os.path.isdir(current):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+    # Check standard install location
+    standard = "/Applications/OnionPress.app"
+    if os.path.isdir(standard):
+        return standard
+
+    return None
