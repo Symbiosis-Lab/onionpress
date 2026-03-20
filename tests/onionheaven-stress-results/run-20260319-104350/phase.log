@@ -944,3 +944,7 @@ Timed out: 9/10 verified
 [11:18:51]   -> Stress test complete
 [11:18:51] Cleaning up stress test artifacts...
 [11:18:51]   Removed stress + polling containers
+[11:22:28]   Unregistered 100 entries
+[11:22:28] Cleanup complete
+[11:22:28] === Stress test complete ===
+[11:22:28] Results saved to: ./onionheaven-stress-results/run-20260319-104350/metrics.jsonl

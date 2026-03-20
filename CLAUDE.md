@@ -88,9 +88,11 @@
 - **Used by**: `torcurl`, `_auto_open_browser_inner()`, `check_tor_reachability()` Check 5, `onion-forward.php` (browser extension PHP proxy)
 - **NOT used by**: `src/onionheaven.py` (outbound Tor to external `.onion`), `onionpress-wayback-archive.php` (Wayback Machine), `onionheaven-heartbeat.py` (runs inside container)
 
-## Colima Networking Gotcha
-- **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
-- **For ANY communication over Tor from the Mac, always use `docker exec` into a tor container** — this is reliable
+## Colima Networking
+- **SOCKS proxy DOES work through Colima VM port forwarding** (tested 2026-03-20 — previously documented as broken, now works for both clearnet and .onion)
+- `curl --socks5-hostname 127.0.0.1:<host_port>` from the Mac host works fine
+- **`docker exec` is still needed for Tor control port** — ControlPort (9051) is not exposed in the main tor container's torrc and not port-mapped in docker-compose
+- To enable direct control port access from the host, would need: add `ControlPort 0.0.0.0:9051` + `CookieAuthentication 1` to torrc, expose port in docker-compose, then use Python sockets directly
   - Example: `docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 http://some-address.onion/`
   - Do NOT use `curl --socks5-hostname 127.0.0.1:9050` from the Mac host — it will fail
 - This applies to future mirror system communication (health checks, challenge-response, etc.)
