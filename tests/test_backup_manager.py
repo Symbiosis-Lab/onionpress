@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for backup_manager module."""
+"""Tests for onionpress.backup module (formerly backup_manager)."""
 
 import json
 import os
@@ -10,10 +10,10 @@ import tempfile
 import unittest
 import zipfile
 
-# Add src/ to path so we can import backup_manager
+# Add src/ to path so we can import both onionpress.backup and key_manager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-import backup_manager
+from onionpress import backup as backup_manager
 
 
 class TestBackupFilename(unittest.TestCase):
@@ -400,6 +400,73 @@ class TestRestoreRoundTrip(unittest.TestCase):
         after = set(os.listdir(tempfile.gettempdir()))
         new_dirs = [d for d in (after - before) if d.startswith("onionpress-restore-")]
         self.assertEqual(len(new_dirs), 0, "Staging directory was not cleaned up")
+
+
+class TestEnsureMultisiteConstants(unittest.TestCase):
+    """Test _ensure_multisite_constants() behavior."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.logs = []
+        self.docker_calls = []
+
+        # Create a fake docker that records calls and simulates responses
+        self.fake_bin = os.path.join(self.tmpdir, "bin")
+        os.makedirs(self.fake_bin)
+        self.call_log = os.path.join(self.tmpdir, "docker_calls.log")
+        fake_docker = os.path.join(self.fake_bin, "docker")
+        with open(fake_docker, "w") as f:
+            f.write('#!/bin/bash\n')
+            f.write(f'echo "$*" >> "{self.call_log}"\n')
+            # Return wp_blogs table when checking for multisite
+            f.write('if [[ "$*" == *"SHOW TABLES"* ]]; then\n')
+            f.write('    echo "wp_blogs"; exit 0\n')
+            f.write('fi\n')
+            f.write('exit 0\n')
+        os.chmod(fake_docker, 0o755)
+
+        self.orig_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
+
+    def tearDown(self):
+        os.environ["PATH"] = self.orig_path
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_adds_constants_for_multisite(self):
+        """Should call wp config set for each multisite constant."""
+        backup_manager._ensure_multisite_constants(self.logs.append)
+
+        with open(self.call_log) as f:
+            calls = f.read()
+
+        # Should have called wp config set for each constant
+        for name in backup_manager._MULTISITE_CONSTANTS:
+            self.assertIn(name, calls, f"Missing wp config set for {name}")
+
+    def test_logs_message(self):
+        backup_manager._ensure_multisite_constants(self.logs.append)
+        self.assertTrue(any("multisite" in msg.lower() for msg in self.logs))
+
+    def test_skips_when_not_multisite(self):
+        """Should not add constants if wp_blogs table doesn't exist."""
+        # Override fake docker to not return wp_blogs
+        fake_docker = os.path.join(self.fake_bin, "docker")
+        with open(fake_docker, "w") as f:
+            f.write('#!/bin/bash\n')
+            f.write(f'echo "$*" >> "{self.call_log}"\n')
+            f.write('if [[ "$*" == *"SHOW TABLES"* ]]; then\n')
+            f.write('    echo ""; exit 0\n')
+            f.write('fi\n')
+            f.write('exit 0\n')
+        os.chmod(fake_docker, 0o755)
+
+        backup_manager._ensure_multisite_constants(self.logs.append)
+
+        with open(self.call_log) as f:
+            calls = f.read()
+
+        # Should NOT have called wp config set
+        self.assertNotIn("config set", calls)
 
 
 if __name__ == "__main__":
