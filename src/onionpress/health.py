@@ -31,6 +31,7 @@ class HealthResult:
     tor_externally_reachable: bool = False  # Check 5 passed (via tor-client)
     onion_address: str = ""
     bootstrap_pct: int = 0
+    external_http_code: str = ""  # HTTP status from external reachability check
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -140,23 +141,30 @@ class HealthChecker:
         )
         return result.ok
 
-    def check_external_reachability(self, onion_address: str) -> bool:
+    def check_external_reachability(self, onion_address: str) -> tuple[bool, str]:
         """Check if the onion service is reachable through the Tor network.
 
         Uses the independent tor-client container (not self-connection).
+        Returns (reachable, http_code). Only HTTP 200 or 301 counts as
+        reachable — 302 indicates OnionHeaven takeover.
         """
         if not onion_address:
-            return False
+            return False, ""
         result = self.docker.exec(
             "onionpress-tor-client",
             [
-                "curl", "-sf", "--max-time", "30",
+                "curl", "-s", "--max-time", "30",
                 "--socks5-hostname", "127.0.0.1:9050",
+                "-o", "/dev/null", "-w", "%{http_code}",
+                "-H", "User-Agent: OnionPress-HealthCheck",
                 f"http://{onion_address}/",
             ],
             timeout=45,
         )
-        return result.ok
+        if not result.ok:
+            return False, "000"
+        http_code = result.output.strip()
+        return http_code in ("200", "301", "302"), http_code
 
     def check_internet_connectivity(self) -> bool:
         """Check if the host has internet access."""
@@ -220,9 +228,14 @@ class HealthChecker:
 
         # Check 5: External reachability (via tor-client)
         if hr.tor_internally_ready and hr.onion_address:
-            hr.tor_externally_reachable = self.check_external_reachability(hr.onion_address)
-            if not hr.tor_externally_reachable:
-                hr.errors.append("Onion service not yet reachable through Tor network")
+            reachable, http_code = self.check_external_reachability(hr.onion_address)
+            hr.tor_externally_reachable = reachable
+            hr.external_http_code = http_code
+            if not reachable:
+                if http_code in ("000", ""):
+                    hr.errors.append("Onion service not yet reachable through Tor network")
+                else:
+                    hr.errors.append(f"Onion service returned HTTP {http_code}")
 
         return hr
 
