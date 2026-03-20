@@ -60,6 +60,7 @@ STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
 IS_ONIONHEAVEN_HOST=false  # auto-detected in preflight
 NO_HEALTHCHECK=false  # skip healthcheck onion services (halves circuit load)
+NO_TIMEOUT=false      # disable timeouts (wait indefinitely for takeover/recovery)
 
 DATA_DIR="$HOME/.onionpress"
 DOCKER_HOST_SOCK=""
@@ -80,6 +81,7 @@ while [ $# -gt 0 ]; do
         --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
         --batch-size)  BATCH_SIZE="$2"; shift 2 ;;
         --no-healthcheck) NO_HEALTHCHECK=true; shift ;;
+        --no-timeout)  NO_TIMEOUT=true; shift ;;
         --cleanup)     CLEANUP=true; shift ;;
         --cleanup-stale) CLEANUP_STALE=true; shift ;;
         --stale-hours)   STALE_HOURS="$2"; shift 2 ;;
@@ -90,6 +92,21 @@ while [ $# -gt 0 ]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Timeout values (--no-timeout sets to 24 hours)
+if [ "$NO_TIMEOUT" = true ]; then
+    BOOTSTRAP_TIMEOUT=86400
+    TAKEOVER_TIMEOUT=86400
+    RECOVERY_TIMEOUT=86400
+    RECOVERY_SILENT_TIMEOUT=86400
+    HEALTHY_TIMEOUT=86400
+else
+    BOOTSTRAP_TIMEOUT=900
+    TAKEOVER_TIMEOUT=600
+    RECOVERY_TIMEOUT=600
+    RECOVERY_SILENT_TIMEOUT=900
+    HEALTHY_TIMEOUT=600
+fi
 
 # Compute healthy/failing split
 if [ -z "$HEALTHY" ] && [ -z "$FAILING" ]; then
@@ -2333,7 +2350,7 @@ run_worker() {
     # Phase 2: Wait for all sites to bootstrap and self-register over Tor
     phase_start "2" "Waiting for sites to bootstrap and register over Tor (est. 2m)"
     log "Phase 2: Waiting for sites to bootstrap and register over Tor..."
-    if ! wait_for_bootstrap 900; then
+    if ! wait_for_bootstrap "$BOOTSTRAP_TIMEOUT"; then
         log "WARNING: Not all sites bootstrapped"
     fi
     r_phase2="$WAIT_RESULT"
@@ -2364,7 +2381,7 @@ run_worker() {
 
     # Phase 3: Wait for onionheaven heartbeat monitor to confirm sites are healthy
     phase_start "3" "Waiting for heartbeat monitor to confirm all ${TOTAL} sites are healthy (est. 1m)"
-    if ! wait_for_healthy "$TOTAL" "Phase 3" 600; then
+    if ! wait_for_healthy "$TOTAL" "Phase 3" "$HEALTHY_TIMEOUT"; then
         log "WARNING: Not all sites became healthy, continuing anyway..."
     fi
     r_phase3="$WAIT_RESULT"
@@ -2391,7 +2408,7 @@ run_worker() {
         notify_offline "$fail_start" "$FAILING"
         flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase A.1: Waiting for takeovers..."
-        if ! wait_for_takeover "$FAILING" 600; then
+        if ! wait_for_takeover "$FAILING" "$TAKEOVER_TIMEOUT"; then
             log "WARNING: Not all expected takeovers happened"
         fi
         local takeover_elapsed=$(( $(date +%s) - scenario_ts ))
@@ -2421,7 +2438,7 @@ run_worker() {
         notify_online "$fail_start" "$FAILING"
         flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase A.2: Waiting for recovery..."
-        if ! wait_for_recovery "$FAILING" 600; then
+        if ! wait_for_recovery "$FAILING" "$RECOVERY_TIMEOUT"; then
             log "WARNING: Not all sites recovered from graceful offline"
         fi
         local recovery_elapsed=$(( $(date +%s) - scenario_ts ))
@@ -2446,7 +2463,7 @@ run_worker() {
         disable_workers "$fail_start" "$FAILING"
         flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase B.1: Waiting for heartbeat-detected takeovers..."
-        if ! wait_for_takeover "$FAILING" 600; then
+        if ! wait_for_takeover "$FAILING" "$TAKEOVER_TIMEOUT"; then
             log "WARNING: Not all expected takeovers happened"
         fi
         takeover_elapsed=$(( $(date +%s) - scenario_ts ))
@@ -2477,7 +2494,7 @@ run_worker() {
         enable_workers_silent "$fail_start" "$FAILING"
         flush_client_descriptor_cache "$fail_start" "$FAILING"
         log "Phase B.2: Waiting for heartbeat-detected recovery..."
-        if ! wait_for_recovery "$FAILING" 900; then
+        if ! wait_for_recovery "$FAILING" "${RECOVERY_SILENT_TIMEOUT:-$RECOVERY_TIMEOUT}"; then
             log "WARNING: Not all sites recovered via heartbeat detection"
         fi
         recovery_elapsed=$(( $(date +%s) - scenario_ts ))
