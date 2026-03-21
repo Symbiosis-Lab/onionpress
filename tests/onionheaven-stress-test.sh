@@ -1602,6 +1602,9 @@ run_verify_worker() {
             "python3 /verify-worker.py ${expected_code} ${these_addrs} > /tmp/verify-worker.log 2>&1 &" 2>/dev/null
     done
 
+    # Wait for all verify-workers to start and write initial results
+    sleep 10
+
     # Poll all results files and aggregate
     local start_ts
     start_ts=$(date +%s)
