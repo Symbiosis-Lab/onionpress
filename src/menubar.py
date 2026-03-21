@@ -4251,6 +4251,30 @@ License: AGPL v3"""
             oh_stats['client_hub'] = self._read_config_value(
                 "ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
 
+            # Fetch remote hub's /status over Tor for takeover container info
+            hub_addr = oh_stats['client_hub']
+            if hub_addr:
+                try:
+                    result = subprocess.run(
+                        ["docker", "exec", "onionpress-tor-client",
+                         "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
+                         "--max-time", "10",
+                         f"http://{hub_addr}:8083/status"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=15
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        hub_status = json.loads(result.stdout)
+                        oh_stats['hub_status'] = {
+                            'total': hub_status.get('total', 0),
+                            'online': hub_status.get('online', 0),
+                            'taken_over': hub_status.get('taken_over', 0),
+                            'takeover_containers': hub_status.get('takeover_containers', 0),
+                            'version': hub_status.get('version', ''),
+                        }
+                except Exception:
+                    pass
+
             onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
 
             # System load averages and host uptime
