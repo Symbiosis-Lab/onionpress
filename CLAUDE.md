@@ -57,6 +57,12 @@
 - All other container data uses Docker named volumes (which live inside the VM)
 - **Do not add additional `--mount` flags without considering security implications**
 
+## Docker Compose and Environment Variables (IMPORTANT)
+- **Never run `docker compose up` directly** from the `docker/` directory — the `onionpress` launcher script sets required env vars (`WORDPRESS_DB_PASSWORD`, `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` from `~/.onionpress/secrets`) before starting containers
+- Running `docker compose up` without these vars causes containers to recreate with blank passwords → WordPress 500 "Error establishing a database connection"
+- **To recreate a single container safely**: use `sudo systemctl restart onionpress` which re-reads secrets and passes them to docker compose
+- If you must recreate a container mid-session (e.g., to pick up a compose change), source the secrets first: `. ~/.onionpress/secrets && cd /opt/onionpress/docker && docker compose up -d <service>`
+
 ## Docker Image Pull Strategy (IMPORTANT)
 - **Do NOT use `--pull always` on `docker compose up`** — it causes double container recreation
 - The launcher already pulls images via `docker compose pull` before starting containers

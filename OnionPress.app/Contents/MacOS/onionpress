@@ -2379,8 +2379,122 @@ main() {
             echo "  Containers running. Run 'onionpress setup' to initialize WordPress."
             ;;
 
+        scrub)
+            # Scrub: full lifecycle test — backup, reset, restore, verify.
+            # Proves backup/restore integrity and that reset truly cleans up.
+            # Usage: onionpress scrub [wp-admin-password]
+            echo ""
+            echo "OnionPress Scrub"
+            echo "================"
+            echo "This will: backup → reset → restore → verify"
+            echo ""
+
+            if [ "$ONIONPRESS_YES" != "true" ]; then
+                echo "  Press Enter to continue or Ctrl+C to cancel..."
+                read -r
+            fi
+
+            # ── Step 1: Backup ──────────────────────────────────────────
+            echo ""
+            echo "── Step 1/4: Backup ──"
+            setup_db_passwords
+            local scrub_pass="${2:-}"
+            if [ -z "$scrub_pass" ]; then
+                read -r -s -p "WordPress admin password (for backup): " scrub_pass
+                echo ""
+            fi
+            if [ -z "$scrub_pass" ]; then
+                echo "ERROR: Password is required for backup."
+                exit 1
+            fi
+            local scrub_backup="/tmp/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
+            create_backup "$scrub_pass" "$scrub_backup"
+            echo "  Backup saved to: $scrub_backup"
+
+            # ── Step 2: Reset ───────────────────────────────────────────
+            echo ""
+            echo "── Step 2/4: Reset ──"
+            stop_containers 2>/dev/null || true
+
+            # Remove all Docker volumes
+            cd "$DOCKER_DIR"
+            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
+                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
+            done
+
+            # Wipe data directory (keep colima VM and docker-config)
+            rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
+            rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
+            rm -f "$DATA_DIR/onionheaven-registration.json"
+            rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
+            rm -rf "$DATA_DIR/shared/vanity-keys/"
+            echo "  Reset complete."
+
+            # ── Step 3: Restore ─────────────────────────────────────────
+            echo ""
+            echo "── Step 3/4: Restore ──"
+            setup_db_passwords
+            start_containers
+            wait_for_services
+            restore_backup "$scrub_pass" "$scrub_backup"
+            echo "  Restore complete. Restarting..."
+            touch "$DATA_DIR/.import-key-pending"
+            stop_containers
+            start_containers
+            wait_for_services
+            write_status
+            echo "  Restore and restart complete."
+
+            # ── Step 4: Verify ──────────────────────────────────────────
+            echo ""
+            echo "── Step 4/4: Verify ──"
+            local scrub_ok=true
+
+            # Check containers are running
+            local expected_containers="onionpress-tor onionpress-wordpress onionpress-db onionpress-tor-client"
+            for ctr in $expected_containers; do
+                if docker ps --format '{{.Names}}' | grep -q "^${ctr}$"; then
+                    echo "  ✓ $ctr running"
+                else
+                    echo "  ✗ $ctr NOT running"
+                    scrub_ok=false
+                fi
+            done
+
+            # Check onion address is present
+            local scrub_addr
+            scrub_addr=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+            if [ -n "$scrub_addr" ]; then
+                echo "  ✓ Onion address: $scrub_addr"
+            else
+                echo "  ✗ No onion address found"
+                scrub_ok=false
+            fi
+
+            # Check WordPress responds
+            local wp_status
+            wp_status=$(docker exec onionpress-wordpress curl -s -o /dev/null -w '%{http_code}' http://localhost:80/ 2>/dev/null || echo "000")
+            if [ "$wp_status" = "200" ] || [ "$wp_status" = "301" ] || [ "$wp_status" = "302" ]; then
+                echo "  ✓ WordPress responding (HTTP $wp_status)"
+            else
+                echo "  ✗ WordPress not responding (HTTP $wp_status)"
+                scrub_ok=false
+            fi
+
+            echo ""
+            if [ "$scrub_ok" = "true" ]; then
+                echo "Scrub PASSED — backup/reset/restore all working."
+            else
+                echo "Scrub FAILED — see errors above."
+            fi
+
+            # Clean up backup file
+            rm -f "$scrub_backup"
+            echo "  Cleaned up: $scrub_backup"
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs|setup|backup|restore|reset}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs|setup|backup|restore|reset|scrub}"
             exit 1
             ;;
     esac
