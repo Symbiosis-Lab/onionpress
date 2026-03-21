@@ -1774,6 +1774,7 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
+                addr=$(echo "$payload" | sed -n "s/.*\"content_address\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
                 (for attempt in 1 2 3; do
                     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
                         -X POST "http://127.0.0.1:8083/offline" \
@@ -1785,15 +1786,11 @@ for p in payloads:
                     fi
                     [ "$attempt" -lt 3 ] && sleep 2
                  done
+                 [ "$code" != "200" ] && echo "FAILED /offline HTTP $code for $addr (after 3 attempts)" >&2
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            # Report results
-            if [ -f "$tmpdir/results" ]; then
-                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
-                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
-            fi
             ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
         ' 2>>"$_notify_log")
@@ -1803,6 +1800,7 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
+                addr=$(echo "$payload" | sed -n "s/.*\"content_address\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
                 (for attempt in 1 2 3; do
                     code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "off${i}r${attempt}:x@127.0.0.1:9050" --max-time 30 \
                         -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
@@ -1814,14 +1812,11 @@ for p in payloads:
                     fi
                     [ "$attempt" -lt 3 ] && sleep 5
                  done
+                 [ "$code" != "200" ] && echo "FAILED /offline HTTP $code for $addr (after 3 attempts)" >&2
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            if [ -f "$tmpdir/results" ]; then
-                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
-                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
-            fi
             ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
         ' 2>>"$_notify_log")
@@ -1898,6 +1893,7 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
+                addr=$(echo "$payload" | sed -n "s/.*\"content_address\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
                 (for attempt in 1 2 3; do
                     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
                         -X POST "http://127.0.0.1:8083/online" \
@@ -1909,14 +1905,11 @@ for p in payloads:
                     fi
                     [ "$attempt" -lt 3 ] && sleep 2
                  done
+                 [ "$code" != "200" ] && echo "FAILED /online HTTP $code for $addr (after 3 attempts)" >&2
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            if [ -f "$tmpdir/results" ]; then
-                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
-                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
-            fi
             ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
         ' 2>>"$_notify_log")
@@ -1926,6 +1919,7 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
+                addr=$(echo "$payload" | sed -n "s/.*\"content_address\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
                 (for attempt in 1 2 3; do
                     code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "on${i}r${attempt}:x@127.0.0.1:9050" --max-time 30 \
                         -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
@@ -1937,14 +1931,11 @@ for p in payloads:
                     fi
                     [ "$attempt" -lt 3 ] && sleep 5
                  done
+                 [ "$code" != "200" ] && echo "FAILED /online HTTP $code for $addr (after 3 attempts)" >&2
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            if [ -f "$tmpdir/results" ]; then
-                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
-                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
-            fi
             ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
         ' 2>>"$_notify_log")
