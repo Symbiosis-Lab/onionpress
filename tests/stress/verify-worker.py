@@ -167,17 +167,22 @@ class VerifyWorker:
 
     def verify_address(self, addr):
         """Verify a single address (called when descriptor is received)."""
-        if addr not in self.pending:
-            return
+        with self.lock:
+            if addr not in self.pending:
+                return
 
         code = curl_check(addr, self.expected_code)
 
         with self.lock:
+            # Never overwrite a verified result — another thread may have
+            # verified this address while our curl was in flight.
+            existing = self.results.get(addr, {})
+            if existing.get("verified"):
+                return
             if code == self.expected_code:
                 elapsed = round(time.time() - self.start_time, 1)
                 self.results[addr] = {"code": code, "time": elapsed, "verified": True}
                 self.pending.discard(addr)
-                self.first_fail_time.pop(addr, None)
                 verified = sum(1 for r in self.results.values() if r.get("verified"))
                 print(f"  VERIFIED {addr[:20]}... → {code} ({elapsed}s) [{verified}/{len(self.addresses)}]", flush=True)
             else:
