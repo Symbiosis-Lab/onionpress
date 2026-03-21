@@ -1774,11 +1774,17 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-                    -X POST "http://127.0.0.1:8083/offline" \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" 2>/dev/null)
-                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                (for attempt in 1 2 3; do
+                    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+                        -X POST "http://127.0.0.1:8083/offline" \
+                        -H "Content-Type: application/json" \
+                        -d "$payload" 2>/dev/null)
+                    if [ "$code" = "200" ]; then
+                        touch "$tmpdir/ok.$i"
+                        break
+                    fi
+                    [ "$attempt" -lt 3 ] && sleep 2
+                 done
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
@@ -1797,11 +1803,17 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "off${i}:x@127.0.0.1:9050" --max-time 30 \
-                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" 2>/dev/null)
-                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                (for attempt in 1 2 3; do
+                    code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "off${i}r${attempt}:x@127.0.0.1:9050" --max-time 30 \
+                        -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
+                        -H "Content-Type: application/json" \
+                        -d "$payload" 2>/dev/null)
+                    if [ "$code" = "200" ]; then
+                        touch "$tmpdir/ok.$i"
+                        break
+                    fi
+                    [ "$attempt" -lt 3 ] && sleep 5
+                 done
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
@@ -1819,6 +1831,10 @@ for p in payloads:
         log "  notify_offline debug: $(cat "$_notify_log")"
     fi
     log "Sent /offline for ${notified:-0} sites"
+    if [ "${notified:-0}" -lt "$count" ]; then
+        local missed=$(( count - ${notified:-0} ))
+        log "WARNING: ${missed} /offline notification(s) failed — those sites will NOT be taken over"
+    fi
     log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
 
@@ -1882,11 +1898,17 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-                    -X POST "http://127.0.0.1:8083/online" \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" 2>/dev/null)
-                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                (for attempt in 1 2 3; do
+                    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+                        -X POST "http://127.0.0.1:8083/online" \
+                        -H "Content-Type: application/json" \
+                        -d "$payload" 2>/dev/null)
+                    if [ "$code" = "200" ]; then
+                        touch "$tmpdir/ok.$i"
+                        break
+                    fi
+                    [ "$attempt" -lt 3 ] && sleep 2
+                 done
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
@@ -1904,11 +1926,17 @@ for p in payloads:
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "on${i}:x@127.0.0.1:9050" --max-time 30 \
-                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" 2>/dev/null)
-                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                (for attempt in 1 2 3; do
+                    code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "on${i}r${attempt}:x@127.0.0.1:9050" --max-time 30 \
+                        -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
+                        -H "Content-Type: application/json" \
+                        -d "$payload" 2>/dev/null)
+                    if [ "$code" = "200" ]; then
+                        touch "$tmpdir/ok.$i"
+                        break
+                    fi
+                    [ "$attempt" -lt 3 ] && sleep 5
+                 done
                  echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
@@ -1926,6 +1954,10 @@ for p in payloads:
         log "  notify_online debug: $(cat "$_notify_log")"
     fi
     log "Sent /online for ${notified:-0} sites"
+    if [ "${notified:-0}" -lt "$count" ]; then
+        local missed=$(( count - ${notified:-0} ))
+        log "WARNING: ${missed} /online notification(s) failed — those sites will NOT be released"
+    fi
     log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
 
