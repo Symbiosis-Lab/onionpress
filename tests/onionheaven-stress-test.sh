@@ -643,8 +643,11 @@ EOF
         log "WARNING: Not all polling clients bootstrapped, using what's available"
     fi
 
-    # verify-worker.py and python3 are pre-installed in STRESS_IMAGE
-    log "  Poll clients ready (pre-built image, no apt-get needed)"
+    # Copy latest verify-worker.py into poll clients (image may be stale)
+    for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        docker_cmd cp "${SCRIPT_DIR}/stress/verify-worker.py" "stress-poll-client-${ci}:/verify-worker.py" 2>/dev/null || true
+    done
+    log "  Poll clients ready (verify-worker.py updated from repo)"
 }
 
 stop_poll_clients() {
