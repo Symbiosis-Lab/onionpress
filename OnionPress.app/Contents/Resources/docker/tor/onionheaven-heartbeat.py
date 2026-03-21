@@ -376,6 +376,7 @@ def main():
                                 (worker,)
                             )
                             db_commit_with_retry(conn)
+                        _ensure_capacity(conn)
 
                     # If another row for the same content_address is online, release this takeover.
                     # This happens when an instance re-registers with a new healthcheck address.
