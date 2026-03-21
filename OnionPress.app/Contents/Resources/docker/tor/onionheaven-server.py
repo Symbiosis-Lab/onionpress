@@ -309,21 +309,31 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 takeover_containers = 0
             conn.close()
 
-            # Aggregate queue stats from all workers
+            # Per-worker details and aggregate queue stats
             total_queued = 0
             total_in_flight = 0
             total_active = 0
+            workers = []
             for tc in tc_rows:
+                worker_info = {
+                    "name": tc["container_name"],
+                    "bootstrapped": bool(tc["bootstrapped"]),
+                    "assigned_count": tc["assigned_count"],
+                }
                 if tc["bootstrapped"]:
                     try:
                         from onionheaven_common import get_queue_status
                         qs = get_queue_status(tc["container_name"])
                         if qs:
+                            worker_info["queued"] = qs.get("queued", 0)
+                            worker_info["in_flight"] = qs.get("in_flight", 0)
+                            worker_info["active"] = qs.get("active", 0)
                             total_queued += qs.get("queued", 0)
                             total_in_flight += qs.get("in_flight", 0)
                             total_active += qs.get("active", 0)
                     except Exception:
                         pass
+                workers.append(worker_info)
 
             self._send_json(200, {
                 "version": ONIONHEAVEN_SERVER_VERSION,
@@ -338,6 +348,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "takeover_queued": total_queued,
                 "takeover_in_flight": total_in_flight,
                 "takeover_active": total_active,
+                "takeover_workers": workers,
             })
         except Exception as e:
             self._send_json(500, {"error": str(e)})
