@@ -2,19 +2,15 @@
 """
 OnionHeaven Queue Manager — rate-limited ADD_ONION pipeline.
 
-Runs inside takeover worker containers. Maintains a persistent Tor control
-port connection, monitors HS_DESC events, and rate-limits ADD_ONION calls
-to avoid overwhelming Tor's circuit builder.
+Runs inside takeover worker containers. Uses two Tor control port
+connections: one for commands (ADD_ONION/DEL_ONION), one for events
+(HS_DESC UPLOADED). Rate-limits ADD_ONION calls to avoid overwhelming
+Tor's circuit builder.
 
 Interface:
-  queue-takeover <content_address>   — add to takeover queue
-  queue-release <content_address>    — release (immediate DEL_ONION)
-  queue-status                       — print JSON status
-
-Invoked via: docker exec <worker> python3 /onionheaven-queue-manager.py <command> [args]
-
-The manager runs as a daemon (started by entrypoint.sh). Commands communicate
-with it via a command file + response file on a shared path.
+  docker exec <worker> python3 /onionheaven-queue-manager.py takeover <addr>
+  docker exec <worker> python3 /onionheaven-queue-manager.py release <addr>
+  docker exec <worker> python3 /onionheaven-queue-manager.py status
 """
 
 import json
@@ -31,14 +27,13 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 
 MAX_IN_FLIGHT = int(os.environ.get("ONIONHEAVEN_MAX_IN_FLIGHT", "5"))
-CONTROL_PORT = ("127.0.0.1", 9051)
+CONTROL_HOST = "127.0.0.1"
+CONTROL_PORT = 9051
 COOKIE_PATH = "/var/lib/tor/control_auth_cookie"
 KEYS_DIR = "/var/lib/onionpress/onionheaven/keys"
 KEY_CONVERT = "/key-convert.py"
 REDIRECT_PORT = 8082
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "unknown")
-
-# Command socket path — query via: docker exec <worker> python3 /onionheaven-queue-manager.py status
 SOCK_PATH = "/tmp/queue-manager.sock"
 
 
@@ -48,132 +43,198 @@ def log(msg):
     sys.stderr.flush()
 
 
+def _read_cookie():
+    with open(COOKIE_PATH, "rb") as f:
+        return f.read().hex()
+
+
 # ---------------------------------------------------------------------------
-# Tor control port connection with event monitoring
+# Tor control port — command connection (synchronous)
 # ---------------------------------------------------------------------------
 
-class TorControl:
-    """Persistent control port connection with HS_DESC event monitoring."""
+class TorCommandConn:
+    """Synchronous control port connection for ADD_ONION / DEL_ONION."""
 
     def __init__(self):
         self.sock = None
-        self.lock = threading.Lock()
-        self.uploaded = set()  # service_ids with HS_DESC UPLOADED
-        self._event_thread = None
-        self._running = False
 
     def connect(self):
-        """Connect to control port, authenticate, subscribe to events."""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect(CONTROL_PORT)
-        self.sock.settimeout(5.0)
-
-        # Read greeting
-        self._read_response()
-
-        # Authenticate
-        try:
-            with open(COOKIE_PATH, "rb") as f:
-                cookie = f.read().hex()
-        except FileNotFoundError:
-            raise RuntimeError("Control auth cookie not found")
-
+        self.sock.connect((CONTROL_HOST, CONTROL_PORT))
+        self.sock.settimeout(10.0)
+        cookie = _read_cookie()
         self._send(f"AUTHENTICATE {cookie}")
         resp = self._read_response()
         if "250 OK" not in resp:
-            raise RuntimeError(f"Auth failed: {resp}")
-
-        # Subscribe to HS_DESC events
-        self._send("SETEVENTS HS_DESC")
-        resp = self._read_response()
-        if "250 OK" not in resp:
-            raise RuntimeError(f"SETEVENTS failed: {resp}")
-
-        # Start event listener thread
-        self._running = True
-        self._event_thread = threading.Thread(target=self._event_loop, daemon=True)
-        self._event_thread.start()
-        log("Connected to Tor control port, listening for HS_DESC events")
+            raise RuntimeError(f"Command conn auth failed: {resp}")
+        log("Command connection established")
 
     def _send(self, cmd):
         self.sock.sendall(f"{cmd}\r\n".encode())
 
     def _read_response(self):
-        """Read until we get a final response line (starts with 250/5xx + space)."""
+        """Read a complete synchronous response (ends with 'NNN SP' line)."""
         data = b""
-        self.sock.settimeout(5.0)
         while True:
             try:
                 chunk = self.sock.recv(4096)
                 if not chunk:
                     break
                 data += chunk
-                # Check for complete response
-                lines = data.decode("utf-8", errors="replace").split("\r\n")
-                for line in lines:
-                    if line and (line[:3].isdigit() and len(line) > 3 and line[3] == " "):
-                        return data.decode("utf-8", errors="replace")
+                text = data.decode("utf-8", errors="replace")
+                for line in text.split("\r\n"):
+                    if line and len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
+                        return text
+            except socket.timeout:
+                break
+        return data.decode("utf-8", errors="replace")
+
+    def add_onion(self, content_address, key_b64):
+        """Send ADD_ONION. Returns (success, service_id_or_error)."""
+        cmd = (f"ADD_ONION ED25519-V3:{key_b64} Flags=Detach "
+               f"Port=80,127.0.0.1:{REDIRECT_PORT}")
+        self._send(cmd)
+        resp = self._read_response()
+
+        if "250-ServiceID=" in resp:
+            # Extract service ID from response
+            for line in resp.split("\r\n"):
+                if line.startswith("250-ServiceID="):
+                    sid = line.split("=", 1)[1]
+                    return True, sid
+            return True, content_address.replace(".onion", "")
+
+        if "Onion address collision" in resp:
+            # Already active — that's fine
+            return True, content_address.replace(".onion", "")
+
+        # Failure
+        return False, resp.strip()
+
+    def del_onion(self, content_address):
+        """Send DEL_ONION. Returns (success, response)."""
+        service_id = content_address.replace(".onion", "")
+        self._send(f"DEL_ONION {service_id}")
+        resp = self._read_response()
+        success = "250 OK" in resp
+        return success, resp.strip()
+
+    def close(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Tor control port — event connection (async HS_DESC monitoring)
+# ---------------------------------------------------------------------------
+
+class TorEventConn:
+    """Async control port connection that monitors HS_DESC events."""
+
+    def __init__(self):
+        self.sock = None
+        self.uploaded = set()  # service_ids with HS_DESC UPLOADED
+        self.failed = set()    # service_ids with HS_DESC FAILED
+        self.lock = threading.Lock()
+        self._running = False
+        self._thread = None
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((CONTROL_HOST, CONTROL_PORT))
+        self.sock.settimeout(5.0)
+        cookie = _read_cookie()
+        self._send(f"AUTHENTICATE {cookie}")
+        resp = self._read_response()
+        if "250 OK" not in resp:
+            raise RuntimeError(f"Event conn auth failed: {resp}")
+
+        self._send("SETEVENTS HS_DESC")
+        resp = self._read_response()
+        if "250 OK" not in resp:
+            raise RuntimeError(f"SETEVENTS failed: {resp}")
+
+        self._running = True
+        self._thread = threading.Thread(target=self._event_loop, daemon=True)
+        self._thread.start()
+        log("Event connection established, listening for HS_DESC events")
+
+    def _send(self, cmd):
+        self.sock.sendall(f"{cmd}\r\n".encode())
+
+    def _read_response(self):
+        data = b""
+        while True:
+            try:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                text = data.decode("utf-8", errors="replace")
+                for line in text.split("\r\n"):
+                    if line and len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
+                        return text
             except socket.timeout:
                 break
         return data.decode("utf-8", errors="replace")
 
     def _event_loop(self):
-        """Listen for async events from Tor."""
         self.sock.settimeout(1.0)
         buf = b""
         while self._running:
             try:
                 chunk = self.sock.recv(4096)
                 if not chunk:
-                    log("Control port connection closed")
+                    log("Event connection closed")
                     self._running = False
                     break
                 buf += chunk
                 while b"\r\n" in buf:
                     line, buf = buf.split(b"\r\n", 1)
-                    self._handle_event(line.decode("utf-8", errors="replace"))
+                    self._handle_line(line.decode("utf-8", errors="replace"))
             except socket.timeout:
                 continue
             except Exception as e:
                 log(f"Event loop error: {e}")
                 time.sleep(1)
 
-    def _handle_event(self, line):
-        """Parse HS_DESC events."""
-        # Format: 650 HS_DESC UPLOADED <service_id> ...
+    def _handle_line(self, line):
+        # 650 HS_DESC UPLOADED <service_id> <auth_type> <hs_dir>
         if "650 HS_DESC UPLOADED" in line:
             parts = line.split()
             if len(parts) >= 4:
-                service_id = parts[3]
+                sid = parts[3]
                 with self.lock:
-                    self.uploaded.add(service_id)
-                log(f"HS_DESC UPLOADED: {service_id[:20]}...")
-
-    def add_onion(self, content_address, key_b64):
-        """Send ADD_ONION command. Returns True on success."""
-        service_id = content_address.replace(".onion", "")
-        cmd = f"ADD_ONION ED25519-V3:{key_b64} Flags=Detach Port=80,127.0.0.1:{REDIRECT_PORT}"
-        with self.lock:
-            self._send(cmd)
-        # Read response (need to handle it carefully with event thread running)
-        time.sleep(0.5)
-        # The response will be mixed with events, but ADD_ONION response is synchronous
-        # We just check if the service appears in detached list
-        return True  # ADD_ONION rarely fails if key is valid
-
-    def del_onion(self, content_address):
-        """Send DEL_ONION command."""
-        service_id = content_address.replace(".onion", "")
-        with self.lock:
-            self._send(f"DEL_ONION {service_id}")
-            self.uploaded.discard(service_id)
-        time.sleep(0.3)
+                    self.uploaded.add(sid)
+                    self.failed.discard(sid)
+                log(f"HS_DESC UPLOADED: {sid[:20]}...")
+        # 650 HS_DESC FAILED <service_id> ...
+        elif "650 HS_DESC FAILED" in line:
+            parts = line.split()
+            if len(parts) >= 4:
+                sid = parts[3]
+                with self.lock:
+                    self.failed.add(sid)
+                log(f"HS_DESC FAILED: {sid[:20]}...")
 
     def is_uploaded(self, content_address):
-        """Check if descriptors were uploaded for this address."""
-        service_id = content_address.replace(".onion", "")
+        sid = content_address.replace(".onion", "")
         with self.lock:
-            return service_id in self.uploaded
+            return sid in self.uploaded
+
+    def is_failed(self, content_address):
+        sid = content_address.replace(".onion", "")
+        with self.lock:
+            return sid in self.failed
+
+    def clear(self, content_address):
+        sid = content_address.replace(".onion", "")
+        with self.lock:
+            self.uploaded.discard(sid)
+            self.failed.discard(sid)
 
     def close(self):
         self._running = False
@@ -191,19 +252,23 @@ class TorControl:
 class QueueManager:
     """Rate-limited ADD_ONION pipeline."""
 
-    def __init__(self, tor):
-        self.tor = tor
+    def __init__(self, cmd_conn, evt_conn):
+        self.cmd = cmd_conn
+        self.evt = evt_conn
         self.queued = []       # addresses waiting for a slot
-        self.in_flight = {}    # addr -> timestamp (ADD_ONION done, waiting for upload)
+        self.in_flight = {}    # addr -> timestamp (ADD_ONION done, waiting)
         self.active = set()    # descriptors uploaded, service reachable
+        self.failed = set()    # ADD_ONION failed
         self.lock = threading.Lock()
 
     def takeover(self, content_address):
         """Add an address to the takeover queue."""
         with self.lock:
-            if (content_address in self.active or
-                    content_address in self.in_flight or
-                    content_address in self.queued):
+            if content_address in self.active:
+                return {"status": "already_active", "address": content_address}
+            if content_address in self.in_flight:
+                return {"status": "in_flight", "address": content_address}
+            if content_address in self.queued:
                 return {"status": "already_queued", "address": content_address}
             self.queued.append(content_address)
         self._process_queue()
@@ -219,11 +284,17 @@ class QueueManager:
             was_in_flight = content_address in self.in_flight
             self.active.discard(content_address)
             self.in_flight.pop(content_address, None)
+            self.failed.discard(content_address)
 
         if was_active or was_in_flight:
-            self.tor.del_onion(content_address)
-            self._process_queue()  # free slot for next in queue
-            return {"status": "released", "address": content_address}
+            success, resp = self.cmd.del_onion(content_address)
+            self.evt.clear(content_address)
+            self._process_queue()
+            if success:
+                return {"status": "released", "address": content_address}
+            else:
+                return {"status": "release_warning", "address": content_address,
+                        "detail": resp}
         return {"status": "not_found", "address": content_address}
 
     def _process_queue(self):
@@ -232,28 +303,43 @@ class QueueManager:
             while self.queued and len(self.in_flight) < MAX_IN_FLIGHT:
                 addr = self.queued.pop(0)
                 key_b64 = self._get_key(addr)
-                if key_b64:
-                    self.tor.add_onion(addr, key_b64)
+                if not key_b64:
+                    log(f"ERROR: no key for {addr}, skipping")
+                    self.failed.add(addr)
+                    continue
+
+                success, result = self.cmd.add_onion(addr, key_b64)
+                if success:
                     self.in_flight[addr] = time.time()
-                    log(f"ADD_ONION in-flight: {addr[:20]}... "
+                    log(f"ADD_ONION OK: {addr[:20]}... "
                         f"({len(self.in_flight)}/{MAX_IN_FLIGHT} slots, "
                         f"{len(self.queued)} queued)")
                 else:
-                    log(f"ERROR: no key for {addr}, skipping")
+                    log(f"ADD_ONION FAILED: {addr[:20]}... — {result}")
+                    self.failed.add(addr)
 
     def check_uploads(self):
         """Move in-flight addresses to active if descriptors uploaded."""
         promoted = []
         with self.lock:
             for addr in list(self.in_flight):
-                if self.tor.is_uploaded(addr):
+                if self.evt.is_uploaded(addr):
                     self.active.add(addr)
                     del self.in_flight[addr]
                     promoted.append(addr)
+                elif self.evt.is_failed(addr):
+                    # Descriptor upload failed — retry by re-queuing
+                    elapsed = time.time() - self.in_flight[addr]
+                    if elapsed > 300:  # 5 min timeout
+                        log(f"HS_DESC FAILED after {elapsed:.0f}s, giving up: "
+                            f"{addr[:20]}...")
+                        self.failed.add(addr)
+                        del self.in_flight[addr]
+                    # else: keep waiting, Tor will retry
         if promoted:
             for addr in promoted:
                 log(f"ACTIVE: {addr[:20]}... (descriptors uploaded)")
-            self._process_queue()  # fill freed slots
+            self._process_queue()
 
     def status(self):
         with self.lock:
@@ -262,6 +348,7 @@ class QueueManager:
                 "queued": len(self.queued),
                 "in_flight": len(self.in_flight),
                 "active": len(self.active),
+                "failed": len(self.failed),
                 "max_in_flight": MAX_IN_FLIGHT,
             }
 
@@ -281,19 +368,17 @@ class QueueManager:
             return None
 
 
-
 # ---------------------------------------------------------------------------
 # Command interface via Unix socket
 # ---------------------------------------------------------------------------
 
 def run_daemon():
     """Run as daemon — listen for commands on Unix socket."""
-    # Wait for Tor control port
     log("Waiting for Tor control port...")
     for _ in range(60):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect(CONTROL_PORT)
+            s.connect((CONTROL_HOST, CONTROL_PORT))
             s.close()
             break
         except ConnectionRefusedError:
@@ -302,9 +387,12 @@ def run_daemon():
         log("ERROR: Tor control port not available after 120s")
         sys.exit(1)
 
-    tor = TorControl()
-    tor.connect()
-    qm = QueueManager(tor)
+    # Two separate connections: commands and events
+    cmd_conn = TorCommandConn()
+    cmd_conn.connect()
+    evt_conn = TorEventConn()
+    evt_conn.connect()
+    qm = QueueManager(cmd_conn, evt_conn)
 
     # Remove stale socket
     try:
