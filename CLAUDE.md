@@ -121,6 +121,32 @@
 - Stress test containers have no persistent volumes, so stale state files are from the current session (not old runs)
 - **Recommended**: add a watchdog — if Tor doesn't reach 100% bootstrap within 120s, delete state and restart
 
+## Scrub Procedure (backup → reset → restore)
+- The "scrub" wipes and rebuilds an OnionPress instance while preserving data
+- **Steps**:
+  1. Quit OnionPress from menubar (full quit)
+  2. `onionpress start` (Colima + containers needed for backup)
+  3. `onionpress backup <wp-admin-password> <output.zip>`
+  4. `ONIONPRESS_YES=true onionpress reset` (wipes volumes, keys, config, secrets; starts fresh containers)
+  5. `onionpress restore <wp-admin-password> <backup.zip>` (imports DB, Tor keys, wp-content, config, re-adds multisite constants, starts Tor)
+  6. Relaunch `/Applications/OnionPress.app`, verify purple
+- **Restore multisite bug** (partially fixed in v2.4.37): After container recreation, wp-config.php loses multisite constants. The restore flow now force-adds them and starts Tor explicitly. See issue #122 for the proper fix (move backup/restore to Python).
+- **Reset vanity key copy bug**: The `log` function's output contaminates `$VANITY_DIR` in the docker mount command. Reset still works; restore overwrites the key anyway.
+- The backup password is the WordPress admin password, verified before proceeding
+
+## Docker Image Builds
+- **GitHub Actions workflow**: `.github/workflows/docker-publish.yml`
+- **Images**: `ghcr.io/brewsterkahle/onionpress-tor:latest` and `ghcr.io/brewsterkahle/onionpress-wordpress:latest`
+- **Manual trigger only** (`workflow_dispatch`) — run via `gh workflow run docker-publish.yml`
+- **Multi-arch**: amd64 on GitHub runners, arm64 on self-hosted runner, then manifest merge
+- **When to trigger**: after changes to `docker/tor/` or `docker/wordpress/` (entrypoint.sh, onionheaven-server.py, onionheaven-heartbeat.py, etc.)
+
+## OnionHeaven Always-On (v2.4.37+)
+- The `onionheaven` container is a **core service** — starts with every `docker compose up`, no profile gate
+- `ONIONHEAVEN=1` is hardcoded in docker-compose.yml (was `${ONIONHEAVEN:-0}` with a fragile lazy activation watcher)
+- The heartbeat monitor starts automatically; takeover workers start when registrations exist
+- **op2pi** (Raspberry Pi OnionHeaven): `op2pieoieuwgwkgps4pz25rrh4mi4tolesyiduy7zrol2uh7luaxhwad.onion`
+
 ## Bash `wait` Gotcha
 - **Bare `wait` (no arguments) waits for ALL background children** — including `tail -f` processes, background log watchers, etc.
 - In scripts that spawn background monitoring processes, always capture PIDs and `wait "$pid"` on specific ones
