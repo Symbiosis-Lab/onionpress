@@ -301,7 +301,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             # Farm container counts
             try:
                 takeover_containers = conn.execute(
-                    "SELECT COUNT(*) FROM takeover_containers WHERE status='active'"
+                    "SELECT COUNT(*) FROM takeover_containers"
                 ).fetchone()[0]
             except Exception:
                 takeover_containers = 0
