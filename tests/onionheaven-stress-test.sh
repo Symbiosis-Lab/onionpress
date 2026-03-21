@@ -1580,9 +1580,14 @@ run_verify_worker() {
     local timeout_secs="$3"
     local poll_start="$4"
     local poll_count="$5"
+    local addr_type="${6:-content}"  # "content" or "healthcheck"
 
     local addrs
-    addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
+    if [ "$addr_type" = "healthcheck" ]; then
+        addrs=$(get_worker_hc_addrs "$poll_start" "$poll_count")
+    else
+        addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
+    fi
     [ -z "$addrs" ] && return 1
 
     # Split addresses across poll clients (round-robin)
@@ -2369,9 +2374,14 @@ run_worker() {
     # HSFETCH all site addresses on poll clients to speed up descriptor discovery
     flush_client_descriptor_cache 0 "$TOTAL"
 
-    # Phase 3: Wait for onionheaven heartbeat monitor to confirm sites are healthy
-    phase_start "3" "Waiting for heartbeat monitor to confirm all ${TOTAL} sites are healthy (est. 1m)"
-    if ! wait_for_healthy "$TOTAL" "Phase 3" "$HEALTHY_TIMEOUT"; then
+    # Phase 3: Wait for all sites to be reachable via Tor (verify-worker checks healthcheck addresses)
+    phase_start "3" "Waiting for all ${TOTAL} sites to be reachable via Tor (est. 1m)"
+    local hc_addr_type="healthcheck"
+    [ "$NO_HEALTHCHECK" = true ] && hc_addr_type="content"
+    log "Phase 3: Waiting for ${TOTAL} sites to be reachable via Tor (${hc_addr_type} addresses, timeout: ${HEALTHY_TIMEOUT}s)..."
+    if run_verify_worker "200" "$TOTAL" "$HEALTHY_TIMEOUT" 0 "$TOTAL" "$hc_addr_type"; then
+        log "Phase 3: all sites reachable"
+    else
         log "WARNING: Not all sites became healthy, continuing anyway..."
     fi
     r_phase3="$WAIT_RESULT"
