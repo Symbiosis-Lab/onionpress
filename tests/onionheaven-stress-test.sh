@@ -2561,13 +2561,18 @@ run_cleanup() {
     # Also remove old-style container
     docker_cmd rm -f stress-worker-tor 2>/dev/null || true
 
-    # Build signed unregister payloads from local worker-info files
+    # Build signed unregister payloads from local worker-info files.
+    # Search both OUTPUT_DIR and all run-* subdirectories, dedup by address.
     local payloads
     payloads=$(python3 -c "
-import json, glob, sys, base64
+import json, glob, sys, base64, os
 sys.path.insert(0, '${SCRIPT_DIR}/../src')
 from onion_auth import sign_payload, make_timestamp
-for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
+# Collect from all run dirs, newest first, dedup by content_address
+seen = set()
+all_files = sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json'))
+all_files += sorted(glob.glob('${OUTPUT_DIR}/run-*/worker-*-info.json'), key=os.path.getmtime, reverse=True)
+for f in all_files:
     try:
         workers = json.load(open(f))
         for w in workers:
@@ -2575,13 +2580,15 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
             ha = w.get('healthcheck_address', '')
             pk = w.get('privkey_b64', '')
             pub = w.get('pubkey_b64', '')
-            if ca and pk and pub:
+            if ca and pk and pub and ca not in seen:
+                seen.add(ca)
                 privkey = base64.b64decode(pk)
                 pubkey = base64.b64decode(pub)
                 ts = make_timestamp()
                 sig = sign_payload(privkey, pubkey, 'unregister', ca, ha, ts)
                 print(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
     except: pass
+print(f'Found {len(seen)} unique addresses across all runs', file=sys.stderr)
 " 2>/dev/null) || true
 
     local count
