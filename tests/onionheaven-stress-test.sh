@@ -652,8 +652,9 @@ EOF
 
 stop_poll_clients() {
     for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
-        docker_cmd rm -f "stress-poll-client-${i}" 2>/dev/null || true
+        docker_cmd rm -f "stress-poll-client-${i}" 2>/dev/null &
     done
+    wait
 }
 
 # Wait for all sites to bootstrap (register with OnionHeaven over Tor).
@@ -2154,15 +2155,16 @@ verify_redirects() {
 cleanup_stress_test() {
     log "Cleaning up stress test artifacts..."
 
-    # Remove all stress containers
+    # Remove all stress containers (parallel)
     for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
-        docker_cmd rm -f "stress-worker-${idx}" 2>/dev/null || true
+        docker_cmd rm -f "stress-worker-${idx}" 2>/dev/null &
     done
     # Also catch any extras
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
-        docker_cmd rm -f "$ctr" 2>/dev/null || true
+        docker_cmd rm -f "$ctr" 2>/dev/null &
     done || true
-    # Remove polling clients
+    wait
+    # Remove polling clients (parallel)
     stop_poll_clients
     log "  Removed stress + polling containers"
 
