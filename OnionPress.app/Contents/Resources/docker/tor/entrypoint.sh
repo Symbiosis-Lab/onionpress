@@ -82,13 +82,13 @@ TORRC_EOF
         fi
     fi
 
-    # Start takeover worker (log to shared volume)
-    LOG_FILE="/var/lib/onionpress/onionheaven/takeover-worker-${CONTAINER_NAME}.log"
-    CONTAINER_NAME="${CONTAINER_NAME}" python3 /onionheaven-takeover-worker.py 2>"$LOG_FILE" &
-    WORKER_PID=$!
+    # Start queue manager daemon (rate-limited ADD_ONION pipeline)
+    LOG_FILE="/var/lib/onionpress/onionheaven/queue-manager-${CONTAINER_NAME}.log"
+    CONTAINER_NAME="${CONTAINER_NAME}" python3 /onionheaven-queue-manager.py daemon 2>"$LOG_FILE" &
+    QM_PID=$!
     sleep 1
-    if ! kill -0 $WORKER_PID 2>/dev/null; then
-        echo "ERROR: onionheaven-takeover-worker.py failed to start"
+    if ! kill -0 $QM_PID 2>/dev/null; then
+        echo "ERROR: onionheaven-queue-manager.py failed to start"
     fi
 
     # Wait on Tor (main process)

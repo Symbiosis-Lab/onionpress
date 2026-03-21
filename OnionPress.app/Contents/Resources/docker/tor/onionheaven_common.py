@@ -10,6 +10,7 @@ release directly via `docker exec`. No polling loops, no DB-mediated IPC.
 Workers are just Tor instances — they receive commands, not requests.
 """
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -668,22 +669,31 @@ def cleanup_dead_workers(conn):
 
 
 def _exec_takeover(container_name, content_address):
-    """Execute takeover on a worker via docker exec.
+    """Queue takeover on a worker via the queue manager.
 
-    Returns True on success, False on failure.
+    The queue manager rate-limits ADD_ONION calls and monitors descriptor
+    propagation. Returns True if the address was queued successfully.
     """
-    log(f"Taking over {content_address} via {container_name}")
+    log(f"Queuing takeover of {content_address} on {container_name}")
     try:
         result = subprocess.run(
             ["docker", "exec", container_name,
-             TOR_MANAGER, "takeover", content_address],
-            capture_output=True, text=True, timeout=60
+             "python3", "/onionheaven-queue-manager.py", "takeover", content_address],
+            capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
-            log(f"Takeover complete: {content_address} on {container_name}")
+            try:
+                resp = json.loads(result.stdout.strip())
+                status = resp.get("status", "")
+                if status in ("queued", "already_queued"):
+                    log(f"Takeover queued: {content_address} on {container_name} ({status})")
+                    return True
+            except (json.JSONDecodeError, ValueError):
+                pass
+            log(f"Takeover queued: {content_address} on {container_name}")
             return True
         else:
-            log(f"Takeover failed for {content_address} on {container_name}: "
+            log(f"Takeover queue failed for {content_address} on {container_name}: "
                 f"{result.stderr.strip()}")
             return False
     except Exception as e:
@@ -692,7 +702,7 @@ def _exec_takeover(container_name, content_address):
 
 
 def _exec_release(container_name, content_address):
-    """Execute release on a worker via docker exec.
+    """Release on a worker via the queue manager.
 
     Returns True on success, False on failure.
     """
@@ -700,8 +710,8 @@ def _exec_release(container_name, content_address):
     try:
         result = subprocess.run(
             ["docker", "exec", container_name,
-             TOR_MANAGER, "release", content_address],
-            capture_output=True, text=True, timeout=60
+             "python3", "/onionheaven-queue-manager.py", "release", content_address],
+            capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
             log(f"Release complete: {content_address} on {container_name}")
@@ -713,6 +723,24 @@ def _exec_release(container_name, content_address):
     except Exception as e:
         log(f"Release error for {content_address} on {container_name}: {e}")
         return False
+
+
+def get_queue_status(container_name):
+    """Get queue status from a worker's queue manager.
+
+    Returns dict with queued/in_flight/active counts, or None on error.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name,
+             "python3", "/onionheaven-queue-manager.py", "status"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout.strip())
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
