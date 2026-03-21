@@ -1967,10 +1967,6 @@ verify_redirects() {
 
     log "${phase_label}: Verifying 302 redirects on sample of taken-over addresses..."
 
-    # Wait for descriptor propagation after takeover
-    log "  Waiting 30s for onion descriptor propagation..."
-    sleep 30
-
     local addrs
     addrs=$(get_taken_over_addresses)
 
@@ -2371,14 +2367,6 @@ run_worker() {
         phase_result "A.1" "Takeover: $r_a1"
         echo ""
 
-        # A1v: Verify 302 redirects — wait at least 10 minutes from A.1 start
-        local min_propagation=600  # 10 minutes
-        local elapsed_since_a1=$(( $(date +%s) - scenario_ts ))
-        if [ "$elapsed_since_a1" -lt "$min_propagation" ]; then
-            local wait_more=$(( min_propagation - elapsed_since_a1 ))
-            log "A.1v: Waiting ${wait_more}s more for descriptor propagation (${elapsed_since_a1}s elapsed, need ${min_propagation}s)..."
-            sleep "$wait_more"
-        fi
         phase_start "A.1v" "Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)"
         verify_redirects "A.1v" 5
         r_a1v="$WAIT_RESULT"
@@ -2426,16 +2414,6 @@ run_worker() {
         phase_result "B.1" "Takeover: $r_b1"
         echo ""
 
-        # B1v: Verify 302 redirects — wait at least 10 minutes from B.1 start
-        # so descriptors have time to propagate (B.1 takeover can be very fast,
-        # but HSDirs need time to serve the new descriptors to our poll clients)
-        local min_propagation=600  # 10 minutes
-        local elapsed_since_b1=$(( $(date +%s) - scenario_ts ))
-        if [ "$elapsed_since_b1" -lt "$min_propagation" ]; then
-            local wait_more=$(( min_propagation - elapsed_since_b1 ))
-            log "B.1v: Waiting ${wait_more}s more for descriptor propagation (${elapsed_since_b1}s elapsed, need ${min_propagation}s)..."
-            sleep "$wait_more"
-        fi
         phase_start "B.1v" "Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)"
         verify_redirects "B.1v" 5
         r_b1v="$WAIT_RESULT"
