@@ -621,8 +621,9 @@ EOF
     done
 
     # Wait for all polling clients to bootstrap
-    log "Waiting for polling clients to bootstrap..."
+    log "Waiting for ${NUM_POLL_CLIENTS} polling clients to bootstrap..."
     local all_ready=false
+    local prev_ready=0
     for attempt in $(seq 1 30); do
         local ready=0
         for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
@@ -632,15 +633,22 @@ EOF
                 ready=$((ready + 1))
             fi
         done
+        # Print dots for newly bootstrapped clients
+        if [ -n "$PHASE_LOG" ] && [ "$ready" -gt "$prev_ready" ]; then
+            printf '%0.s.' $(seq 1 $((ready - prev_ready))) >> "$PHASE_LOG"
+            prev_ready=$ready
+        fi
         if [ "$ready" -ge "$NUM_POLL_CLIENTS" ]; then
             all_ready=true
+            [ -n "$PHASE_LOG" ] && printf ' %s/%s\n' "$NUM_POLL_CLIENTS" "$NUM_POLL_CLIENTS" >> "$PHASE_LOG"
             log "  All ${NUM_POLL_CLIENTS} polling clients ready (${attempt}0s)"
             break
         fi
         sleep 10
     done
     if [ "$all_ready" = false ]; then
-        log "WARNING: Not all polling clients bootstrapped, using what's available"
+        [ -n "$PHASE_LOG" ] && printf ' %s/%s\n' "$prev_ready" "$NUM_POLL_CLIENTS" >> "$PHASE_LOG"
+        log "WARNING: Not all polling clients bootstrapped (${prev_ready}/${NUM_POLL_CLIENTS}), using what's available"
     fi
 
     # Copy latest verify-worker.py into poll clients (image may be stale)
