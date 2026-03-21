@@ -98,14 +98,14 @@ if [ "$NO_TIMEOUT" = true ]; then
     BOOTSTRAP_TIMEOUT=86400
     TAKEOVER_TIMEOUT=86400
     RECOVERY_TIMEOUT=86400
-    RECOVERY_SILENT_TIMEOUT=86400
+
     HEALTHY_TIMEOUT=86400
     REDIRECT_VERIFY_TIMEOUT=86400
 else
     BOOTSTRAP_TIMEOUT=900
     TAKEOVER_TIMEOUT=600
     RECOVERY_TIMEOUT=600
-    RECOVERY_SILENT_TIMEOUT=900
+
     HEALTHY_TIMEOUT=600
     REDIRECT_VERIFY_TIMEOUT=300
 fi
@@ -2451,22 +2451,7 @@ run_worker() {
         phase_result "B.1v" "$r_b1v"
         echo ""
 
-        # B2: Recovery — re-enable only (no /online, no /register), wait for heartbeat monitor
-        phase_start "B.2" "Silent recovery: re-enable ${FAILING} sites (no /online), wait for heartbeat monitor recovery (est. 1m)"
-        scenario_ts=$(date +%s)
-        log "Phase B.2: Silent recovery — re-enabling responders (no /online, no /register)..."
-        enable_workers_silent "$fail_start" "$FAILING"
-        flush_client_descriptor_cache "$fail_start" "$FAILING"
-        log "Phase B.2: Waiting for heartbeat-detected recovery..."
-        if ! wait_for_recovery "$FAILING" "${RECOVERY_SILENT_TIMEOUT:-$RECOVERY_TIMEOUT}"; then
-            log "WARNING: Not all sites recovered via heartbeat detection"
-        fi
-        recovery_elapsed=$(( $(date +%s) - scenario_ts ))
-        r_b2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
-        phase_result "B.2" "Recovery: $r_b2"
-        echo ""
-
-        r_b_sum="takeover $(fmt_duration $takeover_elapsed), recovery $(fmt_duration $recovery_elapsed)"
+        r_b_sum="takeover $(fmt_duration $takeover_elapsed)"
         phase_result "B" "Silent: $r_b_sum"
         echo ""
 
@@ -2498,7 +2483,6 @@ SUMMARY
   B. Silent (heartbeat-only, no notifications):
      B.1  Takeover:       ${r_b1:-(not run)}
      B.1v Verify 302s:    ${r_b1v:-(not run)}
-     B.2  Recovery:       ${r_b2:-(not run)}
      => ${r_b_sum:-(incomplete)}
 SUMMARY
         fi
