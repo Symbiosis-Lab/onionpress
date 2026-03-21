@@ -38,29 +38,38 @@ def ctor_control(cmd):
         ["sh", "-c",
          f'cookie=$(xxd -p /var/lib/tor/control_auth_cookie | tr -d "\\n"); '
          f'printf "AUTHENTICATE %s\\r\\n{cmd}\\r\\nQUIT\\r\\n" "$cookie" | '
-         f'nc -w 5 127.0.0.1 9051'],
-        capture_output=True, text=True, timeout=15,
+         f'nc -w 15 127.0.0.1 9051'],
+        capture_output=True, text=True, timeout=30,
     )
     return result.stdout
 
 
-def ctor_add_onion(port):
+def ctor_add_onion(port, label=""):
     """Create an ephemeral onion service via ADD_ONION NEW:ED25519-V3.
 
     Returns (address, privkey_b64) or (None, None) on failure.
     The address includes .onion suffix. The privkey is the raw base64
     key that can be used with ADD_ONION ED25519-V3:<key> to re-add.
+    Retries up to 3 times on failure.
     """
-    response = ctor_control(f"ADD_ONION NEW:ED25519-V3 Flags=Detach Port=80,127.0.0.1:{port}")
-    service_id = None
-    privkey_b64 = None
-    for line in response.splitlines():
-        if line.startswith("250-ServiceID="):
-            service_id = line.split("=", 1)[1].strip()
-        elif line.startswith("250-PrivateKey=ED25519-V3:"):
-            privkey_b64 = line.split("ED25519-V3:", 1)[1].strip()
-    if service_id and privkey_b64:
-        return f"{service_id}.onion", privkey_b64
+    for attempt in range(3):
+        t0 = time.time()
+        response = ctor_control(f"ADD_ONION NEW:ED25519-V3 Flags=Detach Port=80,127.0.0.1:{port}")
+        elapsed = time.time() - t0
+        service_id = None
+        privkey_b64 = None
+        for line in response.splitlines():
+            if line.startswith("250-ServiceID="):
+                service_id = line.split("=", 1)[1].strip()
+            elif line.startswith("250-PrivateKey=ED25519-V3:"):
+                privkey_b64 = line.split("ED25519-V3:", 1)[1].strip()
+        if service_id and privkey_b64:
+            print(f"  {label}ADD_ONION port={port} → {service_id}.onion ({elapsed:.1f}s)", flush=True)
+            return f"{service_id}.onion", privkey_b64
+        # Log the failure with the raw response
+        resp_preview = response.replace('\n', ' ').strip()[:120] if response else "(empty)"
+        print(f"  {label}ADD_ONION port={port} FAILED attempt {attempt+1}/3 ({elapsed:.1f}s): {resp_preview}", flush=True)
+        time.sleep(2)
     return None, None
 
 
@@ -212,10 +221,9 @@ def bootstrap_one_worker(i):
 
     if USE_CTOR:
         # C Tor: create services via ADD_ONION (ephemeral, DEL_ONION can remove them)
-        print(f"[worker {i}] Creating onion service via ADD_ONION...", flush=True)
-        content_addr, content_key_b64 = ctor_add_onion(cp)
+        content_addr, content_key_b64 = ctor_add_onion(cp, label=f"[worker {i}] content ")
         if not content_addr:
-            print(f"[worker {i}] ERROR: ADD_ONION failed for content service", flush=True)
+            print(f"[worker {i}] ERROR: ADD_ONION failed for content service after 3 attempts", flush=True)
             return {
                 "global_index": global_idx, "local_index": i,
                 "container": CONTAINER_IDX, "registered": False,
@@ -225,7 +233,7 @@ def bootstrap_one_worker(i):
         if NO_HEALTHCHECK:
             hc_addr = content_addr.replace(content_addr[:8], "hc" + content_addr[2:8])
         else:
-            hc_addr, _ = ctor_add_onion(hp)
+            hc_addr, _ = ctor_add_onion(hp, label=f"[worker {i}] hc ")
             if not hc_addr:
                 print(f"[worker {i}] ERROR: ADD_ONION failed for healthcheck service", flush=True)
                 return {
