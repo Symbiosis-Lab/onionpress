@@ -20,6 +20,7 @@ services:
       - arti-state:/var/lib/arti/
       - tor-state:/var/lib/tor/
       - onionpress-data:/var/lib/onionpress
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - wordpress
     restart: unless-stopped
