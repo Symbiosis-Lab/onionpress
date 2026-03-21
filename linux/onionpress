@@ -974,162 +974,12 @@ setup_wordpress_interactive() {
 }
 
 # ─── OnionHeaven farm (takeover containers) ─────────────────────────
-
-# Image used for takeover workers (same as main tor image)
-ONIONHEAVEN_IMAGE="${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}"
-ONIONHEAVEN_FARM_MONITOR_PID=""
-
-_start_takeover_worker() {
-    local idx="$1"
-    local name="onionheaven-takeover-${idx}"
-    local vol="onionpress-arti-state-takeover-${idx}"
-
-    docker rm -f "$name" >> "$LOG_FILE" 2>&1 || true
-
-    if docker run -d \
-        --name "$name" \
-        --network onionpress-network \
-        --ulimit nofile=10000:10000 \
-        -e TZ="${TZ:-UTC}" \
-        -e TOR_IMPL="${TOR_IMPL:-tor}" \
-        -e TAKEOVER_WORKER=1 \
-        -e CONTAINER_NAME="$name" \
-        -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}" \
-        -v "${vol}:/var/lib/arti/" \
-        -v "onionpress-persistent-data:/var/lib/onionpress" \
-        --restart unless-stopped \
-        "$ONIONHEAVEN_IMAGE" >> "$LOG_FILE" 2>&1; then
-        log "OnionHeaven farm: started takeover worker $name"
-    else
-        log "WARNING: Failed to start takeover worker $name"
-        return 1
-    fi
-}
-
-start_onionheaven_farm() {
-    # Guard: don't spawn a second monitor if one is already running
-    if [ -n "$ONIONHEAVEN_FARM_MONITOR_PID" ] && kill -0 "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null; then
-        return
-    fi
-
-    # Start with 0 takeover workers — they'll be spawned on demand when
-    # the heartbeat monitor writes to farm_scale_requests.
-    log "OnionHeaven farm: launching scaling monitor (0 initial workers)"
-
-    _onionheaven_farm_monitor &
-    ONIONHEAVEN_FARM_MONITOR_PID=$!
-}
-
-_onionheaven_farm_monitor() {
-    # Disable errexit — this runs as a background function and any transient
-    # docker/sqlite failure would silently kill the entire monitor loop.
-    set +e
-    local next_takeover=0
-    local db="/var/lib/onionpress/onionheaven/registry.db"
-    local hub_promoted=false
-
-    # Auto-detect hub mode: if we have enough registered sites, bump intro points
-    # by restarting the tor container with ONIONHEAVEN_HUB=1. Only done once.
-    local HUB_THRESHOLD="${ONIONHEAVEN_HUB_THRESHOLD:-5}"
-
-    while true; do
-        sleep 30
-
-        # Auto-promote to hub mode when registration count crosses threshold
-        if [ "$hub_promoted" = "false" ] && [ "$ONIONHEAVEN_HUB" != "1" ]; then
-            local reg_count
-            reg_count=$(docker exec onionheaven sqlite3 "$db" \
-                "SELECT COUNT(*) FROM registry WHERE status='online'" 2>/dev/null) || reg_count=0
-            if [ "$reg_count" -ge "$HUB_THRESHOLD" ] 2>/dev/null; then
-                log "OnionHeaven farm: $reg_count registered sites >= $HUB_THRESHOLD — promoting to hub mode (10 intro points)"
-                export ONIONHEAVEN_HUB="1"
-                # Restart tor container to pick up increased intro points
-                cd "$DOCKER_DIR"
-                docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to restart tor for hub mode"
-                hub_promoted=true
-            fi
-        fi
-
-        # Check for unfulfilled scale-up requests
-        local requests
-        requests=$(docker exec onionheaven sqlite3 "$db" \
-            "SELECT id, worker_type FROM farm_scale_requests WHERE fulfilled_at IS NULL ORDER BY id" 2>/dev/null) || continue
-
-        if [ -z "$requests" ]; then
-            continue
-        fi
-
-        # Memory guard: skip scale-up if host memory usage >85%
-        local mem_pct
-        mem_pct=$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%d", (1-a/t)*100}' /proc/meminfo 2>/dev/null) || mem_pct=0
-        if [ "$mem_pct" -gt 85 ] 2>/dev/null; then
-            log "OnionHeaven farm: skipping scale-up — memory at ${mem_pct}% (>85%)"
-            while IFS='|' read -r req_id req_type; do
-                local now
-                now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-                docker exec onionheaven sqlite3 "$db" \
-                    "UPDATE farm_scale_requests SET fulfilled_at = '${now}' WHERE id = ${req_id}" \
-                    >> "$LOG_FILE" 2>&1 || true
-            done <<< "$requests"
-            continue
-        fi
-
-        # Process each request (format: "id|worker_type" per line)
-        while IFS='|' read -r req_id req_type; do
-            case "$req_type" in
-                takeover)
-                    # Before spawning, check if existing containers already have
-                    # enough total capacity for all taken-over entries. Newly
-                    # spawned containers may not have registered yet — the DB
-                    # knows the real situation, so trust it over the request.
-                    local taken_over_count total_capacity
-                    taken_over_count=$(docker exec onionheaven sqlite3 "$db" \
-                        "SELECT COUNT(*) FROM registry WHERE status = 'taken-over' AND unregistered_at IS NULL" 2>/dev/null) || taken_over_count=0
-                    total_capacity=$(docker exec onionheaven sqlite3 "$db" \
-                        "SELECT COALESCE(SUM(max_services), 0) FROM takeover_containers WHERE status = 'active'" 2>/dev/null) || total_capacity=0
-                    # Also count running takeover containers not yet registered in the DB
-                    local running_workers
-                    running_workers=$(docker ps --filter "name=onionheaven-takeover-" --format '{{.Names}}' 2>/dev/null | wc -l) || running_workers=0
-                    local registered_workers
-                    registered_workers=$(docker exec onionheaven sqlite3 "$db" \
-                        "SELECT COUNT(*) FROM takeover_containers WHERE status = 'active'" 2>/dev/null) || registered_workers=0
-                    local unregistered=$((running_workers - registered_workers))
-                    if [ "$unregistered" -lt 0 ]; then unregistered=0; fi
-                    # Assume unregistered workers will each contribute max_services slots
-                    local max_svc="${ONIONHEAVEN_MAX_SERVICES:-50}"
-                    total_capacity=$((total_capacity + unregistered * max_svc))
-
-                    if [ "$total_capacity" -ge "$taken_over_count" ] 2>/dev/null && [ "$taken_over_count" -gt 0 ]; then
-                        log "OnionHeaven farm: scale-up not needed — capacity $total_capacity >= $taken_over_count taken-over ($unregistered workers still registering)"
-                    else
-                        log "OnionHeaven farm: scaling up — adding 2 takeover workers (starting at index $next_takeover) [capacity $total_capacity < $taken_over_count taken-over]"
-                        _start_takeover_worker "$next_takeover"
-                        _start_takeover_worker "$((next_takeover + 1))"
-                        next_takeover=$((next_takeover + 2))
-                    fi
-                    ;;
-                *)
-                    log "WARNING: Unknown farm scale request type: $req_type"
-                    ;;
-            esac
-
-            local now
-            now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            docker exec onionheaven sqlite3 "$db" \
-                "UPDATE farm_scale_requests SET fulfilled_at = '${now}' WHERE id = ${req_id}" \
-                >> "$LOG_FILE" 2>&1 || true
-        done <<< "$requests"
-    done
-}
+#
+# Takeover container lifecycle is now managed by the heartbeat monitor
+# inside the onionheaven container (via docker socket). The shell script
+# only needs to stop containers on shutdown.
 
 stop_onionheaven_farm() {
-    # Stop the scaling monitor
-    if [ -n "$ONIONHEAVEN_FARM_MONITOR_PID" ] && kill -0 "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null; then
-        kill "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null || true
-        wait "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null || true
-        ONIONHEAVEN_FARM_MONITOR_PID=""
-    fi
-
     # Stop all takeover containers
     for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^onionheaven-takeover-[0-9]+$'); do
         docker stop "$container" >> "$LOG_FILE" 2>&1 || true
@@ -1143,11 +993,8 @@ stop_onionheaven_farm() {
 ONIONHEAVEN_WATCHER_PID=""
 
 start_onionheaven_activation_watcher() {
-    # If the onionheaven container is already running (e.g., restart after activation),
-    # just start the farm monitor directly.
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
-        log "OnionHeaven container already running — starting farm monitor"
-        start_onionheaven_farm
+        log "OnionHeaven container already running"
     fi
 
     # If the activation flag already exists (previous registration), start immediately.
@@ -1192,7 +1039,7 @@ _onionheaven_activation_watcher() {
 _activate_onionheaven() {
     cd "$DOCKER_DIR"
     docker compose --profile onionheaven up -d >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
-    start_onionheaven_farm
+    # Takeover container management is now handled by the heartbeat inside onionheaven
 }
 
 stop_onionheaven_activation_watcher() {
