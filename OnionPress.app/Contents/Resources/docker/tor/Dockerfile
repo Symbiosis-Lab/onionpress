@@ -28,7 +28,8 @@ COPY onionheaven_common.py /onionheaven_common.py
 COPY onionheaven-heartbeat.py /onionheaven-heartbeat.py
 COPY onionheaven-server.py /onionheaven-server.py
 COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
+COPY onionheaven-queue-manager.py /onionheaven-queue-manager.py
 COPY key-convert.py /key-convert.py
 COPY torrc.template /etc/tor/torrc.template
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-takeover-worker.py /key-convert.py
+RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py
 ENTRYPOINT ["/entrypoint.sh"]

@@ -298,14 +298,33 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             onionheaven_peers = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE is_onionheaven = 1"
             ).fetchone()[0]
-            # Farm container counts
+            # Takeover container counts and queue stats
             try:
-                takeover_containers = conn.execute(
-                    "SELECT COUNT(*) FROM takeover_containers"
-                ).fetchone()[0]
+                tc_rows = conn.execute(
+                    "SELECT container_name, bootstrapped, assigned_count FROM takeover_containers"
+                ).fetchall()
+                takeover_containers = len(tc_rows)
             except Exception:
+                tc_rows = []
                 takeover_containers = 0
             conn.close()
+
+            # Aggregate queue stats from all workers
+            total_queued = 0
+            total_in_flight = 0
+            total_active = 0
+            for tc in tc_rows:
+                if tc["bootstrapped"]:
+                    try:
+                        from onionheaven_common import get_queue_status
+                        qs = get_queue_status(tc["container_name"])
+                        if qs:
+                            total_queued += qs.get("queued", 0)
+                            total_in_flight += qs.get("in_flight", 0)
+                            total_active += qs.get("active", 0)
+                    except Exception:
+                        pass
+
             self._send_json(200, {
                 "version": ONIONHEAVEN_SERVER_VERSION,
                 "total": total,
@@ -316,6 +335,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "wordpress_unhealthy": wp_unhealthy,
                 "onionheaven_peers": onionheaven_peers,
                 "takeover_containers": takeover_containers,
+                "takeover_queued": total_queued,
+                "takeover_in_flight": total_in_flight,
+                "takeover_active": total_active,
             })
         except Exception as e:
             self._send_json(500, {"error": str(e)})
