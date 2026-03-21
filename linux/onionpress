@@ -2560,6 +2560,156 @@ main() {
             _validate_oh_address "$2"
             ;;
 
+        scrub)
+            # Scrub: full lifecycle test — backup, uninstall, install, restore, verify.
+            # Proves backup/restore integrity, clean install, and that uninstall
+            # truly cleans up. Use after changes to install.sh, onionpress CLI,
+            # or Docker setup.
+            echo ""
+            echo "OnionPress Scrub"
+            echo "================"
+            echo "This will: backup → uninstall → install → restore → verify"
+            echo ""
+
+            confirm_or_skip "Continue? [y/N] " || { echo "Cancelled."; exit 0; }
+
+            # ── Step 1: Backup ──────────────────────────────────────────
+            echo ""
+            echo "── Step 1/5: Backup ──"
+            setup_db_passwords
+            local scrub_pass="${2:-}"
+            if [ -z "$scrub_pass" ]; then
+                read -r -s -p "WordPress admin password (for backup): " scrub_pass
+                echo ""
+            fi
+            if [ -z "$scrub_pass" ]; then
+                echo "ERROR: Password is required for backup."
+                exit 1
+            fi
+            local scrub_backup="/tmp/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
+            create_backup "$scrub_pass" "$scrub_backup"
+            echo "  Backup saved to: $scrub_backup"
+
+            # Remember the repo dir for re-install
+            local scrub_repo_dir=""
+            for d in /home/*/tmp/onionpress /home/*/onionpress /opt/onionpress-src; do
+                if [ -d "$d/.git" ]; then
+                    scrub_repo_dir="$d"
+                    break
+                fi
+            done
+            if [ -z "$scrub_repo_dir" ]; then
+                echo "ERROR: Cannot find OnionPress git repo — needed to re-install."
+                exit 1
+            fi
+
+            # ── Step 2: Uninstall ───────────────────────────────────────
+            echo ""
+            echo "── Step 2/5: Uninstall ──"
+            # Stop heartbeat client
+            sudo systemctl stop onionpress-heartbeat 2>/dev/null || true
+            sudo systemctl stop onionpress-watcher.timer 2>/dev/null || true
+            sudo systemctl stop onionpress 2>/dev/null || true
+
+            # Remove containers and volumes
+            setup_db_passwords 2>/dev/null || true
+            cd "$DOCKER_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
+
+            # Disable and remove systemd services
+            sudo systemctl disable onionpress 2>/dev/null || true
+            sudo systemctl disable onionpress-heartbeat 2>/dev/null || true
+            sudo systemctl disable onionpress-watcher.timer 2>/dev/null || true
+            sudo rm -f /etc/systemd/system/onionpress.service
+            sudo rm -f /etc/systemd/system/onionpress-heartbeat.service
+            sudo rm -f /etc/systemd/system/onionpress-watcher.service
+            sudo rm -f /etc/systemd/system/onionpress-watcher.timer
+            sudo systemctl daemon-reload
+
+            # Remove install dir and data
+            sudo rm -rf /opt/onionpress
+            sudo rm -f /usr/local/bin/onionpress
+            rm -rf "$DATA_DIR"
+            echo "  Uninstall complete."
+
+            # ── Step 3: Install ─────────────────────────────────────────
+            echo ""
+            echo "── Step 3/5: Install ──"
+            cd "$scrub_repo_dir"
+            sudo bash linux/install.sh
+            echo "  Install complete."
+
+            # ── Step 4: Restore ─────────────────────────────────────────
+            echo ""
+            echo "── Step 4/5: Restore ──"
+            # Re-source the script since install may have changed it
+            setup_db_passwords
+            start_containers
+            wait_for_services
+            restore_backup "$scrub_pass" "$scrub_backup"
+            echo "  Restore complete. Restarting..."
+            touch "$DATA_DIR/.import-key-pending"
+            stop_containers
+            start_containers
+            wait_for_services
+            write_status
+            echo "  Restore and restart complete."
+
+            # ── Step 5: Verify ──────────────────────────────────────────
+            echo ""
+            echo "── Step 5/5: Verify ──"
+            local scrub_ok=true
+
+            # Check containers are running
+            local expected_containers="onionpress-tor onionpress-wordpress onionpress-db onionpress-tor-client"
+            for ctr in $expected_containers; do
+                if docker ps --format '{{.Names}}' | grep -q "^${ctr}$"; then
+                    echo "  ✓ $ctr running"
+                else
+                    echo "  ✗ $ctr NOT running"
+                    scrub_ok=false
+                fi
+            done
+
+            # Check onion address is present
+            local scrub_addr
+            scrub_addr=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+            if [ -n "$scrub_addr" ]; then
+                echo "  ✓ Onion address: $scrub_addr"
+            else
+                echo "  ✗ No onion address found"
+                scrub_ok=false
+            fi
+
+            # Check WordPress responds
+            local wp_status
+            wp_status=$(docker exec onionpress-wordpress curl -s -o /dev/null -w '%{http_code}' http://localhost:80/ 2>/dev/null || echo "000")
+            if [ "$wp_status" = "200" ] || [ "$wp_status" = "301" ] || [ "$wp_status" = "302" ]; then
+                echo "  ✓ WordPress responding (HTTP $wp_status)"
+            else
+                echo "  ✗ WordPress not responding (HTTP $wp_status)"
+                scrub_ok=false
+            fi
+
+            # Check systemd services
+            if systemctl is-enabled onionpress >/dev/null 2>&1; then
+                echo "  ✓ onionpress.service enabled"
+            else
+                echo "  ✗ onionpress.service not enabled"
+                scrub_ok=false
+            fi
+
+            echo ""
+            if [ "$scrub_ok" = "true" ]; then
+                echo "Scrub PASSED — backup/uninstall/install/restore all working."
+            else
+                echo "Scrub FAILED — see errors above."
+            fi
+
+            # Clean up backup file
+            rm -f "$scrub_backup"
+            echo "  Cleaned up: $scrub_backup"
+            ;;
+
         uninstall)
             echo ""
             echo "OnionPress Uninstaller"
@@ -2662,7 +2812,7 @@ main() {
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|import-key|backup|restore|update|logs|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
             exit 1
             ;;
     esac
