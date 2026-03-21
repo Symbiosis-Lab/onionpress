@@ -33,7 +33,6 @@ import time
 CONTROL_PORT = 9051
 SOCKS_PORT = 9050
 RESULTS_FILE = "/tmp/verify-results.json"
-CURE_AFTER_SECS = 90  # request cure after this many seconds of failure
 MAX_CURL_CONCURRENT = 5
 
 
@@ -100,8 +99,6 @@ class VerifyWorker:
         self.results = {}  # addr -> {"code": str, "time": float, "verified": bool}
         self.pending = set(addresses)
         self.desc_received = set()  # service_ids that have received descriptors
-        self.first_fail_time = {}  # addr -> timestamp of first consecutive failure
-        self.cured = set()  # addresses already cured (don't cure twice)
         self.lock = threading.Lock()
         self.start_time = time.time()
 
@@ -113,7 +110,6 @@ class VerifyWorker:
                 "verified": verified,
                 "total": len(self.addresses),
                 "pending": sorted(self.pending),
-                "cured": sorted(self.cured),
                 "elapsed": round(time.time() - self.start_time, 1),
                 "results": dict(self.results),
             }
@@ -186,29 +182,8 @@ class VerifyWorker:
                 print(f"  VERIFIED {addr[:20]}... → {code} ({elapsed}s) [{verified}/{len(self.addresses)}]", flush=True)
             else:
                 self.results[addr] = {"code": code, "time": round(time.time() - self.start_time, 1), "verified": False}
-                if addr not in self.first_fail_time:
-                    self.first_fail_time[addr] = time.time()
 
         self.write_results()
-
-    def check_stragglers(self):
-        """Check for addresses that have been failing too long and request cure."""
-        now = time.time()
-        needs_cure = []
-        with self.lock:
-            for addr in list(self.pending):
-                if addr in self.cured:
-                    continue
-                fail_time = self.first_fail_time.get(addr)
-                if fail_time and (now - fail_time) >= CURE_AFTER_SECS:
-                    needs_cure.append(addr)
-
-        for addr in needs_cure:
-            print(f"  STRAGGLER: {addr[:20]}... failing for {CURE_AFTER_SECS}s — requesting cure", flush=True)
-            with self.lock:
-                self.cured.add(addr)
-            # Write cure request — orchestrator picks this up
-            self.write_results()
 
     def run(self, timeout=600):
         """Main verification loop."""
@@ -226,7 +201,6 @@ class VerifyWorker:
 
         deadline = time.time() + timeout
         last_hsfetch = time.time()
-        last_straggler_check = time.time()
 
         while time.time() < deadline:
             # Check if all verified
@@ -254,11 +228,6 @@ class VerifyWorker:
 
             for addr in to_check[:MAX_CURL_CONCURRENT]:
                 self.verify_address(addr)
-
-            # Check for stragglers
-            if time.time() - last_straggler_check >= 30:
-                self.check_stragglers()
-                last_straggler_check = time.time()
 
             self.write_results()
             time.sleep(5)

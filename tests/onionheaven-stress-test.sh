@@ -1536,72 +1536,6 @@ flush_client_descriptor_cache() {
     for pid in $flush_pids; do wait "$pid" 2>/dev/null; done
 }
 
-# Cure a straggler by rotating its introduction points (DEL_ONION + ADD_ONION).
-# When a service has HS_DESC RECEIVED but poll clients get 000, the intro points
-# are unreachable. Rotating forces new intro points and a fresh descriptor.
-cure_straggler() {
-    local addr="$1"
-
-    # Look up which container/worker owns this address
-    local ctr_idx=-1
-    local local_idx=-1
-    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
-        local found
-        found=$(python3 -c "
-import json, sys
-try:
-    with open('${OUTPUT_DIR}/worker-${idx}-info.json') as f:
-        workers = json.load(f)
-    for w in workers:
-        if w.get('content_address') == '${addr}':
-            print(w['local_index'])
-            sys.exit(0)
-except: pass
-print(-1)
-" 2>/dev/null)
-        if [ "$found" != "-1" ] && [ -n "$found" ]; then
-            ctr_idx=$idx
-            local_idx=$found
-            break
-        fi
-    done
-
-    if [ "$ctr_idx" -lt 0 ]; then
-        log "  cure_straggler: cannot find container for ${addr:0:20}..."
-        return
-    fi
-
-    local ctr_name="stress-worker-${ctr_idx}"
-
-    # Check the container is reachable — it may be on a remote machine
-    if ! docker_cmd inspect --format='{{.State.Running}}' "$ctr_name" 2>/dev/null | grep -q true; then
-        log "  cure_straggler: container ${ctr_name} not reachable (remote machine?) — skipping ${addr:0:20}..."
-        return 1
-    fi
-
-    if [ "$TOR_IMPL" = "tor" ]; then
-        local del_out add_out
-        del_out=$(docker_cmd exec "$ctr_name" \
-            curl -s -X POST http://127.0.0.1:9000/del_onion \
-            -H "Content-Type: application/json" \
-            -d "{\"workers\": [${local_idx}]}" 2>&1)
-        if [ $? -ne 0 ]; then
-            log "  cure_straggler: DEL_ONION failed for ${addr:0:20}... (worker-${ctr_idx}/${local_idx}): ${del_out}"
-            return 1
-        fi
-        sleep 2
-        add_out=$(docker_cmd exec "$ctr_name" \
-            curl -s -X POST http://127.0.0.1:9000/add_onion \
-            -H "Content-Type: application/json" \
-            -d "{\"workers\": [${local_idx}]}" 2>&1)
-        if [ $? -ne 0 ]; then
-            log "  cure_straggler: ADD_ONION failed for ${addr:0:20}... (worker-${ctr_idx}/${local_idx}): ${add_out}"
-            return 1
-        fi
-    fi
-    log "  cure_straggler: rotated intro points for ${addr:0:20}... (worker-${ctr_idx}/${local_idx})"
-}
-
 # Diagnose stragglers at timeout — identify which addresses are stuck and why.
 diagnose_stragglers() {
     local content_addrs="$1"
@@ -1668,33 +1602,22 @@ run_verify_worker() {
     local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
     local prev_verified=0
-    local orchestrator_cured=""  # track addresses already cured by orchestrator
-
     while [ "$(date +%s)" -lt "$deadline" ]; do
         sleep 5
 
         # Aggregate results from all poll clients
         local total_verified=0
         local total_pending=0
-        local all_cures=""
         for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
             local cname="stress-poll-client-${i}"
             local results
             results=$(docker_cmd exec "$cname" cat /tmp/verify-results.json 2>/dev/null) || continue
             [ -z "$results" ] && continue
-            local v p cures
+            local v p
             v=$(echo "$results" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verified',0))" 2>/dev/null || echo 0)
             p=$(echo "$results" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('pending',[])))" 2>/dev/null || echo 0)
-            cures=$(echo "$results" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for addr in d.get('cured', []):
-    r = d.get('results', {}).get(addr, {})
-    if not r.get('verified'): print(addr)
-" 2>/dev/null)
             total_verified=$((total_verified + v))
             total_pending=$((total_pending + p))
-            [ -n "$cures" ] && all_cures="${all_cures}\n${cures}"
         done
 
         # Progress dots
@@ -1710,20 +1633,6 @@ for addr in d.get('cured', []):
             print_dashboard
             log "  (verified: ${total_verified}/${target_count}, pending: ${total_pending})"
             last_dashboard=$now
-        fi
-
-        # Execute cure requests from any verify-worker (max once per address)
-        if [ -n "$all_cures" ]; then
-            local cure_addr
-            for cure_addr in $(echo -e "$all_cures" | tr '\n' ' '); do
-                [ -z "$cure_addr" ] && continue
-                echo "$orchestrator_cured" | grep -q "$cure_addr" && continue
-                if cure_straggler "$cure_addr"; then
-                    orchestrator_cured="${orchestrator_cured} ${cure_addr}"
-                fi
-                # If cure failed (e.g. remote container), don't mark as cured —
-                # allows retry or at least accurate diagnostics
-            done
         fi
 
         if [ "$total_verified" -ge "$target_count" ] 2>/dev/null; then
