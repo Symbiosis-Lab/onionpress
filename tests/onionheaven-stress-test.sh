@@ -100,12 +100,14 @@ if [ "$NO_TIMEOUT" = true ]; then
     RECOVERY_TIMEOUT=86400
     RECOVERY_SILENT_TIMEOUT=86400
     HEALTHY_TIMEOUT=86400
+    REDIRECT_VERIFY_TIMEOUT=86400
 else
     BOOTSTRAP_TIMEOUT=900
     TAKEOVER_TIMEOUT=600
     RECOVERY_TIMEOUT=600
     RECOVERY_SILENT_TIMEOUT=900
     HEALTHY_TIMEOUT=600
+    REDIRECT_VERIFY_TIMEOUT=300
 fi
 
 # Compute healthy/failing split
@@ -1961,6 +1963,7 @@ verify_redirects() {
     local sample_size="${2:-5}"
     local verify_start_ts
     verify_start_ts=$(date +%s)
+    local deadline=$((verify_start_ts + REDIRECT_VERIFY_TIMEOUT))
 
     log "${phase_label}: Verifying 302 redirects on sample of taken-over addresses..."
 
@@ -2006,29 +2009,42 @@ verify_redirects() {
     local vctr_arr
     vctr_arr=($verify_ctrs)
 
-    # Verify all sampled addresses in parallel
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    local pids=""
     local sampled=0
-
+    local sampled_list=""
     while IFS= read -r addr; do
         addr=$(echo "$addr" | tr -d '\r\n ')
         [ -z "$addr" ] && continue
         sampled=$((sampled + 1))
+        sampled_list="${sampled_list} ${addr}"
+    done <<< "$sampled_addrs"
 
-        (
-            # Distribute verification across stress containers' SOCKS proxies.
-            # Falls back to onionpress-wordpress → onionpress-tor if none available.
-            local http_response="000"
-            local attempt
-            for attempt in 1 2 3; do
+    # Retry loop: keep trying failed addresses until all pass or timeout
+    local remaining="$sampled_list"
+    local passed=0
+    local failed_details=""
+    local round=0
+
+    while [ -n "$remaining" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+        round=$((round + 1))
+        local still_failing=""
+
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        local pids=""
+        local idx=0
+
+        for addr in $remaining; do
+            [ -z "$addr" ] && continue
+            idx=$((idx + 1))
+
+            (
+                local http_response="000"
                 if [ "$use_stress_ctrs" = true ]; then
-                    local vctr="${vctr_arr[$(( (sampled - 1) % num_verify_ctrs ))]}"
+                    local vctr="${vctr_arr[$(( (idx - 1) % num_verify_ctrs ))]}"
                     http_response=$(docker_cmd exec "$vctr" \
                         curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
                         --http1.0 \
-                        --socks5-hostname "verify${sampled}:x@127.0.0.1:9050" \
+                        --socks5-hostname "verify${idx}:x@127.0.0.1:9050" \
                         --max-time 30 \
                         "http://${addr}" 2>/dev/null) || http_response="000"
                 else
@@ -2039,52 +2055,63 @@ verify_redirects() {
                         --max-time 30 \
                         "http://${addr}" 2>/dev/null) || http_response="000"
                 fi
-                local code
-                code=$(echo "$http_response" | awk '{print $1}')
-                [ "$code" != "000" ] && break
-                [ "$attempt" -lt 3 ] && sleep 15
-            done
 
-            local http_code redirect_url
-            http_code=$(echo "$http_response" | awk '{print $1}')
-            redirect_url=$(echo "$http_response" | awk '{print $2}')
+                local http_code redirect_url
+                http_code=$(echo "$http_response" | awk '{print $1}')
+                redirect_url=$(echo "$http_response" | awk '{print $2}')
 
-            if [ "$http_code" = "302" ]; then
-                if echo "$redirect_url" | grep -qi 'web.archive.org\|archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion'; then
-                    echo "PASS ${addr} ${redirect_url}" > "${tmpdir}/${addr}"
+                if [ "$http_code" = "302" ]; then
+                    if echo "$redirect_url" | grep -qi 'web.archive.org\|archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion'; then
+                        echo "PASS ${addr} ${redirect_url}" > "${tmpdir}/${addr}"
+                    else
+                        echo "FAIL ${addr} 302-wrong-dest ${redirect_url}" > "${tmpdir}/${addr}"
+                    fi
                 else
-                    echo "FAIL ${addr} 302-wrong-dest ${redirect_url}" > "${tmpdir}/${addr}"
+                    echo "FAIL ${addr} HTTP-${http_code}" > "${tmpdir}/${addr}"
                 fi
+            ) &
+            pids="$pids $!"
+        done
+
+        for pid in $pids; do
+            wait "$pid" 2>/dev/null || true
+        done
+
+        # Collect results for this round
+        for result_file in "${tmpdir}"/*; do
+            [ -f "$result_file" ] || continue
+            local result
+            result=$(cat "$result_file")
+            local status addr_result
+            status=$(echo "$result" | awk '{print $1}')
+            addr_result=$(echo "$result" | awk '{print $2}')
+            if [ "$status" = "PASS" ]; then
+                log "  PASS: ${addr_result} → 302 → $(echo "$result" | awk '{print $3}')"
+                passed=$((passed + 1))
             else
-                echo "FAIL ${addr} HTTP-${http_code}" > "${tmpdir}/${addr}"
+                still_failing="${still_failing} ${addr_result}"
+                failed_details="$(echo "$result" | awk '{print $3}')"
             fi
-        ) &
-        pids="$pids $!"
-    done <<< "$sampled_addrs"
+        done
+        rm -rf "$tmpdir"
 
-    # Wait for all verification jobs
-    for pid in $pids; do
-        wait "$pid" 2>/dev/null || true
-    done
-
-    # Collect results
-    local passed=0
-    local failed=0
-    for result_file in "${tmpdir}"/*; do
-        [ -f "$result_file" ] || continue
-        local result
-        result=$(cat "$result_file")
-        local status
-        status=$(echo "$result" | awk '{print $1}')
-        if [ "$status" = "PASS" ]; then
-            log "  PASS: $(echo "$result" | awk '{print $2}') → 302 → $(echo "$result" | awk '{print $3}')"
-            passed=$((passed + 1))
-        else
-            log "  FAIL: $(echo "$result" | awk '{print $2}') → $(echo "$result" | awk '{print $3}')"
-            failed=$((failed + 1))
+        remaining=$(echo "$still_failing" | xargs)
+        if [ -n "$remaining" ]; then
+            local remain_count
+            remain_count=$(echo "$remaining" | wc -w | tr -d ' ')
+            local elapsed=$(( $(date +%s) - verify_start_ts ))
+            log "  ${phase_label}: ${passed}/${sampled} passed, ${remain_count} still failing (${elapsed}s elapsed) — retrying in 15s..."
+            sleep 15
         fi
     done
-    rm -rf "$tmpdir"
+
+    local failed=$((sampled - passed))
+    # Log any final failures
+    if [ -n "$remaining" ]; then
+        for addr in $remaining; do
+            log "  FAIL: ${addr} → still unreachable after timeout"
+        done
+    fi
 
     local verify_elapsed=$(( $(date +%s) - verify_start_ts ))
     WAIT_RESULT="${passed}/${sampled} passed, ${failed} failed in $(fmt_duration $verify_elapsed)"
