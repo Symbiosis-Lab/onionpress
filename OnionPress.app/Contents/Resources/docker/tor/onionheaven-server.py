@@ -9,7 +9,7 @@ container on port 8083, exposed through the main tor container's onion service.
 Endpoints:
   POST /online       — Heartbeat / register (upserts registry entry, optionally stores arti key)
   POST /register     — Alias for /online (backwards compatibility)
-  POST /unregister   — Mark a registration as unregistered (soft delete)
+  POST /unregister   — Release takeover and hard-delete from registry
   POST /offline      — Notify OnionHeaven that instance is going offline
   GET  /status       — Public status summary (no auth)
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
@@ -473,75 +473,55 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         conn = db_connect()
         db_ensure_schema(conn)
 
-        # Find entry
-        entry = conn.execute(
-            "SELECT * FROM registry WHERE content_address = ? LIMIT 1",
-            (content_address,)
-        ).fetchone()
+        # Find matching rows
+        if healthcheck_address:
+            rows = conn.execute(
+                "SELECT * FROM registry "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (content_address, healthcheck_address)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM registry WHERE content_address = ?",
+                (content_address,)
+            ).fetchall()
 
-        if not entry:
+        if not rows:
             conn.close()
             self._send_json(404, {"error": "Entry not found"})
             return
 
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Release any taken-over entries (DEL_ONION + decrement assigned_count)
+        # before deleting from the registry.
+        for row in rows:
+            if row["status"] == "taken-over" and row["takeover_container"]:
+                try:
+                    release_function(conn, row["content_address"],
+                                     row["healthcheck_address"], force=True)
+                except Exception as e:
+                    log(f"ERROR: release_function failed during unregister "
+                        f"for {row['content_address']} / "
+                        f"{row['healthcheck_address']}: {e}")
 
-        # Stress test entries (version='stress-test') get hard-deleted to avoid
-        # accumulating junk rows across repeated test runs.
-        is_stress = (entry["version"] or "").startswith("stress-test")
-
-        if is_stress:
-            if healthcheck_address:
-                conn.execute(
-                    "DELETE FROM registry "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (content_address, healthcheck_address)
-                )
-            else:
-                conn.execute(
-                    "DELETE FROM registry WHERE content_address = ?",
-                    (content_address,)
-                )
+        # Hard delete from registry
+        if healthcheck_address:
+            conn.execute(
+                "DELETE FROM registry "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (content_address, healthcheck_address)
+            )
         else:
-            # Soft delete — preserve rows and keys for real registrations
-            if healthcheck_address:
-                conn.execute(
-                    "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
-                    "unregistered_reason = 'user_request' "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (now, content_address, healthcheck_address)
-                )
-            else:
-                conn.execute(
-                    "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
-                    "unregistered_reason = 'user_request' "
-                    "WHERE content_address = ?",
-                    (now, content_address)
-                )
-        db_commit_with_retry(conn)
-
-        # Check if no healthy rows remain for this content-address — trigger takeover
-        healthy_remaining = conn.execute(
-            "SELECT COUNT(*) FROM registry "
-            "WHERE content_address = ? AND status = 'online' AND unregistered_at IS NULL",
-            (content_address,)
-        ).fetchone()[0]
-
-        if healthy_remaining == 0:
-            # Find a row to use as the target for takeover_function
-            target_row = conn.execute(
-                "SELECT healthcheck_address FROM registry WHERE content_address = ? LIMIT 1",
+            conn.execute(
+                "DELETE FROM registry WHERE content_address = ?",
                 (content_address,)
-            ).fetchone()
-            if target_row:
-                takeover_function(conn, content_address, target_row["healthcheck_address"], force=True)
-
+            )
+        db_commit_with_retry(conn)
         conn.close()
 
         self._send_json(200, {
             "unregistered": True,
             "content_address": content_address,
-            "hard_deleted": is_stress,
+            "deleted_count": len(rows),
         })
 
     # -- POST /online (also handles /register) --------------------------------
