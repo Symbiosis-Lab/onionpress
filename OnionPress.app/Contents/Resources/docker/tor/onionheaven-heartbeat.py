@@ -28,8 +28,8 @@ from datetime import datetime, timedelta, timezone
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_tor,
-    is_farm_mode, check_farm_scaling, invalidate_farm_cache,
-    assign_takeover_container, get_takeover_containers,
+    is_farm_mode, check_worker_bootstrap, cleanup_dead_workers,
+    _init_worker_index, _ensure_capacity, _pick_worker, _exec_takeover,
     _check_arti_key_errors,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, TOR_MANAGER,
 )
@@ -147,18 +147,52 @@ def startup_reconciliation(conn):
         db_commit_with_retry(conn)
 
     if re_takeover_addrs:
-        if is_farm_mode(conn):
-            # Farm mode: clear all container assignments and set takeover_pending.
-            # The normal takeover path (assign_takeover_container → worker pickup)
-            # handles reassignment. This is simpler than trying to figure out which
-            # containers survived — just let the system re-do all assignments.
+        if is_farm_mode():
+            # Clear old assignments — workers may have been restarted too.
+            # Re-execute takeovers directly on available workers.
             conn.execute(
-                "UPDATE registry SET takeover_container = NULL, takeover_pending = ? "
-                "WHERE status = 'taken-over' AND unregistered_at IS NULL",
-                (now,)
+                "UPDATE registry SET takeover_container = NULL "
+                "WHERE status = 'taken-over' AND unregistered_at IS NULL"
             )
+            # Reset assigned_count since we cleared all assignments
+            conn.execute("UPDATE takeover_containers SET assigned_count = 0")
             db_commit_with_retry(conn)
-            log(f"startup reconciliation: cleared assignments for {len(re_takeover_addrs)} takeover(s) — will be reassigned to live workers")
+
+            # Wait for workers to bootstrap before re-assigning
+            log(f"startup reconciliation: {len(re_takeover_addrs)} takeover(s) need re-execution, waiting for workers...")
+            for _ in range(12):  # wait up to 60s for workers
+                check_worker_bootstrap(conn)
+                worker = _pick_worker(conn)
+                if worker:
+                    break
+                time.sleep(5)
+
+            if _pick_worker(conn):
+                for addr in re_takeover_addrs:
+                    # Find the registry row for this address
+                    row = conn.execute(
+                        "SELECT healthcheck_address FROM registry "
+                        "WHERE content_address = ? AND status = 'taken-over' "
+                        "AND unregistered_at IS NULL LIMIT 1",
+                        (addr,)
+                    ).fetchone()
+                    if row:
+                        worker = _pick_worker(conn)
+                        if worker and _exec_takeover(worker, addr):
+                            conn.execute(
+                                "UPDATE registry SET takeover_container = ? "
+                                "WHERE content_address = ? AND healthcheck_address = ?",
+                                (worker, addr, row["healthcheck_address"])
+                            )
+                            conn.execute(
+                                "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
+                                "WHERE container_name = ?",
+                                (worker,)
+                            )
+                db_commit_with_retry(conn)
+                log(f"startup reconciliation: re-executed {len(re_takeover_addrs)} takeover(s) on workers")
+            else:
+                log(f"startup reconciliation: no workers available — {len(re_takeover_addrs)} takeover(s) will be assigned when workers bootstrap")
         else:
             log(f"startup reconciliation: re-executing {len(re_takeover_addrs)} takeover(s) locally")
             for addr in re_takeover_addrs:
@@ -210,25 +244,8 @@ def startup_reconciliation(conn):
     taken_count = len(taken_over) if taken_over else 0
     log(f"startup reconciliation complete — {online_count} online (grace period reset), {taken_count} taken-over (re-executed)")
 
-    # Clean stale farm container entries
-    import socket as _sock
-    for table in ("takeover_containers",):
-        try:
-            rows = conn.execute(
-                f"SELECT container_name FROM {table}"
-            ).fetchall()
-            for row in rows:
-                name = row[0]
-                try:
-                    _sock.getaddrinfo(name, 9050, proto=_sock.IPPROTO_TCP)
-                except _sock.gaierror:
-                    conn.execute(
-                        f"DELETE FROM {table} WHERE container_name = ?", (name,)
-                    )
-                    log(f"  removed stale {table} entry: {name}")
-            db_commit_with_retry(conn)
-        except Exception as e:
-            log(f"  warning: could not clean {table}: {e}")
+    # Clean up dead worker containers
+    cleanup_dead_workers(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +268,7 @@ def main():
 
     conn = db_connect()
     db_ensure_schema(conn)
+    _init_worker_index(conn)
     startup_reconciliation(conn)
     conn.close()
 
@@ -264,8 +282,10 @@ def main():
         try:
             conn = db_connect()
 
-            # Invalidate per-pass caches (farm mode, container discovery)
-            invalidate_farm_cache()
+            # Check worker bootstrap status and clean up dead workers
+            if is_farm_mode():
+                check_worker_bootstrap(conn)
+                cleanup_dead_workers(conn)
 
             # Get list of active entry keys (content_address + healthcheck_address).
             # We only fetch the keys here — each entry is re-queried fresh before
@@ -341,16 +361,19 @@ def main():
                         takeover_function(conn, ca, ha, force=False)
 
                 elif entry["status"] == "taken-over":
-                    # Unassigned taken-over entry — assign to a container so it gets ADD_ONION'd.
-                    # This happens after restart when reconciliation clears assignments,
-                    # or if entries were orphaned (both fields NULL).
-                    if not entry.get("takeover_container"):
-                        container = assign_takeover_container(conn)
-                        if container:
+                    # Unassigned taken-over entry — execute takeover directly.
+                    if not entry.get("takeover_container") and is_farm_mode():
+                        worker = _pick_worker(conn)
+                        if worker and _exec_takeover(worker, ca):
                             conn.execute(
                                 "UPDATE registry SET takeover_container = ? "
                                 "WHERE content_address = ? AND healthcheck_address = ?",
-                                (container, ca, ha)
+                                (worker, ca, ha)
+                            )
+                            conn.execute(
+                                "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
+                                "WHERE container_name = ?",
+                                (worker,)
                             )
                             db_commit_with_retry(conn)
 
@@ -433,12 +456,9 @@ def main():
 
                 db_commit_with_retry(conn)
 
-            # Flush pending SIGHUPs
-            if not is_farm_mode(conn):
+            # Flush pending SIGHUPs (only relevant for non-farm local Tor)
+            if not is_farm_mode():
                 flush_sighup_tor()
-
-            # Check farm scaling (takeover workers only — no more poll workers)
-            check_farm_scaling(conn, len(entry_keys))
 
             elapsed = (datetime.now(timezone.utc) - pass_start).total_seconds()
             parts = [f"{len(entry_keys)} entries"]

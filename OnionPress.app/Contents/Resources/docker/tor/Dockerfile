@@ -9,6 +9,8 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     socat openssl ca-certificates sqlite3 python3 curl wget procps tor netcat-openbsd xxd \
     && rm -rf /var/lib/apt/lists/*
+# Docker CLI for heartbeat to manage takeover containers via docker exec/run
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 RUN useradd -r -m -s /bin/false arti
 COPY --from=builder /usr/local/cargo/bin/arti /usr/local/bin/arti
 

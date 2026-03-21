@@ -4,13 +4,12 @@ OnionHeaven shared module — constants, DB schema, takeover/release functions.
 Imported by both onionheaven-server.py and onionheaven-heartbeat.py to ensure
 consistent schema and decision logic.
 
-Farm mode: when takeover_containers are registered in the DB,
-takeover/release operations are delegated to farm containers via DB flags
-instead of executing locally. This distributes Arti guard pool usage across
-multiple containers to prevent circuit exhaustion under load.
+Takeover/release engine: the heartbeat is the single orchestrator. It picks a
+bootstrapped worker container with the fewest addresses and executes takeover/
+release directly via `docker exec`. No polling loops, no DB-mediated IPC.
+Workers are just Tor instances — they receive commands, not requests.
 """
 
-import itertools
 import os
 import sqlite3
 import subprocess
@@ -426,23 +425,31 @@ def db_ensure_schema(conn):
             conn.execute("ALTER TABLE registry ADD COLUMN is_onionheaven INTEGER DEFAULT 0")
         db_commit_with_retry(conn)
 
-    # Drop old poll_containers table if it exists (no longer needed — heartbeat-based)
+    # Drop deprecated tables from old polling architecture
     conn.execute("DROP TABLE IF EXISTS poll_containers")
+    conn.execute("DROP TABLE IF EXISTS farm_scale_requests")
 
-    # Farm coordination tables (always created, idempotent)
-    conn.execute("""CREATE TABLE IF NOT EXISTS takeover_containers (
-        container_name  TEXT PRIMARY KEY,
-        max_services    INTEGER DEFAULT 10,
-        active_services INTEGER DEFAULT 0,
-        last_heartbeat  TEXT,
-        status          TEXT DEFAULT 'active'
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS farm_scale_requests (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        worker_type     TEXT NOT NULL,
-        requested_at    TEXT NOT NULL,
-        fulfilled_at    TEXT
-    )""")
+    # Migrate takeover_containers to new schema if needed
+    tc_cols = []
+    try:
+        tc_cols = [row[1] for row in conn.execute("PRAGMA table_info(takeover_containers)").fetchall()]
+    except sqlite3.Error:
+        pass
+
+    if tc_cols and "bootstrapped" not in tc_cols:
+        # Old schema — drop and recreate
+        conn.execute("DROP TABLE takeover_containers")
+        tc_cols = []
+
+    if not tc_cols:
+        conn.execute("""CREATE TABLE IF NOT EXISTS takeover_containers (
+            container_name  TEXT PRIMARY KEY,
+            max_services    INTEGER DEFAULT 50,
+            bootstrapped    INTEGER DEFAULT 0,
+            assigned_count  INTEGER DEFAULT 0,
+            created_at      TEXT
+        )""")
+
     db_commit_with_retry(conn)
 
 
@@ -450,210 +457,254 @@ def db_ensure_schema(conn):
 # Farm mode helpers
 # ---------------------------------------------------------------------------
 
-def is_farm_mode(conn):
-    """Check if farm mode is active.
+# Docker image for takeover workers (same as main tor image)
+TAKEOVER_IMAGE = os.environ.get("ONIONHEAVEN_IMAGE",
+                                "ghcr.io/brewsterkahle/onionpress-tor:latest")
+MAX_SERVICES_PER_WORKER = int(os.environ.get("ONIONHEAVEN_MAX_SERVICES", "50"))
 
-    Always True on the OnionHeaven server (ONIONHEAVEN=1 env var).
-    On normal OnionPress instances, checks DB for active takeover containers.
+# Next index for naming new takeover containers
+_next_worker_index = 0
 
-    Result is cached per heartbeat pass — call invalidate_farm_cache()
-    at the start of each pass to refresh.
-    """
-    if os.environ.get("ONIONHEAVEN") == "1":
-        return True
-    # Check cache first
-    if _farm_mode_cache is not None:
-        return _farm_mode_cache
-    # Normal OnionPress: check DB
-    _discover_takeover_containers(conn)
+
+def is_farm_mode():
+    """True on the OnionHeaven server (ONIONHEAVEN=1 env var)."""
+    return os.environ.get("ONIONHEAVEN") == "1"
+
+
+def _init_worker_index(conn):
+    """Set _next_worker_index based on existing containers in DB."""
+    global _next_worker_index
     try:
-        count = conn.execute(
-            "SELECT COUNT(*) FROM takeover_containers WHERE status = 'active'"
-        ).fetchone()[0]
-        return count > 0
+        rows = conn.execute(
+            "SELECT container_name FROM takeover_containers"
+        ).fetchall()
+        max_idx = -1
+        for row in rows:
+            name = row["container_name"]
+            # parse "onionheaven-takeover-N"
+            try:
+                idx = int(name.rsplit("-", 1)[-1])
+                if idx > max_idx:
+                    max_idx = idx
+            except (ValueError, IndexError):
+                pass
+        _next_worker_index = max_idx + 1
     except sqlite3.OperationalError:
+        _next_worker_index = 0
+
+
+def _pick_worker(conn):
+    """Pick the bootstrapped worker with the fewest addresses.
+
+    Returns container_name or None if no bootstrapped workers exist.
+    """
+    try:
+        row = conn.execute(
+            "SELECT container_name FROM takeover_containers "
+            "WHERE bootstrapped = 1 ORDER BY assigned_count ASC LIMIT 1"
+        ).fetchone()
+        return row["container_name"] if row else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def _ensure_capacity(conn):
+    """If all bootstrapped workers are at max_services and fewer than 2
+    containers are currently building, kick off 2 more.
+
+    Called after each takeover assignment.
+    """
+    try:
+        # Any bootstrapped worker under max_services? If so, no need to build.
+        under_cap = conn.execute(
+            "SELECT COUNT(*) FROM takeover_containers "
+            "WHERE bootstrapped = 1 AND assigned_count < ?",
+            (MAX_SERVICES_PER_WORKER,)
+        ).fetchone()[0]
+        if under_cap > 0:
+            return
+
+        # How many are currently building?
+        building = conn.execute(
+            "SELECT COUNT(*) FROM takeover_containers WHERE bootstrapped = 0"
+        ).fetchone()[0]
+        if building >= 2:
+            return
+
+        # Build 2 more
+        to_build = 2 - building
+        for _ in range(to_build):
+            _spawn_worker(conn)
+    except sqlite3.OperationalError:
+        pass
+
+
+def _spawn_worker(conn):
+    """Start a new takeover worker container via docker run."""
+    global _next_worker_index
+    idx = _next_worker_index
+    _next_worker_index += 1
+    name = f"onionheaven-takeover-{idx}"
+    vol = f"onionpress-arti-state-takeover-{idx}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Remove any existing container with this name
+    subprocess.run(["docker", "rm", "-f", name],
+                   capture_output=True, timeout=15)
+
+    tz = os.environ.get("TZ", "UTC")
+    tor_impl = os.environ.get("TOR_IMPL", "tor")
+
+    try:
+        result = subprocess.run(
+            ["docker", "run", "-d",
+             "--name", name,
+             "--network", "onionpress-network",
+             "--ulimit", "nofile=10000:10000",
+             "-e", f"TZ={tz}",
+             "-e", f"TOR_IMPL={tor_impl}",
+             "-e", "TAKEOVER_WORKER=1",
+             "-e", f"CONTAINER_NAME={name}",
+             "-e", f"MAX_TAKEOVER_SERVICES={MAX_SERVICES_PER_WORKER}",
+             "-v", f"{vol}:/var/lib/arti/",
+             "-v", "onionpress-persistent-data:/var/lib/onionpress",
+             "--restart", "unless-stopped",
+             TAKEOVER_IMAGE],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            # Insert into DB as not-yet-bootstrapped
+            conn.execute(
+                "INSERT OR REPLACE INTO takeover_containers "
+                "(container_name, max_services, bootstrapped, assigned_count, created_at) "
+                "VALUES (?, ?, 0, 0, ?)",
+                (name, MAX_SERVICES_PER_WORKER, now)
+            )
+            db_commit_with_retry(conn)
+            log(f"Spawned takeover worker {name} (bootstrapping...)")
+        else:
+            log(f"WARNING: Failed to spawn {name}: {result.stderr.strip()}")
+            _next_worker_index -= 1  # reuse index
+    except Exception as e:
+        log(f"ERROR spawning {name}: {e}")
+        _next_worker_index -= 1
+
+
+def check_worker_bootstrap(conn):
+    """Check if any not-yet-bootstrapped workers are now ready.
+
+    Called each heartbeat cycle. Checks Tor bootstrap status via docker exec.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT container_name FROM takeover_containers WHERE bootstrapped = 0"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+
+    for row in rows:
+        name = row["container_name"]
+        try:
+            result = subprocess.run(
+                ["docker", "exec", name, "sh", "-c",
+                 "echo 'GETINFO status/bootstrap-phase' | "
+                 "nc -q 1 127.0.0.1 9051 2>/dev/null || true"],
+                capture_output=True, text=True, timeout=10
+            )
+            if "PROGRESS=100" in result.stdout:
+                conn.execute(
+                    "UPDATE takeover_containers SET bootstrapped = 1 "
+                    "WHERE container_name = ?",
+                    (name,)
+                )
+                db_commit_with_retry(conn)
+                log(f"Takeover worker {name} is bootstrapped and ready")
+        except Exception:
+            pass  # container may not be running yet, retry next cycle
+
+
+def cleanup_dead_workers(conn):
+    """Remove DB entries for workers whose containers no longer exist.
+
+    Called each heartbeat cycle.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT container_name FROM takeover_containers"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+
+    for row in rows:
+        name = row["container_name"]
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Running}}", name],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0 or "true" not in result.stdout.lower():
+                # Container dead — clear assignments and remove
+                conn.execute(
+                    "UPDATE registry SET takeover_container = NULL "
+                    "WHERE takeover_container = ? AND status = 'taken-over'",
+                    (name,)
+                )
+                conn.execute(
+                    "DELETE FROM takeover_containers WHERE container_name = ?",
+                    (name,)
+                )
+                db_commit_with_retry(conn)
+                log(f"Cleaned up dead worker {name}")
+        except Exception:
+            pass
+
+
+def _exec_takeover(container_name, content_address):
+    """Execute takeover on a worker via docker exec.
+
+    Returns True on success, False on failure.
+    """
+    log(f"Taking over {content_address} via {container_name}")
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name,
+             TOR_MANAGER, "takeover", content_address],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            log(f"Takeover complete: {content_address} on {container_name}")
+            return True
+        else:
+            log(f"Takeover failed for {content_address} on {container_name}: "
+                f"{result.stderr.strip()}")
+            return False
+    except Exception as e:
+        log(f"Takeover error for {content_address} on {container_name}: {e}")
         return False
 
 
-# Cache for farm mode discovery — invalidated each heartbeat pass
-_farm_mode_cache = None
-_farm_containers_cache = None
-_farm_cache_time = 0.0
-FARM_CACHE_TTL = 10.0  # seconds
+def _exec_release(container_name, content_address):
+    """Execute release on a worker via docker exec.
 
-
-def invalidate_farm_cache():
-    """Clear farm mode cache. Call at the start of each heartbeat pass."""
-    global _farm_mode_cache, _farm_containers_cache, _farm_cache_time
-    _farm_mode_cache = None
-    _farm_containers_cache = None
-    _farm_cache_time = 0.0
-
-
-def _discover_takeover_containers(conn):
-    """Get active takeover containers from the DB.
-
-    Takeover workers register themselves on startup and send heartbeats
-    every 30s. Containers with stale heartbeats (>120s) are marked inactive.
-    No DNS probing — the DB is the single source of truth.
+    Returns True on success, False on failure.
     """
-    global _farm_containers_cache, _farm_cache_time
-
-    now_mono = time.monotonic()
-    if _farm_containers_cache is not None and (now_mono - _farm_cache_time) < FARM_CACHE_TTL:
-        return
-
-    # Mark containers with stale heartbeats as inactive
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log(f"Releasing {content_address} via {container_name}")
     try:
-        stale = conn.execute(
-            "SELECT container_name, last_heartbeat FROM takeover_containers "
-            "WHERE status = 'active'"
-        ).fetchall()
-        for row in stale:
-            if row["last_heartbeat"]:
-                try:
-                    lhb = datetime.fromisoformat(row["last_heartbeat"].replace("Z", "+00:00"))
-                    elapsed = (datetime.now(timezone.utc) - lhb).total_seconds()
-                    if elapsed > 120:
-                        conn.execute(
-                            "UPDATE takeover_containers SET status = 'inactive' "
-                            "WHERE container_name = ?",
-                            (row["container_name"],)
-                        )
-                        db_commit_with_retry(conn)
-                        log(f"Marked {row['container_name']} as inactive (heartbeat stale {elapsed:.0f}s)")
-                except (ValueError, TypeError):
-                    pass
-    except sqlite3.OperationalError:
-        pass
-
-    _farm_cache_time = now_mono
-    try:
-        rows = conn.execute(
-            "SELECT container_name FROM takeover_containers "
-            "WHERE status = 'active' ORDER BY container_name"
-        ).fetchall()
-        _farm_containers_cache = [row["container_name"] for row in rows]
-    except sqlite3.OperationalError:
-        _farm_containers_cache = []
-
-
-def get_takeover_containers(conn):
-    """Get list of active takeover container names (sorted for consistency)."""
-    _discover_takeover_containers(conn)
-    return _farm_containers_cache if _farm_containers_cache else []
-
-
-# Round-robin state for takeover assignment within a heartbeat pass
-_takeover_rr_cycle = None
-_takeover_rr_containers = None
-
-
-def assign_takeover_container(conn):
-    """Assign to a takeover container, preferring ones under max_services.
-
-    Uses round-robin but prefers containers below max_services. If all are
-    at or above max_services, assigns to the least-loaded one anyway — going
-    slightly over capacity is fine and avoids unnecessary scale-up requests.
-    Returns None only if there are no active containers at all.
-    """
-    global _takeover_rr_cycle, _takeover_rr_containers
-
-    containers = get_takeover_containers(conn)
-    if not containers:
-        return None
-
-    # Reset cycle if container list changed (scale-up, container died, etc.)
-    if containers != _takeover_rr_containers:
-        _takeover_rr_containers = containers
-        _takeover_rr_cycle = itertools.cycle(containers)
-
-    # Try each container once — prefer any that are under max_services.
-    # Count assigned rows in the DB (not just active_services) to avoid
-    # over-assigning during a single heartbeat pass before the worker updates.
-    least_loaded = None
-    least_loaded_count = None
-    for _ in range(len(containers)):
-        candidate = next(_takeover_rr_cycle)
-        try:
-            row = conn.execute(
-                "SELECT max_services FROM takeover_containers "
-                "WHERE container_name = ? AND status = 'active'",
-                (candidate,)
-            ).fetchone()
-            if not row:
-                continue
-            assigned = conn.execute(
-                "SELECT COUNT(*) FROM registry "
-                "WHERE takeover_container = ? AND status = 'taken-over'",
-                (candidate,)
-            ).fetchone()[0]
-            if assigned < row["max_services"]:
-                return candidate
-            # Track least-loaded in case all are full
-            if least_loaded_count is None or assigned < least_loaded_count:
-                least_loaded = candidate
-                least_loaded_count = assigned
-        except sqlite3.OperationalError:
-            continue
-
-    return least_loaded  # over-assign to least-loaded rather than refusing
-
-
-def check_farm_scaling(conn, active_entries):
-    """Check if farm needs more takeover workers and write scale requests.
-
-    Called by the heartbeat monitor each cycle. Only requests new containers
-    when ALL existing containers are at max_services AND there are unassigned
-    rows. If existing containers have capacity, the unassigned rows will be
-    picked up by assign_takeover_container on the next pass.
-
-    active_entries: number of active registry entries this cycle.
-    """
-    try:
-        # Count taken-over entries that have no container assigned
-        unassigned = conn.execute(
-            "SELECT COUNT(*) FROM registry "
-            "WHERE status = 'taken-over' AND takeover_container IS NULL AND unregistered_at IS NULL"
-        ).fetchone()[0]
-
-        if unassigned == 0:
-            return
-
-        # Check if existing containers have capacity
-        containers = conn.execute(
-            "SELECT container_name, max_services FROM takeover_containers "
-            "WHERE status = 'active'"
-        ).fetchall()
-
-        if containers:
-            for ctr in containers:
-                assigned = conn.execute(
-                    "SELECT COUNT(*) FROM registry "
-                    "WHERE takeover_container = ? AND status = 'taken-over'",
-                    (ctr["container_name"],)
-                ).fetchone()[0]
-                if assigned < ctr["max_services"]:
-                    # There's room — don't scale, assignment will happen next pass
-                    return
-
-        # No containers or all full — request scale-up
-        pending_requests = conn.execute(
-            "SELECT COUNT(*) FROM farm_scale_requests "
-            "WHERE worker_type = 'takeover' AND fulfilled_at IS NULL"
-        ).fetchone()[0]
-
-        if pending_requests == 0:
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            conn.execute(
-                "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('takeover', ?)",
-                (now,)
-            )
-            db_commit_with_retry(conn)
-            log(f"Farm scale-up requested: {unassigned} unassigned, all {len(containers)} containers full")
-    except sqlite3.OperationalError:
-        pass
+        result = subprocess.run(
+            ["docker", "exec", container_name,
+             TOR_MANAGER, "release", content_address],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            log(f"Release complete: {content_address} on {container_name}")
+            return True
+        else:
+            log(f"Release failed for {content_address} on {container_name}: "
+                f"{result.stderr.strip()}")
+            return False
+    except Exception as e:
+        log(f"Release error for {content_address} on {container_name}: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -663,16 +714,13 @@ def check_farm_scaling(conn, active_entries):
 def takeover_function(conn, content_address, healthcheck_address, force=False):
     """Handle takeover for a single registry row.
 
-    In farm mode: marks DB flags for a takeover worker to pick up.
-    In legacy mode: calls tor-manager locally.
-
     1. Mark the row status='taken-over' and record last_taken_over.
-    2. Check Arti guards before triggering takeover:
+    2. Check guards:
        - No OTHER row for same content_address already has status='taken-over'
        - No other row for content_address has status='online'
        - last_healthy is stale (now - last_healthy > PROPAGATION_DELAY) OR force=True
-    3. If farm mode: assign to a takeover container and set takeover_pending.
-       Else: call onionheaven-tor-manager.sh takeover locally.
+    3. Pick the bootstrapped worker with fewest addresses → docker exec takeover.
+    4. If all workers are at max_services and <2 building, spawn 2 more.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -682,7 +730,8 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     ).fetchone()
 
     if not row:
-        log(f"ERROR: takeover_function called for non-existent row: {content_address} / {healthcheck_address}")
+        log(f"ERROR: takeover_function called for non-existent row: "
+            f"{content_address} / {healthcheck_address}")
         return
 
     if row["status"] != "online" and not force:
@@ -697,7 +746,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     db_commit_with_retry(conn)
     log(f"Marked {healthcheck_address} as taken-over for {content_address}")
 
-    # Arti guards: should we actually start serving the onion service?
+    # Guards: should we actually start serving the onion service?
     already_serving = conn.execute(
         "SELECT COUNT(*) FROM registry "
         "WHERE content_address = ? AND healthcheck_address != ? AND status = 'taken-over'",
@@ -705,7 +754,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     ).fetchone()[0] > 0
 
     if already_serving:
-        log(f"Skipping Arti takeover for {content_address} — another row already taken-over")
+        log(f"Skipping takeover for {content_address} — another row already taken-over")
         return
 
     no_other_online = conn.execute(
@@ -715,7 +764,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     ).fetchone()[0] == 0
 
     if not no_other_online:
-        log(f"Skipping Arti takeover for {content_address} — other row(s) still online")
+        log(f"Skipping takeover for {content_address} — other row(s) still online")
         return
 
     # Check propagation delay
@@ -730,38 +779,41 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
             last_healthy_stale = True
 
     if not last_healthy_stale:
-        log(f"Skipping Arti takeover for {content_address} — last_healthy not yet stale")
+        log(f"Skipping takeover for {content_address} — last_healthy not yet stale")
         return
 
-    # All guards pass — route to farm worker
-    if is_farm_mode(conn):
-        container = assign_takeover_container(conn)
-        if container:
-            conn.execute(
-                "UPDATE registry SET takeover_container = ?, takeover_pending = ? "
-                "WHERE content_address = ? AND healthcheck_address = ?",
-                (container, now, content_address, healthcheck_address)
-            )
-            db_commit_with_retry(conn)
-            log(f"Queued takeover of {content_address} → farm worker {container}")
+    # All guards pass — execute takeover on a worker
+    if is_farm_mode():
+        worker = _pick_worker(conn)
+        if worker:
+            success = _exec_takeover(worker, content_address)
+            if success:
+                conn.execute(
+                    "UPDATE registry SET takeover_container = ?, takeover_pending = NULL "
+                    "WHERE content_address = ? AND healthcheck_address = ?",
+                    (worker, content_address, healthcheck_address)
+                )
+                conn.execute(
+                    "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
+                    "WHERE container_name = ?",
+                    (worker,)
+                )
+                db_commit_with_retry(conn)
+            # Check if we need more capacity
+            _ensure_capacity(conn)
             return
-        # No containers yet — mark pending so a worker picks it up once spawned
-        conn.execute(
-            "UPDATE registry SET takeover_pending = ? "
-            "WHERE content_address = ? AND healthcheck_address = ?",
-            (now, content_address, healthcheck_address)
-        )
-        db_commit_with_retry(conn)
-        log(f"Takeover pending for {content_address} — waiting for farm worker to be spawned")
-        return
+        else:
+            # No bootstrapped workers — spawn 2 if not already building
+            _ensure_capacity(conn)
+            log(f"Takeover deferred for {content_address} — no bootstrapped workers yet")
+            return
 
     # Legacy fallback — only safe inside takeover worker containers.
-    # In the main tor container this would SIGHUP our own onion service.
     if os.environ.get("TAKEOVER_WORKER") == "1":
         _takeover_local(content_address)
     else:
-        log(f"ERROR: takeover_function fell through to legacy mode for {content_address} — "
-            f"farm mode returned False but we are not a takeover worker. Skipping.")
+        log(f"ERROR: takeover_function fell through to legacy mode for "
+            f"{content_address} — not farm mode and not a takeover worker.")
 
 
 def _takeover_local(content_address, no_sighup=False):
@@ -797,12 +849,9 @@ def _takeover_local(content_address, no_sighup=False):
 def release_function(conn, content_address, healthcheck_address, force=False):
     """Handle release for a single registry row.
 
-    In farm mode: sets release_pending flag for the assigned takeover worker.
-    In legacy mode: calls tor-manager locally.
-
     1. Mark the row status='online' and record last_released.
-    2. If farm mode and row has takeover_container: set release_pending.
-       Else: call onionheaven-tor-manager.sh release locally.
+    2. Execute release on the assigned worker via docker exec.
+    3. Decrement assigned_count.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -812,40 +861,42 @@ def release_function(conn, content_address, healthcheck_address, force=False):
     ).fetchone()
 
     if not row:
-        log(f"ERROR: release_function called for non-existent row: {content_address} / {healthcheck_address}")
+        log(f"ERROR: release_function called for non-existent row: "
+            f"{content_address} / {healthcheck_address}")
         return
 
     if row["status"] != "taken-over" and not force:
         return
 
+    takeover_container = row["takeover_container"] if "takeover_container" in row.keys() else None
+
     # Mark this row as online
     conn.execute(
-        "UPDATE registry SET status = 'online', last_released = ? "
+        "UPDATE registry SET status = 'online', last_released = ?, "
+        "takeover_container = NULL, takeover_pending = NULL, release_pending = NULL "
         "WHERE content_address = ? AND healthcheck_address = ?",
         (now, content_address, healthcheck_address)
     )
     db_commit_with_retry(conn)
     log(f"Marked {healthcheck_address} as online for {content_address}")
 
-    # Route to farm worker or skip — never run _release_local in the main
-    # tor container (it sends SIGHUP which disrupts our own onion service).
-    takeover_container = row["takeover_container"] if "takeover_container" in row.keys() else None
-    if takeover_container and is_farm_mode(conn):
-        conn.execute(
-            "UPDATE registry SET release_pending = ?, takeover_pending = NULL "
-            "WHERE content_address = ? AND healthcheck_address = ?",
-            (now, content_address, healthcheck_address)
-        )
-        db_commit_with_retry(conn)
-        log(f"Queued release of {content_address} → farm worker {takeover_container}")
+    # Execute release on the worker
+    if takeover_container and is_farm_mode():
+        success = _exec_release(takeover_container, content_address)
+        if success:
+            conn.execute(
+                "UPDATE takeover_containers SET assigned_count = MAX(0, assigned_count - 1) "
+                "WHERE container_name = ?",
+                (takeover_container,)
+            )
+            db_commit_with_retry(conn)
         return
 
-    # Only run _release_local inside takeover worker containers, never in
-    # the main onionpress-tor container where it would SIGHUP our own Tor.
+    # Legacy fallback — only inside takeover worker containers
     if os.environ.get("TAKEOVER_WORKER") == "1":
         _release_local(content_address)
     elif not takeover_container:
-        log(f"Release skipped for {content_address} — no takeover container assigned (nothing to release)")
+        log(f"Release skipped for {content_address} — no takeover container assigned")
 
 
 def _release_local(content_address, no_sighup=False):

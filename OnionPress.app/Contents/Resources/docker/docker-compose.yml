@@ -129,6 +129,7 @@ services:
     volumes:
       - arti-state-polling:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     networks:
       - onionpress-network
