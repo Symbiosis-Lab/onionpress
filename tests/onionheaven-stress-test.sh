@@ -2040,7 +2040,7 @@ verify_redirects() {
                     http_response=$(docker_cmd exec "$vctr" \
                         curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
                         --http1.0 \
-                        --socks5-hostname "verify${idx}r${round}:x@127.0.0.1:9050" \
+                        --socks5-hostname "verify${idx}:x@127.0.0.1:9050" \
                         --max-time 30 \
                         "http://${addr}" 2>/dev/null) || http_response="000"
                 else
