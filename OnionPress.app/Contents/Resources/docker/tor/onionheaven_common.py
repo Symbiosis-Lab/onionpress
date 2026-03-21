@@ -605,10 +605,12 @@ def check_worker_bootstrap(conn):
     for row in rows:
         name = row["container_name"]
         try:
+            # Use cookie auth — control port requires it
             result = subprocess.run(
                 ["docker", "exec", name, "sh", "-c",
-                 "echo 'GETINFO status/bootstrap-phase' | "
-                 "nc -q 1 127.0.0.1 9051 2>/dev/null || true"],
+                 "COOKIE=$(xxd -p -c 64 /var/lib/tor/control_auth_cookie 2>/dev/null) && "
+                 "printf 'AUTHENTICATE %s\\r\\nGETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n' "
+                 "\"$COOKIE\" | nc -q 1 127.0.0.1 9051 2>/dev/null || true"],
                 capture_output=True, text=True, timeout=10
             )
             if "PROGRESS=100" in result.stdout:
