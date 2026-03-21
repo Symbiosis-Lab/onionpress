@@ -2491,6 +2491,12 @@ main() {
             # Clean up backup file
             rm -f "$scrub_backup"
             echo "  Cleaned up: $scrub_backup"
+
+            # Stop everything so the app can do a clean start
+            echo ""
+            echo "Stopping containers for clean app launch..."
+            stop_containers 2>/dev/null || true
+            echo "Done. Launch OnionPress from /Applications to start fresh."
             ;;
 
         *)
