@@ -467,8 +467,14 @@ _next_worker_index = 0
 
 
 def is_farm_mode():
-    """True on the OnionHeaven server (ONIONHEAVEN=1 env var)."""
-    return os.environ.get("ONIONHEAVEN") == "1"
+    """True if we can manage takeover containers.
+
+    True when ONIONHEAVEN=1 (heartbeat container) or when the docker
+    socket is available (onionpress-tor server container).
+    """
+    if os.environ.get("ONIONHEAVEN") == "1":
+        return True
+    return os.path.exists("/var/run/docker.sock")
 
 
 def _init_worker_index(conn):
@@ -882,8 +888,10 @@ def release_function(conn, content_address, healthcheck_address, force=False):
     db_commit_with_retry(conn)
     log(f"Marked {healthcheck_address} as online for {content_address}")
 
-    # Execute release on the worker
-    if takeover_container and is_farm_mode():
+    # Execute release on the worker — if a container is assigned, release on it
+    # regardless of is_farm_mode() (the server in onionpress-tor doesn't have
+    # ONIONHEAVEN=1 but still needs to release on workers)
+    if takeover_container:
         success = _exec_release(takeover_container, content_address)
         if success:
             conn.execute(
