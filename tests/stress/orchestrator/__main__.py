@@ -297,7 +297,8 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
 
         # A.1v: Verify redirects
         logger.phase_start("A.1v", "Double-check taken-over addresses redirect (302) to Wayback Machine (est. <1m)")
-        r = verify_redirects(docker, config, logger, store, "A.1v", 5)
+        sample = max(5, config.failing // 4)  # 25% of failing, min 5
+        r = verify_redirects(docker, config, logger, store, "A.1v", sample)
         results["a1v"] = r.message
         logger.phase_result("A.1v", r.message)
         print()
@@ -347,7 +348,8 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
 
         # B.1v: Verify redirects
         logger.phase_start("B.1v", "Double-check taken-over addresses redirect (302) (est. <1m)")
-        r = verify_redirects(docker, config, logger, store, "B.1v", 5)
+        sample = max(5, config.failing // 4)  # 25% of failing, min 5
+        r = verify_redirects(docker, config, logger, store, "B.1v", sample)
         results["b1v"] = r.message
         logger.phase_result("B.1v", r.message)
         print()
