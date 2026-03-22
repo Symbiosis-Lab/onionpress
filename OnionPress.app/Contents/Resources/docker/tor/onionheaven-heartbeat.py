@@ -387,7 +387,7 @@ def main():
                     ).fetchone()
                     if sibling_online:
                         log(f"Content address {ca} has an online sibling — releasing stale takeover for {ha}")
-                        release_function(conn, ca, ha, force=True)
+                        release_function(conn, ca, ha)
                         conn.execute(
                             "UPDATE registry SET unregistered_at = ?, "
                             "unregistered_reason = 'superseded-by-new-healthcheck', status = 'unregistered' "
@@ -438,7 +438,7 @@ def main():
                             (now_str, ca, ha)
                         )
                         db_commit_with_retry(conn)
-                        release_function(conn, ca, ha, force=True)
+                        release_function(conn, ca, ha)
 
                     # Auto-cleanup: unregister stress-test entries taken-over for >2 hours
                     # Real users will re-register when they come back online; stress tests won't.
@@ -446,7 +446,7 @@ def main():
                     if version and version.startswith("stress-test") and since_takeover > 7200:
                         stale_cleanup_count += 1
                         log(f"Auto-cleanup stale stress-test entry: {ca} (taken-over {since_takeover/3600:.1f}h ago)")
-                        release_function(conn, ca, ha, force=True)
+                        release_function(conn, ca, ha)
                         conn.execute(
                             "UPDATE registry SET unregistered_at = ?, "
                             "unregistered_reason = 'stale-stress-test-cleanup', status = 'unregistered' "
