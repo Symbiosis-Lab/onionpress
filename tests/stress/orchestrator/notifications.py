@@ -215,33 +215,23 @@ def flush_client_descriptor_cache(
     start: int,
     count: int,
 ):
-    """Flush descriptor cache on all poll clients via NEWNYM + HSFETCH."""
+    """Flush descriptor cache on all poll clients via NEWNYM + HSFETCH.
+
+    Uses TorControl from src/onionpress/tor.py instead of xxd+nc shell pipes.
+    """
+    from onionpress.tor import TorControl
+
     addrs = store.get_content_addrs(start, count)
     if not addrs:
         return
 
-    # Strip .onion suffix
     sids = [a.replace(".onion", "") for a in addrs]
     logger.log(f"HSFETCH for {len(sids)} addresses across {config.num_poll_clients} poll clients...")
 
-    # Step 1: NEWNYM on all poll clients
     for ci in range(config.num_poll_clients):
         cname = config.poll_client_name(ci)
-        docker.exec(cname, """
-            cookie=$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\\n')
-            [ -z "$cookie" ] && exit 0
-            printf 'AUTHENTICATE %s\\r\\nSIGNAL NEWNYM\\r\\nQUIT\\r\\n' "$cookie" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
-        """, timeout=15)
-
-    import time
-    time.sleep(3)
-
-    # Step 2: HSFETCH on all poll clients
-    hsfetch_cmds = "".join(f"HSFETCH {sid}\\r\\n" for sid in sids)
-    for ci in range(config.num_poll_clients):
-        cname = config.poll_client_name(ci)
-        docker.exec(cname, f"""
-            cookie=$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\\n')
-            [ -z "$cookie" ] && exit 0
-            printf 'AUTHENTICATE %s\\r\\n{hsfetch_cmds}QUIT\\r\\n' "$cookie" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
-        """, timeout=15)
+        try:
+            tc = TorControl(docker, container=cname)
+            tc.flush_descriptor_cache(sids)
+        except Exception as e:
+            logger.log(f"  WARNING: flush failed on {cname}: {e}")
