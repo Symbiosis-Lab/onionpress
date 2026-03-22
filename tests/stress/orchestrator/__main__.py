@@ -62,8 +62,8 @@ def _inject_onionheaven_code(docker: Docker, logger: StressLogger):
     logger.log("  Using production heartbeat timing and existing container scripts")
 
 
-def _preflight(config: StressConfig, docker: Docker, logger: StressLogger) -> tuple[bool, bool]:
-    """Run preflight checks. Returns (is_onionheaven_host, lazy_activation)."""
+def _preflight(config: StressConfig, docker: Docker, logger: StressLogger) -> bool:
+    """Run preflight checks. Returns is_onionheaven_host."""
     os.makedirs(config.output_dir, exist_ok=True)
     logger.log("Preflight checks...")
 
@@ -92,29 +92,29 @@ def _preflight(config: StressConfig, docker: Docker, logger: StressLogger) -> tu
         if local_addr:
             logger.log(f"  Local address: {local_addr}")
 
-    # Check onionheaven container
-    lazy_activation = False
+    # OnionHeaven-host-only checks
     if is_onionheaven_host:
-        # Check API
-        status = docker.exec("onionpress-tor",
+        # The onionheaven container always runs — it serves the API.
+        # Takeover workers inside it are lazy (start when registrations exist).
+        if not docker.container_running("onionheaven"):
+            logger.log("ERROR: onionheaven container is not running")
+            logger.log("  The onionheaven container must be running to serve the registration API")
+            sys.exit(1)
+
+        # Check API is responding
+        status = docker.exec("onionheaven",
             "curl -s --max-time 5 http://localhost:8083/status", timeout=10)
-        if not status.ok or not status.output.strip():
-            status = docker.exec("onionheaven",
-                "curl -s --max-time 5 http://localhost:8083/status", timeout=10)
         if not status.ok or not status.output.strip():
             logger.log("ERROR: OnionHeaven registration API is not responding")
             sys.exit(1)
         logger.log("  OnionHeaven registration API is ready")
 
-        if docker.container_running("onionheaven"):
-            logger.log("  onionheaven is running (dedicated polling Tor)")
-            _inject_onionheaven_code(docker, logger)
-        else:
-            logger.log("  onionheaven container not yet running — lazy activation will bootstrap it")
-            lazy_activation = True
+        _inject_onionheaven_code(docker, logger)
+    else:
+        logger.log("  Skipping OnionHeaven host checks (not OnionHeaven host)")
 
     logger.log("Preflight OK")
-    return is_onionheaven_host, lazy_activation
+    return is_onionheaven_host
 
 
 def _check_previous_artifacts(docker: Docker, config: StressConfig, logger: StressLogger,
@@ -192,7 +192,7 @@ def run_worker(config: StressConfig):
     docker = _create_docker(config)
     logger = StressLogger(config.output_dir)
 
-    is_onionheaven_host, lazy_activation = _preflight(config, docker, logger)
+    is_onionheaven_host = _preflight(config, docker, logger)
     _check_previous_artifacts(docker, config, logger, is_onionheaven_host)
 
     # Create timestamped run directory
@@ -283,27 +283,6 @@ def run_worker(config: StressConfig):
     total_registered = store.total_registered()
     logger.log(f"Total registered sites: {total_registered}")
     print()
-
-    # Lazy activation
-    if lazy_activation:
-        logger.phase_start("2b", "Waiting for lazy OnionHeaven activation (est. 1-2m)")
-        logger.log("Waiting for lazy OnionHeaven activation...")
-        for attempt in range(60):
-            if docker.container_running("onionheaven"):
-                logger.log(f"  onionheaven container is running (took ~{(attempt+1)*10}s)")
-                time.sleep(5)
-                # Install sqlite3
-                docker.exec("onionheaven",
-                    "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1",
-                    timeout=60)
-                logger.phase_result("2b", "OnionHeaven container activated")
-                break
-            time.sleep(10)
-        else:
-            logger.phase_result("2b", "FAILED — onionheaven container did not start")
-            logger.log("ERROR: Cannot proceed without onionheaven container")
-            sys.exit(1)
-        print()
 
     # HSFETCH
     flush_client_descriptor_cache(docker, config, logger, store, 0, config.total)
