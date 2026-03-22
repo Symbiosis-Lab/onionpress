@@ -1,0 +1,512 @@
+"""CLI entry point + main test flow.
+
+Usage:
+    python3 -m tests.stress.orchestrator --total 5
+    python3 -m tests.stress.orchestrator --cleanup
+    python3 -m tests.stress.orchestrator --mode coordinator
+"""
+
+import atexit
+import os
+import signal
+import subprocess
+import sys
+import time
+
+from .config import StressConfig
+from .phases import StressLogger, fmt_duration
+from .containers import WorkerManager, PollClientManager
+from .metrics import WorkerInfoStore, Dashboard
+from .notifications import (
+    generate_signed_payloads, send_notifications, flush_client_descriptor_cache,
+)
+from .verification import (
+    wait_for_bootstrap, wait_for_takeover, wait_for_recovery,
+    run_verify_worker, verify_redirects,
+)
+from .cleanup import cleanup_stress_test, run_cleanup, run_cleanup_stale
+
+# Add src to path for onion_auth / onionpress imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
+
+from onionpress.docker import Docker
+from onionpress.platform import resolve_paths
+
+DEFAULT_ONIONHEAVEN_ADDR = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+
+
+def _create_docker(config: StressConfig) -> Docker:
+    """Create a Docker wrapper with OnionPress paths."""
+    paths = resolve_paths(data_dir=config.data_dir)
+    return Docker(paths)
+
+
+def _detect_onionheaven_addr(config: StressConfig, logger: StressLogger):
+    """Auto-detect OnionHeaven address if not specified."""
+    if config.onionheaven_addr:
+        logger.log(f"OnionHeaven address (user-specified): {config.onionheaven_addr}")
+        return
+    config.onionheaven_addr = DEFAULT_ONIONHEAVEN_ADDR
+    logger.log(f"OnionHeaven address: {config.onionheaven_addr}")
+
+
+def _preflight(config: StressConfig, docker: Docker, logger: StressLogger) -> tuple[bool, bool]:
+    """Run preflight checks. Returns (is_onionheaven_host, lazy_activation)."""
+    os.makedirs(config.output_dir, exist_ok=True)
+    logger.log("Preflight checks...")
+
+    result = docker.run(["info"], timeout=15)
+    if not result.ok:
+        logger.log("ERROR: Cannot reach Docker")
+        sys.exit(1)
+
+    for ctr in ["onionpress-tor", "onionpress-wordpress"]:
+        if not docker.container_running(ctr):
+            logger.log(f"ERROR: Container {ctr} is not running")
+            sys.exit(1)
+
+    _detect_onionheaven_addr(config, logger)
+
+    # Detect if we're the OnionHeaven host
+    result = docker.exec("onionpress-tor",
+        "cat /var/lib/tor/hidden_service/wordpress/hostname", timeout=10)
+    local_addr = result.output.strip() if result.ok else ""
+    is_onionheaven_host = bool(local_addr and local_addr == config.onionheaven_addr)
+
+    if is_onionheaven_host:
+        logger.log("  Detected OnionHeaven host (content address matches)")
+    else:
+        logger.log("  Not OnionHeaven host — sites will register over Tor")
+        if local_addr:
+            logger.log(f"  Local address: {local_addr}")
+
+    # Check onionheaven container
+    lazy_activation = False
+    if is_onionheaven_host:
+        # Check API
+        status = docker.exec("onionpress-tor",
+            "curl -s --max-time 5 http://localhost:8083/status", timeout=10)
+        if not status.ok or not status.output.strip():
+            status = docker.exec("onionheaven",
+                "curl -s --max-time 5 http://localhost:8083/status", timeout=10)
+        if not status.ok or not status.output.strip():
+            logger.log("ERROR: OnionHeaven registration API is not responding")
+            sys.exit(1)
+        logger.log("  OnionHeaven registration API is ready")
+
+        if docker.container_running("onionheaven"):
+            logger.log("  onionheaven is running")
+            # Install sqlite3 if needed
+            result = docker.exec("onionheaven", "sqlite3 --version", timeout=10)
+            if not result.ok:
+                logger.log("  Installing sqlite3 in onionheaven...")
+                docker.exec("onionheaven",
+                    "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1",
+                    timeout=60)
+            logger.log("  sqlite3 available in onionheaven")
+        else:
+            logger.log("  onionheaven container not yet running — lazy activation will bootstrap it")
+            lazy_activation = True
+
+    logger.log("Preflight OK")
+    return is_onionheaven_host, lazy_activation
+
+
+def _check_previous_artifacts(docker: Docker, config: StressConfig, logger: StressLogger,
+                              is_onionheaven_host: bool):
+    """Check for and optionally clean leftover stress test artifacts."""
+    result = docker.run(["ps", "-a", "--format", "{{.Names}}"], timeout=10)
+    stale_containers = [
+        c for c in (result.output.strip().splitlines() if result.ok else [])
+        if c.startswith("stress-worker-")
+    ]
+
+    registry_count = 0
+    if is_onionheaven_host:
+        result = docker.exec("onionheaven",
+            'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
+            '"SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL"',
+            timeout=10)
+        try:
+            registry_count = int(result.output.strip()) if result.ok else 0
+        except ValueError:
+            registry_count = 0
+
+    if not stale_containers and registry_count == 0:
+        return
+
+    print()
+    print("Found artifacts from a previous stress test:")
+    if stale_containers:
+        print(f"  - {len(stale_containers)} stress container(s)")
+    if registry_count:
+        print(f"  - {registry_count} registry entries")
+    print()
+
+    if sys.stdin.isatty():
+        answer = input("Clean up before starting? [Y/n] ").strip()
+    else:
+        answer = "y"
+
+    if answer.lower().startswith("n"):
+        logger.log("Keeping previous artifacts")
+        return
+
+    logger.log("Cleaning previous artifacts...")
+    if stale_containers:
+        for ctr in stale_containers:
+            docker.run(["rm", "-f", ctr], timeout=10)
+        logger.log(f"  Removed {len(stale_containers)} stress containers")
+    if registry_count > 0 and is_onionheaven_host:
+        docker.exec("onionheaven",
+            'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
+            '"DELETE FROM registry;"',
+            timeout=10)
+        logger.log(f"  Cleared {registry_count} registry entries")
+        docker.exec("onionheaven",
+            'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
+            '"DELETE FROM takeover_containers; DELETE FROM farm_scale_requests;"',
+            timeout=10)
+    print()
+
+
+def _open_phase_log_window(phase_log: str):
+    """Open a Terminal.app window tailing the phase log."""
+    try:
+        subprocess.Popen([
+            "osascript", "-e",
+            f'tell application "Terminal" to do script "tail -f \'{phase_log}\'"',
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def run_worker(config: StressConfig):
+    """Main stress test flow."""
+    docker = _create_docker(config)
+    logger = StressLogger(config.output_dir)
+
+    is_onionheaven_host, lazy_activation = _preflight(config, docker, logger)
+    _check_previous_artifacts(docker, config, logger, is_onionheaven_host)
+
+    # Create timestamped run directory
+    run_ts = time.strftime("%Y%m%d-%H%M%S")
+    run_dir = os.path.join(config.output_dir, f"run-{run_ts}")
+    os.makedirs(run_dir, exist_ok=True)
+    config.output_dir = run_dir
+    # Update latest symlink
+    latest_link = os.path.join(os.path.dirname(run_dir), "latest")
+    try:
+        os.unlink(latest_link)
+    except OSError:
+        pass
+    os.symlink(f"run-{run_ts}", latest_link)
+
+    logger.output_dir = config.output_dir
+    logger.setup(
+        os.path.join(run_dir, "stress-test.log"),
+        os.path.join(run_dir, "phase.log"),
+    )
+
+    # Detect Tor implementation
+    workers = WorkerManager(config, docker, logger)
+    workers.detect_tor_impl()
+    workers.detect_images()
+
+    dashboard = Dashboard(config, docker, logger, is_onionheaven_host)
+    oh_version = dashboard.get_onionheaven_version()
+    logger.write_phase_header(config, oh_version)
+    _open_phase_log_window(logger.phase_log)
+
+    logger.log(f"=== OnionHeaven Stress Test ({workers.tor_label}) ===")
+    logger.log(f"OnionHeaven: {config.onionheaven_addr}")
+    logger.log(f"Sites: {config.total} total ({config.healthy} stay healthy, {config.failing} will fail)")
+    logger.log(f"Stress containers: {config.num_containers} x {config.per_ctr} sites/container")
+    if config.batch_size > 0:
+        logger.log(f"Container batch size: {config.batch_size}")
+    logger.log(f"Output: {config.output_dir}")
+    print()
+
+    run_start = time.time()
+    results = {}
+
+    # Store for worker info
+    store = WorkerInfoStore(config.output_dir, config.per_ctr)
+
+    # Cleanup on exit
+    def _cleanup():
+        logger.log("Cleaning up before exit...")
+        cleanup_stress_test(docker, config, logger, store)
+
+    atexit.register(_cleanup)
+
+    def _sigint(sig, frame):
+        logger.log("Interrupted...")
+        sys.exit(130)
+    signal.signal(signal.SIGINT, _sigint)
+    signal.signal(signal.SIGTERM, _sigint)
+
+    # Phase 1: Start containers
+    logger.phase_start("1", f"Starting {config.num_containers} containers ({config.total} sites) (est. <1m)")
+    logger.log(f"Phase 1: Starting {config.num_containers} site containers + {config.num_poll_clients} polling clients...")
+    workers.start_all()
+
+    poll_mgr = PollClientManager(config, docker, logger, workers.stress_image, workers.network)
+    poll_mgr.start_all()
+    logger.phase_result("1", f"Started {config.num_containers} stress + {config.num_poll_clients} poll containers")
+    print()
+
+    # Phase 2: Bootstrap
+    logger.phase_start("2", "Waiting for sites to bootstrap and register over Tor (est. 2m)")
+    logger.log("Phase 2: Waiting for sites to bootstrap and register over Tor...")
+    r = wait_for_bootstrap(docker, config, logger)
+    results["phase2"] = r.message
+    logger.phase_result("2", r.message)
+
+    # Extract worker info
+    logger.log("Extracting site info from containers...")
+    total_registered = 0
+    for idx in range(config.num_containers):
+        ctr_name = config.container_name(idx)
+        result = docker.exec(ctr_name, "cat /worker-info.json", timeout=10)
+        if result.ok:
+            info_path = os.path.join(config.output_dir, f"worker-{idx}-info.json")
+            with open(info_path, "w") as f:
+                f.write(result.output)
+    store.load_all(config.num_containers)
+    total_registered = store.total_registered()
+    logger.log(f"Total registered sites: {total_registered}")
+    print()
+
+    # Lazy activation
+    if lazy_activation:
+        logger.phase_start("2b", "Waiting for lazy OnionHeaven activation (est. 1-2m)")
+        logger.log("Waiting for lazy OnionHeaven activation...")
+        for attempt in range(60):
+            if docker.container_running("onionheaven"):
+                logger.log(f"  onionheaven container is running (took ~{(attempt+1)*10}s)")
+                time.sleep(5)
+                # Install sqlite3
+                docker.exec("onionheaven",
+                    "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1",
+                    timeout=60)
+                logger.phase_result("2b", "OnionHeaven container activated")
+                break
+            time.sleep(10)
+        else:
+            logger.phase_result("2b", "FAILED — onionheaven container did not start")
+            logger.log("ERROR: Cannot proceed without onionheaven container")
+            sys.exit(1)
+        print()
+
+    # HSFETCH
+    flush_client_descriptor_cache(docker, config, logger, store, 0, config.total)
+
+    # Phase 3: Healthy
+    hc_type = "content" if config.no_healthcheck else "healthcheck"
+    logger.phase_start("3", f"Waiting for all {config.total} sites to be reachable via Tor (est. 1m)")
+    logger.log(f"Phase 3: Waiting for {config.total} {hc_type} addresses to be reachable via Tor (timeout: {config.healthy_timeout}s)...")
+    r = run_verify_worker(docker, config, logger, store,
+                          "200", config.total, config.healthy_timeout, 0, config.total, hc_type)
+    if r.success:
+        logger.log("Phase 3: all sites reachable")
+    else:
+        logger.log("WARNING: Not all sites became healthy, continuing anyway...")
+    results["phase3"] = r.message
+    logger.phase_result("3", r.message)
+    print()
+
+    if config.failing > 0:
+        fail_start = config.fail_start
+
+        # ═══════════════════════════════════════════════════════════════
+        # Scenario A: Graceful offline/online
+        # ═══════════════════════════════════════════════════════════════
+        logger.phase_start("A", "GRACEFUL OFFLINE/ONLINE (with /offline and /online notifications)")
+
+        # A.1: Takeover
+        logger.phase_start("A.1", f"Graceful takeover: /offline + disable {config.failing} sites (est. 1-2m)")
+        scenario_ts = time.time()
+        logger.log(f"Phase A.1: Graceful offline — disabling responders + sending /offline for {config.failing} sites...")
+        workers.disable_workers(fail_start, config.failing)
+
+        payloads = generate_signed_payloads(store, "offline", fail_start, config.failing)
+        send_notifications(docker, logger, config, "offline", payloads, is_onionheaven_host)
+        flush_client_descriptor_cache(docker, config, logger, store, fail_start, config.failing)
+
+        logger.log("Phase A.1: Waiting for takeovers...")
+        r = wait_for_takeover(docker, config, logger, store, dashboard,
+                              config.failing, config.takeover_timeout)
+        takeover_elapsed = int(time.time() - scenario_ts)
+        results["a1"] = f"{r.message} ({fmt_duration(takeover_elapsed)} e2e)"
+        logger.phase_result("A.1", f"Takeover: {results['a1']}")
+        print()
+
+        # A.1v: Verify redirects
+        logger.phase_start("A.1v", "Double-check taken-over addresses redirect (302) to Wayback Machine (est. <1m)")
+        r = verify_redirects(docker, config, logger, store, is_onionheaven_host, "A.1v", 5)
+        results["a1v"] = r.message
+        logger.phase_result("A.1v", r.message)
+        print()
+
+        # A.2: Recovery
+        logger.phase_start("A.2", f"Graceful recovery: re-enable + /online for {config.failing} sites (est. 1-2m)")
+        scenario_ts = time.time()
+        logger.log("Phase A.2: Graceful recovery — re-enabling responders + sending /online...")
+        workers.enable_workers(fail_start, config.failing, silent=False)
+
+        payloads = generate_signed_payloads(store, "online", fail_start, config.failing)
+        send_notifications(docker, logger, config, "online", payloads, is_onionheaven_host)
+        flush_client_descriptor_cache(docker, config, logger, store, fail_start, config.failing)
+
+        logger.log("Phase A.2: Waiting for recovery...")
+        r = wait_for_recovery(docker, config, logger, store, dashboard,
+                              config.failing, config.recovery_timeout)
+        recovery_elapsed = int(time.time() - scenario_ts)
+        results["a2"] = f"{r.message} ({fmt_duration(recovery_elapsed)} e2e)"
+        logger.phase_result("A.2", f"Recovery: {results['a2']}")
+        print()
+
+        results["a_sum"] = f"takeover {fmt_duration(takeover_elapsed)}, recovery {fmt_duration(recovery_elapsed)}"
+        logger.phase_result("A", f"Graceful: {results['a_sum']}")
+        print()
+
+        # ═══════════════════════════════════════════════════════════════
+        # Scenario B: Silent crash + recovery (heartbeat-only)
+        # ═══════════════════════════════════════════════════════════════
+        logger.phase_start("B", "SILENT CRASH/RECOVERY (no notifications, heartbeat-only detection)")
+
+        # B.1: Takeover
+        logger.phase_start("B.1", f"Silent crash: disable {config.failing} sites (no /offline), wait for heartbeat (est. 9m)")
+        scenario_ts = time.time()
+        logger.log(f"Phase B.1: Silent crash — disabling responders for {config.failing} sites (no /offline)...")
+        workers.disable_workers(fail_start, config.failing)
+        flush_client_descriptor_cache(docker, config, logger, store, fail_start, config.failing)
+
+        logger.log("Phase B.1: Waiting for heartbeat-detected takeovers...")
+        r = wait_for_takeover(docker, config, logger, store, dashboard,
+                              config.failing, config.takeover_timeout)
+        takeover_elapsed = int(time.time() - scenario_ts)
+        results["b1"] = f"{r.message} ({fmt_duration(takeover_elapsed)} e2e)"
+        logger.phase_result("B.1", f"Takeover: {results['b1']}")
+        print()
+
+        # B.1v: Verify redirects
+        logger.phase_start("B.1v", "Double-check taken-over addresses redirect (302) (est. <1m)")
+        r = verify_redirects(docker, config, logger, store, is_onionheaven_host, "B.1v", 5)
+        results["b1v"] = r.message
+        logger.phase_result("B.1v", r.message)
+        print()
+
+        results["b_sum"] = f"takeover {fmt_duration(takeover_elapsed)}"
+        logger.phase_result("B", f"Silent: {results['b_sum']}")
+        print()
+
+    else:
+        logger.log("No failing sites configured — skipping failure/recovery test")
+        print()
+
+    # Summary
+    logger.write_summary(config, results, run_start)
+
+    logger.phase_start("done", "Final metrics and cleanup")
+    logger.log("=== Final metrics ===")
+    dashboard.print_dashboard()
+    logger.phase_result("done", "Stress test complete")
+    print()
+
+    # Cleanup (deregister atexit handler, clean explicitly)
+    atexit.unregister(_cleanup)
+    cleanup_stress_test(docker, config, logger, store)
+    print()
+
+    logger.log("=== Stress test complete ===")
+    logger.log(f"Results saved to: {config.output_dir}/metrics.jsonl")
+
+
+def run_coordinator(config: StressConfig):
+    """Coordinator mode — read-only dashboard monitor."""
+    docker = _create_docker(config)
+    logger = StressLogger(config.output_dir)
+
+    _preflight(config, docker, logger)
+
+    # Follow latest symlink
+    latest = os.path.join(config.output_dir, "latest")
+    if os.path.islink(latest):
+        config.output_dir = latest
+
+    os.makedirs(config.output_dir, exist_ok=True)
+    phase_log = os.path.join(config.output_dir, "phase.log")
+
+    _detect_onionheaven_addr(config, logger)
+
+    # Detect host
+    result = docker.exec("onionpress-tor",
+        "cat /var/lib/tor/hidden_service/wordpress/hostname", timeout=10)
+    local_addr = result.output.strip() if result.ok else ""
+    is_onionheaven_host = bool(local_addr and local_addr == config.onionheaven_addr)
+
+    dashboard = Dashboard(config, docker, logger, is_onionheaven_host)
+
+    logger.log("=== OnionHeaven Stress Test (coordinator — read-only monitor) ===")
+    logger.log(f"Output: {config.output_dir}")
+    logger.log("Press Ctrl-C to stop")
+    print()
+
+    if os.path.exists(phase_log):
+        _open_phase_log_window(phase_log)
+
+    log_opened = os.path.exists(phase_log)
+    while True:
+        if not log_opened and os.path.exists(phase_log):
+            _open_phase_log_window(phase_log)
+            log_opened = True
+        dashboard.print_dashboard()
+        time.sleep(10)
+
+
+def main():
+    config = StressConfig.from_args()
+
+    if config.cleanup_stale:
+        docker = _create_docker(config)
+        logger = StressLogger(config.output_dir)
+        result = docker.run(["info"], timeout=15)
+        if not result.ok:
+            print("ERROR: Cannot reach Docker")
+            sys.exit(1)
+        _detect_onionheaven_addr(config, logger)
+        result = docker.exec("onionpress-tor",
+            "cat /var/lib/tor/hidden_service/wordpress/hostname", timeout=10)
+        local_addr = result.output.strip() if result.ok else ""
+        is_oh = bool(local_addr and local_addr == config.onionheaven_addr)
+        run_cleanup_stale(docker, config, logger, is_oh)
+        sys.exit(0)
+
+    if config.cleanup:
+        docker = _create_docker(config)
+        logger = StressLogger(config.output_dir)
+        result = docker.run(["info"], timeout=15)
+        if not result.ok:
+            print("ERROR: Cannot reach Docker")
+            sys.exit(1)
+        _detect_onionheaven_addr(config, logger)
+        result = docker.exec("onionpress-tor",
+            "cat /var/lib/tor/hidden_service/wordpress/hostname", timeout=10)
+        local_addr = result.output.strip() if result.ok else ""
+        is_oh = bool(local_addr and local_addr == config.onionheaven_addr)
+        run_cleanup(docker, config, logger, is_oh)
+        sys.exit(0)
+
+    if config.mode == "coordinator":
+        run_coordinator(config)
+    elif config.mode == "worker":
+        run_worker(config)
+    else:
+        print(f"Unknown mode: {config.mode}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

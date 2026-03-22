@@ -1,0 +1,534 @@
+"""Container lifecycle — worker and poll client management.
+
+Replaces start_worker_container, start_all_workers, start_poll_clients,
+disable_workers, enable_workers, enable_workers_silent from bash.
+"""
+
+import json
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from .config import StressConfig
+from .phases import StressLogger
+
+# Type alias for the Docker wrapper
+from onionpress.docker import Docker
+
+
+class WorkerManager:
+    """Manage stress worker containers."""
+
+    def __init__(self, config: StressConfig, docker: Docker, logger: StressLogger):
+        self.config = config
+        self.docker = docker
+        self.logger = logger
+        self.network: str = ""
+        self.tor_impl: str = "tor"
+        self.tor_label: str = "C Tor"
+        self.stress_image: str = ""
+        self.arti_image: str = ""
+
+    def detect_tor_impl(self):
+        """Detect whether the host runs Arti or C Tor."""
+        result = self.docker.exec("onionpress-tor", "sh -c 'echo ${TOR_IMPL:-arti}'")
+        self.tor_impl = result.output.strip() if result.ok else "arti"
+        self.tor_label = "C Tor" if self.tor_impl == "tor" else "Arti"
+
+    def detect_network(self):
+        """Get the Docker network used by onionpress-tor."""
+        result = self.docker.run([
+            "inspect", "onionpress-tor",
+            "--format", "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+        ])
+        self.network = result.output.strip()
+        if not self.network:
+            raise RuntimeError("Could not determine OnionPress Docker network")
+
+    def detect_images(self):
+        """Detect container images to use."""
+        result = self.docker.run([
+            "inspect", "--format", "{{.Config.Image}}", "onionpress-tor",
+        ])
+        self.arti_image = result.output.strip()
+        if not self.arti_image:
+            raise RuntimeError("Cannot determine image from onionpress-tor container")
+
+        self.stress_image = "ghcr.io/brewsterkahle/onionpress-stress-worker:latest"
+        result = self.docker.run(["image", "inspect", self.stress_image])
+        if not result.ok:
+            # Try building locally
+            dockerfile_dir = os.path.join(self.config.script_dir, "stress")
+            self.docker.run(["build", "-t", self.stress_image, dockerfile_dir], timeout=120)
+            result = self.docker.run(["image", "inspect", self.stress_image])
+            if not result.ok:
+                self.logger.log(f"  WARNING: Stress worker image not available, falling back to {self.arti_image}")
+                self.stress_image = self.arti_image
+
+    def start_worker(self, idx: int):
+        """Start a single worker container."""
+        cfg = self.config
+        workers_in_ctr = cfg.workers_in_container(idx)
+        ctr_name = cfg.container_name(idx)
+
+        self.logger.log(f"  Starting container {ctr_name} ({workers_in_ctr} sites)...")
+        self.docker.run(["rm", "-f", ctr_name], timeout=10)
+
+        # Generate config files
+        if self.tor_impl == "tor":
+            self._generate_torrc(idx)
+        else:
+            self._generate_arti_conf(idx, workers_in_ctr)
+
+        # Start container
+        self.docker.run([
+            "run", "-d",
+            "--name", ctr_name,
+            "--network", self.network,
+            "--ulimit", "nofile=10000:10000",
+            "--entrypoint", "sh",
+            self.stress_image,
+            "-c", "sleep infinity",
+        ], timeout=30)
+
+        # Copy scripts into container
+        stress_dir = os.path.join(cfg.script_dir, "stress")
+        src_dir = os.path.join(cfg.script_dir, "..", "src")
+        for src, dst in [
+            (os.path.join(stress_dir, "worker-server.py"), "/worker-server.py"),
+            (os.path.join(stress_dir, "worker-bootstrap.py"), "/worker-bootstrap.py"),
+            (os.path.join(src_dir, "onion_auth.py"), "/onion_auth.py"),
+            (os.path.join(stress_dir, "tor-watchdog.sh"), "/tor-watchdog.sh"),
+        ]:
+            self.docker.run(["cp", src, f"{ctr_name}:{dst}"], timeout=10)
+
+        if self.tor_impl == "tor":
+            torrc_path = os.path.join(cfg.output_dir, f"{ctr_name}-torrc")
+            self.docker.run(["cp", torrc_path, f"{ctr_name}:/etc/tor/torrc"], timeout=10)
+        else:
+            conf_path = os.path.join(cfg.output_dir, f"{ctr_name}-arti.toml")
+            self.docker.run(["cp", conf_path, f"{ctr_name}:/etc/arti/arti.toml"], timeout=10)
+
+        # Generate and copy startup script
+        startup = self._generate_startup(idx, workers_in_ctr)
+        startup_path = os.path.join(cfg.output_dir, f"{ctr_name}-start.sh")
+        with open(startup_path, "w") as f:
+            f.write(startup)
+        os.chmod(startup_path, 0o755)
+        self.docker.run(["cp", startup_path, f"{ctr_name}:/start.sh"], timeout=10)
+
+        # Launch startup script (backgrounded from host side)
+        self.docker.exec(ctr_name, "sh /start.sh", timeout=600)
+
+    def start_all(self):
+        """Start all worker containers, optionally in batches."""
+        cfg = self.config
+        self.detect_network()
+        self.logger.log(f"Docker network: {self.network}")
+
+        for idx in range(cfg.num_containers):
+            self.start_worker(idx)
+
+            if cfg.batch_size > 0 and (idx + 1) % cfg.batch_size == 0 and idx + 1 < cfg.num_containers:
+                self.logger.log(f"  Batch of {cfg.batch_size} containers started, waiting 30s before next batch...")
+                time.sleep(30)
+
+        self.logger.log(f"Started {cfg.num_containers} stress containers")
+
+    def disable_workers(self, fail_start: int, fail_count: int):
+        """Disable HTTP responders + Tor services for a range of sites."""
+        cfg = self.config
+        self.logger.log(f"Disabling responders for sites {fail_start}..{fail_start + fail_count - 1}...")
+
+        affected_containers = set()
+        del_failures = 0
+
+        for i in range(fail_start, fail_start + fail_count):
+            ctr_idx = i // cfg.per_ctr
+            local_idx = i % cfg.per_ctr
+            ctr_name = cfg.container_name(ctr_idx)
+            cp = cfg.base_port + local_idx * 2
+            hp = cfg.base_port + local_idx * 2 + 1
+
+            # Disable HTTP ports
+            self.docker.exec(ctr_name, [
+                "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/disable",
+                "-H", "Content-Type: application/json",
+                "-d", json.dumps({"ports": [cp, hp]}),
+            ], timeout=10)
+
+            if self.tor_impl == "tor":
+                # DEL_ONION via control API
+                result = self.docker.exec(ctr_name, [
+                    "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/del_onion",
+                    "-H", "Content-Type: application/json",
+                    "-d", json.dumps({"workers": [local_idx]}),
+                ], timeout=10)
+                if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
+                    self.logger.log(f"WARNING: DEL_ONION failed for site {i}, retrying...")
+                    time.sleep(2)
+                    result = self.docker.exec(ctr_name, [
+                        "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/del_onion",
+                        "-H", "Content-Type: application/json",
+                        "-d", json.dumps({"workers": [local_idx]}),
+                    ], timeout=10)
+                    if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
+                        self.logger.log(f"ERROR: DEL_ONION retry failed for site {i}: {result.output}")
+                        del_failures += 1
+            else:
+                # Arti: disable in config
+                content_nick = f"w{ctr_idx}_{local_idx}_content"
+                hc_nick = f"w{ctr_idx}_{local_idx}_hc"
+                for nick in [content_nick, hc_nick]:
+                    self.docker.exec(ctr_name,
+                        f'sed -i "/^\\[onion_services\\.\\"{nick}\\"\\]/,/^enabled = /{{s/^enabled = true/enabled = false/}}" /etc/arti/arti.toml',
+                        timeout=10)
+                affected_containers.add(ctr_name)
+
+        # Arti SIGHUP
+        if self.tor_impl != "tor":
+            self._sighup_arti(affected_containers)
+
+        if del_failures > 0:
+            self.logger.log(f"WARNING: {del_failures}/{fail_count} DEL_ONION calls failed")
+        impl_action = "DEL_ONION" if self.tor_impl == "tor" else "SIGHUP"
+        self.logger.log(f"Disabled {fail_count} sites (HTTP responders + {self.tor_label} {impl_action})")
+
+    def enable_workers(self, start: int, count: int, silent: bool = False):
+        """Re-enable workers. If silent=True, skip re-registration and /online."""
+        cfg = self.config
+        action = "no /online" if silent else "re-registering"
+        self.logger.log(f"Re-enabling responders for sites {start}..{start + count - 1} ({action})...")
+
+        affected_containers = set()
+        add_failures = 0
+
+        for i in range(start, start + count):
+            ctr_idx = i // cfg.per_ctr
+            local_idx = i % cfg.per_ctr
+            ctr_name = cfg.container_name(ctr_idx)
+            cp = cfg.base_port + local_idx * 2
+            hp = cfg.base_port + local_idx * 2 + 1
+
+            if self.tor_impl == "tor":
+                result = self.docker.exec(ctr_name, [
+                    "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/add_onion",
+                    "-H", "Content-Type: application/json",
+                    "-d", json.dumps({"workers": [local_idx]}),
+                ], timeout=10)
+                if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
+                    self.logger.log(f"WARNING: ADD_ONION failed for site {i}, retrying...")
+                    time.sleep(2)
+                    result = self.docker.exec(ctr_name, [
+                        "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/add_onion",
+                        "-H", "Content-Type: application/json",
+                        "-d", json.dumps({"workers": [local_idx]}),
+                    ], timeout=10)
+                    if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
+                        self.logger.log(f"ERROR: ADD_ONION retry failed for site {i}: {result.output}")
+                        add_failures += 1
+            else:
+                content_nick = f"w{ctr_idx}_{local_idx}_content"
+                hc_nick = f"w{ctr_idx}_{local_idx}_hc"
+                for nick in [content_nick, hc_nick]:
+                    self.docker.exec(ctr_name,
+                        f'sed -i "/^\\[onion_services\\.\\"{nick}\\"\\]/,/^enabled = /{{s/^enabled = false/enabled = true/}}" /etc/arti/arti.toml',
+                        timeout=10)
+                affected_containers.add(ctr_name)
+
+            # Re-enable HTTP responders
+            self.docker.exec(ctr_name, [
+                "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/enable",
+                "-H", "Content-Type: application/json",
+                "-d", json.dumps({"ports": [cp, hp]}),
+            ], timeout=10)
+
+            # Re-register over Tor (unless silent)
+            if not silent:
+                self._reregister_worker(ctr_idx, local_idx, ctr_name)
+
+        if self.tor_impl != "tor":
+            self._sighup_arti(affected_containers)
+
+        if add_failures > 0:
+            self.logger.log(f"WARNING: {add_failures}/{count} ADD_ONION calls failed")
+        impl_action = "ADD_ONION" if self.tor_impl == "tor" else "SIGHUP"
+        suffix = ", no notifications sent" if silent else " + re-registrations over Tor"
+        self.logger.log(f"Re-enabled {count} sites ({self.tor_label} {impl_action}{suffix})")
+
+    def _reregister_worker(self, ctr_idx: int, local_idx: int, ctr_name: str):
+        """Re-register a single worker with OnionHeaven via docker exec python3."""
+        cfg = self.config
+        if self.tor_impl == "tor":
+            pem_path_expr = f"'/tmp/w{ctr_idx}_{local_idx}_content.pem'"
+        else:
+            pem_path_expr = f"f'/var/lib/arti/state/keystore/hss/w{ctr_idx}_{local_idx}_content/ks_hs_id.ed25519_expanded_private'"
+
+        script = f"""
+import json, subprocess, sys, time, os, base64
+from onion_auth import sign_payload, make_timestamp
+with open('/worker-info.json') as f:
+    workers = json.load(f)
+w = next((x for x in workers if x.get('local_index') == {local_idx}), None)
+if not w or not w.get('content_address'):
+    sys.exit(0)
+time.sleep({local_idx} * 1)
+pem_path = {pem_path_expr}
+if os.environ.get('TOR_IMPL') == 'tor' and not os.path.exists(pem_path):
+    secret = '/var/lib/tor/hidden_service/w{ctr_idx}_{local_idx}_content/hs_ed25519_secret_key'
+    subprocess.run(['python3', '/key-convert.py', 'ctor-to-arti', secret, pem_path], capture_output=True, timeout=10)
+try:
+    with open(pem_path, 'rb') as f:
+        pem_b64 = base64.b64encode(f.read()).decode()
+except:
+    pem_b64 = ''
+privkey = base64.b64decode(w.get('privkey_b64', ''))
+pubkey = base64.b64decode(w.get('pubkey_b64', ''))
+timestamp = make_timestamp()
+signature = sign_payload(privkey, pubkey, 'register', w['content_address'], w['healthcheck_address'], timestamp)
+payload = json.dumps({{
+    'content_address': w['content_address'],
+    'healthcheck_address': w['healthcheck_address'],
+    'arti_key_pem': pem_b64,
+    'version': '{cfg.stress_version}',
+    'timestamp': timestamp,
+    'signature': signature,
+}})
+subprocess.run([
+    'curl', '-s', '-X', 'POST',
+    '--socks5-hostname', 'w{ctr_idx}_{local_idx}:x@127.0.0.1:9050',
+    '-H', 'Content-Type: application/json',
+    '-d', payload,
+    '--max-time', '60',
+    'http://{cfg.onionheaven_addr}:8083/online',
+], capture_output=True, timeout=75)
+print(f'Re-registered {{w["content_address"]}}')
+"""
+        # Run in background (don't block on each one)
+        self.docker.exec(ctr_name, ["python3", "-c", script], timeout=120)
+
+    def _sighup_arti(self, containers: set[str]):
+        """Send SIGHUP to Arti in affected containers."""
+        for ctr_name in containers:
+            self.docker.exec(ctr_name, """
+                arti_pid=$(pidof arti 2>/dev/null)
+                if [ -n "$arti_pid" ]; then
+                    kill -HUP $arti_pid 2>/dev/null
+                else
+                    su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
+                fi
+            """, timeout=10)
+
+    def _generate_torrc(self, idx: int):
+        """Generate torrc for a C Tor worker container."""
+        torrc = """SocksPort 127.0.0.1:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+DataDirectory /var/lib/tor
+Log notice stdout
+"""
+        path = os.path.join(self.config.output_dir, f"{self.config.container_name(idx)}-torrc")
+        with open(path, "w") as f:
+            f.write(torrc)
+
+    def _generate_arti_conf(self, idx: int, workers_in_ctr: int):
+        """Generate arti.toml for an Arti worker container."""
+        cfg = self.config
+        lines = [
+            '[proxy]',
+            'socks_listen = "127.0.0.1:9050"',
+            '',
+            '[path_rules]',
+            'reachable_addrs = ["0.0.0.0/0:*"]',
+            '',
+            '[storage]',
+            'cache_dir = "/var/lib/arti/cache"',
+            'state_dir = "/var/lib/arti/state"',
+            '',
+            '[storage.keystore]',
+            'enabled = true',
+            '',
+            '[vanguards]',
+            'mode = "disabled"',
+            '',
+            '[[logging.files]]',
+            'path = "/var/lib/arti/arti.log"',
+            'filter = "info,tor_hsservice=debug,tor_circmgr=debug,arti=debug"',
+        ]
+
+        for i in range(workers_in_ctr):
+            cp = cfg.base_port + i * 2
+            hp = cfg.base_port + i * 2 + 1
+            lines.extend([
+                '',
+                f'[onion_services."w{idx}_{i}_content"]',
+                'enabled = true',
+                f'proxy_ports = [["80", "127.0.0.1:{cp}"]]',
+            ])
+            if not cfg.no_healthcheck:
+                lines.extend([
+                    '',
+                    f'[onion_services."w{idx}_{i}_hc"]',
+                    'enabled = true',
+                    f'proxy_ports = [["80", "127.0.0.1:{hp}"]]',
+                ])
+
+        path = os.path.join(cfg.output_dir, f"{cfg.container_name(idx)}-arti.toml")
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def _generate_startup(self, idx: int, workers_in_ctr: int) -> str:
+        """Generate the startup script for a worker container."""
+        cfg = self.config
+        env_prefix = f'STRESS_VERSION="{cfg.stress_version}" NO_HEALTHCHECK="{cfg.no_healthcheck}"'
+
+        if self.tor_impl == "tor":
+            return f"""#!/bin/sh
+# No set -e — individual failures should not kill the container
+
+if ! python3 --version >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq python3-minimal curl netcat-openbsd xxd >/dev/null 2>&1
+fi
+
+mkdir -p /var/lib/tor
+chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+chmod 700 /var/lib/tor
+
+python3 /worker-server.py {cfg.base_port} {workers_in_ctr} &
+
+MAX_TOR_RETRIES=3
+TOR_ATTEMPT=0
+while [ "$TOR_ATTEMPT" -lt "$MAX_TOR_RETRIES" ]; do
+    TOR_ATTEMPT=$((TOR_ATTEMPT + 1))
+    rm -f /var/lib/tor/state /var/lib/tor/lock
+    su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
+    TOR_PID=$!
+    sh /tor-watchdog.sh 120 &
+    WATCHDOG_PID=$!
+    wait $WATCHDOG_PID
+    WATCHDOG_EXIT=$?
+    if [ "$WATCHDOG_EXIT" -eq 0 ]; then
+        break
+    fi
+    echo "tor-watchdog: retry $TOR_ATTEMPT/$MAX_TOR_RETRIES" >&2
+    wait $TOR_PID 2>/dev/null
+done
+
+{env_prefix} TOR_IMPL=tor python3 -u /worker-bootstrap.py "{cfg.onionheaven_addr}" {idx} {workers_in_ctr} {cfg.base_port} > /bootstrap.log 2>&1 &
+
+wait $TOR_PID
+"""
+        else:
+            return f"""#!/bin/sh
+# No set -e — individual failures should not kill the container
+
+apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
+
+chown root:root /etc/arti/arti.toml
+chmod 644 /etc/arti/arti.toml
+
+mkdir -p /var/lib/arti/cache /var/lib/arti/state
+chown -R arti:arti /var/lib/arti
+chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
+
+python3 /worker-server.py {cfg.base_port} {workers_in_ctr} &
+
+su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+ARTI_PID=$!
+
+{env_prefix} python3 -u /worker-bootstrap.py "{cfg.onionheaven_addr}" {idx} {workers_in_ctr} {cfg.base_port} > /bootstrap.log 2>&1 &
+
+wait $ARTI_PID
+"""
+
+
+class PollClientManager:
+    """Manage poll client containers for reachability verification."""
+
+    def __init__(self, config: StressConfig, docker: Docker, logger: StressLogger,
+                 stress_image: str, network: str):
+        self.config = config
+        self.docker = docker
+        self.logger = logger
+        self.stress_image = stress_image
+        self.network = network
+
+    def start_all(self):
+        """Start all poll client containers and wait for bootstrap."""
+        cfg = self.config
+        self.logger.log(f"Starting {cfg.num_poll_clients} polling clients...")
+
+        for i in range(cfg.num_poll_clients):
+            name = cfg.poll_client_name(i)
+            self.docker.run(["rm", "-f", name], timeout=10)
+            self.docker.run([
+                "run", "-d",
+                "--name", name,
+                "--network", self.network,
+                "--ulimit", "nofile=10000:10000",
+                "--entrypoint", "sh",
+                self.stress_image,
+                "-c", """
+                    mkdir -p /var/lib/tor
+                    chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+                    chmod 700 /var/lib/tor
+                    cat > /etc/tor/torrc << EOF
+SocksPort 0.0.0.0:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+DataDirectory /var/lib/tor
+Log notice stdout
+EOF
+                    su -s /bin/sh debian-tor -c 'tor -f /etc/tor/torrc'
+                """,
+            ], timeout=30)
+
+        # Wait for bootstrap
+        self.logger.log(f"Waiting for {cfg.num_poll_clients} polling clients to bootstrap...")
+        prev_ready = 0
+        for attempt in range(30):
+            ready = 0
+            for i in range(cfg.num_poll_clients):
+                result = self.docker.exec(
+                    cfg.poll_client_name(i),
+                    ["curl", "-s", "-o", "/dev/null",
+                     "--socks5-hostname", "127.0.0.1:9050",
+                     "--max-time", "5", "http://example.com/"],
+                    timeout=15,
+                )
+                if result.ok:
+                    ready += 1
+
+            if ready > prev_ready:
+                self.logger.progress_dot(ready - prev_ready)
+                prev_ready = ready
+
+            if ready >= cfg.num_poll_clients:
+                self.logger.progress_end(f"{cfg.num_poll_clients}/{cfg.num_poll_clients}")
+                self.logger.log(f"  All {cfg.num_poll_clients} polling clients ready ({(attempt + 1) * 10}s)")
+                break
+            time.sleep(10)
+        else:
+            self.logger.progress_end(f"{prev_ready}/{cfg.num_poll_clients}")
+            self.logger.log(f"WARNING: Not all polling clients bootstrapped ({prev_ready}/{cfg.num_poll_clients})")
+
+        # Copy verify-worker.py
+        stress_dir = os.path.join(cfg.script_dir, "stress")
+        for i in range(cfg.num_poll_clients):
+            self.docker.run([
+                "cp",
+                os.path.join(stress_dir, "verify-worker.py"),
+                f"{cfg.poll_client_name(i)}:/verify-worker.py",
+            ], timeout=10)
+        self.logger.log("  Poll clients ready (verify-worker.py updated from repo)")
+
+    def stop_all(self):
+        """Remove all poll client containers in parallel."""
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = []
+            for i in range(self.config.num_poll_clients):
+                futures.append(executor.submit(
+                    self.docker.run, ["rm", "-f", self.config.poll_client_name(i)], 10,
+                ))
+            for f in as_completed(futures):
+                f.result()  # propagate exceptions
