@@ -81,6 +81,7 @@ def run_verify_worker(
     start_ts = time.time()
     deadline = start_ts + timeout_secs
     last_dashboard = 0.0
+    last_worker_log = 0.0
     prev_verified = 0
     total_verified = 0
 
@@ -116,6 +117,16 @@ def run_verify_worker(
             codes_str = " ".join(f"{code}:{n}" for code, n in sorted(code_counts.items()))
             logger.log(f"  (verified: {total_verified}/{target_count}, pending: {total_pending}) [{codes_str}]")
             last_dashboard = now
+
+            # Pull verify-worker logs when stuck (every 60s)
+            if total_pending > 0 and total_verified == prev_verified and now - last_worker_log >= 60:
+                for i in range(num_clients):
+                    cname = config.poll_client_name(i)
+                    result = docker.exec(cname, "grep -E 'ROTATE|FAIL|HS_DESC FAILED' /tmp/verify-worker.log 2>/dev/null | tail -3", timeout=10)
+                    if result.ok and result.output.strip():
+                        for line in result.output.strip().splitlines():
+                            logger.log(f"  [{cname}] {line.strip()}")
+                last_worker_log = now
 
         if total_verified >= target_count:
             elapsed = int(time.time() - start_ts)
