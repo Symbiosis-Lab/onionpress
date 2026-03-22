@@ -447,12 +447,12 @@ def _write_worker_info(workers):
 def main_ctor_ramped():
     """C Tor bootstrap with ramped ADD_ONION — max MAX_IN_FLIGHT concurrent.
 
-    Phase 1: Create onion services with rate-limited ADD_ONION.
-             Monitor HS_DESC UPLOADED events; when one service's descriptor
-             is uploaded, start the next queued ADD_ONION.
-    Phase 2: Register all successful services with OnionHeaven in parallel.
+    Creates onion services with rate-limited ADD_ONION. Monitors HS_DESC
+    UPLOADED events; when a service's descriptor is uploaded, immediately
+    registers it with OnionHeaven in a background thread and fills the
+    next ADD_ONION slot from the queue.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
 
     wait_for_socks()
 
@@ -467,11 +467,33 @@ def main_ctor_ramped():
         print(f"WARNING: HS_DESC monitor failed ({e}), falling back to timed ramp", flush=True)
         monitor = None
 
-    # Phase 1: Create onion services with ramped ADD_ONION
     workers = [None] * NUM_WORKERS
     queued = list(range(NUM_WORKERS))  # worker indices to process
     in_flight = {}  # service_id -> (worker_index, timestamp)
     completed = []  # worker indices done (ADD_ONION + descriptor uploaded)
+
+    # Thread pool for background OnionHeaven registrations
+    reg_pool = ThreadPoolExecutor(max_workers=10)
+    reg_futures = []
+
+    def register_in_background(w):
+        """Register a worker with OnionHeaven (runs in thread pool)."""
+        privkey = base64.b64decode(w["privkey_b64"])
+        pubkey = base64.b64decode(w["pubkey_b64"])
+        pem_b64 = w.pop("_pem_b64", "")
+        result = register_with_onionheaven(
+            w["content_address"], w["healthcheck_address"],
+            privkey, pubkey, pem_b64,
+            worker_id=w["global_index"],
+        )
+        try:
+            resp = json.loads(result)
+            w["registered"] = resp.get("registered", False)
+        except Exception:
+            w["registered"] = False
+        status = "OK" if w["registered"] else f"FAILED: {result[:200]}"
+        print(f"[worker {w['local_index']}] Registration: {status}", flush=True)
+        _write_worker_info(workers)
 
     def fill_slots():
         """Move workers from queue to in-flight up to MAX_IN_FLIGHT."""
@@ -541,11 +563,11 @@ def main_ctor_ramped():
                 "container": CONTAINER_IDX,
                 "content_address": content_addr, "healthcheck_address": hc_addr,
                 "content_port": cp, "hc_port": hp,
-                "registered": False,  # not yet registered with OnionHeaven
+                "registered": False,
                 "privkey_b64": base64.b64encode(privkey).decode(),
                 "pubkey_b64": base64.b64encode(pubkey).decode(),
                 "ctor_key_b64": content_key_b64,
-                "_pem_b64": pem_b64,  # temp, used during registration
+                "_pem_b64": pem_b64,
             }
             _write_worker_info(workers)
 
@@ -555,8 +577,7 @@ def main_ctor_ramped():
     # Initial fill
     fill_slots()
 
-    # Wait for descriptors to upload, filling new slots as they complete
-    stall_start = time.time()
+    # Wait for descriptors to upload, register immediately, fill new slots
     while in_flight or queued:
         time.sleep(1)
 
@@ -566,53 +587,28 @@ def main_ctor_ramped():
             if uploaded:
                 promoted.append((sid, idx))
             elif time.time() - ts > 120:
-                # Timeout — move on anyway
                 print(f"[worker {idx}] descriptor timeout after 120s, continuing", flush=True)
                 promoted.append((sid, idx))
 
         for sid, idx in promoted:
             del in_flight[sid]
             completed.append(idx)
-            elapsed = time.time() - stall_start
-            print(f"[worker {idx}] descriptor ready ({len(completed)}/{NUM_WORKERS} done)", flush=True)
+            print(f"[worker {idx}] descriptor ready, registering ({len(completed)}/{NUM_WORKERS} done)", flush=True)
+            # Register with OnionHeaven immediately in background
+            reg_futures.append(reg_pool.submit(register_in_background, workers[idx]))
 
         if promoted:
             fill_slots()
-            stall_start = time.time()
 
     if monitor:
         monitor.stop()
 
-    print(f"Phase 1 complete: {len(completed)}/{NUM_WORKERS} onion services created", flush=True)
+    # Wait for any remaining registrations to finish
+    for f in reg_futures:
+        f.result()
+    reg_pool.shutdown(wait=False)
 
-    # Phase 2: Register with OnionHeaven in parallel
-    to_register = [w for w in workers if w and w.get("content_address") and not w.get("registered")]
-    if to_register:
-        print(f"Phase 2: Registering {len(to_register)} workers with OnionHeaven...", flush=True)
-        max_parallel = min(10, len(to_register))
-
-        def register_one(w):
-            privkey = base64.b64decode(w["privkey_b64"])
-            pubkey = base64.b64decode(w["pubkey_b64"])
-            pem_b64 = w.pop("_pem_b64", "")
-            result = register_with_onionheaven(
-                w["content_address"], w["healthcheck_address"],
-                privkey, pubkey, pem_b64,
-                worker_id=w["global_index"],
-            )
-            try:
-                resp = json.loads(result)
-                w["registered"] = resp.get("registered", False)
-            except Exception:
-                w["registered"] = False
-            status = "OK" if w["registered"] else f"FAILED: {result[:200]}"
-            print(f"[worker {w['local_index']}] Registration: {status}", flush=True)
-            _write_worker_info(workers)
-
-        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
-            list(pool.map(register_one, to_register))
-
-    # Clean up temp _pem_b64 from any remaining workers
+    # Clean up temp _pem_b64
     for w in workers:
         if w:
             w.pop("_pem_b64", None)
