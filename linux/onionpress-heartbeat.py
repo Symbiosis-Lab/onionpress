@@ -312,7 +312,12 @@ def heartbeat(hub_addr, content_addr, hc_addr, priv_key, pub_key):
 
     log.debug("WP health check: ok=%s output=%r healthy=%s", ok, output, wp_healthy)
 
-    extra = {"wordpress_healthy": wp_healthy}
+    # Always include key — every /online is both heartbeat and registration
+    arti_pem = key_manager.build_openssh_key(priv_key, pub_key)
+    extra = {
+        "wordpress_healthy": wp_healthy,
+        "arti_key_pem": base64.b64encode(arti_pem).decode("ascii"),
+    }
     if _is_onionheaven_server():
         extra["is_onionheaven"] = True
 
