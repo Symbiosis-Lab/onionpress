@@ -523,6 +523,19 @@ class QueueManager:
                 "oldest_in_flight_secs": oldest_in_flight,
             }
 
+    def addr_state(self, content_address):
+        """Return the serving_status for a single address."""
+        with self.lock:
+            if content_address in self.active:
+                return "active"
+            if content_address in self.in_flight:
+                return "activating"
+            if content_address in self.queued:
+                return "queued-to-activate"
+            if content_address in self.failed:
+                return "failed"
+        return None  # not in this worker
+
     def _get_key(self, content_address):
         """Extract ed25519 key as base64 for ADD_ONION."""
         key_file = os.path.join(KEYS_DIR, content_address,
@@ -600,6 +613,9 @@ def run_daemon():
                 result = qm.status()
             elif cmd == "reset":
                 result = qm.reset()
+            elif cmd == "addr_state" and arg:
+                state = qm.addr_state(arg)
+                result = {"address": arg, "serving_status": state}
             else:
                 result = {"error": f"unknown command: {data}"}
 
