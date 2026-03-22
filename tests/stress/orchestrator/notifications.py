@@ -139,7 +139,7 @@ rm -rf "$tmpdir"
 """
 
     result = docker.run(
-        ["exec", "-i", container, "sh", "-c", shell_script],
+        ["exec", "-i", "onionpress-tor-client", "sh", "-c", shell_script],
         timeout=300,
         input=payload_text,
     )
