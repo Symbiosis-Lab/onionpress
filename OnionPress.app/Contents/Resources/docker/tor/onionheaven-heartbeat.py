@@ -48,6 +48,47 @@ def wall_sleep(seconds):
 HEARTBEAT_INTERVAL = int(os.environ.get("ONIONHEAVEN_HEARTBEAT_INTERVAL", "15"))
 
 
+def _get_tor_detached(container_name):
+    """Query a worker's Tor for its actual detached onion services.
+
+    Returns a set of content addresses (with .onion suffix), or None on error.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name, "python3", "-c",
+             "import socket, binascii\n"
+             "cookie = open('/var/lib/tor/control_auth_cookie','rb').read()\n"
+             "s = socket.socket()\n"
+             "s.settimeout(10)\n"
+             "s.connect(('127.0.0.1',9051))\n"
+             "s.send(('AUTHENTICATE ' + binascii.hexlify(cookie).decode() + '\\r\\n').encode())\n"
+             "s.recv(256)\n"
+             "s.send(b'GETINFO onions/detached\\r\\n')\n"
+             "data = b''\n"
+             "while True:\n"
+             "    chunk = s.recv(8192)\n"
+             "    if not chunk: break\n"
+             "    data += chunk\n"
+             "    if b'250 OK' in data: break\n"
+             "s.close()\n"
+             "for l in data.decode().strip().split('\\n'):\n"
+             "    l = l.strip()\n"
+             "    if l and not l.startswith('250') and l != '.':\n"
+             "        print(l + '.onion')\n"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0:
+            return None
+        onions = set()
+        for line in result.stdout.strip().splitlines():
+            line = line.strip()
+            if line:
+                onions.add(line)
+        return onions
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Post-takeover audit — ping healthcheck to detect false positives
 # ---------------------------------------------------------------------------
@@ -302,6 +343,30 @@ def main():
                                 f"DB says {w['assigned_count']}, actual {actual}")
                 except sqlite3.OperationalError:
                     pass
+
+                # Reconcile: compare what Tor actually serves vs what DB expects.
+                # Log-only for now — helps diagnose silent service drops.
+                try:
+                    for w in (workers if workers else []):
+                        name = w["container_name"]
+                        tor_onions = _get_tor_detached(name)
+                        if tor_onions is None:
+                            continue
+                        db_rows = conn.execute(
+                            "SELECT content_address FROM registry "
+                            "WHERE takeover_container = ? AND status = 'taken-over' "
+                            "AND unregistered_at IS NULL",
+                            (name,)
+                        ).fetchall()
+                        db_addrs = set(r["content_address"] for r in db_rows)
+                        dropped = db_addrs - tor_onions
+                        extra = tor_onions - db_addrs
+                        if dropped or extra:
+                            log(f"RECONCILE: {name} — "
+                                f"Tor has {len(tor_onions)}, DB expects {len(db_addrs)}, "
+                                f"dropped={len(dropped)}, extra={len(extra)}")
+                except Exception as e:
+                    log(f"RECONCILE error: {e}")
 
             # Get list of active entry keys (content_address + healthcheck_address).
             # We only fetch the keys here — each entry is re-queried fresh before
