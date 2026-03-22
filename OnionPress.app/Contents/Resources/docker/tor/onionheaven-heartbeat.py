@@ -287,6 +287,23 @@ def main():
                 check_worker_bootstrap(conn)
                 cleanup_dead_workers(conn)
 
+                # Check for assigned_count drift
+                try:
+                    workers = conn.execute(
+                        "SELECT container_name, assigned_count FROM takeover_containers"
+                    ).fetchall()
+                    for w in workers:
+                        actual = conn.execute(
+                            "SELECT COUNT(*) FROM registry WHERE status='taken-over' "
+                            "AND takeover_container = ? AND unregistered_at IS NULL",
+                            (w["container_name"],)
+                        ).fetchone()[0]
+                        if actual != w["assigned_count"]:
+                            log(f"WARNING: assigned_count drift on {w['container_name']}: "
+                                f"DB says {w['assigned_count']}, actual {actual}")
+                except sqlite3.OperationalError:
+                    pass
+
             # Get list of active entry keys (content_address + healthcheck_address).
             # We only fetch the keys here — each entry is re-queried fresh before
             # acting on it, so we never act on stale data from a snapshot.
