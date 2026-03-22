@@ -425,7 +425,7 @@ while [ "$TOR_ATTEMPT" -lt "$MAX_TOR_RETRIES" ]; do
     wait $TOR_PID 2>/dev/null
 done
 
-{env_prefix} TOR_IMPL=tor python3 -u /worker-bootstrap.py "{cfg.onionheaven_addr}" {idx} {workers_in_ctr} {cfg.base_port} > /bootstrap.log 2>&1 &
+{env_prefix} TOR_IMPL=tor python3 -u /worker-bootstrap.py "{cfg.onionheaven_addr}" {idx} {workers_in_ctr} {cfg.base_port} {cfg.per_ctr} > /bootstrap.log 2>&1 &
 
 wait $TOR_PID
 """
@@ -447,7 +447,7 @@ python3 /worker-server.py {cfg.base_port} {workers_in_ctr} &
 su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
 ARTI_PID=$!
 
-{env_prefix} python3 -u /worker-bootstrap.py "{cfg.onionheaven_addr}" {idx} {workers_in_ctr} {cfg.base_port} > /bootstrap.log 2>&1 &
+{env_prefix} python3 -u /worker-bootstrap.py "{cfg.onionheaven_addr}" {idx} {workers_in_ctr} {cfg.base_port} {cfg.per_ctr} > /bootstrap.log 2>&1 &
 
 wait $ARTI_PID
 """
