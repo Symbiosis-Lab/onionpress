@@ -229,7 +229,7 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
     backoff_delays = [10, 30, 30]
     for attempt in range(4):
         log.info("Registration attempt %d/4 with %s...", attempt + 1, hub_addr)
-        ok, resp = sign_and_post("register", hub_addr, content_addr, hc_addr, priv_key, pub_key, extra)
+        ok, resp = sign_and_post("online", hub_addr, content_addr, hc_addr, priv_key, pub_key, extra)
 
         if ok and resp:
             if resp.get("registered"):

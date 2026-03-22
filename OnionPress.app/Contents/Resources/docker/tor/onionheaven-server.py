@@ -467,7 +467,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
         handlers = {
-            "/register": self._handle_online,  # alias for backwards compat
             "/unregister": self._handle_unregister,
             "/online": self._handle_online,
             "/offline": self._handle_offline,
