@@ -18,7 +18,8 @@ from .phases import StressLogger, fmt_duration
 from .containers import WorkerManager, PollClientManager
 from .metrics import WorkerInfoStore, Dashboard, init_worker_db_volume
 from .notifications import (
-    generate_signed_payloads, send_notifications, flush_client_descriptor_cache,
+    generate_signed_payloads, send_notifications, send_notifications_via_workers,
+    flush_client_descriptor_cache,
 )
 from .verification import (
     wait_for_bootstrap, wait_for_takeover, wait_for_recovery,
@@ -283,8 +284,7 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
         logger.log(f"Phase A.1: Graceful offline — disabling responders + sending /offline for {config.failing} sites...")
         workers.disable_workers(fail_start, config.failing)
 
-        payloads = generate_signed_payloads(store, "offline", fail_start, config.failing)
-        send_notifications(docker, logger, config, "offline", payloads)
+        send_notifications_via_workers(docker, logger, config, "offline", fail_start, config.failing)
         flush_client_descriptor_cache(docker, config, logger, store, fail_start, config.failing)
 
         logger.log("Phase A.1: Waiting for takeovers...")
@@ -309,9 +309,9 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
         logger.log("Phase A.2: Graceful recovery — re-enabling responders + sending /online...")
         workers.enable_workers(fail_start, config.failing, silent=False)
 
-        payloads = generate_signed_payloads(store, "online", fail_start, config.failing,
-                                                  stress_version=config.stress_version)
-        send_notifications(docker, logger, config, "online", payloads)
+        send_notifications_via_workers(docker, logger, config, "online",
+                                      fail_start, config.failing,
+                                      stress_version=config.stress_version)
         flush_client_descriptor_cache(docker, config, logger, store, fail_start, config.failing)
 
         logger.log("Phase A.2: Waiting for recovery...")

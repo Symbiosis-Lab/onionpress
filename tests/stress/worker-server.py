@@ -18,6 +18,7 @@ Each worker i gets:
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 
@@ -43,6 +44,58 @@ def _load_worker_info():
     except Exception:
         _worker_info = {}
     return _worker_info
+
+
+def _send_notify(worker_idx, endpoint, onionheaven_addr, stress_version=""):
+    """Send a signed /offline or /online notification for a worker using this container's Tor."""
+    import base64
+    from onion_auth import sign_payload, make_timestamp
+
+    _load_worker_info()
+    w = _worker_info.get(worker_idx)
+    if not w or not w.get("content_address"):
+        return {"error": "no_info"}
+
+    ca = w["content_address"]
+    ha = w.get("healthcheck_address", "")
+    pk = w.get("privkey_b64", "")
+    pub = w.get("pubkey_b64", "")
+    if not (pk and pub):
+        return {"error": "no_keys"}
+
+    privkey = base64.b64decode(pk)
+    pubkey = base64.b64decode(pub)
+    ts = make_timestamp()
+    sig = sign_payload(privkey, pubkey, endpoint, ca, ha, ts)
+
+    payload = {
+        "content_address": ca,
+        "healthcheck_address": ha,
+        "timestamp": ts,
+        "signature": sig,
+    }
+    if endpoint == "online":
+        payload["arti_key_pem"] = w.get("arti_key_pem", "")
+        payload["version"] = stress_version or os.environ.get("STRESS_VERSION", "stress-test")
+        payload["wordpress_healthy"] = True
+
+    global_idx = w.get("global_index", worker_idx)
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-X", "POST",
+             "--socks5-hostname", f"notify{global_idx}:x@127.0.0.1:9050",
+             "-H", "Content-Type: application/json",
+             "-d", json.dumps(payload),
+             "--max-time", "30",
+             f"http://{onionheaven_addr}:8083/{endpoint}"],
+            capture_output=True, text=True, timeout=45,
+        )
+        try:
+            return json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            return {"error": result.stdout[:200] if result.stdout else "empty"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _ctor_control(cmd):
@@ -180,6 +233,18 @@ async def handle_control(reader, writer):
                     await asyncio.get_event_loop().run_in_executor(
                         None, _ctor_control,
                         f"ADD_ONION ED25519-V3:{hc_key} Flags=Detach Port=80,127.0.0.1:{hp}")
+            resp = json.dumps({"ok": True, "results": results}).encode()
+        elif path == "/notify" and method == "POST":
+            data = json.loads(body)
+            worker_indices = data.get("workers", [])
+            endpoint = data.get("endpoint", "offline")
+            onionheaven_addr = data.get("onionheaven_addr", "")
+            stress_version = data.get("stress_version", "")
+            results = {}
+            for widx in worker_indices:
+                r = await asyncio.get_event_loop().run_in_executor(
+                    None, _send_notify, widx, endpoint, onionheaven_addr, stress_version)
+                results[str(widx)] = r
             resp = json.dumps({"ok": True, "results": results}).encode()
         elif path == "/status":
             resp = json.dumps({

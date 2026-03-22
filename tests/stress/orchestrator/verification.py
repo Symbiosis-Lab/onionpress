@@ -7,6 +7,7 @@ and diagnose_stragglers from bash.
 import json
 import random
 import time
+from collections import Counter
 
 from .config import StressConfig
 from .phases import StressLogger, PhaseResult, fmt_duration
@@ -88,6 +89,7 @@ def run_verify_worker(
 
         total_verified = 0
         total_pending = 0
+        code_counts: Counter = Counter()
 
         for i in range(num_clients):
             cname = config.poll_client_name(i)
@@ -98,6 +100,9 @@ def run_verify_worker(
                 data = json.loads(result.output)
                 total_verified += data.get("verified", 0)
                 total_pending += len(data.get("pending", []))
+                for info in data.get("results", {}).values():
+                    if isinstance(info, dict):
+                        code_counts[info.get("code", "?")] += 1
             except json.JSONDecodeError:
                 continue
 
@@ -108,7 +113,8 @@ def run_verify_worker(
 
         now = time.time()
         if now - last_dashboard >= 10:
-            logger.log(f"  (verified: {total_verified}/{target_count}, pending: {total_pending})")
+            codes_str = " ".join(f"{code}:{n}" for code, n in sorted(code_counts.items()))
+            logger.log(f"  (verified: {total_verified}/{target_count}, pending: {total_pending}) [{codes_str}]")
             last_dashboard = now
 
         if total_verified >= target_count:
@@ -316,8 +322,11 @@ def verify_redirects(
                     logger.log(f"  PASS: {addr[:30]}... -> 302 -> {redirect_url}")
                     passed += 1
                 else:
+                    logger.log(f"  FAIL: {addr[:30]}... -> {code} {redirect_url[:80]}")
                     still_failing.append(addr)
             else:
+                code = result.output.strip()[:10] if result.ok else "000"
+                logger.log(f"  FAIL: {addr[:30]}... -> {code} (no response)")
                 still_failing.append(addr)
 
         remaining = still_failing
