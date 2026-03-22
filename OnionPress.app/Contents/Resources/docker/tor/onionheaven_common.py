@@ -1243,7 +1243,39 @@ def reset_onionheaven(conn=None):
         "real_migrated": 0,
         "old_workers_removed": 0,
         "new_workers_spawned": 0,
+        "duplicate_heartbeats_killed": 0,
     }
+
+    # Step 0: kill duplicate heartbeat processes inside the onionheaven container.
+    # Multiple heartbeats cause race conditions (double assignments, DB locks).
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "onionheaven", "pgrep", "-f", "onionheaven-heartbeat"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            pids = [p.strip() for p in result.stdout.strip().splitlines() if p.strip()]
+            if len(pids) > 2:  # 1 sh wrapper + 1 python = normal
+                # Kill all, the entrypoint or caller will restart one
+                subprocess.run(
+                    ["docker", "exec", "onionheaven", "pkill", "-f", "onionheaven-heartbeat"],
+                    capture_output=True, timeout=10
+                )
+                killed = len(pids) - 2  # don't count the normal pair
+                stats["duplicate_heartbeats_killed"] = max(0, killed)
+                log(f"reset_onionheaven: killed {len(pids)} heartbeat processes "
+                    f"({killed} duplicates)")
+                time.sleep(2)
+                # Restart one clean heartbeat
+                subprocess.run(
+                    ["docker", "exec", "-d", "onionheaven", "sh", "-c",
+                     "python3 /onionheaven-heartbeat.py "
+                     "2>>/var/lib/onionpress/onionheaven/heartbeat.log"],
+                    capture_output=True, timeout=10
+                )
+                log("reset_onionheaven: restarted single heartbeat process")
+    except Exception as e:
+        log(f"reset_onionheaven: heartbeat cleanup error: {e}")
 
     # Step 1: tear down ALL workers and clear assignments FIRST.
     # This must happen before cleanup_stress_tests so the heartbeat can't
