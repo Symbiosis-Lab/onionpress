@@ -167,11 +167,10 @@ class OnionPressCLI:
                 f"~/Downloads/onionpress-{time.strftime('%Y-%m-%d')}-{os.getpid()}.zip"
             )
         addr = self.containers.get_onion_address()
-        # Delegate to backup_manager (existing module)
+        # Delegate to onionpress.backup
         try:
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-            import backup_manager
-            backup_manager.create_backup(
+            from .backup import create_backup
+            create_backup(
                 onion_address=addr,
                 username="",  # not needed for CLI backup
                 password=password,
@@ -188,10 +187,9 @@ class OnionPressCLI:
     def cmd_restore(self, password: str, backup_path: str) -> int:
         """Restore from backup."""
         try:
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-            import backup_manager
-            backup_manager.restore_backup(
-                backup_path=backup_path,
+            from .backup import restore_from_backup
+            restore_from_backup(
+                zip_path=backup_path,
                 password=password,
                 log_func=self.log,
             )
