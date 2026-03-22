@@ -593,12 +593,19 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": err})
             return
 
-        # arti_key_pem is required — without it we can't takeover the address
+        # arti_key_pem is required on first registration — without it we can't
+        # takeover the address. Subsequent heartbeats can omit it if the key is
+        # already stored.
         arti_key_stored = False
-        if not data.get("arti_key_pem"):
-            self._send_json(400, {"error": "Missing required field: arti_key_pem"})
-            return
-        if data.get("arti_key_pem"):
+        has_key = data.get("arti_key_pem")
+        if not has_key and healthcheck_address:
+            # Check if key already exists on disk
+            key_path = os.path.join(KEYS_DIR, content_address,
+                                    "ks_hs_id.ed25519_expanded_private")
+            if not os.path.isfile(key_path):
+                self._send_json(400, {"error": "Missing required field: arti_key_pem (no key on file)"})
+                return
+        if has_key:
             try:
                 arti_pem = base64.b64decode(data["arti_key_pem"])
             except Exception:
