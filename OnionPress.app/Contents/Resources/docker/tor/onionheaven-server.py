@@ -8,7 +8,6 @@ container on port 8083, exposed through the main tor container's onion service.
 
 Endpoints:
   POST /online       — Heartbeat / register (upserts registry entry, optionally stores arti key)
-  POST /register     — Alias for /online (backwards compatibility)
   POST /unregister   — Release takeover and hard-delete from registry
   POST /offline      — Notify OnionHeaven that instance is going offline
   GET  /status       — Public status summary (no auth)
@@ -460,7 +459,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
         handlers = {
-            "/register": self._handle_online,  # alias — /register and /online are the same
             "/unregister": self._handle_unregister,
             "/online": self._handle_online,
             "/offline": self._handle_offline,

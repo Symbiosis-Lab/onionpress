@@ -261,7 +261,7 @@ class TestRegister(unittest.TestCase):
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
 
-        code, data = _post(f"{server.base_url}/register", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
@@ -281,7 +281,7 @@ class TestRegister(unittest.TestCase):
         # Sign with wrong endpoint
         sig = onion_auth.sign_payload(expanded, pub, "unregister", addr, hc_addr, ts)
 
-        code, data = _post(f"{server.base_url}/register", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
@@ -301,7 +301,7 @@ class TestRegister(unittest.TestCase):
         # Sign with key2 but claim to be addr1
         sig = onion_auth.sign_payload(expanded2, pub2, "register", addr1, addr2, ts)
 
-        code, data = _post(f"{server.base_url}/register", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": addr1,
             "healthcheck_address": addr2,
             "arti_key_pem": base64.b64encode(pem1).decode('ascii'),
@@ -317,7 +317,7 @@ class TestRegister(unittest.TestCase):
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
 
-        code, data = _post(f"{server.base_url}/register", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
             "timestamp": ts,
@@ -333,7 +333,7 @@ class TestRegister(unittest.TestCase):
         ts = "2020-01-01T00:00:00Z"
         sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
 
-        code, data = _post(f"{server.base_url}/register", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
@@ -356,7 +356,7 @@ class TestFullLifecycle(unittest.TestCase):
             self.expanded, self.pub, "register",
             self.addr, self.hc_addr, ts
         )
-        code, data = _post(f"{server.base_url}/register", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": self.addr,
             "healthcheck_address": self.hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
@@ -416,7 +416,7 @@ class TestFullLifecycle(unittest.TestCase):
             self.expanded, self.pub, "register",
             self.addr, self.hc_addr, ts
         )
-        code, data = _post(f"{server.base_url}/register", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": self.addr,
             "healthcheck_address": self.hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
@@ -470,7 +470,7 @@ class TestStatusLookup(unittest.TestCase):
 
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
-        _post(f"{server.base_url}/register", {
+        _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
@@ -491,7 +491,7 @@ class TestStatusLookup(unittest.TestCase):
 
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
-        _post(f"{server.base_url}/register", {
+        _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
