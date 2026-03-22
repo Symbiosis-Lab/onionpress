@@ -522,31 +522,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "Entry not found"})
             return
 
-        # Release any taken-over entries (DEL_ONION + decrement assigned_count)
-        # before deleting from the registry.
+        # Unregister all matching rows (release + mark unregistered + delete keys)
+        from onionheaven_common import unregister_entry
         for row in rows:
-            if row["status"] == "taken-over" and row["takeover_container"]:
-                try:
-                    release_function(conn, row["content_address"],
-                                     row["healthcheck_address"])
-                except Exception as e:
-                    log(f"ERROR: release_function failed during unregister "
-                        f"for {row['content_address']} / "
-                        f"{row['healthcheck_address']}: {e}")
-
-        # Hard delete from registry
-        if healthcheck_address:
-            conn.execute(
-                "DELETE FROM registry "
-                "WHERE content_address = ? AND healthcheck_address = ?",
-                (content_address, healthcheck_address)
-            )
-        else:
-            conn.execute(
-                "DELETE FROM registry WHERE content_address = ?",
-                (content_address,)
-            )
-        db_commit_with_retry(conn)
+            try:
+                unregister_entry(conn, row["content_address"],
+                                 row["healthcheck_address"],
+                                 reason="explicit-unregister")
+            except Exception as e:
+                log(f"ERROR: unregister_entry failed for "
+                    f"{row['content_address']}: {e}")
         conn.close()
 
         try:
@@ -600,8 +585,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": err})
             return
 
-        # If arti_key_pem is provided, validate and store it
+        # arti_key_pem is required — without it we can't takeover the address
         arti_key_stored = False
+        if not data.get("arti_key_pem"):
+            self._send_json(400, {"error": "Missing required field: arti_key_pem"})
+            return
         if data.get("arti_key_pem"):
             try:
                 arti_pem = base64.b64decode(data["arti_key_pem"])
