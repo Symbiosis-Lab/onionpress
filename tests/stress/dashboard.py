@@ -127,6 +127,33 @@ def query_queue_status(container_name):
         return None
 
 
+def query_tor_detached(container_name):
+    """Count actual detached onion services in a worker's Tor."""
+    script = (
+        "import socket, binascii; "
+        "cookie = open('/var/lib/tor/control_auth_cookie','rb').read(); "
+        "s = socket.socket(); s.settimeout(10); s.connect(('127.0.0.1',9051)); "
+        "s.send(('AUTHENTICATE ' + binascii.hexlify(cookie).decode() + chr(13) + chr(10)).encode()); "
+        "s.recv(256); "
+        "s.send(b'GETINFO onions/detached' + bytes([13,10])); "
+        "data = b''; "
+        "exec('while True:\\n chunk = s.recv(8192)\\n if not chunk: break\\n data += chunk\\n if b\"250 OK\" in data: break'); "
+        "s.close(); "
+        "print(sum(1 for l in data.decode().strip().split(chr(10)) "
+        "if l.strip() and not l.startswith('250') and l.strip() != '.'))"
+    )
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name, "python3", "-c", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, Exception):
+        pass
+    return None
+
+
 def get_heartbeat_info():
     out = docker_exec("onionheaven",
                       "tail -1 /var/lib/onionpress/onionheaven/heartbeat.log")
@@ -215,10 +242,11 @@ def print_dashboard(iteration):
     active = reg["active"]
     unreg = reg["unregistered"]
 
+    unreg_str = f"  |  {unreg} unreg{delta('unreg', unreg)}" if unreg else ""
     print(f"  Registry:    {active} active{delta('active', active)}  |  "
           f"{c(32, f'{online} online')}{delta('online', online)}  |  "
           f"{c(33, f'{taken} taken-over')}{delta('taken', taken)}"
-          f"{f'  |  {unreg} unreg{delta(\"unreg\", unreg)}' if unreg else ''}")
+          f"{unreg_str}")
     save('active', active)
     save('online', online)
     save('taken', taken)
@@ -248,8 +276,9 @@ def print_dashboard(iteration):
 
             line = f"    {name:30s}  {boot}  [{bar}] {assigned}/{w['max']}"
 
-            # Queue details with deltas
+            # Queue details + Tor reality check
             qs = query_queue_status(name)
+            tor_count = query_tor_detached(name)
             if qs:
                 q_parts = []
                 act = qs.get("active", 0)
@@ -257,21 +286,21 @@ def print_dashboard(iteration):
                 fly = qs.get("in_flight", 0)
                 failed = qs.get("failed", 0)
 
-                act_d = delta(f'{name}.act', act)
-                q_parts.append(f"act={act}{act_d}")
-                save(f'{name}.act', act)
+                q_parts.append(f"act={act}")
+
+                if tor_count is not None:
+                    gap = act - tor_count
+                    if gap > 0:
+                        q_parts.append(c(31, f"tor={tor_count} gap={gap}"))
+                    else:
+                        q_parts.append(f"tor={tor_count}")
 
                 if queued:
-                    q_parts.append(f"q={queued}{delta(f'{name}.q', queued)}")
-                save(f'{name}.q', queued)
-
+                    q_parts.append(f"q={queued}")
                 if fly:
                     q_parts.append(f"fly={fly}")
-
                 if failed:
-                    fail_d = delta(f'{name}.fail', failed)
-                    q_parts.append(c(31, f"fail={failed}{fail_d}"))
-                    save(f'{name}.fail', failed)
+                    q_parts.append(c(31, f"fail={failed}"))
 
                 line += f"  ({', '.join(q_parts)})"
 
