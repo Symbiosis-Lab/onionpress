@@ -549,11 +549,14 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         db_commit_with_retry(conn)
         conn.close()
 
-        self._send_json(200, {
-            "unregistered": True,
-            "content_address": content_address,
-            "deleted_count": len(rows),
-        })
+        try:
+            self._send_json(200, {
+                "unregistered": True,
+                "content_address": content_address,
+                "deleted_count": len(rows),
+            })
+        except BrokenPipeError:
+            pass  # client disconnected — release already completed
 
     # -- POST /online (also handles /register) --------------------------------
 
