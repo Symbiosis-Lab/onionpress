@@ -1,6 +1,5 @@
-"""Dashboard and worker info — replaces repeated python3 -c subprocess calls."""
+"""Dashboard and worker info — SQLite-backed worker store via Docker volume."""
 
-import glob
 import json
 import os
 from typing import Iterator
@@ -11,77 +10,135 @@ from .phases import StressLogger
 from onionpress.docker import Docker
 
 
-class WorkerInfoStore:
-    """Load and query worker-info.json files.
+# Schema for the shared worker-info DB (also created by workers on first write)
+WORKER_DB_SCHEMA = """\
+CREATE TABLE IF NOT EXISTS workers (
+    global_index        INTEGER PRIMARY KEY,
+    local_index         INTEGER NOT NULL,
+    container           INTEGER NOT NULL,
+    content_address     TEXT,
+    healthcheck_address TEXT,
+    content_port        INTEGER,
+    hc_port             INTEGER,
+    registered          INTEGER NOT NULL DEFAULT 0,
+    privkey_b64         TEXT,
+    pubkey_b64          TEXT,
+    ctor_key_b64        TEXT DEFAULT '',
+    arti_key_pem        TEXT DEFAULT '',
+    error               TEXT
+);
+"""
 
-    Replaces the bash pattern of calling python3 -c "import json..."
-    once per site to extract addresses.
+
+def init_worker_db_volume(docker: Docker, config: StressConfig):
+    """Create the Docker volume and initialize the DB schema inside it."""
+    docker.run(["volume", "create", config.db_volume], timeout=10)
+
+    # Initialize DB + schema via a throwaway container
+    docker.run([
+        "run", "--rm",
+        "-v", f"{config.db_volume}:/worker-data",
+        "alpine", "sh", "-c",
+        "apk add --no-cache sqlite >/dev/null 2>&1 && "
+        "sqlite3 /worker-data/worker-info.db "
+        "'PRAGMA journal_mode=WAL; "
+        "CREATE TABLE IF NOT EXISTS workers ("
+        "global_index INTEGER PRIMARY KEY, local_index INTEGER NOT NULL, "
+        "container INTEGER NOT NULL, content_address TEXT, healthcheck_address TEXT, "
+        "content_port INTEGER, hc_port INTEGER, registered INTEGER NOT NULL DEFAULT 0, "
+        "privkey_b64 TEXT, pubkey_b64 TEXT, ctor_key_b64 TEXT DEFAULT \"\", "
+        "arti_key_pem TEXT DEFAULT \"\", error TEXT);'",
+    ], timeout=30)
+
+
+class WorkerInfoStore:
+    """Read and query worker info from the shared SQLite DB in a Docker volume.
+
+    All containers write to the DB via the shared volume.
+    The orchestrator reads via a single `docker exec` call on a running container.
     """
 
-    def __init__(self, output_dir: str, per_ctr: int):
-        self.output_dir = output_dir
-        self.per_ctr = per_ctr
-        self._workers: dict[int, list[dict]] = {}  # ctr_idx -> worker list
+    def __init__(self, docker: Docker, config: StressConfig):
+        self.docker = docker
+        self.config = config
+        self.db_path = config.db_container_path
+        self._workers: dict[int, dict] = {}  # global_index -> worker dict
 
-    def load_all(self, num_containers: int):
-        """Load worker info from all container info files."""
-        self._workers.clear()
-        for idx in range(num_containers):
-            path = os.path.join(self.output_dir, f"worker-{idx}-info.json")
-            if os.path.exists(path):
+    def _read_container(self) -> str:
+        """Find a running stress container to exec into for reads."""
+        for idx in range(self.config.num_containers):
+            name = self.config.container_name(idx)
+            if self.docker.container_running(name):
+                return name
+        return self.config.container_name(0)
+
+    def refresh(self):
+        """Load all worker data from the DB via one docker exec."""
+        ctr = self._read_container()
+        result = self.docker.exec(ctr, [
+            "python3", "-c",
+            "import sqlite3,json;"
+            f"conn=sqlite3.connect('{self.db_path}',timeout=10);"
+            "conn.row_factory=sqlite3.Row;"
+            "rows=[dict(r) for r in conn.execute('SELECT * FROM workers').fetchall()];"
+            "conn.close();"
+            "print(json.dumps(rows))",
+        ], timeout=15)
+        if result.ok and result.output.strip():
+            try:
+                workers = json.loads(result.output)
+                self._workers = {w["global_index"]: w for w in workers}
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+    def refresh_counts(self) -> tuple[int, int]:
+        """Fast count query — returns (total, registered) without loading all data."""
+        ctr = self._read_container()
+        result = self.docker.exec(ctr, [
+            "python3", "-c",
+            "import sqlite3;"
+            f"conn=sqlite3.connect('{self.db_path}',timeout=10);"
+            "r=conn.execute('SELECT COUNT(*),COALESCE(SUM(registered),0) FROM workers').fetchone();"
+            "conn.close();"
+            "print(r[0],r[1])",
+        ], timeout=15)
+        if result.ok and result.output.strip():
+            parts = result.output.strip().split()
+            if len(parts) >= 2:
                 try:
-                    with open(path) as f:
-                        self._workers[idx] = json.load(f)
-                except (json.JSONDecodeError, OSError):
-                    self._workers[idx] = []
+                    return int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+        return 0, 0
+
+    def load_all(self, num_containers: int = 0):
+        """Refresh from the DB."""
+        self.refresh()
 
     def load_from_globs(self):
-        """Load from all worker-*-info.json files (for cleanup)."""
-        self._workers.clear()
-        patterns = [
-            os.path.join(self.output_dir, "worker-*-info.json"),
-            os.path.join(self.output_dir, "run-*", "worker-*-info.json"),
-        ]
-        seen_addrs: set[str] = set()
-        idx = 0
-        for pattern in patterns:
-            for path in sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True):
-                try:
-                    with open(path) as f:
-                        workers = json.load(f)
-                    # Dedup by content address
-                    deduped = []
-                    for w in workers:
-                        ca = w.get("content_address", "")
-                        if ca and ca not in seen_addrs:
-                            seen_addrs.add(ca)
-                            deduped.append(w)
-                    if deduped:
-                        self._workers[idx] = deduped
-                        idx += 1
-                except (json.JSONDecodeError, OSError):
-                    pass
+        """For cleanup — just refresh from the DB."""
+        self.refresh()
 
     def get_worker(self, global_index: int) -> dict | None:
         """Get worker info by global index."""
-        ctr_idx = global_index // self.per_ctr
-        local_idx = global_index % self.per_ctr
-        workers = self._workers.get(ctr_idx, [])
-        for w in workers:
-            if w.get("local_index") == local_idx:
-                return w
-        return None
+        w = self._workers.get(global_index)
+        if w:
+            w = dict(w)
+            w["registered"] = bool(w.get("registered"))
+        return w
 
     def all_workers(self) -> Iterator[dict]:
-        """Iterate over all workers across all containers."""
-        for workers in self._workers.values():
-            yield from workers
+        """Iterate over all workers."""
+        for w in self._workers.values():
+            d = dict(w)
+            d["registered"] = bool(d.get("registered"))
+            yield d
 
     def get_content_addrs(self, start: int, count: int) -> list[str]:
         """Get content addresses for a range of global indices."""
         addrs = []
         for i in range(start, start + count):
-            w = self.get_worker(i)
+            w = self._workers.get(i)
             if w and w.get("content_address"):
                 addrs.append(w["content_address"])
         return addrs
@@ -90,16 +147,14 @@ class WorkerInfoStore:
         """Get healthcheck addresses for a range of global indices."""
         addrs = []
         for i in range(start, start + count):
-            w = self.get_worker(i)
+            w = self._workers.get(i)
             if w and w.get("healthcheck_address"):
                 addrs.append(w["healthcheck_address"])
         return addrs
 
     def total_registered(self) -> int:
         """Count total registered workers."""
-        return sum(
-            1 for w in self.all_workers() if w.get("registered")
-        )
+        return sum(1 for w in self._workers.values() if w.get("registered"))
 
 
 class Dashboard:

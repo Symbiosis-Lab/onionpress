@@ -54,6 +54,10 @@ def cleanup_stress_test(
 
     logger.log("  Removed stress + polling containers")
 
+    # Remove the shared worker-info Docker volume
+    docker.run(["volume", "rm", "-f", config.db_volume], timeout=10)
+    logger.log(f"  Removed volume: {config.db_volume}")
+
     # Clean stress test entries and refresh workers via /reset-onionheaven.
     # Faster and more reliable than individual /unregister calls over Tor.
     result = docker.exec("onionheaven",
@@ -96,7 +100,7 @@ def run_cleanup(
     docker.run(["rm", "-f", "stress-worker-tor"], timeout=10)
 
     # Build unregister payloads from all info files
-    store = WorkerInfoStore(config.output_dir, config.per_ctr)
+    store = WorkerInfoStore(docker, config)
     store.load_from_globs()
     payloads = generate_unregister_payloads(store)
 
@@ -206,7 +210,7 @@ def run_cleanup_stale(
             if not ctr.startswith("stress-worker-"):
                 continue
             has_info = docker.exec(ctr,
-                "test -f /worker-info.json && echo yes || echo no", timeout=10)
+                "test -f /worker-info.db && echo yes || echo no", timeout=10)
             has_bootstrap = docker.exec(ctr,
                 "ps aux 2>/dev/null | grep -c '[w]orker-bootstrap'", timeout=10)
             has_heartbeat = docker.exec(ctr,

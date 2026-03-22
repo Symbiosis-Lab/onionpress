@@ -16,7 +16,7 @@ import time
 from .config import StressConfig
 from .phases import StressLogger, fmt_duration
 from .containers import WorkerManager, PollClientManager
-from .metrics import WorkerInfoStore, Dashboard
+from .metrics import WorkerInfoStore, Dashboard, init_worker_db_volume
 from .notifications import (
     generate_signed_payloads, send_notifications, flush_client_descriptor_cache,
 )
@@ -187,8 +187,8 @@ def run_worker(config: StressConfig):
     logger.log(f"Output: {config.output_dir}")
     print()
 
-    # Store for worker info
-    store = WorkerInfoStore(config.output_dir, config.per_ctr)
+    # Store for worker info (reads from shared SQLite DB via docker exec)
+    store = WorkerInfoStore(docker, config)
 
     # Cleanup on exit
     def _cleanup():
@@ -225,6 +225,10 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
     run_start = time.time()
     results = {}
 
+    # Create shared Docker volume + DB before starting containers
+    init_worker_db_volume(docker, config)
+    logger.log(f"Created worker-info volume: {config.db_volume}")
+
     # Phase 1: Start containers
     logger.phase_start("1", f"Starting {config.num_containers} containers ({config.total} sites) (est. <1m)")
     logger.log(f"Phase 1: Starting {config.num_containers} site containers + {config.num_poll_clients} polling clients...")
@@ -238,32 +242,12 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
     # Phase 2: Bootstrap
     logger.phase_start("2", "Waiting for sites to bootstrap and register over Tor (est. 2m)")
     logger.log("Phase 2: Waiting for sites to bootstrap and register over Tor...")
-    r = wait_for_bootstrap(docker, config, logger)
+    r = wait_for_bootstrap(docker, config, logger, store)
     results["phase2"] = r.message
     logger.phase_result("2", r.message)
 
-    # Extract worker info + PEM keys
-    logger.log("Extracting site info from containers...")
-    for idx in range(config.num_containers):
-        ctr_name = config.container_name(idx)
-        # Get worker-info.json and enrich with arti_key_pem
-        result = docker.exec(ctr_name, """python3 -c "
-import json, base64, os
-with open('/worker-info.json') as f:
-    workers = json.load(f)
-for w in workers:
-    ci, li = w.get('container', 0), w.get('local_index', 0)
-    pem_path = f'/tmp/w{ci}_{li}_content.pem'
-    if os.path.exists(pem_path):
-        with open(pem_path, 'rb') as pf:
-            w['arti_key_pem'] = base64.b64encode(pf.read()).decode()
-print(json.dumps(workers))
-" """, timeout=15)
-        if result.ok:
-            info_path = os.path.join(config.output_dir, f"worker-{idx}-info.json")
-            with open(info_path, "w") as f:
-                f.write(result.output)
-    store.load_all(config.num_containers)
+    # Load full worker data from the shared DB
+    store.refresh()
     total_registered = store.total_registered()
     logger.log(f"Total registered sites: {total_registered}")
     print()

@@ -137,8 +137,12 @@ def wait_for_bootstrap(
     docker: Docker,
     config: StressConfig,
     logger: StressLogger,
+    store: WorkerInfoStore,
 ) -> PhaseResult:
-    """Wait for all sites to bootstrap and register with OnionHeaven."""
+    """Wait for all sites to bootstrap and register with OnionHeaven.
+
+    Reads from the shared SQLite DB via one docker exec per poll cycle.
+    """
     timeout = config.bootstrap_timeout
     logger.log(f"Waiting for all sites to bootstrap and register (timeout: {timeout}s)...")
 
@@ -147,41 +151,10 @@ def wait_for_bootstrap(
     last_status = 0.0
     registered_count = 0
     prev_registered = 0
+    total_in_db = 0
 
     while time.time() < deadline:
-        all_ready = True
-        ready_count = 0
-        registered_count = 0
-
-        for idx in range(config.num_containers):
-            ctr_name = config.container_name(idx)
-            result = docker.exec(ctr_name, "test -f /worker-info.json", timeout=10)
-            if not result.ok:
-                all_ready = False
-                continue
-
-            result = docker.exec(ctr_name, """python3 -c "
-import json
-with open('/worker-info.json') as f:
-    w = json.load(f)
-print(sum(1 for x in w if x.get('registered')), len(w))
-" """, timeout=10)
-            if result.ok and result.output.strip():
-                parts = result.output.strip().split()
-                if len(parts) >= 2:
-                    try:
-                        reg = int(parts[0])
-                        total_in_ctr = int(parts[1])
-                        registered_count += reg
-                        expected = config.workers_in_container(idx)
-                        if total_in_ctr >= expected and reg >= expected:
-                            ready_count += 1
-                        else:
-                            all_ready = False
-                    except ValueError:
-                        all_ready = False
-            else:
-                all_ready = False
+        total_in_db, registered_count = store.refresh_counts()
 
         # Progress dots
         if registered_count > prev_registered:
@@ -190,10 +163,10 @@ print(sum(1 for x in w if x.get('registered')), len(w))
 
         now = time.time()
         if now - last_status >= 10:
-            logger.log(f"  Bootstrap: {ready_count}/{config.num_containers} stress containers done, {registered_count}/{config.total} sites registered")
+            logger.log(f"  Bootstrap: {total_in_db}/{config.total} sites in DB, {registered_count}/{config.total} registered")
             last_status = now
 
-        if all_ready:
+        if total_in_db >= config.total and registered_count >= config.total:
             elapsed = int(time.time() - start_ts)
             logger.progress_end(f"{registered_count}/{config.total}")
             msg = f"{registered_count}/{config.total} registered in {fmt_duration(elapsed)}"

@@ -147,5 +147,9 @@ class StressConfig:
     def container_name(self, idx: int) -> str:
         return f"stress-worker-{idx}"
 
+    # Docker volume + in-container path for the shared worker-info DB
+    db_volume: str = "stress-worker-info"
+    db_container_path: str = "/worker-data/worker-info.db"
+
     def poll_client_name(self, idx: int) -> str:
         return f"stress-poll-client-{idx}"

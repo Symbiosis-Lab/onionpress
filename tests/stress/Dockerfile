@@ -5,7 +5,7 @@
 FROM ghcr.io/brewsterkahle/onionpress-tor:latest
 
 # Install python3 (for verify-worker.py on poll clients and worker-bootstrap.py on workers)
-RUN apt-get update -qq && apt-get install -y -qq python3-minimal >/dev/null 2>&1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -qq && apt-get install -y -qq python3 >/dev/null 2>&1 && rm -rf /var/lib/apt/lists/*
 
 COPY worker-server.py /worker-server.py
 COPY worker-bootstrap.py /worker-bootstrap.py
