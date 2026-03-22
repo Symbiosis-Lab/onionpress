@@ -216,10 +216,11 @@ class VerifyWorker:
                     return 0
 
             # Periodic HSFETCH for remaining addresses (every 30s)
+            # No NEWNYM here — it kills in-flight circuits and prevents
+            # descriptor fetches from completing. The initial NEWNYM at
+            # startup is sufficient to clear stale cache.
             now = time.time()
             if now - last_hsfetch >= 30:
-                newnym()
-                time.sleep(3)
                 with self.lock:
                     remaining_sids = [sid for sid, addr in self.service_ids.items() if addr in self.pending]
                 for sid in remaining_sids:
