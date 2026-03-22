@@ -105,40 +105,25 @@ class WorkerInfoStore:
 class Dashboard:
     """Query and display OnionHeaven metrics."""
 
-    def __init__(self, config: StressConfig, docker: Docker, logger: StressLogger,
-                 is_onionheaven_host: bool):
+    def __init__(self, config: StressConfig, docker: Docker, logger: StressLogger):
         self.config = config
         self.docker = docker
         self.logger = logger
-        self.is_onionheaven_host = is_onionheaven_host
         self._status_cache: dict | None = None
         self._status_ts: float = 0
 
     def query_status(self) -> dict:
-        """Query OnionHeaven /status API (cached for 5s)."""
+        """Query OnionHeaven /status API over Tor (cached for 5s)."""
         import time
         now = time.time()
         if now - self._status_ts < 5 and self._status_cache:
             return self._status_cache
 
-        result_text = ""
-        if self.is_onionheaven_host:
-            result = self.docker.exec("onionpress-tor",
-                "curl -s --max-time 5 http://localhost:8083/status", timeout=10)
-            if result.ok:
-                result_text = result.output
-            if not result_text:
-                result = self.docker.exec("onionheaven",
-                    "curl -s --max-time 5 http://localhost:8083/status", timeout=10)
-                if result.ok:
-                    result_text = result.output
-        else:
-            result = self.docker.exec("onionpress-tor-client",
-                f'curl -s --socks5-hostname "status:x@127.0.0.1:9050" --max-time 30 '
-                f'"http://{self.config.onionheaven_addr}:8083/status"',
-                timeout=35)
-            if result.ok:
-                result_text = result.output
+        result = self.docker.exec("onionpress-tor-client",
+            f'curl -s --socks5-hostname "status:x@127.0.0.1:9050" --max-time 30 '
+            f'"http://{self.config.onionheaven_addr}:8083/status"',
+            timeout=35)
+        result_text = result.output if result.ok else ""
 
         try:
             status = json.loads(result_text)
@@ -182,13 +167,9 @@ class Dashboard:
             return 0
 
     def get_last_pass_duration(self) -> str:
-        """Get last heartbeat pass duration (OnionHeaven host only)."""
-        if not self.is_onionheaven_host:
-            return "-"
-        result = self.docker.exec("onionheaven",
-            'grep "heartbeat pass complete" /var/lib/onionpress/onionheaven/heartbeat.log 2>/dev/null | tail -1 | sed "s/.*in //;s/s$//"',
-            timeout=10)
-        return result.output.strip() if result.ok and result.output.strip() else "-"
+        """Get last heartbeat pass duration from /status API."""
+        status = self.query_status()
+        return str(status.get("last_pass_duration", "-"))
 
     def get_onionheaven_version(self) -> str:
         """Get OnionHeaven server version from /status API."""

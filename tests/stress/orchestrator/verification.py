@@ -287,7 +287,6 @@ def verify_redirects(
     config: StressConfig,
     logger: StressLogger,
     store: WorkerInfoStore,
-    is_onionheaven_host: bool,
     phase_label: str,
     sample_size: int = 5,
 ) -> PhaseResult:
@@ -297,16 +296,8 @@ def verify_redirects(
 
     logger.log(f"{phase_label}: Verifying 302 redirects on sample of taken-over addresses...")
 
-    # Get taken-over addresses
-    if is_onionheaven_host:
-        result = docker.exec("onionheaven",
-            'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
-            '"SELECT content_address FROM registry WHERE status=\'taken-over\'"',
-            timeout=10)
-        addrs = [a.strip() for a in result.output.strip().splitlines() if a.strip()] if result.ok else []
-    else:
-        fail_start = config.fail_start
-        addrs = store.get_content_addrs(fail_start, config.failing)
+    # Use the addresses we know we disabled
+    addrs = store.get_content_addrs(config.fail_start, config.failing)
 
     if not addrs:
         logger.log(f"{phase_label}: No taken-over addresses found — skipping redirect verification")
@@ -375,16 +366,6 @@ def verify_redirects(
         f'"event":"redirect_verify","phase":"{phase_label}",'
         f'"total_taken":{len(addrs)},"sampled":{len(sampled)},"passed":{passed},"failed":{failed}'
     )
-
-    # Debug log from redirect service
-    if is_onionheaven_host:
-        logger.log(f"{phase_label}: Redirect debug log:")
-        result = docker.exec("onionheaven",
-            "cat /tmp/onionheaven-redirect-debug.log 2>/dev/null | tail -30",
-            timeout=10)
-        if result.ok and result.output.strip():
-            for line in result.output.strip().splitlines()[-5:]:
-                print(f"           [redirect-dbg] {line}")
 
     return PhaseResult(passed == len(sampled), msg, elapsed)
 
