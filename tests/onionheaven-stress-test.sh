@@ -1376,7 +1376,7 @@ subprocess.run([
     '-H', 'Content-Type: application/json',
     '-d', payload,
     '--max-time', '60',
-    'http://${ONIONHEAVEN_ADDR}:8083/register',
+    'http://${ONIONHEAVEN_ADDR}:8083/online',
 ], capture_output=True, timeout=75)
 print(f'Re-registered {w[\"content_address\"]}')
 " 2>/dev/null &
@@ -1409,7 +1409,7 @@ enable_workers_silent() {
     local start="$1"
     local count="$2"
 
-    log "Re-enabling responders for sites ${start}..$(( start + count - 1 )) (no /online, no /register)..."
+    log "Re-enabling responders for sites ${start}..$(( start + count - 1 )) (no /online)..."
 
     local affected_containers=""
     local add_failures=0

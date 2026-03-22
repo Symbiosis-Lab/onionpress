@@ -256,7 +256,7 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, w
                     "-H", "Content-Type: application/json",
                     "-d", payload,
                     "--max-time", "90",
-                    f"http://{ONIONHEAVEN_ADDR}:8083/register",
+                    f"http://{ONIONHEAVEN_ADDR}:8083/online",
                 ],
                 capture_output=True, text=True, timeout=105,
             )

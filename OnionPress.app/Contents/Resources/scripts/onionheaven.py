@@ -186,7 +186,7 @@ def register_with_onionheaven(app):
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", "60",
-            f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/register"
+            f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/online"
         ], timeout=75)
         last_output = output
 
