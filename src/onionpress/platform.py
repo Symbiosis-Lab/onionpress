@@ -130,6 +130,12 @@ def resolve_paths(data_dir: str = None, app_bundle: str = None) -> OnionPressPat
         bin_dir = ""
         docker_dir = ""
 
+    # On Linux, use the system Docker socket; on macOS, use Colima's
+    if detect_os() == OS.LINUX:
+        docker_socket = "/var/run/docker.sock"
+    else:
+        docker_socket = os.path.join(colima_home, "default", "docker.sock")
+
     return OnionPressPaths(
         data_dir=data_dir,
         config_file=os.path.join(data_dir, "config"),
@@ -142,7 +148,7 @@ def resolve_paths(data_dir: str = None, app_bundle: str = None) -> OnionPressPat
         bin_dir=bin_dir,
         docker_dir=docker_dir,
         colima_home=colima_home,
-        docker_socket=os.path.join(colima_home, "default", "docker.sock"),
+        docker_socket=docker_socket,
         app_bundle=app_bundle,
     )
 
