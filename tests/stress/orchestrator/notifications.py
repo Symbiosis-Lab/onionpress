@@ -150,7 +150,7 @@ def send_notifications(
     config: StressConfig,
     endpoint: str,
     payloads: list[str],
-    max_parallel: int = 10,
+    max_parallel: int = 5,
 ) -> int:
     """Send notification payloads to OnionHeaven API over Tor.
 
@@ -196,7 +196,9 @@ def send_notifications(
             except Exception as e:
                 failed_details.append((addr, str(e)))
                 logger.log(f"  /{endpoint} ERROR {addr[:20]}... → {e}")
+            logger.progress_dot()
 
+    logger.progress_end(f"{notified}/{len(payloads)}")
     logger.log(f"Sent /{endpoint} for {notified}/{len(payloads)} sites")
     if failed_details:
         logger.log(f"WARNING: {len(failed_details)} /{endpoint} notification(s) failed")

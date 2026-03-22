@@ -353,7 +353,7 @@ print(json.dumps(workers))
         workers.disable_workers(fail_start, config.failing)
         flush_client_descriptor_cache(docker, config, logger, store, fail_start, config.failing)
 
-        logger.log("Phase B.1: Waiting for heartbeat-detected takeovers...")
+        logger.log("Phase B.1: Waiting for heartbeat-detected takeovers (takeovers can start at 180s)...")
         r = wait_for_takeover(docker, config, logger, store, dashboard,
                               config.failing, config.takeover_timeout)
         takeover_elapsed = int(time.time() - scenario_ts)

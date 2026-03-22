@@ -2,13 +2,55 @@
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
 
 
 def fmt_duration(secs: int) -> str:
     """Format seconds as 'Xm:XXs' (e.g., 135 -> '2m:15s')."""
     return f"{secs // 60}m:{secs % 60:02d}s"
+
+
+def run_parallel(
+    items: list[T],
+    func: Callable[[T], bool],
+    logger: "StressLogger",
+    max_workers: int = 5,
+) -> tuple[int, int]:
+    """Run func on each item with ThreadPoolExecutor (like gnu-parallel -j5).
+
+    Shows progress dots as items complete.
+
+    Args:
+        items: List of items to process.
+        func: Callable that takes one item, returns True on success.
+        logger: StressLogger for progress dots.
+        max_workers: Concurrency limit (default 5).
+
+    Returns:
+        (succeeded, failed) counts.
+    """
+    succeeded = 0
+    failed = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(func, item): item for item in items}
+        for future in as_completed(futures):
+            try:
+                if future.result():
+                    succeeded += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+            logger.progress_dot()
+
+    logger.progress_end(f"{succeeded}/{len(items)}")
+    return succeeded, failed
 
 
 @dataclass

@@ -248,14 +248,21 @@ class VerifyWorker:
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: verify-worker.py <expected_code> <addr1> [addr2] ...", file=sys.stderr)
+        print("Usage: verify-worker.py <expected_code> [--timeout N] <addr1> [addr2] ...", file=sys.stderr)
         sys.exit(1)
 
-    expected_code = sys.argv[1]
-    addresses = sys.argv[2:]
+    args = sys.argv[1:]
+    expected_code = args.pop(0)
+
+    timeout = 600
+    if args and args[0] == "--timeout":
+        args.pop(0)
+        timeout = int(args.pop(0))
+
+    addresses = args
 
     worker = VerifyWorker(expected_code, addresses)
-    sys.exit(worker.run())
+    sys.exit(worker.run(timeout=timeout))
 
 
 if __name__ == "__main__":

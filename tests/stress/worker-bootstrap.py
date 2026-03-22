@@ -703,41 +703,57 @@ def is_worker_enabled(worker):
         return False
 
 
-def heartbeat_loop(registered_workers):
-    """Send periodic /online heartbeats for all enabled registered workers."""
-    HEARTBEAT_INTERVAL = 60
+def _site_heartbeat_thread(site, interval, initial_delay):
+    """Independent heartbeat thread for a single site.
 
-    # Initial jitter to avoid thundering herd
-    jitter = random.uniform(0, 15)
-    print(f"Heartbeat loop starting for {len(registered_workers)} workers (first beat in {jitter:.0f}s)...", flush=True)
-    time.sleep(jitter)
+    Each site sends its own heartbeat every `interval` seconds,
+    offset by `initial_delay` so heartbeats are evenly spread.
+    """
+    time.sleep(initial_delay)
 
     while True:
-        enabled = 0
-        skipped = 0
-        errors = 0
+        if not is_worker_enabled(site):
+            time.sleep(interval)
+            continue
 
-        for w in registered_workers:
-            if not is_worker_enabled(w):
-                skipped += 1
-                continue
+        result = send_heartbeat(site)
+        try:
+            resp = json.loads(result)
+            if not resp.get("online"):
+                print(f"  heartbeat rejected for site {site['local_index']}: {result[:100]}", flush=True)
+        except Exception:
+            pass
 
-            result = send_heartbeat(w)
-            try:
-                resp = json.loads(result)
-                if resp.get("online"):
-                    enabled += 1
-                else:
-                    errors += 1
-                    print(f"  heartbeat rejected for worker {w['local_index']}: {result[:100]}", flush=True)
-            except Exception:
-                errors += 1
+        time.sleep(interval)
 
-            # Small stagger between workers
-            time.sleep(0.5)
 
-        print(f"Heartbeat: {enabled} sent, {skipped} disabled, {errors} errors", flush=True)
+def heartbeat_loop(registered_sites):
+    """Launch independent heartbeat threads, one per site.
+
+    Each site gets its own thread that sends a heartbeat every 60s.
+    Threads are staggered evenly across the interval so the SOCKS proxy
+    never sees all sites hitting it at once.
+    """
+    HEARTBEAT_INTERVAL = 60
+    n = len(registered_sites)
+    stagger = HEARTBEAT_INTERVAL / max(n, 1)
+
+    print(f"Heartbeat: {n} sites, staggered {stagger:.1f}s apart", flush=True)
+
+    for i, site in enumerate(registered_sites):
+        t = threading.Thread(
+            target=_site_heartbeat_thread,
+            args=(site, HEARTBEAT_INTERVAL, i * stagger),
+            daemon=True,
+        )
+        t.start()
+
+    # Keep main thread alive, periodically log summary
+    while True:
         time.sleep(HEARTBEAT_INTERVAL)
+        enabled = sum(1 for s in registered_sites if is_worker_enabled(s))
+        disabled = n - enabled
+        print(f"Heartbeat: {enabled} active, {disabled} disabled ({n} sites)", flush=True)
 
 
 if __name__ == "__main__":
