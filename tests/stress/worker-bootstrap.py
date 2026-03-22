@@ -470,7 +470,7 @@ def main_ctor_ramped():
         """Register a worker with OnionHeaven (runs in thread pool)."""
         privkey = base64.b64decode(w["privkey_b64"])
         pubkey = base64.b64decode(w["pubkey_b64"])
-        pem_b64 = w.pop("_pem_b64", "")
+        pem_b64 = w.get("_pem_b64", "")
         result = register_with_onionheaven(
             w["content_address"], w["healthcheck_address"],
             privkey, pubkey, pem_b64,
@@ -605,10 +605,14 @@ def main_ctor_ramped():
     _write_worker_info(workers)
 
     registered_workers = [w for w in workers if w and w.get("registered")]
-    print(f"Bootstrap complete: {len(registered_workers)}/{NUM_WORKERS} registered", flush=True)
+    all_with_addresses = [w for w in workers if w and w.get("content_address")]
+    print(f"Bootstrap complete: {len(registered_workers)}/{NUM_WORKERS} registered "
+          f"({len(all_with_addresses)} have addresses, heartbeat will retry unregistered)", flush=True)
 
-    if registered_workers:
-        heartbeat_loop(registered_workers)
+    # Heartbeat loop includes ALL workers with addresses — not just registered ones.
+    # Workers that failed initial registration will get registered via heartbeat /online.
+    if all_with_addresses:
+        heartbeat_loop(all_with_addresses)
 
 
 def main():
@@ -654,13 +658,19 @@ def send_heartbeat(worker):
 
     timestamp = make_timestamp()
     signature = sign_payload(privkey, pubkey, "online", ca, ha, timestamp)
-    payload = json.dumps({
+    payload_dict = {
         "content_address": ca,
         "healthcheck_address": ha,
         "timestamp": timestamp,
         "signature": signature,
         "wordpress_healthy": True,
-    })
+    }
+    # Include PEM key so unregistered workers can register via heartbeat
+    pem_b64 = worker.get("_pem_b64", "")
+    if pem_b64:
+        payload_dict["arti_key_pem"] = pem_b64
+        payload_dict["version"] = os.environ.get("STRESS_VERSION", "stress-test")
+    payload = json.dumps(payload_dict)
 
     # Use unique SOCKS credentials per worker for circuit isolation
     worker_id = worker.get("global_index", worker.get("local_index", 0))
