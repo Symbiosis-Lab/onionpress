@@ -275,6 +275,17 @@ def main():
                 check_worker_bootstrap(conn)
                 cleanup_dead_workers(conn)
 
+                # Re-sync worker index if takeover_containers is empty
+                # (e.g. after a reset-onionheaven cleared the table)
+                try:
+                    tc_count = conn.execute(
+                        "SELECT COUNT(*) FROM takeover_containers"
+                    ).fetchone()[0]
+                    if tc_count == 0:
+                        _init_worker_index(conn)
+                except sqlite3.OperationalError:
+                    pass
+
                 # Check for assigned_count drift
                 try:
                     workers = conn.execute(
