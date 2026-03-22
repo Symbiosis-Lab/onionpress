@@ -32,16 +32,109 @@ USE_CTOR = os.environ.get("TOR_IMPL", "arti").lower() == "tor"
 CTOR_HS_BASE = "/var/lib/tor/hidden_service"
 
 
+CONTROL_PORT = 9051
+MAX_IN_FLIGHT = int(os.environ.get("MAX_IN_FLIGHT", "5"))
+
+
 def ctor_control(cmd):
     """Send a command to C Tor's control port. Returns the full response."""
     result = subprocess.run(
         ["sh", "-c",
          f'cookie=$(xxd -p /var/lib/tor/control_auth_cookie | tr -d "\\n"); '
          f'printf "AUTHENTICATE %s\\r\\n{cmd}\\r\\nQUIT\\r\\n" "$cookie" | '
-         f'nc -w 15 127.0.0.1 9051'],
+         f'nc -w 15 127.0.0.1 {CONTROL_PORT}'],
         capture_output=True, text=True, timeout=30,
     )
     return result.stdout
+
+
+def _read_control_cookie():
+    """Read the Tor control auth cookie as hex string."""
+    with open("/var/lib/tor/control_auth_cookie", "rb") as f:
+        return f.read().hex()
+
+
+class HsDescMonitor:
+    """Monitor HS_DESC UPLOADED events from C Tor control port.
+
+    Runs a background thread that listens for 650 HS_DESC events and
+    tracks which service_ids have had their descriptors uploaded.
+    """
+
+    def __init__(self):
+        self.uploaded = set()  # service_ids with HS_DESC UPLOADED
+        self.lock = threading.Lock()
+        self._sock = None
+        self._running = False
+
+    def start(self):
+        """Connect to control port, subscribe to HS_DESC events, start listener."""
+        import socket as _socket
+        self._sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        self._sock.connect(("127.0.0.1", CONTROL_PORT))
+        self._sock.settimeout(5.0)
+
+        cookie = _read_control_cookie()
+        self._sock.sendall(f"AUTHENTICATE {cookie}\r\n".encode())
+        resp = self._recv()
+        if "250 OK" not in resp:
+            raise RuntimeError(f"HS_DESC monitor auth failed: {resp}")
+
+        self._sock.sendall(b"SETEVENTS HS_DESC\r\n")
+        resp = self._recv()
+        if "250 OK" not in resp:
+            raise RuntimeError(f"SETEVENTS failed: {resp}")
+
+        self._running = True
+        t = threading.Thread(target=self._listen, daemon=True)
+        t.start()
+
+    def _recv(self):
+        data = b""
+        while True:
+            try:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                text = data.decode("utf-8", errors="replace")
+                for line in text.split("\r\n"):
+                    if line and len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
+                        return text
+            except Exception:
+                break
+        return data.decode("utf-8", errors="replace")
+
+    def _listen(self):
+        buf = b""
+        while self._running:
+            try:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\r\n" in buf:
+                    line, buf = buf.split(b"\r\n", 1)
+                    text = line.decode("utf-8", errors="replace")
+                    if "650 HS_DESC UPLOADED" in text:
+                        parts = text.split()
+                        if len(parts) >= 4:
+                            with self.lock:
+                                self.uploaded.add(parts[3])
+            except Exception:
+                continue
+
+    def is_uploaded(self, service_id):
+        with self.lock:
+            return service_id in self.uploaded
+
+    def stop(self):
+        self._running = False
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
 
 
 def ctor_add_onion(port, label=""):
@@ -345,13 +438,204 @@ def bootstrap_one_worker(i):
     }
 
 
+def _write_worker_info(workers):
+    """Write current worker state to JSON for orchestrator tracking."""
+    with open("/worker-info.json", "w") as f:
+        json.dump([w for w in workers if w is not None], f, indent=2)
+
+
+def main_ctor_ramped():
+    """C Tor bootstrap with ramped ADD_ONION — max MAX_IN_FLIGHT concurrent.
+
+    Phase 1: Create onion services with rate-limited ADD_ONION.
+             Monitor HS_DESC UPLOADED events; when one service's descriptor
+             is uploaded, start the next queued ADD_ONION.
+    Phase 2: Register all successful services with OnionHeaven in parallel.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    wait_for_socks()
+
+    print(f"Ramped bootstrap: {NUM_WORKERS} workers, max {MAX_IN_FLIGHT} in-flight", flush=True)
+
+    # Start HS_DESC monitor
+    monitor = HsDescMonitor()
+    try:
+        monitor.start()
+        print("HS_DESC monitor connected", flush=True)
+    except Exception as e:
+        print(f"WARNING: HS_DESC monitor failed ({e}), falling back to timed ramp", flush=True)
+        monitor = None
+
+    # Phase 1: Create onion services with ramped ADD_ONION
+    workers = [None] * NUM_WORKERS
+    queued = list(range(NUM_WORKERS))  # worker indices to process
+    in_flight = {}  # service_id -> (worker_index, timestamp)
+    completed = []  # worker indices done (ADD_ONION + descriptor uploaded)
+
+    def fill_slots():
+        """Move workers from queue to in-flight up to MAX_IN_FLIGHT."""
+        while queued and len(in_flight) < MAX_IN_FLIGHT:
+            i = queued.pop(0)
+            global_idx = CONTAINER_IDX * NUM_WORKERS + i
+            cp = BASE_PORT + i * 2
+            hp = BASE_PORT + i * 2 + 1
+
+            # Create content onion service
+            content_addr, content_key_b64 = ctor_add_onion(cp, label=f"[worker {i}] content ")
+            if not content_addr:
+                print(f"[worker {i}] ADD_ONION failed, skipping", flush=True)
+                workers[i] = {
+                    "global_index": global_idx, "local_index": i,
+                    "container": CONTAINER_IDX, "registered": False,
+                    "error": "add_onion_failed",
+                }
+                _write_worker_info(workers)
+                continue
+
+            # Create healthcheck onion service
+            if NO_HEALTHCHECK:
+                hc_addr = content_addr.replace(content_addr[:8], "hc" + content_addr[2:8])
+            else:
+                hc_addr, _ = ctor_add_onion(hp, label=f"[worker {i}] hc ")
+                if not hc_addr:
+                    print(f"[worker {i}] ADD_ONION hc failed, skipping", flush=True)
+                    workers[i] = {
+                        "global_index": global_idx, "local_index": i,
+                        "container": CONTAINER_IDX, "registered": False,
+                        "error": "add_onion_hc_failed",
+                    }
+                    _write_worker_info(workers)
+                    continue
+
+            # Derive keys for registration
+            raw_key = base64.b64decode(content_key_b64)
+            import onion_auth
+            a_bytes = raw_key[:32]
+            a = int.from_bytes(a_bytes, 'little')
+            A = onion_auth._scalar_mult(a, onion_auth._B)
+            pubkey = onion_auth._encode_point(A)
+            privkey = raw_key
+
+            # Build PEM for registration
+            key_dir = f"/tmp/ctor_keys_{CONTAINER_IDX}_{i}"
+            os.makedirs(key_dir, exist_ok=True)
+            with open(f"{key_dir}/hs_ed25519_secret_key", "wb") as f:
+                f.write(b"== ed25519v1-secret: type0 ==\x00\x00\x00" + raw_key)
+            with open(f"{key_dir}/hs_ed25519_public_key", "wb") as f:
+                f.write(b"== ed25519v1-public: type0 ==\x00\x00\x00" + pubkey)
+            pem_path = f"/tmp/w{CONTAINER_IDX}_{i}_content.pem"
+            subprocess.run(
+                ["python3", "/key-convert.py", "ctor-to-arti",
+                 f"{key_dir}/hs_ed25519_secret_key", pem_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            with open(pem_path, "rb") as f:
+                pem_b64 = base64.b64encode(f.read()).decode()
+
+            service_id = content_addr.replace(".onion", "")
+            in_flight[service_id] = (i, time.time())
+
+            workers[i] = {
+                "global_index": global_idx, "local_index": i,
+                "container": CONTAINER_IDX,
+                "content_address": content_addr, "healthcheck_address": hc_addr,
+                "content_port": cp, "hc_port": hp,
+                "registered": False,  # not yet registered with OnionHeaven
+                "privkey_b64": base64.b64encode(privkey).decode(),
+                "pubkey_b64": base64.b64encode(pubkey).decode(),
+                "ctor_key_b64": content_key_b64,
+                "_pem_b64": pem_b64,  # temp, used during registration
+            }
+            _write_worker_info(workers)
+
+            slots = f"{len(in_flight)}/{MAX_IN_FLIGHT} slots, {len(queued)} queued"
+            print(f"[worker {i}] in-flight ({slots})", flush=True)
+
+    # Initial fill
+    fill_slots()
+
+    # Wait for descriptors to upload, filling new slots as they complete
+    stall_start = time.time()
+    while in_flight or queued:
+        time.sleep(1)
+
+        promoted = []
+        for sid, (idx, ts) in list(in_flight.items()):
+            uploaded = monitor.is_uploaded(sid) if monitor else (time.time() - ts > 15)
+            if uploaded:
+                promoted.append((sid, idx))
+            elif time.time() - ts > 120:
+                # Timeout — move on anyway
+                print(f"[worker {idx}] descriptor timeout after 120s, continuing", flush=True)
+                promoted.append((sid, idx))
+
+        for sid, idx in promoted:
+            del in_flight[sid]
+            completed.append(idx)
+            elapsed = time.time() - stall_start
+            print(f"[worker {idx}] descriptor ready ({len(completed)}/{NUM_WORKERS} done)", flush=True)
+
+        if promoted:
+            fill_slots()
+            stall_start = time.time()
+
+    if monitor:
+        monitor.stop()
+
+    print(f"Phase 1 complete: {len(completed)}/{NUM_WORKERS} onion services created", flush=True)
+
+    # Phase 2: Register with OnionHeaven in parallel
+    to_register = [w for w in workers if w and w.get("content_address") and not w.get("registered")]
+    if to_register:
+        print(f"Phase 2: Registering {len(to_register)} workers with OnionHeaven...", flush=True)
+        max_parallel = min(10, len(to_register))
+
+        def register_one(w):
+            privkey = base64.b64decode(w["privkey_b64"])
+            pubkey = base64.b64decode(w["pubkey_b64"])
+            pem_b64 = w.pop("_pem_b64", "")
+            result = register_with_onionheaven(
+                w["content_address"], w["healthcheck_address"],
+                privkey, pubkey, pem_b64,
+                worker_id=w["global_index"],
+            )
+            try:
+                resp = json.loads(result)
+                w["registered"] = resp.get("registered", False)
+            except Exception:
+                w["registered"] = False
+            status = "OK" if w["registered"] else f"FAILED: {result[:200]}"
+            print(f"[worker {w['local_index']}] Registration: {status}", flush=True)
+            _write_worker_info(workers)
+
+        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+            list(pool.map(register_one, to_register))
+
+    # Clean up temp _pem_b64 from any remaining workers
+    for w in workers:
+        if w:
+            w.pop("_pem_b64", None)
+    _write_worker_info(workers)
+
+    registered_workers = [w for w in workers if w and w.get("registered")]
+    print(f"Bootstrap complete: {len(registered_workers)}/{NUM_WORKERS} registered", flush=True)
+
+    if registered_workers:
+        heartbeat_loop(registered_workers)
+
+
 def main():
+    if USE_CTOR:
+        main_ctor_ramped()
+        return
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # Wait for Tor SOCKS to be functional before registering any workers
     wait_for_socks()
 
-    # Bootstrap all workers in parallel (10 concurrent to avoid overwhelming SOCKS)
+    # Arti: bootstrap all workers in parallel (no control port for ramping)
     max_parallel = min(10, NUM_WORKERS)
     print(f"Bootstrapping {NUM_WORKERS} workers ({max_parallel} parallel)...", flush=True)
 
@@ -362,12 +646,10 @@ def main():
         for future in as_completed(futures):
             i = futures[future]
             workers[i] = future.result()
-            # Write incrementally so the stress test can track progress per-site
             with lock:
-                with open("/worker-info.json", "w") as f:
-                    json.dump([w for w in workers if w is not None], f, indent=2)
+                _write_worker_info(workers)
 
-    registered_workers = [w for w in workers if w.get("registered")]
+    registered_workers = [w for w in workers if w and w.get("registered")]
     print(f"Bootstrap complete: {len(registered_workers)}/{len(workers)} registered", flush=True)
 
     # Start heartbeat loop — sends /online for each registered worker every 60s
