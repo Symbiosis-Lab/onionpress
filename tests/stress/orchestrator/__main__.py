@@ -222,12 +222,23 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
     results["phase2"] = r.message
     logger.phase_result("2", r.message)
 
-    # Extract worker info
+    # Extract worker info + PEM keys
     logger.log("Extracting site info from containers...")
-    total_registered = 0
     for idx in range(config.num_containers):
         ctr_name = config.container_name(idx)
-        result = docker.exec(ctr_name, "cat /worker-info.json", timeout=10)
+        # Get worker-info.json and enrich with arti_key_pem
+        result = docker.exec(ctr_name, """python3 -c "
+import json, base64, os
+with open('/worker-info.json') as f:
+    workers = json.load(f)
+for w in workers:
+    ci, li = w.get('container', 0), w.get('local_index', 0)
+    pem_path = f'/tmp/w{ci}_{li}_content.pem'
+    if os.path.exists(pem_path):
+        with open(pem_path, 'rb') as pf:
+            w['arti_key_pem'] = base64.b64encode(pf.read()).decode()
+print(json.dumps(workers))
+" """, timeout=15)
         if result.ok:
             info_path = os.path.join(config.output_dir, f"worker-{idx}-info.json")
             with open(info_path, "w") as f:
@@ -293,7 +304,8 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
         logger.log("Phase A.2: Graceful recovery — re-enabling responders + sending /online...")
         workers.enable_workers(fail_start, config.failing, silent=False)
 
-        payloads = generate_signed_payloads(store, "online", fail_start, config.failing)
+        payloads = generate_signed_payloads(store, "online", fail_start, config.failing,
+                                                  stress_version=config.stress_version)
         send_notifications(docker, logger, config, "online", payloads)
         flush_client_descriptor_cache(docker, config, logger, store, fail_start, config.failing)
 
