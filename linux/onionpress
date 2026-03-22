@@ -1288,6 +1288,7 @@ wait_for_services() {
                     log "WordPress not installed -- setup required, skipping Tor wait"
                     return 0
                 fi
+                log "Waiting for Tor to bootstrap and onion service to be reachable..."
             fi
         fi
 
@@ -2095,7 +2096,7 @@ main() {
                 # Start Tor if not running
                 if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
                     echo "  Starting Tor..."
-                    docker compose up -d tor >> "$LOG_FILE" 2>&1
+                    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1
                 fi
             fi
             write_status
