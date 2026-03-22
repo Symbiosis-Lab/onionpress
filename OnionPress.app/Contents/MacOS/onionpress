@@ -1493,7 +1493,7 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
                 log "WARNING: Failed to restore .htaccess"
         fi
 
-        docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+        docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
     else
         log "WordPress not yet installed — waiting for setup (Tor NOT started)"
     fi
