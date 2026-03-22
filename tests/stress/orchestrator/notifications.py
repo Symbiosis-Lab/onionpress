@@ -129,7 +129,7 @@ while IFS= read -r payload; do
             touch "$tmpdir/ok.$i"
             break
         fi
-        [ "$attempt" -lt 3 ] && sleep {retry_sleep}
+        [ "$attempt" -lt 3 ] && sleep 5
      done) &
     [ $((i % {max_parallel})) -eq 0 ] && wait
 done
