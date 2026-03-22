@@ -173,9 +173,10 @@ def _check_previous_artifacts(docker: Docker, config: StressConfig, logger: Stre
 def _open_phase_log_window(phase_log: str):
     """Open a Terminal.app window tailing the phase log."""
     try:
+        abs_path = os.path.abspath(phase_log)
         subprocess.Popen([
             "osascript", "-e",
-            f'tell application "Terminal" to do script "tail -f \'{phase_log}\'"',
+            f'tell application "Terminal" to do script "tail -f \'{abs_path}\'"',
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
