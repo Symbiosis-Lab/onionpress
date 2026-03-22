@@ -62,8 +62,8 @@ class StressConfig:
         # Containers
         self.num_containers = (self.total + self.per_ctr - 1) // self.per_ctr
 
-        # Poll clients: 1 per 3 failing sites, clamped [3, 20]
-        self.num_poll_clients = max(3, min(20, (self.total // 2 + 2) // 3))
+        # Poll clients: 1 per 3 failing sites, clamped [1, 20]
+        self.num_poll_clients = max(1, min(20, (self.total // 2 + 2) // 3))
 
         # Version stamp
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")

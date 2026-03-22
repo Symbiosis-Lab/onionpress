@@ -17,7 +17,7 @@ class TestStressConfig:
         assert cfg.failing == 2
         assert cfg.per_ctr == 20
         assert cfg.num_containers == 1
-        assert cfg.num_poll_clients == 3
+        assert cfg.num_poll_clients == 1
         assert cfg.mode == "worker"
         assert cfg.no_healthcheck is False
         assert cfg.base_port == 9100
@@ -60,7 +60,7 @@ class TestStressConfig:
 
     def test_poll_clients_clamped_min(self):
         cfg = StressConfig(total=2)
-        assert cfg.num_poll_clients == 3  # minimum
+        assert cfg.num_poll_clients == 1  # minimum
 
     def test_poll_clients_clamped_max(self):
         cfg = StressConfig(total=1000)
