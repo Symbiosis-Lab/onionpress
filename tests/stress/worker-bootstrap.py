@@ -598,11 +598,9 @@ def main_ctor_ramped():
         f.result()
     reg_pool.shutdown(wait=False)
 
-    # Clean up temp _pem_b64
-    for w in workers:
-        if w:
-            w.pop("_pem_b64", None)
-    _write_worker_info(workers)
+    # Keep _pem_b64 in memory for heartbeat — every /online must include the key.
+    # Remove it from the persisted worker-info.json (it's large and on disk as PEM).
+    _write_worker_info([{k: v for k, v in w.items() if k != "_pem_b64"} for w in workers if w])
 
     registered_workers = [w for w in workers if w and w.get("registered")]
     all_with_addresses = [w for w in workers if w and w.get("content_address")]
