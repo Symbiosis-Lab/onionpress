@@ -516,7 +516,7 @@ generate_vanity_address() {
         if ! ensure_key_formats "$VANITY_DIR"; then
             return 1
         fi
-        log "Ensured both key formats for vanity key"
+        log "Ensured both key formats for vanity key" >&2
     fi
 
     # Return the directory path (only thing on stdout)
