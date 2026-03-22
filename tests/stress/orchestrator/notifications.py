@@ -25,6 +25,7 @@ def generate_signed_payloads(
     endpoint: str,
     start: int,
     count: int,
+    stress_version: str = "",
 ) -> list[str]:
     """Generate signed JSON payloads for a range of sites.
 
@@ -33,6 +34,7 @@ def generate_signed_payloads(
         endpoint: API endpoint name ('offline', 'online', 'unregister').
         start: Global index of first site.
         count: Number of sites.
+        stress_version: Version string (required for 'online' payloads).
 
     Returns:
         List of JSON strings, one per site.
@@ -53,12 +55,18 @@ def generate_signed_payloads(
         pubkey = base64.b64decode(pub)
         ts = make_timestamp()
         sig = sign_payload(privkey, pubkey, endpoint, ca, ha, ts)
-        payloads.append(json.dumps({
+        payload = {
             "content_address": ca,
             "healthcheck_address": ha,
             "timestamp": ts,
             "signature": sig,
-        }))
+        }
+        # /online requires arti_key_pem and version
+        if endpoint == "online":
+            payload["arti_key_pem"] = worker.get("arti_key_pem", "")
+            payload["version"] = stress_version
+            payload["wordpress_healthy"] = True
+        payloads.append(json.dumps(payload))
     return payloads
 
 
@@ -97,12 +105,15 @@ def _send_one_notification(
 ) -> tuple[bool, str]:
     """Send a single notification with retries. Returns (success, detail)."""
     tag = endpoint[:3]
+    code = "000"
+    body = ""
     for attempt in range(1, max_attempts + 1):
         socks_tag = f"{tag}{index}r{attempt}"
+        # Capture both HTTP code and response body
         result = docker.exec(
             "onionpress-tor-client",
             [
-                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "curl", "-s", "-w", "\n%{http_code}",
                 "--socks5-hostname", f"{socks_tag}:x@127.0.0.1:9050",
                 "--max-time", "30",
                 "-X", "POST",
@@ -112,14 +123,25 @@ def _send_one_notification(
             ],
             timeout=45,
         )
-        code = result.output.strip() if result.ok else "000"
+        if result.ok and result.output.strip():
+            lines = result.output.strip().rsplit("\n", 1)
+            body = lines[0] if len(lines) > 1 else ""
+            code = lines[-1].strip()
+        else:
+            code = "000"
+            body = result.stderr.strip()[:100] if result.stderr else ""
+
         if code == "200":
             return True, f"HTTP 200 (attempt {attempt})"
         if attempt < max_attempts:
             import time
             time.sleep(5)
 
-    return False, f"HTTP {code} after {max_attempts} attempts"
+    # Include the error response body so we know why it failed
+    detail = f"HTTP {code} after {max_attempts} attempts"
+    if body:
+        detail += f": {body[:150]}"
+    return False, detail
 
 
 def send_notifications(
