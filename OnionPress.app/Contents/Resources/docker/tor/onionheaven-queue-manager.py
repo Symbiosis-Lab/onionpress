@@ -250,7 +250,12 @@ class TorEventConn:
 # ---------------------------------------------------------------------------
 
 class QueueManager:
-    """Rate-limited ADD_ONION pipeline."""
+    """Rate-limited ADD_ONION pipeline with stuck circuit recovery."""
+
+    # Timeout before declaring in-flight addresses stuck
+    STUCK_TIMEOUT = 180  # 3 minutes
+    # Backoff multiplier for repeated recovery attempts
+    MAX_BACKOFF = 720  # 12 minutes max
 
     def __init__(self, cmd_conn, evt_conn):
         self.cmd = cmd_conn
@@ -260,6 +265,9 @@ class QueueManager:
         self.active = set()    # descriptors uploaded, service reachable
         self.failed = set()    # ADD_ONION failed
         self.lock = threading.Lock()
+        self._ever_active = False          # has any address ever gone active?
+        self._recovery_count = 0           # consecutive recovery attempts
+        self._last_recovery_time = 0.0     # monotonic time of last recovery
 
     def takeover(self, content_address):
         """Add an address to the takeover queue."""
@@ -319,7 +327,14 @@ class QueueManager:
                     self.failed.add(addr)
 
     def check_uploads(self):
-        """Move in-flight addresses to active if descriptors uploaded."""
+        """Move in-flight addresses to active if descriptors uploaded.
+
+        Also detects stuck in-flight addresses and triggers recovery:
+        - If 0 ever went active and in-flight stuck > STUCK_TIMEOUT: restart Tor
+          (bad guard selection — need fresh guards)
+        - If some active but current batch stuck > STUCK_TIMEOUT: SIGNAL NEWNYM
+          (circuits congested — get new circuits without losing active services)
+        """
         promoted = []
         with self.lock:
             for addr in list(self.in_flight):
@@ -328,21 +343,143 @@ class QueueManager:
                     del self.in_flight[addr]
                     promoted.append(addr)
                 elif self.evt.is_failed(addr):
-                    # Descriptor upload failed — retry by re-queuing
                     elapsed = time.time() - self.in_flight[addr]
-                    if elapsed > 300:  # 5 min timeout
+                    if elapsed > 300:
                         log(f"HS_DESC FAILED after {elapsed:.0f}s, giving up: "
                             f"{addr[:20]}...")
                         self.failed.add(addr)
                         del self.in_flight[addr]
-                    # else: keep waiting, Tor will retry
+
         if promoted:
+            self._ever_active = True
+            self._recovery_count = 0  # reset backoff on success
             for addr in promoted:
                 log(f"ACTIVE: {addr[:20]}... (descriptors uploaded)")
             self._process_queue()
 
+        # Check for stuck in-flight addresses
+        self._check_stuck()
+
+    def _check_stuck(self):
+        """Detect stuck in-flight addresses and trigger recovery."""
+        now = time.time()
+        with self.lock:
+            if not self.in_flight:
+                return
+            oldest = min(self.in_flight.values())
+            elapsed = now - oldest
+
+        # Apply backoff — don't recover too frequently
+        backoff = min(self.STUCK_TIMEOUT * (2 ** self._recovery_count),
+                      self.MAX_BACKOFF)
+        if now - self._last_recovery_time < backoff:
+            return
+        if elapsed < backoff:
+            return
+
+        if not self._ever_active:
+            # No address has EVER gone active — bad guard, restart Tor
+            log(f"RECOVERY: in-flight stuck {elapsed:.0f}s, 0 ever active — "
+                f"restarting Tor for fresh guards (attempt {self._recovery_count + 1})")
+            self._restart_tor()
+        else:
+            # Some active, current batch stuck — try NEWNYM for new circuits
+            log(f"RECOVERY: in-flight stuck {elapsed:.0f}s, {len(self.active)} active — "
+                f"sending SIGNAL NEWNYM (attempt {self._recovery_count + 1})")
+            self._signal_newnym()
+
+    def _restart_tor(self):
+        """Restart Tor with fresh guard selection. Re-queues all services."""
+        self._last_recovery_time = time.time()
+        self._recovery_count += 1
+
+        # Collect everything to re-queue
+        with self.lock:
+            to_requeue = list(self.in_flight.keys()) + list(self.active)
+            self.in_flight.clear()
+            self.active.clear()
+
+        # Close control connections (Tor is going away)
+        self.cmd.close()
+        self.evt.close()
+
+        # Delete state and restart Tor
+        try:
+            subprocess.run(["rm", "-rf", "/var/lib/tor/state"],
+                           capture_output=True, timeout=5)
+            # Find and kill Tor process
+            result = subprocess.run(["pgrep", "-f", "tor -f"],
+                                    capture_output=True, text=True, timeout=5)
+            if result.stdout.strip():
+                pid = result.stdout.strip().split()[0]
+                subprocess.run(["kill", pid], capture_output=True, timeout=5)
+                log(f"RECOVERY: killed Tor PID {pid}, waiting for restart...")
+                # The entrypoint's wait loop will detect Tor died and exit,
+                # but we need Tor to come back. Since the container has
+                # restart=unless-stopped, it will restart. But we're inside
+                # the container — we need to start Tor ourselves.
+                time.sleep(2)
+                subprocess.Popen(
+                    ["su", "-s", "/bin/sh", "debian-tor", "-c", "tor -f /etc/tor/torrc"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                log("RECOVERY: Tor restarting with fresh guards...")
+        except Exception as e:
+            log(f"RECOVERY: error restarting Tor: {e}")
+
+        # Wait for Tor to bootstrap
+        for _ in range(60):
+            time.sleep(2)
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect((CONTROL_HOST, CONTROL_PORT))
+                s.close()
+                break
+            except ConnectionRefusedError:
+                continue
+        else:
+            log("RECOVERY: Tor control port not available after 120s")
+            return
+
+        # Reconnect control connections
+        try:
+            self.cmd.connect()
+            self.evt.connect()
+            self.evt.uploaded.clear()
+            self.evt.failed.clear()
+            log("RECOVERY: control connections re-established")
+        except Exception as e:
+            log(f"RECOVERY: failed to reconnect: {e}")
+            return
+
+        # Re-queue everything
+        with self.lock:
+            for addr in to_requeue:
+                if addr not in self.queued:
+                    self.queued.append(addr)
+        log(f"RECOVERY: re-queued {len(to_requeue)} addresses after Tor restart")
+        self._process_queue()
+
+    def _signal_newnym(self):
+        """Send SIGNAL NEWNYM to get new circuits without killing services."""
+        self._last_recovery_time = time.time()
+        self._recovery_count += 1
+        try:
+            self.cmd._send("SIGNAL NEWNYM")
+            resp = self.cmd._read_response()
+            if "250 OK" in resp:
+                log("RECOVERY: SIGNAL NEWNYM sent — waiting for new circuits")
+            else:
+                log(f"RECOVERY: SIGNAL NEWNYM response: {resp.strip()}")
+        except Exception as e:
+            log(f"RECOVERY: NEWNYM error: {e}")
+
     def status(self):
         with self.lock:
+            oldest_in_flight = None
+            if self.in_flight:
+                oldest = min(self.in_flight.values())
+                oldest_in_flight = int(time.time() - oldest)
             return {
                 "container": CONTAINER_NAME,
                 "queued": len(self.queued),
@@ -350,6 +487,8 @@ class QueueManager:
                 "active": len(self.active),
                 "failed": len(self.failed),
                 "max_in_flight": MAX_IN_FLIGHT,
+                "recovery_count": self._recovery_count,
+                "oldest_in_flight_secs": oldest_in_flight,
             }
 
     def _get_key(self, content_address):
