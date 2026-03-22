@@ -242,8 +242,8 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
 
     # Phase 3: Healthy
     hc_type = "content" if config.no_healthcheck else "healthcheck"
-    logger.phase_start("3", f"Waiting for all {config.total} sites to be reachable via Tor (est. 1m)")
-    logger.log(f"Phase 3: Waiting for {config.total} {hc_type} addresses to be reachable via Tor (timeout: {config.healthy_timeout}s)...")
+    logger.phase_start("3", f"Waiting for all {config.total} sites to be reachable from polling clients (est. 1m)")
+    logger.log(f"Phase 3: Waiting for {config.total} {hc_type} addresses to be reachable from polling clients (timeout: {config.healthy_timeout}s)...")
     r = run_verify_worker(docker, config, logger, store,
                           "200", config.total, config.healthy_timeout, 0, config.total, hc_type)
     if r.success:
