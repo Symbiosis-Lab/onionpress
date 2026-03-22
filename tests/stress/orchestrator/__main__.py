@@ -95,7 +95,7 @@ def _preflight(config: StressConfig, docker: Docker, logger: StressLogger) -> tu
         logger.log("  OnionHeaven registration API is ready")
 
         if docker.container_running("onionheaven"):
-            logger.log("  onionheaven is running")
+            logger.log("  onionheaven is running (dedicated polling Tor)")
             # Install sqlite3 if needed
             result = docker.exec("onionheaven", "sqlite3 --version", timeout=10)
             if not result.ok:
@@ -105,8 +105,10 @@ def _preflight(config: StressConfig, docker: Docker, logger: StressLogger) -> tu
                     timeout=60)
             logger.log("  sqlite3 available in onionheaven")
         else:
-            logger.log("  onionheaven container not yet running — lazy activation will bootstrap it")
-            lazy_activation = True
+            # No dedicated onionheaven container — API runs in onionpress-tor (v2.4.31+).
+            # Only need lazy activation if the API wasn't reachable above.
+            logger.log("  No onionheaven container (API runs in onionpress-tor)")
+            lazy_activation = False
 
     logger.log("Preflight OK")
     return is_onionheaven_host, lazy_activation
@@ -123,14 +125,18 @@ def _check_previous_artifacts(docker: Docker, config: StressConfig, logger: Stre
 
     registry_count = 0
     if is_onionheaven_host:
-        result = docker.exec("onionheaven",
-            'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
-            '"SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL"',
-            timeout=10)
-        try:
-            registry_count = int(result.output.strip()) if result.ok else 0
-        except ValueError:
-            registry_count = 0
+        # Try onionheaven container first, fall back to onionpress-tor
+        for ctr in ["onionheaven", "onionpress-tor"]:
+            result = docker.exec(ctr,
+                'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
+                '"SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL"',
+                timeout=10)
+            if result.ok:
+                try:
+                    registry_count = int(result.output.strip())
+                except ValueError:
+                    pass
+                break
 
     if not stale_containers and registry_count == 0:
         return
@@ -158,12 +164,14 @@ def _check_previous_artifacts(docker: Docker, config: StressConfig, logger: Stre
             docker.run(["rm", "-f", ctr], timeout=10)
         logger.log(f"  Removed {len(stale_containers)} stress containers")
     if registry_count > 0 and is_onionheaven_host:
-        docker.exec("onionheaven",
+        # Use whichever container has sqlite3 access to the registry
+        db_ctr = "onionheaven" if docker.container_running("onionheaven") else "onionpress-tor"
+        docker.exec(db_ctr,
             'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
             '"DELETE FROM registry;"',
             timeout=10)
         logger.log(f"  Cleared {registry_count} registry entries")
-        docker.exec("onionheaven",
+        docker.exec(db_ctr,
             'sqlite3 /var/lib/onionpress/onionheaven/registry.db '
             '"DELETE FROM takeover_containers; DELETE FROM farm_scale_requests;"',
             timeout=10)
