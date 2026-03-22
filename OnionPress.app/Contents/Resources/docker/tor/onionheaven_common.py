@@ -1222,9 +1222,10 @@ def reset_onionheaven(conn=None):
     """Clean stress tests and refresh all takeover workers with current code.
 
     Steps:
-      1. Remove all stress test entries (registry rows, keys, takeovers)
-      2. Collect real taken-over entries that need to be migrated
-      3. Remove ALL old takeover workers
+      1. Tear down ALL old takeover workers and clear assignments FIRST
+         (prevents heartbeat from assigning to doomed workers during cleanup)
+      2. Remove all stress test entries (registry rows, keys, takeovers)
+      3. Collect real taken-over entries that need to be migrated
       4. Spawn fresh workers, patch them with current code, wait for bootstrap
       5. Re-assign real taken-over entries to the new workers
 
@@ -1237,32 +1238,28 @@ def reset_onionheaven(conn=None):
         conn = db_connect()
         db_ensure_schema(conn)
 
-    # Step 1: clean stress tests (this releases stress takeovers from workers)
-    cleanup_stats = cleanup_stress_tests(conn)
-
     stats = {
-        "stress_cleaned": cleanup_stats["registry_deleted"],
+        "stress_cleaned": 0,
         "real_migrated": 0,
         "old_workers_removed": 0,
         "new_workers_spawned": 0,
     }
 
-    # Step 2: collect real taken-over entries that need migration
-    real_takeovers = conn.execute(
-        "SELECT content_address, healthcheck_address, takeover_container "
-        "FROM registry WHERE status = 'taken-over' AND unregistered_at IS NULL "
-        "AND (version IS NULL OR version NOT LIKE 'stress-test%')"
-    ).fetchall()
+    # Step 1: tear down ALL workers and clear assignments FIRST.
+    # This must happen before cleanup_stress_tests so the heartbeat can't
+    # assign new takeovers to workers that are about to be removed.
 
-    # Step 3: remove ALL old takeover workers (DB + orphaned)
+    # Clear ALL takeover_container assignments so heartbeat knows nothing
+    # is assigned (prevents it from skipping unassigned entries).
+    conn.execute(
+        "UPDATE registry SET takeover_container = NULL "
+        "WHERE takeover_container IS NOT NULL"
+    )
+    conn.execute("DELETE FROM takeover_containers")
+    db_commit_with_retry(conn)
+
+    # Remove all takeover containers (DB-tracked + orphaned)
     old_workers = set()
-    try:
-        rows = conn.execute("SELECT container_name FROM takeover_containers").fetchall()
-        old_workers = set(r["container_name"] for r in rows)
-    except sqlite3.OperationalError:
-        pass
-
-    # Also find orphaned containers
     try:
         result = subprocess.run(
             ["docker", "ps", "-a", "--format", "{{.Names}}"],
@@ -1284,15 +1281,18 @@ def reset_onionheaven(conn=None):
         except Exception:
             pass
 
-    # Clear takeover_containers table and reset index
-    conn.execute("DELETE FROM takeover_containers")
-    # Clear stale takeover_container assignments
-    conn.execute(
-        "UPDATE registry SET takeover_container = NULL "
-        "WHERE status = 'taken-over' AND unregistered_at IS NULL"
-    )
-    db_commit_with_retry(conn)
     _next_worker_index = 0
+
+    # Step 2: clean stress tests (safe now — no workers to race with)
+    cleanup_stats = cleanup_stress_tests(conn)
+    stats["stress_cleaned"] = cleanup_stats["registry_deleted"]
+
+    # Step 3: collect real taken-over entries that need migration
+    real_takeovers = conn.execute(
+        "SELECT content_address, healthcheck_address, takeover_container "
+        "FROM registry WHERE status = 'taken-over' AND unregistered_at IS NULL "
+        "AND (version IS NULL OR version NOT LIKE 'stress-test%')"
+    ).fetchall()
 
     # If no real takeovers to migrate, we're done — heartbeat will spawn
     # workers on demand when new takeovers happen.
