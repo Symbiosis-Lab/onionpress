@@ -743,6 +743,48 @@ def get_queue_status(container_name):
     return None
 
 
+def get_addr_serving_status(conn, content_address):
+    """Get the serving_status for a content_address.
+
+    Returns one of: registered, queued-to-activate, activating, active, failed, unknown.
+    """
+    row = conn.execute(
+        "SELECT status, takeover_container FROM registry "
+        "WHERE content_address = ? AND unregistered_at IS NULL LIMIT 1",
+        (content_address,)
+    ).fetchone()
+
+    if not row:
+        return "unknown"
+
+    if row["status"] == "online":
+        return "registered"
+
+    if row["status"] != "taken-over":
+        return "unknown"
+
+    container = row["takeover_container"]
+    if not container:
+        return "queued-to-activate"  # taken-over but no worker assigned yet
+
+    # Ask the worker's queue manager
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container,
+             "python3", "/onionheaven-queue-manager.py", "addr_state", content_address],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            resp = json.loads(result.stdout.strip())
+            state = resp.get("serving_status")
+            if state:
+                return state
+    except Exception:
+        pass
+
+    return "activating"  # fallback — assigned but can't reach worker
+
+
 # ---------------------------------------------------------------------------
 # Takeover function
 # ---------------------------------------------------------------------------

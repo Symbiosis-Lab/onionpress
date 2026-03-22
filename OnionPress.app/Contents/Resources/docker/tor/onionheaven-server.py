@@ -377,9 +377,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 ).fetchall()
                 lookup_type = "healthcheck_address"
 
-            conn.close()
-
             if not rows:
+                conn.close()
                 self._send_json(404, {"error": "No entries found for this address (checked both content_address and healthcheck_address)"})
                 return
 
@@ -403,6 +402,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     "audit_result": row["audit_result"],
                 }
 
+                # serving_status: registered, queued-to-activate, activating, active, failed
+                from onionheaven_common import get_addr_serving_status
+                entry["serving_status"] = get_addr_serving_status(conn, row["content_address"])
+
                 # Add computed debugging fields
                 entry["seconds_since_last_checked"] = self._seconds_since(row["last_checked"], now)
                 entry["seconds_since_last_healthy"] = self._seconds_since(row["last_healthy"], now)
@@ -420,6 +423,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 entry["propagation_delay_seconds"] = PROPAGATION_DELAY
 
                 entries.append(entry)
+            conn.close()
 
             self._send_json(200, {
                 "lookup_type": lookup_type,
