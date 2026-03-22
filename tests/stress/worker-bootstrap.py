@@ -24,6 +24,9 @@ ONIONHEAVEN_ADDR = sys.argv[1]
 CONTAINER_IDX = int(sys.argv[2])
 NUM_WORKERS = int(sys.argv[3])
 BASE_PORT = int(sys.argv[4]) if len(sys.argv) > 4 else 9100
+# per_ctr = uniform container size for global_index calculation
+# (last container may have fewer workers, but global indices must be consistent)
+PER_CTR = int(sys.argv[5]) if len(sys.argv) > 5 else NUM_WORKERS
 
 KEYSTORE_BASE = "/var/lib/arti/state/keystore/hss"
 ARTI_TOML = "/etc/arti/arti.toml"
@@ -298,7 +301,7 @@ def bootstrap_one_worker(i):
     """Bootstrap a single worker: create onion service, read keys, register over Tor."""
     content_nick = f"w{CONTAINER_IDX}_{i}_content"
     hc_nick = f"w{CONTAINER_IDX}_{i}_hc"
-    global_idx = CONTAINER_IDX * NUM_WORKERS + i
+    global_idx = CONTAINER_IDX * PER_CTR + i
     cp = BASE_PORT + i * 2
     hp = BASE_PORT + i * 2 + 1
 
@@ -520,7 +523,7 @@ def main_ctor_ramped():
         """Move workers from queue to in-flight up to MAX_IN_FLIGHT."""
         while queued and len(in_flight) < MAX_IN_FLIGHT:
             i = queued.pop(0)
-            global_idx = CONTAINER_IDX * NUM_WORKERS + i
+            global_idx = CONTAINER_IDX * PER_CTR + i
             cp = BASE_PORT + i * 2
             hp = BASE_PORT + i * 2 + 1
 
