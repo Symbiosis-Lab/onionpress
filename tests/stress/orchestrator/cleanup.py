@@ -54,19 +54,26 @@ def cleanup_stress_test(
 
     logger.log("  Removed stress + polling containers")
 
-    # Unregister from OnionHeaven
-    payloads = generate_unregister_payloads(store)
-    count = 0
-    for payload in payloads:
-        docker.exec("onionpress-tor-client",
-            f'curl -s --socks5-hostname "unreg{count}:x@127.0.0.1:9050" --max-time 30 '
-            f'-X POST "http://{config.onionheaven_addr}:8083/unregister" '
-            f'-H "Content-Type: application/json" '
-            f"-d '{payload}'",
-            timeout=35)
-        count += 1
-
-    logger.log(f"  Unregistered {count} entries")
+    # Clean stress test entries and refresh workers via /reset-onionheaven.
+    # Faster and more reliable than individual /unregister calls over Tor.
+    result = docker.exec("onionheaven",
+        'curl -s -X POST http://127.0.0.1:8083/reset-onionheaven',
+        timeout=120)
+    if result.ok:
+        logger.log(f"  OnionHeaven reset: {result.output.strip()}")
+    else:
+        logger.log(f"  OnionHeaven reset failed, falling back to individual unregister")
+        payloads = generate_unregister_payloads(store)
+        count = 0
+        for payload in payloads:
+            docker.exec("onionpress-tor-client",
+                f'curl -s --socks5-hostname "unreg{count}:x@127.0.0.1:9050" --max-time 30 '
+                f'-X POST "http://{config.onionheaven_addr}:8083/unregister" '
+                f'-H "Content-Type: application/json" '
+                f"-d '{payload}'",
+                timeout=35)
+            count += 1
+        logger.log(f"  Unregistered {count} entries")
     logger.log("Cleanup complete")
 
 

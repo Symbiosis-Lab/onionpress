@@ -10,6 +10,7 @@ Endpoints:
   POST /online       — Heartbeat / register (upserts registry entry, optionally stores arti key)
   POST /unregister   — Release takeover and hard-delete from registry
   POST /offline      — Notify OnionHeaven that instance is going offline
+  POST /reset-onionheaven — Clean stress tests + refresh workers with current code (internal only)
   GET  /status       — Public status summary (no auth)
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
@@ -470,6 +471,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "/unregister": self._handle_unregister,
             "/online": self._handle_online,
             "/offline": self._handle_offline,
+            "/reset-onionheaven": self._handle_reset_onionheaven,
         }
         handler = handlers.get(path)
         if handler is None:
@@ -781,6 +783,19 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "offline": True,
             "content_address": content_address,
         })
+
+    # -- POST /reset-onionheaven ---------------------------------------------
+
+    def _handle_reset_onionheaven(self):
+        """Clean stress tests + refresh all takeover workers with current code.
+
+        Removes stress test entries, tears down old workers, spawns fresh ones
+        with patched code, and migrates real takeovers. No auth required —
+        reachable only from within the Docker network.
+        """
+        from onionheaven_common import reset_onionheaven
+        stats = reset_onionheaven()
+        self._send_json(200, {"reset": True, **stats})
 
 
 # ---------------------------------------------------------------------------
