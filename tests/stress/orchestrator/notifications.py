@@ -93,13 +93,9 @@ def send_notifications(
     config: StressConfig,
     endpoint: str,
     payloads: list[str],
-    is_onionheaven_host: bool,
     max_parallel: int = 10,
 ) -> int:
-    """Send notification payloads to OnionHeaven API.
-
-    Sends via docker exec into the appropriate container (onionpress-tor for
-    local, onionpress-tor-client for remote).
+    """Send notification payloads to OnionHeaven API over Tor.
 
     Returns:
         Number of successfully sent notifications.
@@ -110,49 +106,18 @@ def send_notifications(
 
     logger.log(f"  Generated {len(payloads)} /{endpoint} payload(s)")
 
-    # Join all payloads with newlines and pipe into a single docker exec
     payload_text = "\n".join(payloads)
     debug_log = os.path.join(config.output_dir, f"notify_{endpoint}_debug.log")
 
-    if is_onionheaven_host:
-        container = "onionpress-tor"
-        curl_template = (
-            'curl -s -o /dev/null -w "%{{http_code}}" --max-time 10 '
-            '-X POST "http://127.0.0.1:8083/{endpoint}" '
-            '-H "Content-Type: application/json" '
-            '-d "$payload"'
-        )
-    else:
-        container = "onionpress-tor-client"
-        curl_template = (
-            'curl -s -o /dev/null -w "%{{http_code}}" '
-            '--socks5-hostname "{tag}${{i}}r${{attempt}}:x@127.0.0.1:9050" '
-            '--max-time 30 '
-            '-X POST "http://{oh_addr}:8083/{endpoint}" '
-            '-H "Content-Type: application/json" '
-            '-d "$payload"'
-        )
-
-    # Build a shell script that processes payloads in parallel
     tag = endpoint[:3]
-    if is_onionheaven_host:
-        curl_cmd = (
-            f'curl -s -o /dev/null -w "%{{http_code}}" --max-time 10 '
-            f'-X POST "http://127.0.0.1:8083/{endpoint}" '
-            f'-H "Content-Type: application/json" '
-            f'-d "$payload"'
-        )
-        retry_sleep = 2
-    else:
-        curl_cmd = (
-            f'curl -s -o /dev/null -w "%{{http_code}}" '
-            f'--socks5-hostname "{tag}${{i}}r${{attempt}}:x@127.0.0.1:9050" '
-            f'--max-time 30 '
-            f'-X POST "http://{config.onionheaven_addr}:8083/{endpoint}" '
-            f'-H "Content-Type: application/json" '
-            f'-d "$payload"'
-        )
-        retry_sleep = 5
+    curl_cmd = (
+        f'curl -s -o /dev/null -w "%{{http_code}}" '
+        f'--socks5-hostname "{tag}${{i}}r${{attempt}}:x@127.0.0.1:9050" '
+        f'--max-time 30 '
+        f'-X POST "http://{config.onionheaven_addr}:8083/{endpoint}" '
+        f'-H "Content-Type: application/json" '
+        f'-d "$payload"'
+    )
 
     shell_script = f"""
 tmpdir=$(mktemp -d); i=0

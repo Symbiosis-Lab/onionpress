@@ -74,7 +74,6 @@ def run_cleanup(
     docker: Docker,
     config: StressConfig,
     logger: StressLogger,
-    is_onionheaven_host: bool,
 ):
     """Full cleanup mode — remove all stress artifacts."""
     logger.log("=== OnionHeaven Stress Test Cleanup ===")
@@ -126,14 +125,13 @@ def run_cleanup_stale(
     docker: Docker,
     config: StressConfig,
     logger: StressLogger,
-    is_onionheaven_host: bool,
 ):
     """Remove only stale stress tests (no activity in stale_hours)."""
     db_path = "/var/lib/onionpress/onionheaven/registry.db"
     logger.log(f"=== OnionHeaven Stale Stress Test Cleanup (>{config.stale_hours}h inactive) ===")
 
-    if not is_onionheaven_host:
-        logger.log("ERROR: --cleanup-stale must run on the OnionHeaven host (need DB access)")
+    if not docker.container_running("onionheaven"):
+        logger.log("ERROR: --cleanup-stale requires the onionheaven container (need DB access)")
         logger.log("NOTE:  Stale stress-test entries are auto-cleaned by the heartbeat monitor after 2h.")
         return
 
