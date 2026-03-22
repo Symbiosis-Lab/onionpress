@@ -39,6 +39,7 @@ class StressLogger:
         # Start fresh phase log
         with open(self.phase_log, "w"):
             pass
+        self._mid_progress = False
 
     def log(self, msg: str):
         """Log a message to stdout + log file + phase log."""
@@ -50,6 +51,9 @@ class StressLogger:
                 f.write(line + "\n")
         if self.phase_log:
             with open(self.phase_log, "a") as f:
+                if self._mid_progress:
+                    f.write("\n")
+                    self._mid_progress = False
                 f.write(line + "\n")
 
     def log_json(self, fields: str):
@@ -64,6 +68,7 @@ class StressLogger:
         if self.phase_log and count > 0:
             with open(self.phase_log, "a") as f:
                 f.write("." * count)
+            self._mid_progress = True
 
     def progress_end(self, msg: str):
         """End a progress line in the phase log."""
