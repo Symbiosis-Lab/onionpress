@@ -80,12 +80,13 @@ class WorkerManager:
         else:
             self._generate_arti_conf(idx, workers_in_ctr)
 
-        # Start container
+        # Start container with shared worker-info volume
         self.docker.run([
             "run", "-d",
             "--name", ctr_name,
             "--network", self.network,
             "--ulimit", "nofile=10000:10000",
+            "-v", f"{cfg.db_volume}:/worker-data",
             "--entrypoint", "sh",
             self.stress_image,
             "-c", "sleep infinity",
@@ -290,15 +291,17 @@ class WorkerManager:
 
         # Compact script — runs inside container where onion_auth.py and keys live
         script = (
-            "import json,subprocess,sys,time,os,base64;"
+            "import sqlite3,json,subprocess,sys,time,os,base64;"
             "from onion_auth import sign_payload,make_timestamp;"
-            "w=[x for x in json.load(open('/worker-info.json'))"
-            f" if x.get('local_index')=={local_idx}];"
-            "w=w[0] if w else None;"
-            "exec('sys.exit(0)') if not w or not w.get('content_address') else None;"
+            "conn=sqlite3.connect('/worker-data/worker-info.db',timeout=10);"
+            "conn.row_factory=sqlite3.Row;"
+            f"row=conn.execute('SELECT * FROM workers WHERE container=? AND local_index=?',({ctr_idx},{local_idx})).fetchone();"
+            "conn.close();"
+            "exec('sys.exit(0)') if not row or not row['content_address'] else None;"
+            "w=dict(row);"
             f"time.sleep({local_idx});"
             f"pem_b64=base64.b64encode(open('{pem_path}','rb').read()).decode() "
-            f"if os.path.exists('{pem_path}') else '';"
+            f"if os.path.exists('{pem_path}') else w.get('arti_key_pem','');"
             "ts=make_timestamp();"
             "sig=sign_payload(base64.b64decode(w['privkey_b64']),"
             "base64.b64decode(w['pubkey_b64']),'register',"
@@ -395,7 +398,7 @@ Log notice stdout
 # No set -e — individual failures should not kill the container
 
 if ! python3 --version >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
+    apt-get update -qq && apt-get install -y -qq python3 curl >/dev/null 2>&1
 fi
 
 mkdir -p /var/lib/tor
@@ -430,7 +433,7 @@ wait $TOR_PID
             return f"""#!/bin/sh
 # No set -e — individual failures should not kill the container
 
-apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
+apt-get update -qq && apt-get install -y -qq python3 curl >/dev/null 2>&1
 
 chown root:root /etc/arti/arti.toml
 chmod 644 /etc/arti/arti.toml

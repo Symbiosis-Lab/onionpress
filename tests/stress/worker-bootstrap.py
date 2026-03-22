@@ -428,10 +428,41 @@ def bootstrap_one_worker(i):
     }
 
 
-def _write_worker_info(workers):
-    """Write current worker state to JSON for orchestrator tracking."""
-    with open("/worker-info.json", "w") as f:
-        json.dump([w for w in workers if w is not None], f, indent=2)
+def _upsert_worker(w):
+    """Upsert a single worker row into the shared SQLite DB."""
+    import sqlite3
+    conn = sqlite3.connect("/worker-data/worker-info.db", timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript("""CREATE TABLE IF NOT EXISTS workers (
+        global_index INTEGER PRIMARY KEY, local_index INTEGER NOT NULL,
+        container INTEGER NOT NULL, content_address TEXT, healthcheck_address TEXT,
+        content_port INTEGER, hc_port INTEGER, registered INTEGER NOT NULL DEFAULT 0,
+        privkey_b64 TEXT, pubkey_b64 TEXT, ctor_key_b64 TEXT DEFAULT '',
+        arti_key_pem TEXT DEFAULT '', error TEXT);""")
+    conn.execute(
+        """INSERT OR REPLACE INTO workers
+           (global_index, local_index, container, content_address, healthcheck_address,
+            content_port, hc_port, registered, privkey_b64, pubkey_b64, ctor_key_b64,
+            arti_key_pem, error)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            w.get("global_index"),
+            w.get("local_index"),
+            w.get("container"),
+            w.get("content_address"),
+            w.get("healthcheck_address"),
+            w.get("content_port"),
+            w.get("hc_port"),
+            1 if w.get("registered") else 0,
+            w.get("privkey_b64"),
+            w.get("pubkey_b64"),
+            w.get("ctor_key_b64", ""),
+            w.get("arti_key_pem", w.get("_pem_b64", "")),
+            w.get("error"),
+        ),
+    )
+    conn.commit()
+    conn.close()
 
 
 def main_ctor_ramped():
@@ -483,7 +514,7 @@ def main_ctor_ramped():
             w["registered"] = False
         status = "OK" if w["registered"] else f"FAILED: {result[:200]}"
         print(f"[worker {w['local_index']}] Registration: {status}", flush=True)
-        _write_worker_info(workers)
+        _upsert_worker(w)
 
     def fill_slots():
         """Move workers from queue to in-flight up to MAX_IN_FLIGHT."""
@@ -502,7 +533,7 @@ def main_ctor_ramped():
                     "container": CONTAINER_IDX, "registered": False,
                     "error": "add_onion_failed",
                 }
-                _write_worker_info(workers)
+                _upsert_worker(workers[i])
                 continue
 
             # Create healthcheck onion service
@@ -517,7 +548,7 @@ def main_ctor_ramped():
                         "container": CONTAINER_IDX, "registered": False,
                         "error": "add_onion_hc_failed",
                     }
-                    _write_worker_info(workers)
+                    _upsert_worker(workers[i])
                     continue
 
             # Derive keys for registration
@@ -559,7 +590,7 @@ def main_ctor_ramped():
                 "ctor_key_b64": content_key_b64,
                 "_pem_b64": pem_b64,
             }
-            _write_worker_info(workers)
+            _upsert_worker(workers[i])
 
             slots = f"{len(in_flight)}/{MAX_IN_FLIGHT} slots, {len(queued)} queued"
             print(f"[worker {i}] in-flight ({slots})", flush=True)
@@ -598,9 +629,8 @@ def main_ctor_ramped():
         f.result()
     reg_pool.shutdown(wait=False)
 
+    # PEM keys are already stored in the DB as arti_key_pem via _upsert_worker.
     # Keep _pem_b64 in memory for heartbeat — every /online must include the key.
-    # Remove it from the persisted worker-info.json (it's large and on disk as PEM).
-    _write_worker_info([{k: v for k, v in w.items() if k != "_pem_b64"} for w in workers if w])
 
     registered_workers = [w for w in workers if w and w.get("registered")]
     all_with_addresses = [w for w in workers if w and w.get("content_address")]
@@ -628,14 +658,13 @@ def main():
     print(f"Bootstrapping {NUM_WORKERS} workers ({max_parallel} parallel)...", flush=True)
 
     workers = [None] * NUM_WORKERS
-    lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=max_parallel) as pool:
         futures = {pool.submit(bootstrap_one_worker, i): i for i in range(NUM_WORKERS)}
         for future in as_completed(futures):
             i = futures[future]
             workers[i] = future.result()
-            with lock:
-                _write_worker_info(workers)
+            if workers[i] is not None:
+                _upsert_worker(workers[i])
 
     registered_workers = [w for w in workers if w and w.get("registered")]
     print(f"Bootstrap complete: {len(registered_workers)}/{len(workers)} registered", flush=True)
@@ -703,11 +732,12 @@ def is_worker_enabled(worker):
         return False
 
 
-def _site_heartbeat_thread(site, interval, initial_delay):
+def _site_heartbeat_thread(site, all_sites, interval, initial_delay):
     """Independent heartbeat thread for a single site.
 
     Each site sends its own heartbeat every `interval` seconds,
     offset by `initial_delay` so heartbeats are evenly spread.
+    If /online succeeds and site wasn't registered, update the DB.
     """
     time.sleep(initial_delay)
 
@@ -719,7 +749,12 @@ def _site_heartbeat_thread(site, interval, initial_delay):
         result = send_heartbeat(site)
         try:
             resp = json.loads(result)
-            if not resp.get("online"):
+            if resp.get("online"):
+                if not site.get("registered"):
+                    site["registered"] = True
+                    print(f"  site {site['local_index']}: registered via heartbeat", flush=True)
+                    _upsert_worker(site)
+            else:
                 print(f"  heartbeat rejected for site {site['local_index']}: {result[:100]}", flush=True)
         except Exception:
             pass
@@ -743,7 +778,7 @@ def heartbeat_loop(registered_sites):
     for i, site in enumerate(registered_sites):
         t = threading.Thread(
             target=_site_heartbeat_thread,
-            args=(site, HEARTBEAT_INTERVAL, i * stagger),
+            args=(site, registered_sites, HEARTBEAT_INTERVAL, i * stagger),
             daemon=True,
         )
         t.start()

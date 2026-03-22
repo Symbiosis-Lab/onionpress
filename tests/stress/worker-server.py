@@ -27,16 +27,19 @@ disabled_ports = set()
 # Stats
 stats = {"requests": 0, "disabled_hits": 0, "healthy_hits": 0}
 
-# Cached worker info (loaded from /worker-info.json on demand)
+# Cached worker info (loaded from /worker-info.db on demand)
 _worker_info = None
 
 
 def _load_worker_info():
     global _worker_info
     try:
-        with open("/worker-info.json") as f:
-            workers = json.load(f)
-        _worker_info = {w["local_index"]: w for w in workers if "local_index" in w}
+        import sqlite3
+        conn = sqlite3.connect("/worker-data/worker-info.db", timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM workers").fetchall()
+        conn.close()
+        _worker_info = {row["local_index"]: dict(row) for row in rows}
     except Exception:
         _worker_info = {}
     return _worker_info
