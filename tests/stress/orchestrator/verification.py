@@ -70,7 +70,7 @@ def run_verify_worker(
 
         addr_args = " ".join(client_addrs[i])
         docker.exec(cname,
-            f"python3 /verify-worker.py {expected_code} {addr_args} > /tmp/verify-worker.log 2>&1 &",
+            f"python3 /verify-worker.py {expected_code} --timeout {timeout_secs} {addr_args} > /tmp/verify-worker.log 2>&1 &",
             timeout=10)
 
     # Wait for verify-workers to start
@@ -174,7 +174,7 @@ print(sum(1 for x in w if x.get('registered')), len(w))
                         total_in_ctr = int(parts[1])
                         registered_count += reg
                         expected = config.workers_in_container(idx)
-                        if total_in_ctr >= expected:
+                        if total_in_ctr >= expected and reg >= expected:
                             ready_count += 1
                         else:
                             all_ready = False

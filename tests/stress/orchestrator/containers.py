@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import StressConfig
-from .phases import StressLogger
+from .phases import StressLogger, run_parallel
 
 # Type alias for the Docker wrapper
 from onionpress.docker import Docker
@@ -137,14 +137,16 @@ class WorkerManager:
         self.logger.log(f"Started {cfg.num_containers} stress containers")
 
     def disable_workers(self, fail_start: int, fail_count: int):
-        """Disable HTTP responders + Tor services for a range of sites."""
+        """Disable HTTP responders + Tor services for a range of sites.
+
+        Runs up to 5 in parallel with progress dots.
+        """
         cfg = self.config
         self.logger.log(f"Disabling responders for sites {fail_start}..{fail_start + fail_count - 1}...")
 
         affected_containers = set()
-        del_failures = 0
 
-        for i in range(fail_start, fail_start + fail_count):
+        def _disable_one(i: int) -> bool:
             ctr_idx = i // cfg.per_ctr
             local_idx = i % cfg.per_ctr
             ctr_name = cfg.container_name(ctr_idx)
@@ -159,7 +161,6 @@ class WorkerManager:
             ], timeout=10)
 
             if self.tor_impl == "tor":
-                # DEL_ONION via control API
                 result = self.docker.exec(ctr_name, [
                     "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/del_onion",
                     "-H", "Content-Type: application/json",
@@ -175,9 +176,8 @@ class WorkerManager:
                     ], timeout=10)
                     if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
                         self.logger.log(f"ERROR: DEL_ONION retry failed for site {i}: {result.output}")
-                        del_failures += 1
+                        return False
             else:
-                # Arti: disable in config
                 content_nick = f"w{ctr_idx}_{local_idx}_content"
                 hc_nick = f"w{ctr_idx}_{local_idx}_hc"
                 for nick in [content_nick, hc_nick]:
@@ -185,6 +185,13 @@ class WorkerManager:
                         f'sed -i "/^\\[onion_services\\.\\"{nick}\\"\\]/,/^enabled = /{{s/^enabled = true/enabled = false/}}" /etc/arti/arti.toml',
                         timeout=10)
                 affected_containers.add(ctr_name)
+
+            return True
+
+        succeeded, del_failures = run_parallel(
+            list(range(fail_start, fail_start + fail_count)),
+            _disable_one, self.logger,
+        )
 
         # Arti SIGHUP
         if self.tor_impl != "tor":
@@ -196,15 +203,18 @@ class WorkerManager:
         self.logger.log(f"Disabled {fail_count} sites (HTTP responders + {self.tor_label} {impl_action})")
 
     def enable_workers(self, start: int, count: int, silent: bool = False):
-        """Re-enable workers. If silent=True, skip re-registration and /online."""
+        """Re-enable workers. If silent=True, skip re-registration and /online.
+
+        Runs up to 5 workers in parallel (like gnu-parallel -j5) with progress dots.
+        """
         cfg = self.config
         action = "no /online" if silent else "re-registering"
         self.logger.log(f"Re-enabling responders for sites {start}..{start + count - 1} ({action})...")
 
         affected_containers = set()
-        add_failures = 0
 
-        for i in range(start, start + count):
+        def _enable_one(i: int) -> bool:
+            """Enable a single worker. Returns False if ADD_ONION failed."""
             ctr_idx = i // cfg.per_ctr
             local_idx = i % cfg.per_ctr
             ctr_name = cfg.container_name(ctr_idx)
@@ -227,7 +237,7 @@ class WorkerManager:
                     ], timeout=10)
                     if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
                         self.logger.log(f"ERROR: ADD_ONION retry failed for site {i}: {result.output}")
-                        add_failures += 1
+                        return False
             else:
                 content_nick = f"w{ctr_idx}_{local_idx}_content"
                 hc_nick = f"w{ctr_idx}_{local_idx}_hc"
@@ -247,6 +257,13 @@ class WorkerManager:
             # Re-register over Tor (unless silent)
             if not silent:
                 self._reregister_worker(ctr_idx, local_idx, ctr_name)
+
+            return True
+
+        done_count, add_failures = run_parallel(
+            list(range(start, start + count)),
+            _enable_one, self.logger,
+        )
 
         if self.tor_impl != "tor":
             self._sighup_arti(affected_containers)
