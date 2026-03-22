@@ -318,10 +318,8 @@ def print_dashboard(iteration):
                     else:
                         q_parts.append(f"tor={tor_count}")
 
-                if queued:
-                    q_parts.append(f"q={queued}")
-                if fly:
-                    q_parts.append(f"fly={fly}")
+                q_parts.append(f"q={queued}")
+                q_parts.append(f"fly={fly}")
                 if failed:
                     q_parts.append(c(31, f"fail={failed}"))
             elif tor_count is not None:
