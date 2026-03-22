@@ -1594,6 +1594,7 @@ wait_for_services() {
         if [ "$wp_ready" = false ]; then
             if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
                 log "✓ WordPress is responding on localhost:${ONIONPRESS_WP_PORT:-8080}"
+                log "Waiting for Tor to bootstrap and onion service to be reachable (est. 30-90s)..."
                 wp_ready=true
 
                 # If WordPress is not yet installed, skip waiting for Tor
