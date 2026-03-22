@@ -312,6 +312,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             total_queued = 0
             total_in_flight = 0
             total_active = 0
+            total_failed = 0
             workers = []
             for tc in tc_rows:
                 worker_info = {
@@ -327,9 +328,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                             worker_info["queued"] = qs.get("queued", 0)
                             worker_info["in_flight"] = qs.get("in_flight", 0)
                             worker_info["active"] = qs.get("active", 0)
+                            worker_info["failed"] = qs.get("failed", 0)
                             total_queued += qs.get("queued", 0)
                             total_in_flight += qs.get("in_flight", 0)
                             total_active += qs.get("active", 0)
+                            total_failed += qs.get("failed", 0)
                     except Exception:
                         pass
                 workers.append(worker_info)
@@ -347,6 +350,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "takeover_queued": total_queued,
                 "takeover_in_flight": total_in_flight,
                 "takeover_active": total_active,
+                "takeover_failed": total_failed,
                 "takeover_workers": workers,
             })
         except Exception as e:
