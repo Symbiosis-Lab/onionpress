@@ -116,6 +116,22 @@ def query_workers():
     return workers
 
 
+def query_db_assigned(container_name):
+    """Count how many registry rows are assigned to this worker."""
+    sql = (
+        f"SELECT COUNT(*) FROM registry "
+        f"WHERE takeover_container='{container_name}' "
+        f"AND status='taken-over' AND unregistered_at IS NULL;"
+    )
+    out = docker_exec("onionheaven", f"sqlite3 {DB} \"{sql}\"")
+    if out is None:
+        return None
+    try:
+        return int(out.strip())
+    except ValueError:
+        return None
+
+
 def query_queue_status(container_name):
     out = docker_exec(container_name,
                       "python3 /onionheaven-queue-manager.py status", timeout=5)
@@ -276,22 +292,29 @@ def print_dashboard(iteration):
 
             line = f"    {name:30s}  {boot}  [{bar}] {assigned}/{w['max']}"
 
+            # DB assigned count for this worker
+            db_assigned = query_db_assigned(name)
+
             # Queue details + Tor reality check
             qs = query_queue_status(name)
             tor_count = query_tor_detached(name)
+
+            q_parts = []
+
+            # DB vs queue manager vs Tor
+            if db_assigned is not None:
+                q_parts.append(f"db={db_assigned}")
             if qs:
-                q_parts = []
                 act = qs.get("active", 0)
                 queued = qs.get("queued", 0)
                 fly = qs.get("in_flight", 0)
                 failed = qs.get("failed", 0)
 
-                q_parts.append(f"act={act}")
+                q_parts.append(f"qm={act}")
 
                 if tor_count is not None:
-                    gap = act - tor_count
-                    if gap > 0:
-                        q_parts.append(c(31, f"tor={tor_count} gap={gap}"))
+                    if act != tor_count:
+                        q_parts.append(c(31, f"tor={tor_count}"))
                     else:
                         q_parts.append(f"tor={tor_count}")
 
@@ -301,7 +324,10 @@ def print_dashboard(iteration):
                     q_parts.append(f"fly={fly}")
                 if failed:
                     q_parts.append(c(31, f"fail={failed}"))
+            elif tor_count is not None:
+                q_parts.append(f"tor={tor_count}")
 
+            if q_parts:
                 line += f"  ({', '.join(q_parts)})"
 
             print(line)
