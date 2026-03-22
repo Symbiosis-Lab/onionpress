@@ -80,14 +80,20 @@ def _preflight(config: StressConfig, docker: Docker, logger: StressLogger):
         sys.exit(1)
     logger.log(f"  Checking OnionHeaven API at {config.onionheaven_addr}:8083/status ...")
     result = docker.exec("onionpress-tor-client",
-        f'curl -s --socks5-hostname "preflight:x@127.0.0.1:9050" --max-time 30 '
+        f'curl -s -w "\\n%{{http_code}}" --socks5-hostname "preflight:x@127.0.0.1:9050" --max-time 30 '
         f'"http://{config.onionheaven_addr}:8083/status"',
         timeout=35)
-    if not result.ok or '"total"' not in result.output:
-        logger.log("ERROR: Cannot reach OnionHeaven API over Tor")
-        logger.log(f"  Response: {result.output[:200] if result.output else result.stderr[:200]}")
+    if result.ok and result.output.strip():
+        lines = result.output.strip().rsplit("\n", 1)
+        body = lines[0] if len(lines) > 1 else ""
+        code = lines[-1].strip()
+    else:
+        body, code = "", "000"
+    if code != "200" or '"total"' not in body:
+        logger.log(f"ERROR: OnionHeaven API returned HTTP {code} (expected 200)")
+        logger.log(f"  Response: {body[:200]}")
         sys.exit(1)
-    logger.log(f"  OnionHeaven API OK: {result.output.strip()[:100]}")
+    logger.log(f"  OnionHeaven API OK (HTTP {code}): {body[:100]}")
 
     logger.log("Preflight OK")
 
