@@ -224,17 +224,12 @@ def parse_openssh_pem(path):
 def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, worker_id=0):
     """Register with OnionHeaven over Tor (via this container's SOCKS proxy).
 
-    Uses exponential backoff: retries up to 6 times with delays of
-    5s, 15s, 30s, 60s, 60s between attempts. Total worst-case ~8 minutes
-    per worker, but this trades speed for reliability when Tor circuits
-    are flaky.
-
-    Each worker uses unique SOCKS auth credentials to force Arti to build
-    a separate circuit (stream isolation).
+    Tries twice with a 5s gap. If both fail, the heartbeat loop (every 60s)
+    will keep retrying via /online automatically.
     """
     from onion_auth import sign_payload, make_timestamp
     timestamp = make_timestamp()
-    signature = sign_payload(privkey, pubkey, "register", content_addr, hc_addr, timestamp)
+    signature = sign_payload(privkey, pubkey, "online", content_addr, hc_addr, timestamp)
     payload = json.dumps({
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
@@ -244,10 +239,7 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, w
         "signature": signature,
     })
 
-    max_attempts = 6
-    backoff = [5, 15, 30, 60, 60]  # delays between attempts
-
-    for attempt in range(max_attempts):
+    for attempt in range(2):
         try:
             result = subprocess.run(
                 [
@@ -255,10 +247,10 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, w
                     "--socks5-hostname", f"w{worker_id}:x@127.0.0.1:9050",
                     "-H", "Content-Type: application/json",
                     "-d", payload,
-                    "--max-time", "90",
+                    "--max-time", "30",
                     f"http://{ONIONHEAVEN_ADDR}:8083/online",
                 ],
-                capture_output=True, text=True, timeout=105,
+                capture_output=True, text=True, timeout=45,
             )
             try:
                 resp = json.loads(result.stdout)
@@ -269,16 +261,14 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, w
         except Exception:
             pass
 
-        if attempt < max_attempts - 1:
-            delay = backoff[min(attempt, len(backoff) - 1)]
-            print(f"  Registration attempt {attempt + 1} failed, retrying in {delay}s...", flush=True)
-            time.sleep(delay)
+        if attempt == 0:
+            time.sleep(5)
 
-    # All attempts exhausted — return last result or error
+    # Failed — heartbeat loop will retry
     try:
         return result.stdout
     except Exception:
-        return '{"error": "all attempts exhausted"}'
+        return '{"error": "registration failed, heartbeat will retry"}'
 
 
 def wait_for_socks():
