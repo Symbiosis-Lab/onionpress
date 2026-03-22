@@ -44,6 +44,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKER_HOST: unix:///Users/internetarchive/.onionpress/colima/default/docker.sock
     steps:
       - uses: actions/checkout@v4
       - name: Log in to registry
@@ -116,6 +118,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKER_HOST: unix:///Users/internetarchive/.onionpress/colima/default/docker.sock
     steps:
       - uses: actions/checkout@v4
       - name: Log in to registry
