@@ -45,7 +45,8 @@ class StressConfig:
 
     def __post_init__(self):
         self.data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
-        self.script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # tests/stress/orchestrator/config.py → tests/
+        self.script_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
         # Compute healthy/failing split
         if not self._healthy_set and not self._failing_set:
