@@ -75,12 +75,30 @@ def newnym():
     control_cmd("SIGNAL NEWNYM")
 
 
+_addr_generation: dict[str, tuple[int, float]] = {}  # addr -> (generation, last_rotate_time)
+_ROTATE_INTERVAL = 120  # seconds between SOCKS credential rotations per address
+
 def curl_check(addr, expected_code, timeout=15):
-    """Check if an address returns the expected HTTP code."""
+    """Check if an address returns the expected HTTP code.
+
+    Rotates SOCKS credentials per-address every 2 minutes so Tor builds
+    a fresh circuit periodically — prevents stale descriptor cache from
+    causing permanent 000s without overwhelming the SOCKS proxy.
+    """
+    import time
+    now = time.time()
+    # Offset rotation per-address so they don't all rotate at once
+    offset = (hash(addr) % 60)
+    gen, last_rotate = _addr_generation.get(addr, (0, now + offset))
+    if now - last_rotate >= _ROTATE_INTERVAL:
+        gen += 1
+        last_rotate = now
+        print(f"  ROTATE {addr} gen={gen} (stale circuit after {_ROTATE_INTERVAL}s)", flush=True)
+    _addr_generation[addr] = (gen, last_rotate)
     try:
         result = subprocess.run(
             ["curl", "-s", "--http1.0",
-             "--socks5-hostname", f"v_{os.getpid()}_{id(addr)}:x@127.0.0.1:{SOCKS_PORT}",
+             "--socks5-hostname", f"v_{os.getpid()}_{id(addr)}_{gen}:x@127.0.0.1:{SOCKS_PORT}",
              "--max-time", str(timeout),
              "-o", "/dev/null", "-w", "%{http_code}",
              f"http://{addr}/"],
@@ -163,7 +181,7 @@ class VerifyWorker:
                 # Descriptor available — trigger verification
                 self.verify_address(addr)
             elif action == "FAILED":
-                print(f"  HS_DESC FAILED for {addr[:20]}...", flush=True)
+                print(f"  HS_DESC FAILED for {addr}", flush=True)
 
     def verify_address(self, addr):
         """Verify a single address (called when descriptor is received)."""
@@ -184,7 +202,7 @@ class VerifyWorker:
                 self.results[addr] = {"code": code, "time": elapsed, "verified": True}
                 self.pending.discard(addr)
                 verified = sum(1 for r in self.results.values() if r.get("verified"))
-                print(f"  VERIFIED {addr[:20]}... → {code} ({elapsed}s) [{verified}/{len(self.addresses)}]", flush=True)
+                print(f"  VERIFIED {addr} → {code} ({elapsed}s) [{verified}/{len(self.addresses)}]", flush=True)
             else:
                 self.results[addr] = {"code": code, "time": round(time.time() - self.start_time, 1), "verified": False}
 

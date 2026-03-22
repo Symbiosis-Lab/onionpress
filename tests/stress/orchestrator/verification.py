@@ -319,14 +319,14 @@ def verify_redirects(
                 redirect_url = parts[1] if len(parts) > 1 else ""
 
                 if code == "302" and ("web.archive.org" in redirect_url or "archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion" in redirect_url):
-                    logger.log(f"  PASS: {addr[:30]}... -> 302 -> {redirect_url}")
+                    logger.log(f"  PASS: {addr} -> 302 -> {redirect_url}")
                     passed += 1
                 else:
-                    logger.log(f"  FAIL: {addr[:30]}... -> {code} {redirect_url[:80]}")
+                    logger.log(f"  FAIL: {addr} -> {code} {redirect_url[:80]}")
                     still_failing.append(addr)
             else:
                 code = result.output.strip()[:10] if result.ok else "000"
-                logger.log(f"  FAIL: {addr[:30]}... -> {code} (no response)")
+                logger.log(f"  FAIL: {addr} -> {code} (no response)")
                 still_failing.append(addr)
 
         remaining = still_failing
@@ -370,4 +370,4 @@ def _diagnose_stragglers(
         )
         code = result.output.strip() if result.ok else "000"
         if code != expected_code:
-            logger.log(f"  STRAGGLER: {addr[:30]}... -> HTTP {code} (wanted {expected_code})")
+            logger.log(f"  STRAGGLER: {addr} -> HTTP {code} (wanted {expected_code})")
