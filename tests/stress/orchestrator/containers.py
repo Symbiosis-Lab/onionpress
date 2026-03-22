@@ -117,8 +117,9 @@ class WorkerManager:
         os.chmod(startup_path, 0o755)
         self.docker.run(["cp", startup_path, f"{ctr_name}:/start.sh"], timeout=10)
 
-        # Launch startup script (backgrounded from host side)
-        self.docker.exec(ctr_name, "sh /start.sh", timeout=600)
+        # Launch startup script in background inside container
+        # (must not block — start.sh waits for Tor/Arti to exit)
+        self.docker.exec(ctr_name, "sh /start.sh </dev/null >/dev/null 2>&1 &", timeout=10)
 
     def start_all(self):
         """Start all worker containers, optionally in batches."""
