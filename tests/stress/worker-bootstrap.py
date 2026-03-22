@@ -224,7 +224,7 @@ def parse_openssh_pem(path):
 def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, worker_id=0):
     """Register with OnionHeaven over Tor (via this container's SOCKS proxy).
 
-    Tries twice with a 5s gap. If both fail, the heartbeat loop (every 60s)
+    Tries 3 times with 10s gaps. If all fail, the heartbeat loop (every 60s)
     will keep retrying via /online automatically.
     """
     from onion_auth import sign_payload, make_timestamp
@@ -239,7 +239,7 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, w
         "signature": signature,
     })
 
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             result = subprocess.run(
                 [
@@ -261,8 +261,8 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, w
         except Exception:
             pass
 
-        if attempt == 0:
-            time.sleep(5)
+        if attempt < 2:
+            time.sleep(10)
 
     # Failed — heartbeat loop will retry
     try:
