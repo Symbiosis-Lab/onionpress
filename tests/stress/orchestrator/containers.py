@@ -98,7 +98,7 @@ class WorkerManager:
             (os.path.join(stress_dir, "worker-server.py"), "/worker-server.py"),
             (os.path.join(stress_dir, "worker-bootstrap.py"), "/worker-bootstrap.py"),
             (os.path.join(src_dir, "onion_auth.py"), "/onion_auth.py"),
-            (os.path.join(stress_dir, "tor-watchdog.sh"), "/tor-watchdog.sh"),
+            (os.path.join(stress_dir, "tor-watchdog.py"), "/tor-watchdog.py"),
         ]:
             self.docker.run(["cp", src, f"{ctr_name}:{dst}"], timeout=10)
 
@@ -258,54 +258,44 @@ class WorkerManager:
         self.logger.log(f"Re-enabled {count} sites ({self.tor_label} {impl_action}{suffix})")
 
     def _reregister_worker(self, ctr_idx: int, local_idx: int, ctr_name: str):
-        """Re-register a single worker with OnionHeaven via docker exec python3."""
+        """Re-register a single worker with OnionHeaven over Tor.
+
+        Runs a compact Python script inside the container that:
+        1. Reads worker info + PEM key
+        2. Signs a registration payload using onion_auth
+        3. Sends /online via curl over the container's SOCKS proxy
+        """
         cfg = self.config
         if self.tor_impl == "tor":
-            pem_path_expr = f"'/tmp/w{ctr_idx}_{local_idx}_content.pem'"
+            pem_path = f"/tmp/w{ctr_idx}_{local_idx}_content.pem"
         else:
-            pem_path_expr = f"f'/var/lib/arti/state/keystore/hss/w{ctr_idx}_{local_idx}_content/ks_hs_id.ed25519_expanded_private'"
+            pem_path = f"/var/lib/arti/state/keystore/hss/w{ctr_idx}_{local_idx}_content/ks_hs_id.ed25519_expanded_private"
 
-        script = f"""
-import json, subprocess, sys, time, os, base64
-from onion_auth import sign_payload, make_timestamp
-with open('/worker-info.json') as f:
-    workers = json.load(f)
-w = next((x for x in workers if x.get('local_index') == {local_idx}), None)
-if not w or not w.get('content_address'):
-    sys.exit(0)
-time.sleep({local_idx} * 1)
-pem_path = {pem_path_expr}
-if os.environ.get('TOR_IMPL') == 'tor' and not os.path.exists(pem_path):
-    secret = '/var/lib/tor/hidden_service/w{ctr_idx}_{local_idx}_content/hs_ed25519_secret_key'
-    subprocess.run(['python3', '/key-convert.py', 'ctor-to-arti', secret, pem_path], capture_output=True, timeout=10)
-try:
-    with open(pem_path, 'rb') as f:
-        pem_b64 = base64.b64encode(f.read()).decode()
-except:
-    pem_b64 = ''
-privkey = base64.b64decode(w.get('privkey_b64', ''))
-pubkey = base64.b64decode(w.get('pubkey_b64', ''))
-timestamp = make_timestamp()
-signature = sign_payload(privkey, pubkey, 'register', w['content_address'], w['healthcheck_address'], timestamp)
-payload = json.dumps({{
-    'content_address': w['content_address'],
-    'healthcheck_address': w['healthcheck_address'],
-    'arti_key_pem': pem_b64,
-    'version': '{cfg.stress_version}',
-    'timestamp': timestamp,
-    'signature': signature,
-}})
-subprocess.run([
-    'curl', '-s', '-X', 'POST',
-    '--socks5-hostname', 'w{ctr_idx}_{local_idx}:x@127.0.0.1:9050',
-    '-H', 'Content-Type: application/json',
-    '-d', payload,
-    '--max-time', '60',
-    'http://{cfg.onionheaven_addr}:8083/online',
-], capture_output=True, timeout=75)
-print(f'Re-registered {{w["content_address"]}}')
-"""
-        # Run in background (don't block on each one)
+        # Compact script — runs inside container where onion_auth.py and keys live
+        script = (
+            "import json,subprocess,sys,time,os,base64;"
+            "from onion_auth import sign_payload,make_timestamp;"
+            "w=[x for x in json.load(open('/worker-info.json'))"
+            f" if x.get('local_index')=={local_idx}];"
+            "w=w[0] if w else None;"
+            "exec('sys.exit(0)') if not w or not w.get('content_address') else None;"
+            f"time.sleep({local_idx});"
+            f"pem_b64=base64.b64encode(open('{pem_path}','rb').read()).decode() "
+            f"if os.path.exists('{pem_path}') else '';"
+            "ts=make_timestamp();"
+            "sig=sign_payload(base64.b64decode(w['privkey_b64']),"
+            "base64.b64decode(w['pubkey_b64']),'register',"
+            "w['content_address'],w['healthcheck_address'],ts);"
+            "subprocess.run(['curl','-s','-X','POST',"
+            f"'--socks5-hostname','w{ctr_idx}_{local_idx}:x@127.0.0.1:9050',"
+            "'-H','Content-Type: application/json','-d',"
+            "json.dumps({'content_address':w['content_address'],"
+            "'healthcheck_address':w['healthcheck_address'],"
+            f"'arti_key_pem':pem_b64,'version':'{cfg.stress_version}',"
+            "'timestamp':ts,'signature':sig}),"
+            f"'--max-time','60','http://{cfg.onionheaven_addr}:8083/online'],"
+            "capture_output=True,timeout=75)"
+        )
         self.docker.exec(ctr_name, ["python3", "-c", script], timeout=120)
 
     def _sighup_arti(self, containers: set[str]):
@@ -388,7 +378,7 @@ Log notice stdout
 # No set -e — individual failures should not kill the container
 
 if ! python3 --version >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq python3-minimal curl netcat-openbsd xxd >/dev/null 2>&1
+    apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
 fi
 
 mkdir -p /var/lib/tor
@@ -404,7 +394,7 @@ while [ "$TOR_ATTEMPT" -lt "$MAX_TOR_RETRIES" ]; do
     rm -f /var/lib/tor/state /var/lib/tor/lock
     su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
     TOR_PID=$!
-    sh /tor-watchdog.sh 120 &
+    python3 /tor-watchdog.py 120 &
     WATCHDOG_PID=$!
     wait $WATCHDOG_PID
     WATCHDOG_EXIT=$?
