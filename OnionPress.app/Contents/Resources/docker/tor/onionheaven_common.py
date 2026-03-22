@@ -1037,3 +1037,339 @@ def unregister_entry(conn, content_address, healthcheck_address, reason="unregis
         if os.path.isdir(key_dir):
             shutil.rmtree(key_dir, ignore_errors=True)
             log(f"Deleted keys for {content_address}")
+
+
+# ---------------------------------------------------------------------------
+# Stress test cleanup — remove only stress test entries, preserve real ones
+# ---------------------------------------------------------------------------
+
+def cleanup_stress_tests(conn=None):
+    """Remove all stress test entries and release their takeovers.
+
+    Only touches registry rows where version LIKE 'stress-test%'.
+    Real entries and their keys are never deleted. Takeover workers are
+    removed only if they have no remaining (real) assignments.
+
+    Returns a dict summarising what was cleaned up.
+    """
+    import shutil
+
+    own_conn = conn is None
+    if own_conn:
+        conn = db_connect()
+        db_ensure_schema(conn)
+
+    stats = {
+        "registry_deleted": 0,
+        "released": 0,
+        "keys_deleted": 0,
+        "workers_removed": 0,
+    }
+
+    # 1. Find all stress test entries
+    stress_rows = conn.execute(
+        "SELECT content_address, healthcheck_address, status, takeover_container "
+        "FROM registry WHERE version LIKE 'stress-test%'"
+    ).fetchall()
+
+    stats["registry_deleted"] = len(stress_rows)
+    if not stress_rows:
+        log("cleanup_stress_tests: no stress test entries found")
+        if own_conn:
+            conn.close()
+        return stats
+
+    # 2. Release taken-over entries from their workers
+    for row in stress_rows:
+        if row["status"] == "taken-over" and row["takeover_container"]:
+            container = row["takeover_container"]
+            ca = row["content_address"]
+            try:
+                _exec_release(container, ca)
+                stats["released"] += 1
+            except Exception as e:
+                log(f"cleanup_stress_tests: release failed for {ca} on {container}: {e}")
+            # Decrement assigned_count
+            conn.execute(
+                "UPDATE takeover_containers SET assigned_count = MAX(0, assigned_count - 1) "
+                "WHERE container_name = ?",
+                (container,)
+            )
+
+    # 3. Delete stress test rows from registry
+    conn.execute("DELETE FROM registry WHERE version LIKE 'stress-test%'")
+    db_commit_with_retry(conn)
+    log(f"cleanup_stress_tests: deleted {stats['registry_deleted']} registry rows")
+
+    # 4. Delete keys that belong ONLY to stress test content addresses.
+    #    A key is safe to delete only if no real entry uses the same content_address.
+    stress_addrs = set(row["content_address"] for row in stress_rows)
+    for ca in stress_addrs:
+        real_refs = conn.execute(
+            "SELECT COUNT(*) FROM registry WHERE content_address = ? "
+            "AND version NOT LIKE 'stress-test%'",
+            (ca,)
+        ).fetchone()[0]
+        if real_refs == 0:
+            key_dir = os.path.join(KEYS_DIR, ca)
+            if os.path.isdir(key_dir):
+                shutil.rmtree(key_dir, ignore_errors=True)
+                stats["keys_deleted"] += 1
+
+    if stats["keys_deleted"]:
+        log(f"cleanup_stress_tests: deleted {stats['keys_deleted']} key directories")
+
+    # 5. Remove takeover workers that are now empty (assigned_count = 0).
+    #    Also discover orphaned workers not in the DB.
+    try:
+        empty_workers = conn.execute(
+            "SELECT container_name FROM takeover_containers WHERE assigned_count <= 0"
+        ).fetchall()
+        for w in empty_workers:
+            name = w["container_name"]
+            try:
+                subprocess.run(["docker", "rm", "-f", name],
+                               capture_output=True, timeout=15)
+                stats["workers_removed"] += 1
+                log(f"cleanup_stress_tests: removed empty worker {name}")
+            except Exception:
+                pass
+            conn.execute(
+                "DELETE FROM takeover_containers WHERE container_name = ?",
+                (name,)
+            )
+        db_commit_with_retry(conn)
+    except sqlite3.OperationalError:
+        pass
+
+    # Also remove orphaned takeover containers not tracked in DB
+    try:
+        db_workers = set()
+        try:
+            rows = conn.execute("SELECT container_name FROM takeover_containers").fetchall()
+            db_workers = set(r["container_name"] for r in rows)
+        except sqlite3.OperationalError:
+            pass
+
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            for name in result.stdout.strip().splitlines():
+                if name.startswith("onionheaven-takeover-") and name not in db_workers:
+                    subprocess.run(["docker", "rm", "-f", name],
+                                   capture_output=True, timeout=15)
+                    stats["workers_removed"] += 1
+                    log(f"cleanup_stress_tests: removed orphaned worker {name}")
+    except Exception:
+        pass
+
+    if own_conn:
+        conn.close()
+
+    log(f"cleanup_stress_tests complete: {stats}")
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Reset OnionHeaven — clean stress tests + refresh workers with current code
+# ---------------------------------------------------------------------------
+
+# Files to copy from the onionheaven container into takeover workers.
+# These are the Python/shell files that workers execute.
+_WORKER_CODE_FILES = [
+    "/onionheaven_common.py",
+    "/onionheaven-queue-manager.py",
+    "/onionheaven-takeover-worker.py",
+    "/onionheaven-tor-manager.sh",
+    "/onionheaven-redirect.sh",
+    "/onion_auth.py",
+    "/key-convert.py",
+]
+
+
+def _patch_worker_code(container_name):
+    """Copy current code files from this container into a takeover worker.
+
+    Uses docker cp via the host socket. The onionheaven container is the
+    source of truth — it has the latest code (either from the image or from
+    docker cp during development).
+    """
+    # We're running inside the onionheaven container, so we copy from local
+    # filesystem into the target container via `docker cp`.
+    failed = []
+    for fpath in _WORKER_CODE_FILES:
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            result = subprocess.run(
+                ["docker", "cp", fpath, f"{container_name}:{fpath}"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                failed.append(fpath)
+        except Exception:
+            failed.append(fpath)
+
+    if failed:
+        log(f"_patch_worker_code({container_name}): failed to copy: {failed}")
+    else:
+        log(f"_patch_worker_code({container_name}): patched {len(_WORKER_CODE_FILES)} files")
+
+
+def reset_onionheaven(conn=None):
+    """Clean stress tests and refresh all takeover workers with current code.
+
+    Steps:
+      1. Remove all stress test entries (registry rows, keys, takeovers)
+      2. Collect real taken-over entries that need to be migrated
+      3. Remove ALL old takeover workers
+      4. Spawn fresh workers, patch them with current code, wait for bootstrap
+      5. Re-assign real taken-over entries to the new workers
+
+    Returns a dict summarising what happened.
+    """
+    global _next_worker_index
+
+    own_conn = conn is None
+    if own_conn:
+        conn = db_connect()
+        db_ensure_schema(conn)
+
+    # Step 1: clean stress tests (this releases stress takeovers from workers)
+    cleanup_stats = cleanup_stress_tests(conn)
+
+    stats = {
+        "stress_cleaned": cleanup_stats["registry_deleted"],
+        "real_migrated": 0,
+        "old_workers_removed": 0,
+        "new_workers_spawned": 0,
+    }
+
+    # Step 2: collect real taken-over entries that need migration
+    real_takeovers = conn.execute(
+        "SELECT content_address, healthcheck_address, takeover_container "
+        "FROM registry WHERE status = 'taken-over' AND unregistered_at IS NULL "
+        "AND (version IS NULL OR version NOT LIKE 'stress-test%')"
+    ).fetchall()
+
+    # Step 3: remove ALL old takeover workers (DB + orphaned)
+    old_workers = set()
+    try:
+        rows = conn.execute("SELECT container_name FROM takeover_containers").fetchall()
+        old_workers = set(r["container_name"] for r in rows)
+    except sqlite3.OperationalError:
+        pass
+
+    # Also find orphaned containers
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            for name in result.stdout.strip().splitlines():
+                if name.startswith("onionheaven-takeover-"):
+                    old_workers.add(name)
+    except Exception:
+        pass
+
+    for name in old_workers:
+        try:
+            subprocess.run(["docker", "rm", "-f", name],
+                           capture_output=True, timeout=15)
+            stats["old_workers_removed"] += 1
+            log(f"reset_onionheaven: removed old worker {name}")
+        except Exception:
+            pass
+
+    # Clear takeover_containers table and reset index
+    conn.execute("DELETE FROM takeover_containers")
+    # Clear stale takeover_container assignments
+    conn.execute(
+        "UPDATE registry SET takeover_container = NULL "
+        "WHERE status = 'taken-over' AND unregistered_at IS NULL"
+    )
+    db_commit_with_retry(conn)
+    _next_worker_index = 0
+
+    # If no real takeovers to migrate, we're done — heartbeat will spawn
+    # workers on demand when new takeovers happen.
+    if not real_takeovers:
+        log(f"reset_onionheaven: no real takeovers to migrate")
+        if own_conn:
+            conn.close()
+        log(f"reset_onionheaven complete: {stats}")
+        return stats
+
+    # Step 4: spawn fresh workers, patch code, wait for bootstrap
+    # Figure out how many workers we need
+    needed = (len(real_takeovers) + MAX_SERVICES_PER_WORKER - 1) // MAX_SERVICES_PER_WORKER
+    needed = max(needed, 1)
+    # Spawn in pairs (as _ensure_capacity does)
+    to_spawn = needed + (needed % 2)
+
+    new_worker_names = []
+    for _ in range(to_spawn):
+        idx = _next_worker_index
+        _spawn_worker(conn)
+        name = f"onionheaven-takeover-{idx}"
+        # Check if it was actually created
+        row = conn.execute(
+            "SELECT container_name FROM takeover_containers WHERE container_name = ?",
+            (name,)
+        ).fetchone()
+        if row:
+            new_worker_names.append(name)
+            stats["new_workers_spawned"] += 1
+
+    # Patch code into new workers
+    for name in new_worker_names:
+        _patch_worker_code(name)
+
+    # Wait for at least one worker to bootstrap (up to 90s)
+    log(f"reset_onionheaven: waiting for {len(new_worker_names)} workers to bootstrap...")
+    ready_worker = None
+    for _ in range(18):  # 18 * 5s = 90s
+        check_worker_bootstrap(conn)
+        ready_worker = _pick_worker(conn)
+        if ready_worker:
+            break
+        time.sleep(5)
+
+    if not ready_worker:
+        log("reset_onionheaven: WARNING — no workers bootstrapped in 90s, "
+            "real takeovers will be re-assigned by heartbeat later")
+        if own_conn:
+            conn.close()
+        log(f"reset_onionheaven complete: {stats}")
+        return stats
+
+    # Step 5: re-assign real takeovers to new workers
+    for row in real_takeovers:
+        ca = row["content_address"]
+        ha = row["healthcheck_address"]
+        worker = _pick_worker(conn)
+        if not worker:
+            log(f"reset_onionheaven: no worker available for {ca}, deferring to heartbeat")
+            break
+        if _exec_takeover(worker, ca):
+            conn.execute(
+                "UPDATE registry SET takeover_container = ? "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (worker, ca, ha)
+            )
+            conn.execute(
+                "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
+                "WHERE container_name = ?",
+                (worker,)
+            )
+            stats["real_migrated"] += 1
+    db_commit_with_retry(conn)
+
+    if own_conn:
+        conn.close()
+
+    log(f"reset_onionheaven complete: {stats}")
+    return stats

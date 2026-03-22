@@ -2553,6 +2553,12 @@ main() {
             wait_for_services
             write_status
 
+            # Clean OnionHeaven state in the shared persistent volume
+            if docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
+                log "Resetting OnionHeaven..."
+                docker exec onionheaven curl -s -X POST http://127.0.0.1:8083/reset-onionheaven >> "$LOG_FILE" 2>&1 || true
+            fi
+
             log "OnionPress reset and restarted"
             echo "  Containers running. Run 'onionpress setup' to initialize WordPress."
             ;;
@@ -2812,8 +2818,23 @@ main() {
             fi
             ;;
 
+        reset-onionheaven)
+            # Clean stress test entries and refresh takeover workers with current code.
+            # Preserves real entries and their keys.
+            log "Resetting OnionHeaven (clean stress tests + refresh workers)..."
+
+            if ! docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
+                echo "ERROR: onionheaven container is not running"
+                exit 1
+            fi
+
+            result=$(docker exec onionheaven curl -s -X POST http://127.0.0.1:8083/reset-onionheaven 2>&1)
+            echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
+            log "OnionHeaven reset complete"
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|reset-onionheaven|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
             exit 1
             ;;
     esac
