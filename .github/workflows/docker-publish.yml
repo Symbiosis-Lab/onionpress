@@ -44,8 +44,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    env:
-      DOCKER_HOST: unix:///Users/internetarchive/.onionpress/colima/default/docker.sock
+    # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
       - name: Log in to registry
@@ -118,8 +117,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    env:
-      DOCKER_HOST: unix:///Users/internetarchive/.onionpress/colima/default/docker.sock
+    # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
       - name: Log in to registry
