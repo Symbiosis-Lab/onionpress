@@ -167,9 +167,6 @@ def run_worker(config: StressConfig):
     logger.log(f"Output: {config.output_dir}")
     print()
 
-    run_start = time.time()
-    results = {}
-
     # Store for worker info
     store = WorkerInfoStore(config.output_dir, config.per_ctr)
 
@@ -185,6 +182,28 @@ def run_worker(config: StressConfig):
         sys.exit(130)
     signal.signal(signal.SIGINT, _sigint)
     signal.signal(signal.SIGTERM, _sigint)
+
+    try:
+        _run_phases(config, docker, logger, workers, store, dashboard)
+    except Exception as e:
+        import traceback
+        logger.log(f"ERROR: {e}")
+        logger.log(traceback.format_exc())
+        raise
+    finally:
+        # Cleanup (deregister atexit handler, clean explicitly)
+        atexit.unregister(_cleanup)
+        cleanup_stress_test(docker, config, logger, store)
+        print()
+
+    logger.log("=== Stress test complete ===")
+    logger.log(f"Results saved to: {config.output_dir}/metrics.jsonl")
+
+
+def _run_phases(config, docker, logger, workers, store, dashboard):
+    """Execute all test phases. Separated so errors are caught and logged."""
+    run_start = time.time()
+    results = {}
 
     # Phase 1: Start containers
     logger.phase_start("1", f"Starting {config.num_containers} containers ({config.total} sites) (est. <1m)")
@@ -333,14 +352,6 @@ def run_worker(config: StressConfig):
     dashboard.print_dashboard()
     logger.phase_result("done", "Stress test complete")
     print()
-
-    # Cleanup (deregister atexit handler, clean explicitly)
-    atexit.unregister(_cleanup)
-    cleanup_stress_test(docker, config, logger, store)
-    print()
-
-    logger.log("=== Stress test complete ===")
-    logger.log(f"Results saved to: {config.output_dir}/metrics.jsonl")
 
 
 def run_coordinator(config: StressConfig):
