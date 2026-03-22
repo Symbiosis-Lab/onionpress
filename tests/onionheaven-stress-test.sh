@@ -2375,7 +2375,7 @@ run_worker() {
     phase_start "3" "Waiting for all ${TOTAL} sites to be reachable via Tor (est. 1m)"
     local hc_addr_type="healthcheck"
     [ "$NO_HEALTHCHECK" = true ] && hc_addr_type="content"
-    log "Phase 3: Waiting for ${TOTAL} sites to be reachable via Tor (${hc_addr_type} addresses, timeout: ${HEALTHY_TIMEOUT}s)..."
+    log "Phase 3: Waiting for ${TOTAL} ${hc_addr_type} addresses to be reachable via Tor from poll clients (timeout: ${HEALTHY_TIMEOUT}s)..."
     if run_verify_worker "200" "$TOTAL" "$HEALTHY_TIMEOUT" 0 "$TOTAL" "$hc_addr_type"; then
         log "Phase 3: all sites reachable"
     else
