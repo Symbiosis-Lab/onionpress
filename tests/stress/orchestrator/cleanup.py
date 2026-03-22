@@ -59,11 +59,12 @@ def cleanup_stress_test(
     logger.log(f"  Removed volume: {config.db_volume}")
 
     # Clean stress test entries and refresh workers via /reset-onionheaven.
-    # Faster and more reliable than individual /unregister calls over Tor.
-    result = docker.exec("onionheaven",
-        'curl -s -X POST http://127.0.0.1:8083/reset-onionheaven',
-        timeout=120)
-    if result.ok:
+    # Always call over Tor to reach the OnionHeaven that was actually used.
+    result = docker.exec("onionpress-tor-client",
+        f'curl -s --socks5-hostname "reset:x@127.0.0.1:9050" --max-time 120 '
+        f'-X POST "http://{config.onionheaven_addr}:8083/reset-onionheaven"',
+        timeout=130)
+    if result.ok and "error" not in (result.output or "").lower():
         logger.log(f"  OnionHeaven reset: {result.output.strip()}")
     else:
         logger.log(f"  OnionHeaven reset failed, falling back to individual unregister")
