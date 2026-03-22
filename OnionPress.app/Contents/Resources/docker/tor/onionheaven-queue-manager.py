@@ -282,6 +282,38 @@ class QueueManager:
         self._process_queue()
         return {"status": "queued", "address": content_address}
 
+    def reset(self):
+        """Clear all state and DEL_ONION everything in Tor.
+
+        Called when the DB is cleaned externally and the worker needs to
+        start fresh without being restarted.
+        """
+        with self.lock:
+            all_addrs = list(self.active) + list(self.in_flight.keys())
+            self.queued.clear()
+            self.in_flight.clear()
+            self.active.clear()
+            self.failed.clear()
+            self._ever_active = False
+            self._recovery_count = 0
+            self._last_recovery_time = 0.0
+
+        # DEL_ONION everything currently in Tor
+        del_count = 0
+        for addr in all_addrs:
+            success, _ = self.cmd.del_onion(addr)
+            if success:
+                del_count += 1
+            self.evt.clear(addr)
+
+        log(f"RESET: cleared {len(all_addrs)} addresses from memory, "
+            f"DEL_ONION'd {del_count} from Tor")
+        return {
+            "status": "reset",
+            "cleared": len(all_addrs),
+            "del_onion": del_count,
+        }
+
     def release(self, content_address):
         """Release an address (immediate DEL_ONION)."""
         with self.lock:
@@ -566,6 +598,8 @@ def run_daemon():
                 result = qm.release(arg)
             elif cmd == "status":
                 result = qm.status()
+            elif cmd == "reset":
+                result = qm.reset()
             else:
                 result = {"error": f"unknown command: {data}"}
 
@@ -598,7 +632,7 @@ def send_command(cmd):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: queue-manager.py daemon | takeover <addr> | release <addr> | status")
+        print("Usage: queue-manager.py daemon | takeover <addr> | release <addr> | status | reset")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -610,6 +644,8 @@ if __name__ == "__main__":
         send_command(f"release {sys.argv[2]}")
     elif cmd == "status":
         send_command("status")
+    elif cmd == "reset":
+        send_command("reset")
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
