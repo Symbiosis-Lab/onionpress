@@ -1038,7 +1038,7 @@ _onionheaven_activation_watcher() {
 
 _activate_onionheaven() {
     cd "$DOCKER_DIR"
-    docker compose --profile onionheaven up -d >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
+    docker compose up -d onionheaven >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
     # Takeover container management is now handled by the heartbeat inside onionheaven
 }
 
@@ -1197,14 +1197,14 @@ start_containers() {
 
     if $wp_installed; then
         log "WordPress is installed -- starting Tor"
-        docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+        docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
     else
         if [ -t 0 ]; then
             # Interactive terminal — prompt for credentials
             log "WordPress not yet installed -- running first-time setup"
             setup_wordpress_interactive
             # Now that WP is installed, start Tor
-            docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
         else
             # Non-interactive (systemd) — auto-setup with generated credentials
             log "WordPress not yet installed -- running automatic setup"
@@ -1216,7 +1216,7 @@ start_containers() {
             chmod 600 "$DATA_DIR/wp-admin-password"
             log "WordPress auto-setup complete (user: admin, password in $DATA_DIR/wp-admin-password)"
             # Now start Tor
-            docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
         fi
     fi
 
