@@ -530,7 +530,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             if row["status"] == "taken-over" and row["takeover_container"]:
                 try:
                     release_function(conn, row["content_address"],
-                                     row["healthcheck_address"], force=True)
+                                     row["healthcheck_address"])
                 except Exception as e:
                     log(f"ERROR: release_function failed during unregister "
                         f"for {row['content_address']} / "
@@ -655,17 +655,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         created = False
 
         if healthcheck_address:
-            # Check if entry exists and its current status (for release decision)
+            # Check if entry exists
             existing = conn.execute(
-                "SELECT status, last_taken_over FROM registry WHERE content_address = ? AND healthcheck_address = ?",
+                "SELECT status FROM registry WHERE content_address = ? AND healthcheck_address = ?",
                 (content_address, healthcheck_address)
             ).fetchone()
-            was_taken_over = existing and existing["status"] == "taken-over"
 
-            # No cooldown — /online always releases immediately.
-            # The client is responsible for stopping heartbeats before /offline.
-
-            # Upsert: create if new, update if exists
+            # Upsert: create if new, update if exists.
+            # Do NOT set status='online' here — release_function owns that transition.
+            # For new entries, status starts as 'online'. For existing entries, keep
+            # current status so release_function can detect taken-over and act on it.
             wp_healthy_val = (1 if wordpress_healthy else 0) if wordpress_healthy is not None else None
             conn.execute("""INSERT INTO registry
                 (content_address, healthcheck_address, registered_at, version,
@@ -673,7 +672,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?)
                 ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
                     last_healthy = excluded.last_healthy,
-                    status = 'online',
                     version = CASE WHEN excluded.version != 'unknown' THEN excluded.version ELSE registry.version END,
                     is_onionheaven = excluded.is_onionheaven,
                     wordpress_healthy = COALESCE(excluded.wordpress_healthy, registry.wordpress_healthy),
@@ -685,9 +683,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 (content_address, healthcheck_address, now, version, now, is_oh,
                  wp_healthy_val, now if wp_healthy_val is not None else None))
             db_commit_with_retry(conn)
-            # Only release if the entry was actually taken over
-            if was_taken_over:
-                release_function(conn, content_address, healthcheck_address, force=True)
+            # release_function checks if taken-over and handles status change + DEL_ONION
+            release_function(conn, content_address, healthcheck_address)
             if not existing:
                 created = True
                 log(f"New registry entry for {content_address} / {healthcheck_address}")
@@ -701,8 +698,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 conn.close()
                 self._send_json(400, {"error": "healthcheck_address required for new entries"})
                 return
+            # Update last_healthy but don't change status — release_function owns that
             conn.execute(
-                "UPDATE registry SET last_healthy = ?, status = 'online', "
+                "UPDATE registry SET last_healthy = ?, "
                 "is_onionheaven = ?, "
                 "unregistered_at = NULL, unregistered_reason = NULL, "
                 "audit_result = NULL, audit_at = NULL "
@@ -710,10 +708,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 (now, is_oh, content_address)
             )
             db_commit_with_retry(conn)
-            # Only release rows that were actually taken over
+            # release_function handles taken-over → online transition
             for row in existing:
-                if row["status"] == "taken-over":
-                    release_function(conn, content_address, row["healthcheck_address"], force=True)
+                release_function(conn, content_address, row["healthcheck_address"])
             flush_sighup_tor()
 
         conn.close()

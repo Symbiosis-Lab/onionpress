@@ -882,31 +882,28 @@ def _takeover_local(content_address, no_sighup=False):
 # Release function
 # ---------------------------------------------------------------------------
 
-def release_function(conn, content_address, healthcheck_address, force=False):
+def release_function(conn, content_address, healthcheck_address):
     """Handle release for a single registry row.
 
-    1. Mark the row status='online' and record last_released.
-    2. Execute release on the assigned worker via docker exec.
-    3. Decrement assigned_count.
+    Owns the status change: checks if taken-over, marks online, does DEL_ONION,
+    decrements assigned_count. If already online, returns early — prevents
+    double-release and double-decrement.
     """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
     row = conn.execute(
         "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
         (content_address, healthcheck_address)
     ).fetchone()
 
     if not row:
-        log(f"ERROR: release_function called for non-existent row: "
-            f"{content_address} / {healthcheck_address}")
         return
 
-    if row["status"] != "taken-over" and not force:
+    if row["status"] != "taken-over":
         return
 
     takeover_container = row["takeover_container"] if "takeover_container" in row.keys() else None
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Mark this row as online
+    # Mark this row as online — release_function owns this status change
     conn.execute(
         "UPDATE registry SET status = 'online', last_released = ?, "
         "takeover_container = NULL, takeover_pending = NULL, release_pending = NULL "
@@ -914,11 +911,9 @@ def release_function(conn, content_address, healthcheck_address, force=False):
         (now, content_address, healthcheck_address)
     )
     db_commit_with_retry(conn)
-    log(f"Marked {healthcheck_address} as online for {content_address}")
+    log(f"Released {content_address} (was on {takeover_container or 'none'})")
 
-    # Execute release on the worker — if a container is assigned, release on it
-    # regardless of is_farm_mode() (the server in onionpress-tor doesn't have
-    # ONIONHEAVEN=1 but still needs to release on workers)
+    # Execute DEL_ONION on the worker and decrement assigned_count
     if takeover_container:
         success = _exec_release(takeover_container, content_address)
         if success:
@@ -933,8 +928,6 @@ def release_function(conn, content_address, healthcheck_address, force=False):
     # Legacy fallback — only inside takeover worker containers
     if os.environ.get("TAKEOVER_WORKER") == "1":
         _release_local(content_address)
-    elif not takeover_container:
-        log(f"Release skipped for {content_address} — no takeover container assigned")
 
 
 def _release_local(content_address, no_sighup=False):
