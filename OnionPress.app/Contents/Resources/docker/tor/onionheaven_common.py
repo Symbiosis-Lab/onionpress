@@ -954,3 +954,44 @@ def _release_local(content_address, no_sighup=False):
 
     if not no_sighup:
         sighup_tor()
+
+
+# ---------------------------------------------------------------------------
+# Unregister function
+# ---------------------------------------------------------------------------
+
+def unregister_entry(conn, content_address, healthcheck_address, reason="unregistered"):
+    """Fully unregister an entry: release from worker, mark unregistered, delete keys.
+
+    This is the single path for all cleanup — called by /unregister handler
+    and by implicit unregistration (superseded by new healthcheck, stale
+    stress test cleanup, etc.).
+    """
+    import shutil
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Release from worker if taken-over (DEL_ONION + decrement)
+    release_function(conn, content_address, healthcheck_address)
+
+    # Mark as unregistered
+    conn.execute(
+        "UPDATE registry SET unregistered_at = ?, "
+        "unregistered_reason = ?, status = 'unregistered' "
+        "WHERE content_address = ? AND healthcheck_address = ?",
+        (now, reason, content_address, healthcheck_address)
+    )
+    db_commit_with_retry(conn)
+
+    # Delete key directory if no other active rows use this content_address
+    other_active = conn.execute(
+        "SELECT COUNT(*) FROM registry WHERE content_address = ? "
+        "AND unregistered_at IS NULL",
+        (content_address,)
+    ).fetchone()[0]
+
+    if other_active == 0:
+        key_dir = os.path.join(KEYS_DIR, content_address)
+        if os.path.isdir(key_dir):
+            shutil.rmtree(key_dir, ignore_errors=True)
+            log(f"Deleted keys for {content_address}")

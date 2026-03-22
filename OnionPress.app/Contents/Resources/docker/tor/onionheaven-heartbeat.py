@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    takeover_function, release_function, flush_sighup_tor,
+    takeover_function, release_function, unregister_entry, flush_sighup_tor,
     is_farm_mode, check_worker_bootstrap, cleanup_dead_workers,
     _init_worker_index, _ensure_capacity, _pick_worker, _exec_takeover,
     _check_arti_key_errors,
@@ -135,12 +135,7 @@ def startup_reconciliation(conn):
             ).fetchone()
             if sibling_online:
                 log(f"  startup: {ca} has online sibling — unregistering stale takeover for {ha}")
-                conn.execute(
-                    "UPDATE registry SET unregistered_at = ?, "
-                    "unregistered_reason = 'superseded-by-new-healthcheck', status = 'unregistered' "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (now, ca, ha)
-                )
+                unregister_entry(conn, ca, ha, reason="superseded-by-new-healthcheck")
             else:
                 if ca not in re_takeover_addrs:
                     re_takeover_addrs.append(ca)
@@ -221,14 +216,7 @@ def startup_reconciliation(conn):
         ).fetchall()
         for stale in stale_rows[1:]:  # skip the newest
             log(f"  startup: unregistering duplicate online row for {ca} (hc: {stale[0]})")
-            conn.execute(
-                "UPDATE registry SET unregistered_at = ?, "
-                "unregistered_reason = 'superseded-by-new-healthcheck', status = 'unregistered' "
-                "WHERE content_address = ? AND healthcheck_address = ?",
-                (now, ca, stale[0])
-            )
-    if dupes:
-        db_commit_with_retry(conn)
+            unregister_entry(conn, ca, stale[0], reason="superseded-by-new-healthcheck")
 
     # Give online entries a fresh grace period
     conn.execute(
@@ -404,14 +392,7 @@ def main():
                     ).fetchone()
                     if sibling_online:
                         log(f"Content address {ca} has an online sibling — releasing stale takeover for {ha}")
-                        release_function(conn, ca, ha)
-                        conn.execute(
-                            "UPDATE registry SET unregistered_at = ?, "
-                            "unregistered_reason = 'superseded-by-new-healthcheck', status = 'unregistered' "
-                            "WHERE content_address = ? AND healthcheck_address = ?",
-                            (now_str, ca, ha)
-                        )
-                        db_commit_with_retry(conn)
+                        unregister_entry(conn, ca, ha, reason="superseded-by-new-healthcheck")
                         continue
 
                     # Post-takeover audit: check if healthcheck still responds (false positive)
@@ -463,14 +444,7 @@ def main():
                     if version and version.startswith("stress-test") and since_takeover > 7200:
                         stale_cleanup_count += 1
                         log(f"Auto-cleanup stale stress-test entry: {ca} (taken-over {since_takeover/3600:.1f}h ago)")
-                        release_function(conn, ca, ha)
-                        conn.execute(
-                            "UPDATE registry SET unregistered_at = ?, "
-                            "unregistered_reason = 'stale-stress-test-cleanup', status = 'unregistered' "
-                            "WHERE content_address = ? AND healthcheck_address = ?",
-                            (now_str, ca, ha)
-                        )
-                        db_commit_with_retry(conn)
+                        unregister_entry(conn, ca, ha, reason="stale-stress-test-cleanup")
 
                 db_commit_with_retry(conn)
 
