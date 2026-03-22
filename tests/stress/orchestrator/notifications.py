@@ -209,6 +209,99 @@ def send_notifications(
     return notified
 
 
+def send_notifications_via_workers(
+    docker: Docker,
+    logger: StressLogger,
+    config: StressConfig,
+    endpoint: str,
+    start: int,
+    count: int,
+    stress_version: str = "",
+) -> int:
+    """Send notifications through the worker containers' own Tor circuits.
+
+    Instead of routing all notifications through onionpress-tor-client,
+    tells each worker container to sign and send its own /offline or /online
+    payloads via its already-warm Tor SOCKS proxy.
+
+    Returns:
+        Number of successfully sent notifications.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if count == 0:
+        return 0
+
+    # Group workers by container
+    per_ctr_map: dict[int, list[int]] = {}  # ctr_idx -> [local_indices]
+    for i in range(start, start + count):
+        ctr_idx = i // config.per_ctr
+        local_idx = i % config.per_ctr
+        per_ctr_map.setdefault(ctr_idx, []).append(local_idx)
+
+    logger.log(f"  Sending /{endpoint} via {len(per_ctr_map)} worker container(s) ({count} sites)...")
+
+    notified = 0
+    failed = 0
+
+    def _notify_container(ctr_idx: int, local_indices: list[int]) -> tuple[int, int]:
+        """Send notifications for a batch of workers in one container."""
+        ctr_name = config.container_name(ctr_idx)
+        result = docker.exec(ctr_name, [
+            "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/notify",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps({
+                "workers": local_indices,
+                "endpoint": endpoint,
+                "onionheaven_addr": config.onionheaven_addr,
+                "stress_version": stress_version,
+            }),
+        ], timeout=60 + len(local_indices) * 35)
+
+        ok_count = 0
+        fail_count = 0
+        if result.ok and result.output.strip():
+            try:
+                data = json.loads(result.output)
+                for widx, r in data.get("results", {}).items():
+                    if isinstance(r, dict) and not r.get("error"):
+                        ok_count += 1
+                    else:
+                        fail_count += 1
+            except (json.JSONDecodeError, ValueError):
+                fail_count = len(local_indices)
+        else:
+            fail_count = len(local_indices)
+        return ok_count, fail_count
+
+    with ThreadPoolExecutor(max_workers=len(per_ctr_map)) as executor:
+        futures = {
+            executor.submit(_notify_container, ctr_idx, indices): ctr_idx
+            for ctr_idx, indices in per_ctr_map.items()
+        }
+        for fut in as_completed(futures):
+            ctr_idx = futures[fut]
+            try:
+                ok, fail = fut.result()
+                notified += ok
+                failed += fail
+            except Exception as e:
+                ctr_name = config.container_name(ctr_idx)
+                logger.log(f"  /{endpoint} ERROR on {ctr_name}: {e}")
+                failed += len(per_ctr_map.get(ctr_idx, []))
+            logger.progress_dot()
+
+    logger.progress_end(f"{notified}/{count}")
+    logger.log(f"Sent /{endpoint} for {notified}/{count} sites via worker containers")
+    if failed > 0:
+        logger.log(f"WARNING: {failed} /{endpoint} notification(s) failed")
+
+    logger.log_json(
+        f'"event":"{endpoint}_notify","count":{count},"notified":{notified}'
+    )
+    return notified
+
+
 def flush_client_descriptor_cache(
     docker: Docker,
     config: StressConfig,
