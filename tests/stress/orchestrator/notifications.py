@@ -87,6 +87,41 @@ def generate_unregister_payloads(store: WorkerInfoStore) -> list[str]:
     return payloads
 
 
+def _send_one_notification(
+    docker: Docker,
+    config: StressConfig,
+    endpoint: str,
+    payload: str,
+    index: int,
+    max_attempts: int = 3,
+) -> tuple[bool, str]:
+    """Send a single notification with retries. Returns (success, detail)."""
+    tag = endpoint[:3]
+    for attempt in range(1, max_attempts + 1):
+        socks_tag = f"{tag}{index}r{attempt}"
+        result = docker.exec(
+            "onionpress-tor-client",
+            [
+                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "--socks5-hostname", f"{socks_tag}:x@127.0.0.1:9050",
+                "--max-time", "30",
+                "-X", "POST",
+                f"http://{config.onionheaven_addr}:8083/{endpoint}",
+                "-H", "Content-Type: application/json",
+                "-d", payload,
+            ],
+            timeout=45,
+        )
+        code = result.output.strip() if result.ok else "000"
+        if code == "200":
+            return True, f"HTTP 200 (attempt {attempt})"
+        if attempt < max_attempts:
+            import time
+            time.sleep(5)
+
+    return False, f"HTTP {code} after {max_attempts} attempts"
+
+
 def send_notifications(
     docker: Docker,
     logger: StressLogger,
@@ -97,69 +132,52 @@ def send_notifications(
 ) -> int:
     """Send notification payloads to OnionHeaven API over Tor.
 
+    Uses ThreadPoolExecutor for parallelism with per-payload logging.
+
     Returns:
         Number of successfully sent notifications.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     if not payloads:
         logger.log(f"WARNING: No payloads generated for /{endpoint}")
         return 0
 
     logger.log(f"  Generated {len(payloads)} /{endpoint} payload(s)")
 
-    payload_text = "\n".join(payloads)
-    debug_log = os.path.join(config.output_dir, f"notify_{endpoint}_debug.log")
-
-    tag = endpoint[:3]
-    curl_cmd = (
-        f'curl -s -o /dev/null -w "%{{http_code}}" '
-        f'--socks5-hostname "{tag}${{i}}r${{attempt}}:x@127.0.0.1:9050" '
-        f'--max-time 30 '
-        f'-X POST "http://{config.onionheaven_addr}:8083/{endpoint}" '
-        f'-H "Content-Type: application/json" '
-        f'-d "$payload"'
-    )
-
-    shell_script = f"""
-tmpdir=$(mktemp -d); i=0
-while IFS= read -r payload; do
-    i=$((i+1))
-    (for attempt in 1 2 3; do
-        code=$({curl_cmd} 2>/dev/null)
-        if [ "$code" = "200" ]; then
-            touch "$tmpdir/ok.$i"
-            break
-        fi
-        [ "$attempt" -lt 3 ] && sleep 5
-     done) &
-    [ $((i % {max_parallel})) -eq 0 ] && wait
-done
-wait
-ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
-rm -rf "$tmpdir"
-"""
-
-    result = docker.run(
-        ["exec", "-i", "onionpress-tor-client", "sh", "-c", shell_script],
-        timeout=300,
-        input=payload_text,
-    )
-
     notified = 0
-    if result.ok:
-        try:
-            notified = int(result.output.strip())
-        except ValueError:
-            pass
+    failed_details = []
 
-    if result.stderr:
-        with open(debug_log, "a") as f:
-            f.write(result.stderr)
-        logger.log(f"  notify_{endpoint} debug: {result.stderr.strip()[:200]}")
+    with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+        futures = {}
+        for i, payload in enumerate(payloads):
+            # Extract content_address for logging
+            try:
+                addr = json.loads(payload).get("content_address", "?")
+            except (json.JSONDecodeError, ValueError):
+                addr = "?"
+            fut = executor.submit(
+                _send_one_notification, docker, config, endpoint, payload, i,
+            )
+            futures[fut] = (i, addr)
 
-    logger.log(f"Sent /{endpoint} for {notified} sites")
-    if notified < len(payloads):
-        missed = len(payloads) - notified
-        logger.log(f"WARNING: {missed} /{endpoint} notification(s) failed")
+        for fut in as_completed(futures):
+            idx, addr = futures[fut]
+            try:
+                success, detail = fut.result()
+                if success:
+                    notified += 1
+                    logger.log(f"  /{endpoint} {addr[:20]}... → {detail}")
+                else:
+                    failed_details.append((addr, detail))
+                    logger.log(f"  /{endpoint} FAILED {addr[:20]}... → {detail}")
+            except Exception as e:
+                failed_details.append((addr, str(e)))
+                logger.log(f"  /{endpoint} ERROR {addr[:20]}... → {e}")
+
+    logger.log(f"Sent /{endpoint} for {notified}/{len(payloads)} sites")
+    if failed_details:
+        logger.log(f"WARNING: {len(failed_details)} /{endpoint} notification(s) failed")
 
     logger.log_json(
         f'"event":"{endpoint}_notify","count":{len(payloads)},"notified":{notified}'
