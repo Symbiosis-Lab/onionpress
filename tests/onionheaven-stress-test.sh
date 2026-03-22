@@ -131,7 +131,7 @@ NUM_CONTAINERS=$(( (TOTAL + PER_CTR - 1) / PER_CTR ))
 if [ "$NUM_POLL_CLIENTS" -eq 0 ]; then
     NUM_POLL_CLIENTS=$(( (TOTAL / 2 + 2) / 3 ))  # 1 per 3 failing sites (half of total)
     [ "$NUM_POLL_CLIENTS" -lt 3 ] && NUM_POLL_CLIENTS=3
-    [ "$NUM_POLL_CLIENTS" -gt 50 ] && NUM_POLL_CLIENTS=50  # cap for VM resources
+    [ "$NUM_POLL_CLIENTS" -gt 20 ] && NUM_POLL_CLIENTS=20  # cap for VM resources (50 caused 84% VM memory at 400 sites)
 fi
 
 if [ "$TOTAL" -lt 1 ]; then
