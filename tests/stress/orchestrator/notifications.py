@@ -267,10 +267,14 @@ def send_notifications_via_workers(
                     if isinstance(r, dict) and not r.get("error"):
                         ok_count += 1
                     else:
+                        err = r.get("error", r) if isinstance(r, dict) else r
+                        logger.log(f"  /{endpoint} FAILED {ctr_name} local={widx}: {str(err)[:200]}")
                         fail_count += 1
             except (json.JSONDecodeError, ValueError):
+                logger.log(f"  /{endpoint} FAILED {ctr_name}: bad response: {result.output[:200]}")
                 fail_count = len(local_indices)
         else:
+            logger.log(f"  /{endpoint} FAILED {ctr_name}: no response")
             fail_count = len(local_indices)
         return ok_count, fail_count
 
