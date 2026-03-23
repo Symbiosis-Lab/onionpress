@@ -99,15 +99,65 @@ def _send_notify(worker_idx, endpoint, onionheaven_addr, stress_version=""):
 
 
 def _ctor_control(cmd):
-    """Send a command to C Tor's control port. Returns the raw response."""
-    result = subprocess.run(
-        ["sh", "-c",
-         f'cookie=$(xxd -p /var/lib/tor/control_auth_cookie | tr -d "\\n"); '
-         f'printf "AUTHENTICATE %s\\r\\n{cmd}\\r\\nQUIT\\r\\n" "$cookie" | '
-         f'nc -w 5 127.0.0.1 9051'],
-        capture_output=True, text=True, timeout=15,
-    )
-    return result.stdout
+    """Send a command to C Tor's control port. Returns the raw response.
+
+    Uses a Python socket instead of nc pipe so we can verify each step:
+    1. AUTHENTICATE — must get 250 OK
+    2. Send the actual command — must get a response
+    3. QUIT
+    """
+    import socket as _socket
+
+    try:
+        cookie = open("/var/lib/tor/control_auth_cookie", "rb").read().hex()
+    except Exception as e:
+        return f"ERROR: cannot read cookie: {e}"
+
+    try:
+        s = _socket.create_connection(("127.0.0.1", 9051), timeout=10)
+        s.settimeout(10)
+
+        # Step 1: AUTHENTICATE
+        s.sendall(f"AUTHENTICATE {cookie}\r\n".encode())
+        auth_resp = _recv_response(s)
+        if "250 OK" not in auth_resp:
+            s.close()
+            print(f"  CONTROL AUTH FAILED: {auth_resp.strip()}", flush=True)
+            return f"AUTH_FAILED: {auth_resp}"
+
+        # Step 2: Send the actual command
+        s.sendall(f"{cmd}\r\n".encode())
+        cmd_resp = _recv_response(s)
+
+        # Step 3: QUIT
+        try:
+            s.sendall(b"QUIT\r\n")
+            s.close()
+        except Exception:
+            pass
+
+        return cmd_resp
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def _recv_response(sock):
+    """Read a complete Tor control response (ends with 'NNN SP' line)."""
+    data = b""
+    while True:
+        try:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            # Check if we have a final response line (3-digit code + space)
+            lines = data.decode("utf-8", errors="replace").split("\r\n")
+            for line in lines:
+                if len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
+                    return data.decode("utf-8", errors="replace")
+        except Exception:
+            break
+    return data.decode("utf-8", errors="replace")
 
 
 async def handle_http(reader, writer, port):

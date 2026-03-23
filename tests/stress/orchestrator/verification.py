@@ -82,6 +82,7 @@ def run_verify_worker(
     deadline = start_ts + timeout_secs
     last_dashboard = 0.0
     last_worker_log = 0.0
+    worker_log_lines: dict[int, int] = {}  # poll client index -> lines already read
     prev_verified = 0
     total_verified = 0
 
@@ -118,14 +119,23 @@ def run_verify_worker(
             logger.log(f"  (verified: {total_verified}/{target_count}, pending: {total_pending}) [{codes_str}]")
             last_dashboard = now
 
-            # Pull verify-worker logs when stuck (every 60s)
+            # Pull NEW verify-worker log lines when stuck (every 60s)
             if total_pending > 0 and total_verified == prev_verified and now - last_worker_log >= 60:
                 for i in range(num_clients):
                     cname = config.poll_client_name(i)
-                    result = docker.exec(cname, "grep -E 'ROTATE|FAIL|HS_DESC FAILED' /tmp/verify-worker.log 2>/dev/null | tail -3", timeout=10)
-                    if result.ok and result.output.strip():
-                        for line in result.output.strip().splitlines():
-                            logger.log(f"  [{cname}] {line.strip()}")
+                    skip = worker_log_lines.get(i, 0)
+                    result = docker.exec(cname,
+                        f"grep -c -E 'ROTATE|FAIL|HS_DESC FAILED' /tmp/verify-worker.log 2>/dev/null",
+                        timeout=10)
+                    total_lines = int(result.output.strip()) if result.ok and result.output.strip().isdigit() else 0
+                    if total_lines > skip:
+                        result = docker.exec(cname,
+                            f"grep -E 'ROTATE|FAIL|HS_DESC FAILED' /tmp/verify-worker.log 2>/dev/null | tail -n +{skip + 1}",
+                            timeout=10)
+                        if result.ok and result.output.strip():
+                            for line in result.output.strip().splitlines():
+                                logger.log(f"  [{cname}] {line.strip()}")
+                        worker_log_lines[i] = total_lines
                 last_worker_log = now
 
         if total_verified >= target_count:
