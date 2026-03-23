@@ -480,7 +480,7 @@ if ! python3 --version >/dev/null 2>&1; then
 fi
 
 # Prepare C Tor data dir (no HiddenServiceDir — services created via ADD_ONION)
-mkdir -p /var/lib/tor
+mkdir -p /var/lib/tor /worker-data
 chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
 chmod 700 /var/lib/tor
 
@@ -524,7 +524,7 @@ chown root:root /etc/arti/arti.toml
 chmod 644 /etc/arti/arti.toml
 
 # Prepare Arti state dirs
-mkdir -p /var/lib/arti/cache /var/lib/arti/state
+mkdir -p /var/lib/arti/cache /var/lib/arti/state /worker-data
 chown -R arti:arti /var/lib/arti
 chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
