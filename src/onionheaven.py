@@ -479,13 +479,24 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
         app.log(f"OnionHeaven: failed to sign /{endpoint} request: {e}")
         return False
 
-    payload = json.dumps({
+    payload_dict = {
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
         "is_onionheaven": getattr(app, 'is_onionheaven', False),
         "timestamp": timestamp,
         "signature": signature,
-    })
+    }
+
+    # /online requires the arti key so OnionHeaven can do takeover if needed
+    if endpoint == "online":
+        try:
+            arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
+            payload_dict["arti_key_pem"] = base64.b64encode(arti_pem).decode('ascii')
+        except Exception as e:
+            app.log(f"OnionHeaven: failed to build arti key for /{endpoint}: {e}")
+            return False
+
+    payload = json.dumps(payload_dict)
 
     backoff = [10, 30]
     last_output = ""
