@@ -1218,6 +1218,57 @@ def _patch_worker_code(container_name):
         log(f"_patch_worker_code({container_name}): patched {len(_WORKER_CODE_FILES)} files")
 
 
+def _rotate_logs():
+    """Rotate OnionHeaven log files: rename current logs with a timestamp,
+    delete logs older than 7 days.
+
+    Covers heartbeat.log and queue-manager-*.log on the shared volume.
+    """
+    import glob as _glob
+
+    log_dir = ONIONHEAVEN_DATA_DIR
+    now_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    rotated = 0
+    deleted = 0
+
+    # Rotate current logs
+    patterns = [
+        os.path.join(log_dir, "heartbeat.log"),
+        os.path.join(log_dir, "queue-manager-*.log"),
+    ]
+    for pattern in patterns:
+        for path in _glob.glob(pattern):
+            # Don't rotate already-rotated files (they have a date suffix)
+            basename = os.path.basename(path)
+            if basename.count(".") > 1:
+                continue
+            name, ext = os.path.splitext(path)
+            rotated_path = f"{name}.{now_str}{ext}"
+            try:
+                os.rename(path, rotated_path)
+                rotated += 1
+            except OSError:
+                pass
+
+    # Delete old rotated logs (older than 7 days)
+    cutoff = time.time() - (7 * 86400)
+    old_patterns = [
+        os.path.join(log_dir, "heartbeat.*.log"),
+        os.path.join(log_dir, "queue-manager-*.*.log"),
+    ]
+    for pattern in old_patterns:
+        for path in _glob.glob(pattern):
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    deleted += 1
+            except OSError:
+                pass
+
+    if rotated or deleted:
+        log(f"_rotate_logs: rotated {rotated}, deleted {deleted} old logs")
+
+
 def reset_onionheaven(conn=None):
     """Clean stress tests and refresh all takeover workers with current code.
 
@@ -1276,6 +1327,9 @@ def reset_onionheaven(conn=None):
                 log("reset_onionheaven: restarted single heartbeat process")
     except Exception as e:
         log(f"reset_onionheaven: heartbeat cleanup error: {e}")
+
+    # Step 0.5: rotate log files so each test run has a clean slate.
+    _rotate_logs()
 
     # Step 1: tear down ALL workers and clear assignments FIRST.
     # This must happen before cleanup_stress_tests so the heartbeat can't
