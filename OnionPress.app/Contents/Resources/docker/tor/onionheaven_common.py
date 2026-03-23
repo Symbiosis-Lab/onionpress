@@ -681,20 +681,28 @@ def _exec_takeover(container_name, content_address):
              "python3", "/onionheaven-queue-manager.py", "takeover", content_address],
             capture_output=True, text=True, timeout=30
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip():
             try:
                 resp = json.loads(result.stdout.strip())
                 status = resp.get("status", "")
-                if status in ("queued", "already_queued"):
+                if status in ("queued", "already_queued", "already_active", "in_flight"):
                     log(f"Takeover queued: {content_address} on {container_name} ({status})")
                     return True
+                elif "error" in resp:
+                    log(f"Takeover queue failed for {content_address} on {container_name}: "
+                        f"{resp['error']}")
+                    return False
+                else:
+                    log(f"Takeover unexpected response for {content_address} on {container_name}: "
+                        f"{resp}")
+                    return False
             except (json.JSONDecodeError, ValueError):
-                pass
-            log(f"Takeover queued: {content_address} on {container_name}")
-            return True
+                log(f"Takeover unparseable response for {content_address} on {container_name}: "
+                    f"{result.stdout.strip()[:200]}")
+                return False
         else:
             log(f"Takeover queue failed for {content_address} on {container_name}: "
-                f"{result.stderr.strip()}")
+                f"exit={result.returncode} stderr={result.stderr.strip()[:200]}")
             return False
     except Exception as e:
         log(f"Takeover error for {content_address} on {container_name}: {e}")

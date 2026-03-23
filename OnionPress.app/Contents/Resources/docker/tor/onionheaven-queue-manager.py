@@ -587,7 +587,7 @@ def run_daemon():
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(SOCK_PATH)
     os.chmod(SOCK_PATH, 0o666)
-    server.listen(5)
+    server.listen(64)
     server.settimeout(2.0)
 
     log(f"Queue manager daemon started (max_in_flight={MAX_IN_FLIGHT})")
@@ -633,12 +633,22 @@ def send_command(cmd):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect(SOCK_PATH)
         s.sendall(cmd.encode() + b"\n")
-        s.settimeout(10.0)
+        s.settimeout(30.0)
         resp = s.recv(4096).decode().strip()
         s.close()
-        print(resp)
+        if resp:
+            print(resp)
+        else:
+            print(json.dumps({"error": "empty response from queue manager"}))
+            sys.exit(1)
+    except socket.timeout:
+        print(json.dumps({"error": "queue manager timed out"}))
+        sys.exit(1)
     except ConnectionRefusedError:
         print(json.dumps({"error": "queue manager not running"}))
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": f"queue manager error: {e}"}))
         sys.exit(1)
 
 
