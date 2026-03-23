@@ -496,32 +496,10 @@ def main_ctor_ramped():
     in_flight = {}  # service_id -> (worker_index, timestamp)
     completed = []  # worker indices done (ADD_ONION + descriptor uploaded)
 
-    # Thread pool for background OnionHeaven registrations
-    reg_pool = ThreadPoolExecutor(max_workers=10)
-    reg_futures = []
     heartbeat_started = set()  # track which workers have heartbeat threads
 
-    def register_and_start_heartbeat(w):
-        """Register a worker with OnionHeaven, then start its heartbeat thread immediately."""
-        privkey = base64.b64decode(w["privkey_b64"])
-        pubkey = base64.b64decode(w["pubkey_b64"])
-        pem_b64 = w.get("_pem_b64", "")
-        result = register_with_onionheaven(
-            w["content_address"], w["healthcheck_address"],
-            privkey, pubkey, pem_b64,
-            worker_id=w["global_index"],
-        )
-        try:
-            resp = json.loads(result)
-            w["registered"] = resp.get("registered", False)
-        except Exception:
-            w["registered"] = False
-        status = "OK" if w["registered"] else f"FAILED: {result[:200]}"
-        print(f"[worker {w['local_index']}] Registration: {status}", flush=True)
-        _upsert_worker(w)
-
-        # Start heartbeat thread for this worker right away — don't wait
-        # for all workers to finish bootstrap.
+    def start_heartbeat(w):
+        """Start heartbeat thread for a worker. First heartbeat is the registration."""
         idx = w["local_index"]
         if idx not in heartbeat_started:
             heartbeat_started.add(idx)
@@ -630,9 +608,9 @@ def main_ctor_ramped():
         for sid, idx in promoted:
             del in_flight[sid]
             completed.append(idx)
-            print(f"[worker {idx}] descriptor ready, registering ({len(completed)}/{NUM_WORKERS} done)", flush=True)
-            # Register with OnionHeaven and start heartbeat immediately
-            reg_futures.append(reg_pool.submit(register_and_start_heartbeat, workers[idx]))
+            print(f"[worker {idx}] descriptor ready, starting heartbeat ({len(completed)}/{NUM_WORKERS} done)", flush=True)
+            # First heartbeat will register via /online
+            start_heartbeat(workers[idx])
 
         if promoted:
             fill_slots()
@@ -640,18 +618,9 @@ def main_ctor_ramped():
     if monitor:
         monitor.stop()
 
-    # Wait for any remaining registrations to finish
-    for f in reg_futures:
-        f.result()
-    reg_pool.shutdown(wait=False)
-
-    # PEM keys are already stored in the DB as arti_key_pem via _upsert_worker.
-    # Keep _pem_b64 in memory for heartbeat — every /online must include the key.
-
-    registered_workers = [w for w in workers if w and w.get("registered")]
     all_with_addresses = [w for w in workers if w and w.get("content_address")]
-    print(f"Bootstrap complete: {len(registered_workers)}/{NUM_WORKERS} registered "
-          f"({len(all_with_addresses)} have addresses, {len(heartbeat_started)} heartbeating)", flush=True)
+    print(f"Bootstrap complete: {len(all_with_addresses)}/{NUM_WORKERS} have addresses, "
+          f"{len(heartbeat_started)} heartbeating (first heartbeat = registration)", flush=True)
 
     # Start heartbeat threads for any workers that don't have one yet
     # (e.g. those that failed registration but have addresses).
