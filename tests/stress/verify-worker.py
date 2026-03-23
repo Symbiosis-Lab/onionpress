@@ -93,7 +93,9 @@ def curl_check(addr, expected_code, timeout=15):
     if now - last_rotate >= _ROTATE_INTERVAL:
         gen += 1
         last_rotate = now
-        print(f"  ROTATE {addr} gen={gen} (stale circuit after {_ROTATE_INTERVAL}s)", flush=True)
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"  [{ts}] ROTATE {addr} gen={gen} (stale circuit after {_ROTATE_INTERVAL}s)", flush=True)
     _addr_generation[addr] = (gen, last_rotate)
     try:
         result = subprocess.run(
