@@ -166,19 +166,12 @@ class WorkerManager:
                     "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/del_onion",
                     "-H", "Content-Type: application/json",
                     "-d", json.dumps({"workers": [local_idx]}),
-                ], timeout=10)
-                self.logger.log(f"  DEL_ONION site {i} ({ctr_name} local={local_idx}): {result.output.strip()[:200]}")
-                if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
-                    self.logger.log(f"WARNING: DEL_ONION failed for site {i}, retrying...")
-                    time.sleep(2)
-                    result = self.docker.exec(ctr_name, [
-                        "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/del_onion",
-                        "-H", "Content-Type: application/json",
-                        "-d", json.dumps({"workers": [local_idx]}),
-                    ], timeout=10)
-                    self.logger.log(f"  DEL_ONION retry site {i}: {result.output.strip()[:200]}")
-                    if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
-                        self.logger.log(f"ERROR: DEL_ONION retry failed for site {i}: {result.output}")
+                ], timeout=30)
+                resp = result.output.strip()[:300]
+                self.logger.log(f"  DEL_ONION site {i} ({ctr_name} local={local_idx}): {resp}")
+                if "false-ok" in resp or "fail" in resp.lower() or "error" in resp.lower() or not result.ok:
+                    self.logger.log(f"WARNING: DEL_ONION issue for site {i}")
+                    if not result.ok:
                         return False
             else:
                 content_nick = f"w{ctr_idx}_{local_idx}_content"
@@ -225,23 +218,17 @@ class WorkerManager:
             hp = cfg.base_port + local_idx * 2 + 1
 
             if self.tor_impl == "tor":
+                # Timeout 150s: ADD_ONION + 60s HS_DESC wait + possible DEL+ADD retry + 60s wait
                 result = self.docker.exec(ctr_name, [
                     "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/add_onion",
                     "-H", "Content-Type: application/json",
                     "-d", json.dumps({"workers": [local_idx]}),
-                ], timeout=10)
-                self.logger.log(f"  ADD_ONION site {i} ({ctr_name} local={local_idx}): {result.output.strip()[:200]}")
-                if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
-                    self.logger.log(f"WARNING: ADD_ONION failed for site {i}, retrying...")
-                    time.sleep(2)
-                    result = self.docker.exec(ctr_name, [
-                        "curl", "-s", "-X", "POST", "http://127.0.0.1:9000/add_onion",
-                        "-H", "Content-Type: application/json",
-                        "-d", json.dumps({"workers": [local_idx]}),
-                    ], timeout=10)
-                    self.logger.log(f"  ADD_ONION retry site {i}: {result.output.strip()[:200]}")
-                    if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
-                        self.logger.log(f"ERROR: ADD_ONION retry failed for site {i}: {result.output}")
+                ], timeout=150)
+                resp = result.output.strip()[:300]
+                self.logger.log(f"  ADD_ONION site {i} ({ctr_name} local={local_idx}): {resp}")
+                if "fail" in resp.lower() or "error" in resp.lower() or not result.ok:
+                    self.logger.log(f"WARNING: ADD_ONION issue for site {i}")
+                    if not result.ok:
                         return False
             else:
                 content_nick = f"w{ctr_idx}_{local_idx}_content"
