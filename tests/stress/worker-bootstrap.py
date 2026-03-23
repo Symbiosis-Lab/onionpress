@@ -499,9 +499,10 @@ def main_ctor_ramped():
     # Thread pool for background OnionHeaven registrations
     reg_pool = ThreadPoolExecutor(max_workers=10)
     reg_futures = []
+    heartbeat_started = set()  # track which workers have heartbeat threads
 
-    def register_in_background(w):
-        """Register a worker with OnionHeaven (runs in thread pool)."""
+    def register_and_start_heartbeat(w):
+        """Register a worker with OnionHeaven, then start its heartbeat thread immediately."""
         privkey = base64.b64decode(w["privkey_b64"])
         pubkey = base64.b64decode(w["pubkey_b64"])
         pem_b64 = w.get("_pem_b64", "")
@@ -518,6 +519,18 @@ def main_ctor_ramped():
         status = "OK" if w["registered"] else f"FAILED: {result[:200]}"
         print(f"[worker {w['local_index']}] Registration: {status}", flush=True)
         _upsert_worker(w)
+
+        # Start heartbeat thread for this worker right away — don't wait
+        # for all workers to finish bootstrap.
+        idx = w["local_index"]
+        if idx not in heartbeat_started:
+            heartbeat_started.add(idx)
+            t = threading.Thread(
+                target=_site_heartbeat_thread,
+                args=(w, workers, 60, 0),
+                daemon=True,
+            )
+            t.start()
 
     def fill_slots():
         """Move workers from queue to in-flight up to MAX_IN_FLIGHT."""
@@ -618,8 +631,8 @@ def main_ctor_ramped():
             del in_flight[sid]
             completed.append(idx)
             print(f"[worker {idx}] descriptor ready, registering ({len(completed)}/{NUM_WORKERS} done)", flush=True)
-            # Register with OnionHeaven immediately in background
-            reg_futures.append(reg_pool.submit(register_in_background, workers[idx]))
+            # Register with OnionHeaven and start heartbeat immediately
+            reg_futures.append(reg_pool.submit(register_and_start_heartbeat, workers[idx]))
 
         if promoted:
             fill_slots()
@@ -638,12 +651,31 @@ def main_ctor_ramped():
     registered_workers = [w for w in workers if w and w.get("registered")]
     all_with_addresses = [w for w in workers if w and w.get("content_address")]
     print(f"Bootstrap complete: {len(registered_workers)}/{NUM_WORKERS} registered "
-          f"({len(all_with_addresses)} have addresses, heartbeat will retry unregistered)", flush=True)
+          f"({len(all_with_addresses)} have addresses, {len(heartbeat_started)} heartbeating)", flush=True)
 
-    # Heartbeat loop includes ALL workers with addresses — not just registered ones.
-    # Workers that failed initial registration will get registered via heartbeat /online.
+    # Start heartbeat threads for any workers that don't have one yet
+    # (e.g. those that failed registration but have addresses).
+    remaining = [w for w in all_with_addresses if w["local_index"] not in heartbeat_started]
+    if remaining:
+        n = len(remaining)
+        stagger = 60 / max(n, 1)
+        for i, w in enumerate(remaining):
+            heartbeat_started.add(w["local_index"])
+            t = threading.Thread(
+                target=_site_heartbeat_thread,
+                args=(w, workers, 60, i * stagger),
+                daemon=True,
+            )
+            t.start()
+        print(f"Started {n} additional heartbeat threads for unregistered workers", flush=True)
+
+    # Keep main thread alive, periodically log summary
     if all_with_addresses:
-        heartbeat_loop(all_with_addresses)
+        HEARTBEAT_INTERVAL = 60
+        while True:
+            time.sleep(HEARTBEAT_INTERVAL)
+            enabled = sum(1 for s in all_with_addresses if is_worker_enabled(s))
+            print(f"Heartbeat: {enabled}/{len(all_with_addresses)} enabled", flush=True)
 
 
 def main():
