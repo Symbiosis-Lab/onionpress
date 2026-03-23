@@ -167,6 +167,7 @@ class WorkerManager:
                     "-H", "Content-Type: application/json",
                     "-d", json.dumps({"workers": [local_idx]}),
                 ], timeout=10)
+                self.logger.log(f"  DEL_ONION site {i} ({ctr_name} local={local_idx}): {result.output.strip()[:200]}")
                 if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
                     self.logger.log(f"WARNING: DEL_ONION failed for site {i}, retrying...")
                     time.sleep(2)
@@ -175,6 +176,7 @@ class WorkerManager:
                         "-H", "Content-Type: application/json",
                         "-d", json.dumps({"workers": [local_idx]}),
                     ], timeout=10)
+                    self.logger.log(f"  DEL_ONION retry site {i}: {result.output.strip()[:200]}")
                     if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
                         self.logger.log(f"ERROR: DEL_ONION retry failed for site {i}: {result.output}")
                         return False
@@ -228,6 +230,7 @@ class WorkerManager:
                     "-H", "Content-Type: application/json",
                     "-d", json.dumps({"workers": [local_idx]}),
                 ], timeout=10)
+                self.logger.log(f"  ADD_ONION site {i} ({ctr_name} local={local_idx}): {result.output.strip()[:200]}")
                 if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
                     self.logger.log(f"WARNING: ADD_ONION failed for site {i}, retrying...")
                     time.sleep(2)
@@ -236,6 +239,7 @@ class WorkerManager:
                         "-H", "Content-Type: application/json",
                         "-d", json.dumps({"workers": [local_idx]}),
                     ], timeout=10)
+                    self.logger.log(f"  ADD_ONION retry site {i}: {result.output.strip()[:200]}")
                     if not result.ok or "fail" in result.output.lower() or "error" in result.output.lower():
                         self.logger.log(f"ERROR: ADD_ONION retry failed for site {i}: {result.output}")
                         return False
