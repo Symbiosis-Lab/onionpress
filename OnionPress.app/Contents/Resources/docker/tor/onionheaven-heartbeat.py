@@ -34,9 +34,6 @@ from onionheaven_common import (
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, TOR_MANAGER,
 )
 
-# SOCKS proxy for post-takeover audit pings
-SOCKS_ADDR = os.environ.get("ONIONHEAVEN_SOCKS_ADDR", "onionpress-tor-client:9050")
-
 def wall_sleep(seconds):
     """Sleep using wall-clock busy-wait — time.sleep() is unreliable under qemu."""
     deadline = datetime.now(timezone.utc) + timedelta(seconds=seconds)
@@ -87,60 +84,6 @@ def _get_tor_detached(container_name):
         return onions
     except Exception:
         return None
-
-
-# ---------------------------------------------------------------------------
-# Post-takeover audit — ping healthcheck to detect false positives
-# ---------------------------------------------------------------------------
-
-def check_healthcheck(healthcheck_address, socks_addr=None):
-    """Check if a healthcheck .onion address is reachable."""
-    proxy = socks_addr or SOCKS_ADDR
-    try:
-        result = subprocess.run(
-            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-             "--socks5-hostname", proxy,
-             "--max-time", os.environ.get("ONIONHEAVEN_CURL_TIMEOUT", "8"),
-             f"http://{healthcheck_address}/"],
-            capture_output=True, text=True, timeout=15
-        )
-        http_code = result.stdout.strip()
-        return result.returncode == 0 and http_code in ("200", "301")
-    except Exception:
-        return False
-
-
-def audit_entry(entry):
-    """Post-takeover audit: ping healthcheck to detect false positives.
-
-    Returns True if the healthcheck responds (false positive detected).
-    """
-    hc_addr = entry["healthcheck_address"]
-    if not hc_addr:
-        return False
-    return check_healthcheck(hc_addr)
-
-
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
-
-def wait_for_socks():
-    """Wait for Arti SOCKS proxy to accept connections."""
-    import socket
-    log("Waiting for Arti SOCKS proxy...")
-    for _ in range(60):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2)
-            s.connect(("127.0.0.1", 9050))
-            s.close()
-            log("Arti SOCKS proxy is ready")
-            return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(2)
-    log("WARNING: Arti SOCKS proxy not ready after 120s")
-    return False
 
 
 def startup_reconciliation(conn):
@@ -284,8 +227,6 @@ def startup_reconciliation(conn):
 def main():
     log("heartbeat monitor starting")
 
-    wait_for_socks()
-
     # Wait for the DB directory to exist
     for _ in range(30):
         if os.path.isdir("/var/lib/onionpress/onionheaven"):
@@ -385,8 +326,6 @@ def main():
             pass_start = datetime.now(timezone.utc)
 
             stale_count = 0
-            audit_count = 0
-            false_positive_count = 0
             stale_cleanup_count = 0
 
             for key_row in entry_keys:
@@ -471,48 +410,33 @@ def main():
                         unregister_entry(conn, ca, ha, reason="superseded-by-new-healthcheck")
                         continue
 
-                    # Post-takeover audit: check if healthcheck still responds (false positive)
-                    # Only audit within 5 minutes of takeover
-                    audit_result = entry.get("audit_result")
-                    if audit_result:
-                        continue  # already audited
-
+                    # Compute since_takeover for audit queueing and auto-cleanup
                     last_taken_over = entry.get("last_taken_over")
-                    if not last_taken_over:
-                        continue
+                    since_takeover = 0
+                    if last_taken_over:
+                        try:
+                            lto = datetime.fromisoformat(
+                                last_taken_over.replace("Z", "+00:00")
+                            )
+                            since_takeover = (now - lto).total_seconds()
+                        except (ValueError, TypeError):
+                            pass
 
-                    try:
-                        lto = datetime.fromisoformat(
-                            last_taken_over.replace("Z", "+00:00")
-                        )
-                        since_takeover = (now - lto).total_seconds()
-                    except (ValueError, TypeError):
-                        continue
-
-                    # Don't audit within first 10s (Tor descriptors may linger)
-                    if since_takeover < 10:
-                        continue
-                    # Stop auditing after 5 minutes
-                    if since_takeover > 300:
-                        conn.execute(
-                            "UPDATE registry SET audit_result = 'confirmed_dead', audit_at = ? "
-                            "WHERE content_address = ? AND healthcheck_address = ?",
-                            (now_str, ca, ha)
-                        )
-                        db_commit_with_retry(conn)
-                        continue
-
-                    audit_count += 1
-                    if audit_entry(entry):
-                        false_positive_count += 1
-                        log(f"FALSE POSITIVE: {ha} (content: {ca}) responded after takeover — releasing")
-                        conn.execute(
-                            "UPDATE registry SET audit_result = 'false_positive', audit_at = ? "
-                            "WHERE content_address = ? AND healthcheck_address = ?",
-                            (now_str, ca, ha)
-                        )
-                        db_commit_with_retry(conn)
-                        release_function(conn, ca, ha)
+                    # Queue audit on the takeover worker (no curl here)
+                    audit_result = entry.get("audit_result")
+                    if not audit_result and not entry.get("audit_pending"):
+                        if 10 < since_takeover <= 300:
+                            conn.execute(
+                                "UPDATE registry SET audit_pending = ? "
+                                "WHERE content_address = ? AND healthcheck_address = ?",
+                                (now_str, ca, ha))
+                            db_commit_with_retry(conn)
+                        elif since_takeover > 300:
+                            conn.execute(
+                                "UPDATE registry SET audit_result = 'confirmed_dead', audit_at = ? "
+                                "WHERE content_address = ? AND healthcheck_address = ?",
+                                (now_str, ca, ha))
+                            db_commit_with_retry(conn)
 
                     # Auto-cleanup: unregister stress-test entries taken-over for >2 hours
                     # Real users will re-register when they come back online; stress tests won't.
@@ -532,10 +456,6 @@ def main():
             parts = [f"{len(entry_keys)} entries"]
             if stale_count:
                 parts.append(f"{stale_count} takeovers")
-            if audit_count:
-                parts.append(f"{audit_count} audits")
-            if false_positive_count:
-                parts.append(f"{false_positive_count} false positives")
             if stale_cleanup_count:
                 parts.append(f"{stale_cleanup_count} stress-test cleanups")
             log(f"heartbeat pass complete — {', '.join(parts)} in {elapsed:.1f}s")

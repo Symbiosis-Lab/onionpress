@@ -326,6 +326,77 @@ def process_releases(conn):
     return count
 
 
+def _check_healthcheck(healthcheck_address):
+    """Check if a healthcheck .onion address is reachable via local Tor SOCKS."""
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "--socks5-hostname", "127.0.0.1:9050",
+             "--max-time", os.environ.get("ONIONHEAVEN_CURL_TIMEOUT", "8"),
+             f"http://{healthcheck_address}/"],
+            capture_output=True, text=True, timeout=15
+        )
+        http_code = result.stdout.strip()
+        return result.returncode == 0 and http_code in ("200", "301")
+    except Exception:
+        return False
+
+
+def process_audits(conn):
+    """Process pending audit requests — one per cycle to avoid blocking takeovers."""
+    row = conn.execute(
+        "SELECT content_address, healthcheck_address FROM registry "
+        "WHERE takeover_container = ? AND audit_pending IS NOT NULL LIMIT 1",
+        (CONTAINER_NAME,)
+    ).fetchone()
+
+    if not row:
+        return 0
+
+    ca = row["content_address"]
+    ha = row["healthcheck_address"]
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if _check_healthcheck(ha):
+        # False positive — site is actually alive
+        log(f"takeover-worker: FALSE POSITIVE: {ha} (content: {ca}) responded — releasing")
+        conn.execute(
+            "UPDATE registry SET audit_result = 'false_positive', audit_at = ?, "
+            "audit_pending = NULL "
+            "WHERE content_address = ? AND healthcheck_address = ?",
+            (now_str, ca, ha)
+        )
+        db_commit_with_retry(conn)
+        # Release via local tor-manager and update DB
+        ok = _release_local(ca, no_sighup=True)
+        if ok:
+            conn.execute(
+                "UPDATE registry SET status = 'online', last_released = ?, "
+                "takeover_container = NULL, takeover_pending = NULL, release_pending = NULL "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (now_str, ca, ha)
+            )
+            # Decrement assigned_count
+            conn.execute(
+                "UPDATE takeover_containers SET assigned_count = MAX(0, assigned_count - 1) "
+                "WHERE container_name = ?",
+                (CONTAINER_NAME,)
+            )
+            db_commit_with_retry(conn)
+            flush_sighup_tor()
+    else:
+        # Confirmed dead — clear audit_pending
+        conn.execute(
+            "UPDATE registry SET audit_result = 'confirmed_dead', audit_at = ?, "
+            "audit_pending = NULL "
+            "WHERE content_address = ? AND healthcheck_address = ?",
+            (now_str, ca, ha)
+        )
+        db_commit_with_retry(conn)
+
+    return 1
+
+
 def update_active_count(conn):
     """Update active_services count for this container."""
     count = conn.execute(
@@ -405,6 +476,7 @@ def main():
 
             takeovers = process_takeovers(conn)
             releases = process_releases(conn)
+            audits = process_audits(conn)
 
             # Periodic heartbeat
             now = time.monotonic()
