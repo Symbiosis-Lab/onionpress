@@ -76,7 +76,7 @@ def newnym():
 
 
 _addr_generation: dict[str, tuple[int, float]] = {}  # addr -> (generation, last_rotate_time)
-_ROTATE_INTERVAL = 120  # seconds between SOCKS credential rotations per address
+_ROTATE_INTERVAL = 1800  # seconds between SOCKS credential rotations per address (30 min)
 
 def curl_check(addr, expected_code, timeout=15):
     """Check if an address returns the expected HTTP code.
