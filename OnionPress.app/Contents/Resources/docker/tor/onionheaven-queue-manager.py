@@ -393,7 +393,11 @@ class QueueManager:
         self._check_stuck()
 
     def _check_stuck(self):
-        """Detect stuck in-flight addresses and trigger recovery."""
+        """Log stuck in-flight addresses. No automatic recovery — NEWNYM and
+        Tor restarts cause more harm than good by disrupting working services.
+        Stuck uploads will either eventually succeed or be cleaned up by the
+        heartbeat's reconciliation check.
+        """
         now = time.time()
         with self.lock:
             if not self.in_flight:
@@ -401,24 +405,13 @@ class QueueManager:
             oldest = min(self.in_flight.values())
             elapsed = now - oldest
 
-        # Apply backoff — don't recover too frequently
-        backoff = min(self.STUCK_TIMEOUT * (2 ** self._recovery_count),
-                      self.MAX_BACKOFF)
-        if now - self._last_recovery_time < backoff:
-            return
-        if elapsed < backoff:
-            return
-
-        if not self._ever_active:
-            # No address has EVER gone active — bad guard, restart Tor
-            log(f"RECOVERY: in-flight stuck {elapsed:.0f}s, 0 ever active — "
-                f"restarting Tor for fresh guards (attempt {self._recovery_count + 1})")
-            self._restart_tor()
-        else:
-            # Some active, current batch stuck — try NEWNYM for new circuits
-            log(f"RECOVERY: in-flight stuck {elapsed:.0f}s, {len(self.active)} active — "
-                f"sending SIGNAL NEWNYM (attempt {self._recovery_count + 1})")
-            self._signal_newnym()
+        if elapsed > self.STUCK_TIMEOUT:
+            with self.lock:
+                stuck_count = sum(1 for t in self.in_flight.values()
+                                  if now - t > self.STUCK_TIMEOUT)
+            log(f"STUCK: {stuck_count} in-flight addresses waiting >{self.STUCK_TIMEOUT}s "
+                f"for descriptor upload ({len(self.active)} active, "
+                f"oldest {elapsed:.0f}s) — no recovery action taken")
 
     def _restart_tor(self):
         """Restart Tor with fresh guard selection. Re-queues all services."""
