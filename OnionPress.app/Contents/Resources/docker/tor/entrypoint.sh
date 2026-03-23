@@ -91,6 +91,15 @@ TORRC_EOF
         echo "ERROR: onionheaven-queue-manager.py failed to start"
     fi
 
+    # Start takeover worker (processes DB-mediated takeover/release/audit queues)
+    TW_LOG="/var/lib/onionpress/onionheaven/takeover-worker-${CONTAINER_NAME}.log"
+    CONTAINER_NAME="${CONTAINER_NAME}" TAKEOVER_WORKER=1 python3 /onionheaven-takeover-worker.py 2>"$TW_LOG" &
+    TW_PID=$!
+    sleep 1
+    if ! kill -0 $TW_PID 2>/dev/null; then
+        echo "ERROR: onionheaven-takeover-worker.py failed to start"
+    fi
+
     # Wait on Tor (main process)
     wait $TOR_PID
     exit $?
