@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -1129,28 +1130,22 @@ def cleanup_stress_tests(conn=None):
 
     # 5. Remove takeover workers that are now empty (assigned_count = 0).
     #    Also discover orphaned workers not in the DB.
+    to_remove = set()
     try:
         empty_workers = conn.execute(
             "SELECT container_name FROM takeover_containers WHERE assigned_count <= 0"
         ).fetchall()
         for w in empty_workers:
-            name = w["container_name"]
-            try:
-                subprocess.run(["docker", "rm", "-f", name],
-                               capture_output=True, timeout=15)
-                stats["workers_removed"] += 1
-                log(f"cleanup_stress_tests: removed empty worker {name}")
-            except Exception:
-                pass
+            to_remove.add(w["container_name"])
             conn.execute(
                 "DELETE FROM takeover_containers WHERE container_name = ?",
-                (name,)
+                (w["container_name"],)
             )
         db_commit_with_retry(conn)
     except sqlite3.OperationalError:
         pass
 
-    # Also remove orphaned takeover containers not tracked in DB
+    # Also discover orphaned takeover containers not tracked in DB
     try:
         db_workers = set()
         try:
@@ -1166,12 +1161,20 @@ def cleanup_stress_tests(conn=None):
         if result.returncode == 0:
             for name in result.stdout.strip().splitlines():
                 if name.startswith("onionheaven-takeover-") and name not in db_workers:
-                    subprocess.run(["docker", "rm", "-f", name],
-                                   capture_output=True, timeout=15)
-                    stats["workers_removed"] += 1
-                    log(f"cleanup_stress_tests: removed orphaned worker {name}")
+                    to_remove.add(name)
     except Exception:
         pass
+
+    # Remove all in parallel
+    if to_remove:
+        def _rm(name):
+            subprocess.run(["docker", "rm", "-f", name],
+                           capture_output=True, timeout=15)
+            return name
+        with ThreadPoolExecutor(max_workers=len(to_remove)) as pool:
+            for _ in as_completed({pool.submit(_rm, n): n for n in to_remove}):
+                stats["workers_removed"] += 1
+        log(f"cleanup_stress_tests: removed {stats['workers_removed']} workers")
 
     if own_conn:
         conn.close()
@@ -1353,14 +1356,17 @@ def reset_onionheaven(conn=None):
     except Exception:
         pass
 
-    for name in old_workers:
-        try:
+    if old_workers:
+        def _rm(name):
             subprocess.run(["docker", "rm", "-f", name],
                            capture_output=True, timeout=15)
-            stats["old_workers_removed"] += 1
-            log(f"reset_onionheaven: removed old worker {name}")
-        except Exception:
-            pass
+            return name
+        with ThreadPoolExecutor(max_workers=len(old_workers)) as pool:
+            for name in as_completed(
+                {pool.submit(_rm, n): n for n in old_workers}
+            ):
+                stats["old_workers_removed"] += 1
+        log(f"reset_onionheaven: removed {stats['old_workers_removed']} workers")
 
     _next_worker_index = 0
 
