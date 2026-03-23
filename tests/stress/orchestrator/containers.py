@@ -409,7 +409,7 @@ mkdir -p /var/lib/tor
 chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
 chmod 700 /var/lib/tor
 
-python3 /worker-server.py {cfg.base_port} {workers_in_ctr} &
+python3 /worker-server.py {cfg.base_port} {workers_in_ctr} {idx} &
 
 MAX_TOR_RETRIES=3
 TOR_ATTEMPT=0
@@ -446,7 +446,7 @@ mkdir -p /var/lib/arti/cache /var/lib/arti/state
 chown -R arti:arti /var/lib/arti
 chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
-python3 /worker-server.py {cfg.base_port} {workers_in_ctr} &
+python3 /worker-server.py {cfg.base_port} {workers_in_ctr} {idx} &
 
 su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
 ARTI_PID=$!

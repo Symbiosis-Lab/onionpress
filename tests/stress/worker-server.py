@@ -34,11 +34,15 @@ _worker_info = None
 
 def _load_worker_info():
     global _worker_info
+    ctr_idx = int(sys.argv[3]) if len(sys.argv) > 3 else -1
     try:
         import sqlite3
         conn = sqlite3.connect("/worker-data/worker-info.db", timeout=10)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM workers").fetchall()
+        if ctr_idx >= 0:
+            rows = conn.execute("SELECT * FROM workers WHERE container = ?", (ctr_idx,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM workers").fetchall()
         conn.close()
         _worker_info = {row["local_index"]: dict(row) for row in rows}
     except Exception:
