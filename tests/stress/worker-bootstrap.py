@@ -496,11 +496,12 @@ def main_ctor_ramped():
     in_flight = {}  # service_id -> (worker_index, timestamp)
     completed = []  # worker indices done (ADD_ONION + descriptor uploaded)
 
+    # Thread pool for background OnionHeaven registrations
+    reg_pool = ThreadPoolExecutor(max_workers=10)
+    reg_futures = []
+
     def register_in_background(w):
-        """Register a worker with OnionHeaven (runs in thread pool).
-        NOTE: No longer called during bootstrap — heartbeat loop handles
-        initial registration. Kept for potential future use.
-        """
+        """Register a worker with OnionHeaven (runs in thread pool)."""
         privkey = base64.b64decode(w["privkey_b64"])
         pubkey = base64.b64decode(w["pubkey_b64"])
         pem_b64 = w.get("_pem_b64", "")
@@ -616,11 +617,9 @@ def main_ctor_ramped():
         for sid, idx in promoted:
             del in_flight[sid]
             completed.append(idx)
-            print(f"[worker {idx}] descriptor ready ({len(completed)}/{NUM_WORKERS} done)", flush=True)
-            # No explicit registration — the heartbeat loop sends /online
-            # for all workers with addresses, which creates the entry on
-            # first heartbeat. This avoids the stale-registration flap where
-            # the entry exists but the first heartbeat hasn't arrived yet.
+            print(f"[worker {idx}] descriptor ready, registering ({len(completed)}/{NUM_WORKERS} done)", flush=True)
+            # Register with OnionHeaven immediately in background
+            reg_futures.append(reg_pool.submit(register_in_background, workers[idx]))
 
         if promoted:
             fill_slots()
@@ -628,9 +627,18 @@ def main_ctor_ramped():
     if monitor:
         monitor.stop()
 
+    # Wait for any remaining registrations to finish
+    for f in reg_futures:
+        f.result()
+    reg_pool.shutdown(wait=False)
+
+    # PEM keys are already stored in the DB as arti_key_pem via _upsert_worker.
+    # Keep _pem_b64 in memory for heartbeat — every /online must include the key.
+
+    registered_workers = [w for w in workers if w and w.get("registered")]
     all_with_addresses = [w for w in workers if w and w.get("content_address")]
-    print(f"Bootstrap complete: {len(all_with_addresses)}/{NUM_WORKERS} have addresses, "
-          f"heartbeat will register all via /online", flush=True)
+    print(f"Bootstrap complete: {len(registered_workers)}/{NUM_WORKERS} registered "
+          f"({len(all_with_addresses)} have addresses, heartbeat will retry unregistered)", flush=True)
 
     # Heartbeat loop includes ALL workers with addresses — not just registered ones.
     # Workers that failed initial registration will get registered via heartbeat /online.
