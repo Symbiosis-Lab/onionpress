@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.21"
+        self.version = "2.4.35"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -593,6 +593,13 @@ class OnionPressApp(rumps.App):
         # Update onion_proxy module globals (already imported with defaults)
         onion_proxy.PROXY_PORT = self.proxy_port
         onion_proxy.PHP_PROXY_PORT = self.wp_port
+
+        # Update OnionHeaven hub address from config
+        oh_addr = self._read_config_value(
+            "ONIONHEAVEN_ADDRESS",
+            "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
+        if oh_addr:
+            onionheaven.ONIONHEAVEN_ADDRESS = oh_addr
 
         # Do slow I/O operations in background after icon appears
         def background_init():
@@ -651,6 +658,13 @@ class OnionPressApp(rumps.App):
             except Exception as e:
                 self.log(f"Native messaging install failed: {e}")
 
+            # Sync login item LaunchAgent with config
+            launch_on_login = self._read_config_value("LAUNCH_ON_LOGIN", "yes")
+            if launch_on_login == "yes" and not self._is_login_item_installed():
+                self.add_login_item()
+            elif launch_on_login != "yes" and self._is_login_item_installed():
+                self.remove_login_item()
+
             # Check if Cloudflare Tunnel is configured
             cf_token = self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN")
             if cf_token:
@@ -695,22 +709,34 @@ class OnionPressApp(rumps.App):
         self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
-        self._tor_auto_restarted = False   # Whether we've auto-restarted tor this startup
+        self._tor_internally_ready = False # Checks 1-4 passed (Arti+WordPress up)
+        self._onionheaven_reclaim_succeeded = False  # Whether /online reclaim succeeded
+        self._onionheaven_reclaim_in_flight = False  # Whether a reclaim thread is running
+        self._onionheaven_reclaim_last_attempt = 0   # Timestamp of last reclaim attempt
+        self._tor_last_auto_restart = 0    # Timestamp of last auto-restart (cooldown-based)
         self._wordpress_confirmed = False  # WordPress responded at least once (stays up reliably)
         self.healthcheck_address = None    # Healthcheck .onion address
         self.onionheaven_messages = []          # Messages received from OnionHeaven
         self._onionheaven_alert_shown = False   # Whether we've shown OnionHeaven alert icon
         self.is_onionheaven = False             # True if this instance is OnionHeaven
         self._onionheaven_checked = False       # Whether onionheaven mode has been checked
-        self._onionheaven_registration_started = False  # Whether registration thread is running
+        self._onionheaven_registration_succeeded = False  # Whether registration succeeded
+        self._onionheaven_registration_in_flight = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
         self._quitting = False                 # True once quit cleanup has started
         self._stopping = False                 # True while Stop button is in progress
         self._run_generation = 0               # Incremented on stop/start; stale threads check this
 
+        # Wayback queue state
+        self._wayback_queue = []
+        self._wayback_queue_lock = threading.Lock()
+        self._wayback_last_drain = 0
+        self._wayback_queue_item = rumps.MenuItem("", callback=None)
+
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
+        self.local_site_item = rumps.MenuItem("Open Local Site", callback=self.open_local_site)
         self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
@@ -719,6 +745,7 @@ class OnionPressApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
             self.browser_menu_item,
+            self.local_site_item,
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
@@ -751,93 +778,89 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=self.auto_start, daemon=True).start()
 
     def show_launch_splash(self):
-        """Show non-blocking launch splash with logo - no I/O blocking"""
-        def show():
+        """Show launch splash with logo synchronously (called from __init__ on main thread)"""
+        try:
+            # Create window - taller for buttons and time estimate
+            window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                AppKit.NSMakeRect(0, 0, 320, 300),
+                AppKit.NSWindowStyleMaskTitled,  # No close button - dismisses automatically when ready
+                AppKit.NSBackingStoreBuffered,
+                False
+            )
+            window.setTitle_("OnionPress")
+            window.setLevel_(AppKit.NSFloatingWindowLevel)
+            window.center()
+            window.setReleasedWhenClosed_(False)  # Keep window object alive
+            window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
+
+            # Create content view
+            content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 320, 300))
+
+            # Add "Launching..." text
+            text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(60, 120, 200, 30))
+            text_field.setStringValue_("Launching OnionPress...")
+            text_field.setBezeled_(False)
+            text_field.setDrawsBackground_(False)
+            text_field.setEditable_(False)
+            text_field.setSelectable_(False)
+            text_field.setAlignment_(AppKit.NSTextAlignmentCenter)
+            font = AppKit.NSFont.systemFontOfSize_(16)
+            text_field.setFont_(font)
+            content_view.addSubview_(text_field)
+
+            # Add estimated time text
+            time_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(40, 90, 240, 20))
+            time_field.setStringValue_("Estimated time: ~3 minutes")
+            time_field.setBezeled_(False)
+            time_field.setDrawsBackground_(False)
+            time_field.setEditable_(False)
+            time_field.setSelectable_(False)
+            time_field.setAlignment_(AppKit.NSTextAlignmentCenter)
+            time_field.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+            small_font = AppKit.NSFont.systemFontOfSize_(12)
+            time_field.setFont_(small_font)
+            content_view.addSubview_(time_field)
+
+            # Add View Log button
+            view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(20, 20, 130, 32))
+            view_log_button.setTitle_("View Log")
+            view_log_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            view_log_button.setTarget_(self)
+            view_log_button.setAction_("openLogFile:")
+            content_view.addSubview_(view_log_button)
+
+            # Add Dismiss button
+            dismiss_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(170, 20, 130, 32))
+            dismiss_button.setTitle_("Dismiss")
+            dismiss_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            dismiss_button.setTarget_(self)
+            dismiss_button.setAction_("dismissSplashButton:")
+            content_view.addSubview_(dismiss_button)
+
+            # Add logo (fast local PNG load)
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
+                image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if image:
+                    image_view.setImage_(image)
+                    content_view.addSubview_(image_view)
+
+            window.setContentView_(content_view)
+            window.makeKeyAndOrderFront_(None)
+
+            self.launch_splash = window
+            self.launch_splash_time_field = time_field  # Store reference for updates
+
+            # Log splash creation
             try:
-                # Create window (no I/O) - taller for buttons and time estimate
-                window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-                    AppKit.NSMakeRect(0, 0, 320, 300),
-                    AppKit.NSWindowStyleMaskTitled,  # No close button - dismisses automatically when ready
-                    AppKit.NSBackingStoreBuffered,
-                    False
-                )
-                window.setTitle_("OnionPress")
-                window.setLevel_(AppKit.NSFloatingWindowLevel)
-                window.center()
-                window.setReleasedWhenClosed_(False)  # Keep window object alive
-                window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
+                with open(self.log_file, 'a') as f:
+                    f.write(f"DEBUG: Launch splash created and shown\n")
+            except Exception:
+                pass
 
-                # Create content view
-                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 320, 300))
-
-                # Add "Launching..." text (no I/O)
-                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(60, 120, 200, 30))
-                text_field.setStringValue_("Launching OnionPress...")
-                text_field.setBezeled_(False)
-                text_field.setDrawsBackground_(False)
-                text_field.setEditable_(False)
-                text_field.setSelectable_(False)
-                text_field.setAlignment_(AppKit.NSTextAlignmentCenter)
-                font = AppKit.NSFont.systemFontOfSize_(16)
-                text_field.setFont_(font)
-                content_view.addSubview_(text_field)
-
-                # Add estimated time text
-                time_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(40, 90, 240, 20))
-                time_field.setStringValue_("Estimated time: ~3 minutes")
-                time_field.setBezeled_(False)
-                time_field.setDrawsBackground_(False)
-                time_field.setEditable_(False)
-                time_field.setSelectable_(False)
-                time_field.setAlignment_(AppKit.NSTextAlignmentCenter)
-                time_field.setTextColor_(AppKit.NSColor.secondaryLabelColor())
-                small_font = AppKit.NSFont.systemFontOfSize_(12)
-                time_field.setFont_(small_font)
-                content_view.addSubview_(time_field)
-
-                # Add View Log button
-                view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(20, 20, 130, 32))
-                view_log_button.setTitle_("View Log")
-                view_log_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-                view_log_button.setTarget_(self)
-                view_log_button.setAction_("openLogFile:")
-                content_view.addSubview_(view_log_button)
-
-                # Add Dismiss button
-                dismiss_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(170, 20, 130, 32))
-                dismiss_button.setTitle_("Dismiss")
-                dismiss_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-                dismiss_button.setTarget_(self)
-                dismiss_button.setAction_("dismissSplashButton:")
-                content_view.addSubview_(dismiss_button)
-
-                window.setContentView_(content_view)
-                window.makeKeyAndOrderFront_(None)
-
-                self.launch_splash = window
-                self.launch_splash_time_field = time_field  # Store reference for updates
-
-                # Log splash creation
-                try:
-                    with open(self.log_file, 'a') as f:
-                        f.write(f"DEBUG: Launch splash created and shown\n")
-                except Exception:
-                    pass
-
-                # Add logo on main thread (fast local PNG load, avoids AppKit threading crash)
-                icon_path = os.path.join(self.resources_dir, "app-icon.png")
-                if os.path.exists(icon_path):
-                    image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
-                    image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                    if image:
-                        image_view.setImage_(image)
-                        content_view.addSubview_(image_view)
-
-            except Exception as e:
-                pass  # Don't log yet, log file not ready
-
-        # Show on main thread
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(show)
+        except Exception as e:
+            pass  # Don't crash on splash failure
 
     def dismiss_launch_splash(self):
         """Dismiss the launch splash window"""
@@ -1377,43 +1400,46 @@ class OnionPressApp(rumps.App):
         self.start_service(None)
 
 
+    LAUNCHAGENT_LABEL = "com.onionpress.launcher"
+    LAUNCHAGENT_PATH = os.path.expanduser(
+        f"~/Library/LaunchAgents/{LAUNCHAGENT_LABEL}.plist")
+
+    def _is_login_item_installed(self):
+        """Check if LaunchAgent plist exists"""
+        return os.path.exists(self.LAUNCHAGENT_PATH)
+
     def add_login_item(self):
-        """Add app to login items - prompts user to add manually"""
+        """Install LaunchAgent plist for auto-start on login"""
         try:
-            # Open System Settings to Login Items
-            # Modern macOS doesn't allow programmatic login item addition without prompts
-            rumps.alert(
-                title="Enable Launch on Login",
-                message="Please add OnionPress to Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Click the + button\n4. Select OnionPress.app from Applications\n\nNote: You can also disable this setting in the config file.",
-                ok="Open System Settings"
-            )
-
-            # Open System Settings to Login Items
-            subprocess.run(["open", "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"])
-
-            self.log("User prompted to add login item manually")
+            plist = {
+                "Label": self.LAUNCHAGENT_LABEL,
+                "ProgramArguments": ["open", "-a", "/Applications/OnionPress.app"],
+                "RunAtLoad": True,
+                "LimitLoadToSessionType": "Aqua",
+            }
+            os.makedirs(os.path.dirname(self.LAUNCHAGENT_PATH), exist_ok=True)
+            with open(self.LAUNCHAGENT_PATH, "wb") as f:
+                plistlib.dump(plist, f)
+            self.log("LaunchAgent installed for login auto-start")
             return True
         except Exception as e:
-            self.log(f"Error prompting login item addition: {e}")
+            self.log(f"Error installing LaunchAgent: {e}")
             return False
 
     def remove_login_item(self):
-        """Remove app from login items - prompts user to remove manually"""
+        """Remove LaunchAgent plist"""
         try:
-            # Open System Settings to Login Items
-            rumps.alert(
-                title="Disable Launch on Login",
-                message="Please remove OnionPress from Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Select OnionPress\n4. Click the - button to remove it",
-                ok="Open System Settings"
-            )
-
-            # Open System Settings to Login Items
-            subprocess.run(["open", "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"])
-
-            self.log("User prompted to remove login item manually")
+            if os.path.exists(self.LAUNCHAGENT_PATH):
+                # Unload first (ignore errors if not loaded)
+                subprocess.run(
+                    ["launchctl", "bootout", f"gui/{os.getuid()}",
+                     self.LAUNCHAGENT_PATH],
+                    capture_output=True, timeout=10)
+                os.remove(self.LAUNCHAGENT_PATH)
+            self.log("LaunchAgent removed")
             return True
         except Exception as e:
-            self.log(f"Error prompting login item removal: {e}")
+            self.log(f"Error removing LaunchAgent: {e}")
             return False
 
 
@@ -1470,6 +1496,7 @@ class OnionPressApp(rumps.App):
 
     def check_tor_reachability(self, log_result=True):
         """Check if the .onion service is properly configured and published"""
+        self._tor_internally_ready = False
         if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
             return False
 
@@ -1549,6 +1576,9 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ WordPress not reachable from Tor container")
                 return False
 
+            # Checks 1-4 passed — mark internally ready
+            self._tor_internally_ready = True
+
             # Check 5: Verify onion service is actually reachable through Tor network
             # Uses the independent tor-client container (not onionpress-tor which hosts
             # the service and can resolve its own .onion via self-connection shortcut)
@@ -1563,9 +1593,15 @@ class OnionPressApp(rumps.App):
                 timeout=15,
                 env=docker_env
             )
-            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301"]:
+            http_code = probe_result.stdout.strip() if probe_result.returncode == 0 else "000"
+            if http_code not in ("200", "301"):
                 if log_result:
-                    self.log(f"✗ Onion service not yet reachable through Tor network")
+                    if http_code == "302":
+                        self.log(f"✗ Onion service returning 302 (OnionHeaven takeover active)")
+                    elif http_code == "000" or not http_code:
+                        self.log(f"✗ Onion service not yet reachable through Tor network")
+                    else:
+                        self.log(f"✗ Onion service returned HTTP {http_code}")
                 return False
 
             if log_result:
@@ -1770,6 +1806,9 @@ class OnionPressApp(rumps.App):
                     if ready_now and not previous_ready:
                         self.is_ready = True
                         self._was_ready = True
+                        self._onionheaven_reclaim_succeeded = False
+                        self._onionheaven_reclaim_in_flight = False
+                        self._onionheaven_reclaim_last_attempt = 0
                         self._bootstrap_stall_count = 0
                         self._yellow_since = None
                         elapsed = int(time.time() - self.startup_time)
@@ -1809,7 +1848,7 @@ class OnionPressApp(rumps.App):
                             self.is_ready = False
                             self._yellow_since = time.time()
                             self._bootstrap_stall_count = 0
-                            self._tor_auto_restarted = False  # Allow auto-restart again
+                            self._tor_last_auto_restart = 0  # Allow immediate auto-restart
                             self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
@@ -1827,13 +1866,14 @@ class OnionPressApp(rumps.App):
                         # guards, circuit failures). If Arti is healthy but
                         # just waiting for descriptor propagation, don't restart
                         # — that would reset progress.
+                        # Uses cooldown (5 min) so we can retry if the spiral recurs.
                         if (self._yellow_since
-                                and not self._tor_auto_restarted
                                 and not self._stopping
                                 and not self._quitting
                                 and (time.time() - self._yellow_since) > 120
+                                and (time.time() - self._tor_last_auto_restart) > 300
                                 and self._tor_container_unhealthy()):
-                            self._tor_auto_restarted = True
+                            self._tor_last_auto_restart = time.time()
                             self.log("Tor container unhealthy after 2min — restarting")
                             threading.Thread(target=self._auto_restart_tor, daemon=True).start()
 
@@ -1862,12 +1902,22 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.poll_onionheaven_messages()
 
-                # OnionHeaven: detect onionheaven mode, register, or notify online
+                # Poll and drain Wayback queue
+                self.poll_wayback_queue()
+                if self.is_ready:
+                    self.drain_wayback_queue()
+
+                # Write status, poll for config updates & action requests from WordPress settings page
+                self.write_status_to_volume()
+                self.poll_config_updates()
+                self.poll_requested_actions()
+
+                # OnionHeaven: detect onionheaven mode (one-shot)
                 if self.is_ready and not self._onionheaven_checked:
                     self._onionheaven_checked = True
                     if onionheaven.is_onionheaven_instance(self.onion_address):
                         self.is_onionheaven = True
-                        self.log("OnionHeaven mode activated (poller runs in onionheaven container)")
+                        self.log("OnionHeaven mode activated (heartbeat monitor runs in onionheaven container)")
                         # One-shot: auto-set PREVENT_SLEEP=never on first OnionHeaven detection
                         # Uses a marker file so we never override the user's later choice
                         sleep_marker = os.path.join(self.app_support, ".onionheaven_sleep_set")
@@ -1883,13 +1933,36 @@ class OnionPressApp(rumps.App):
                         self.stop_caffeinate()
                         self.start_caffeinate()
                         self.update_menu()
-                    elif not self._onionheaven_registration_started:
-                        # First time — full registration with keys
-                        self._onionheaven_registration_started = True
-                        onionheaven.start_registration_thread(self)
-                    else:
-                        # Already registered, coming back online (wake/reconnect)
-                        onionheaven.start_online_notification_thread(self)
+
+                # OnionHeaven: register or notify online (retries until success)
+                if (self.is_ready and not self.is_onionheaven
+                        and not self._onionheaven_registration_succeeded
+                        and not self._onionheaven_registration_in_flight):
+                    # First time or previous registration failed — full registration with keys
+                    self._onionheaven_registration_in_flight = True
+                    onionheaven.start_registration_thread(self)
+                elif (self.is_ready and not self.is_onionheaven
+                        and self._onionheaven_registration_succeeded
+                        and ready_now and not previous_ready):
+                    # Already registered, coming back online (wake/reconnect)
+                    onionheaven.start_online_notification_thread(self)
+
+                # OnionHeaven: reclaim address after takeover.
+                # If internally ready (checks 1-4) but self-check fails (check 5),
+                # OnionHeaven may have taken over our address (serving 302 redirect).
+                # Send /online as soon as Tor network is up — don't wait for
+                # the self-check, which can't pass until the takeover is released.
+                # This also handles fresh launches where a previous session's address
+                # was taken over while we were offline.
+                # Keep retrying every 60s until we get a positive response.
+                if (self._tor_internally_ready and not self.is_ready
+                        and not self._onionheaven_reclaim_succeeded
+                        and not self._onionheaven_reclaim_in_flight
+                        and (time.time() - self._onionheaven_reclaim_last_attempt) > 60):
+                    self._onionheaven_reclaim_in_flight = True
+                    self._onionheaven_reclaim_last_attempt = time.time()
+                    self.log("Internally ready but self-check failing — sending /online to reclaim address")
+                    onionheaven.start_online_notification_thread(self)
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
@@ -1945,7 +2018,12 @@ class OnionPressApp(rumps.App):
                 self.onionheaven_messages = []
                 self._onionheaven_alert_shown = False
                 self._onionheaven_checked = False
-                self._onionheaven_registration_started = False
+                self._onionheaven_registration_succeeded = False
+                self._onionheaven_registration_in_flight = False
+                self._onionheaven_reclaim_succeeded = False
+                self._onionheaven_reclaim_in_flight = False
+                self._onionheaven_reclaim_last_attempt = 0
+                self._tor_internally_ready = False
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:
@@ -2000,6 +2078,19 @@ class OnionPressApp(rumps.App):
             if self._quitting:
                 return  # Don't update icon/menu during shutdown
 
+            # Show/hide Wayback queue status
+            with self._wayback_queue_lock:
+                wq_count = len(self._wayback_queue)
+            if wq_count > 0:
+                self._wayback_queue_item.title = f"Pending Wayback Saves ({wq_count})"
+                if self._wayback_queue_item.title not in self.menu:
+                    self.menu.insert_after("Copy Onion Address", self._wayback_queue_item)
+            else:
+                # Remove any existing queue item (title may have changed)
+                for key in list(self.menu.keys()):
+                    if isinstance(key, str) and key.startswith("Pending Wayback Saves"):
+                        del self.menu[key]
+
             if state == "available":
                 self.icon = self.icon_running
                 if self.is_onionheaven:
@@ -2012,34 +2103,34 @@ class OnionPressApp(rumps.App):
                 self.menu["Backup..."].set_callback(self.backup)
                 self.menu["Restore..."].set_callback(self.restore)
                 self.update_browser_menu_title()
-            elif state == "starting":
-                self.icon = self.icon_starting
-                pct = self._last_bootstrap_pct
-                if pct > 0:
-                    self.menu["Starting..."].title = f"Status: Connecting to Tor ({pct}%)..."
-                else:
-                    self.menu["Starting..."].title = "Status: Starting up, please wait..."
+                # Purple: browser opens .onion, local site available as secondary
+                self.browser_menu_item.set_callback(self.open_tor_browser)
+                self.local_site_item.title = f"Open Local Site ({self.local_url})"
+                self.local_site_item.set_callback(self.open_local_site)
+            elif state in ("starting", "offline", "stuck"):
+                if state == "starting":
+                    self.icon = self.icon_starting
+                    pct = self._last_bootstrap_pct
+                    if pct > 0:
+                        self.menu["Starting..."].title = f"Status: Connecting to Tor ({pct}%)..."
+                    else:
+                        self.menu["Starting..."].title = "Status: Starting up, please wait..."
+                elif state == "offline":
+                    self.icon = self.icon_stopped
+                    self.menu["Starting..."].title = "Status: Offline — no internet connection"
+                else:  # stuck
+                    self.icon = self.icon_starting
+                    self.menu["Starting..."].title = "Status: Slow to connect — try Restart"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
                 self.menu["Backup..."].set_callback(self.backup)
                 self.menu["Restore..."].set_callback(self.restore)
-            elif state == "offline":
-                self.icon = self.icon_stopped
-                self.menu["Starting..."].title = "Status: Offline — no internet connection"
-                self.menu["Start"].set_callback(None)
-                self.menu["Stop"].set_callback(self.stop_service)
-                self.menu["Restart"].set_callback(self.restart_service)
-                self.menu["Backup..."].set_callback(self.backup)
-                self.menu["Restore..."].set_callback(self.restore)
-            elif state == "stuck":
-                self.icon = self.icon_starting
-                self.menu["Starting..."].title = "Status: Slow to connect — try Restart"
-                self.menu["Start"].set_callback(None)
-                self.menu["Stop"].set_callback(self.stop_service)
-                self.menu["Restart"].set_callback(self.restart_service)
-                self.menu["Backup..."].set_callback(self.backup)
-                self.menu["Restore..."].set_callback(self.restore)
+                # Gray/Yellow: browser opens local site since .onion isn't reachable
+                self.browser_menu_item.title = f"Open Local Site ({self.local_url})"
+                self.browser_menu_item.set_callback(self.open_local_site)
+                self.local_site_item.title = ""
+                self.local_site_item.set_callback(None)
             else:
                 # Stopped
                 self.icon = self.icon_stopped
@@ -2052,6 +2143,10 @@ class OnionPressApp(rumps.App):
                 self.menu["Restart"].set_callback(None)
                 self.menu["Backup..."].set_callback(None)
                 self.menu["Restore..."].set_callback(None)
+                # Stopped: disable browser items
+                self.browser_menu_item.set_callback(None)
+                self.local_site_item.title = ""
+                self.local_site_item.set_callback(None)
 
         # Execute on main thread
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(do_update)
@@ -2217,7 +2312,7 @@ class OnionPressApp(rumps.App):
         self.log("System going to sleep")
         if not self.is_onionheaven:
             # Notify OnionHeaven before sleeping so it can take over quickly
-            if self.is_ready and self._onionheaven_registration_started:
+            if self.is_ready and self._onionheaven_registration_succeeded:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
@@ -2235,7 +2330,7 @@ class OnionPressApp(rumps.App):
         self.log("="*60)
 
         # Notify OnionHeaven before stopping services
-        if self._onionheaven_registration_started and not self.is_onionheaven:
+        if self._onionheaven_registration_succeeded and not self.is_onionheaven:
             try:
                 onionheaven.notify_onionheaven_offline(self)
             except Exception:
@@ -2336,35 +2431,30 @@ class OnionPressApp(rumps.App):
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             result = subprocess.run(
                 [docker_bin, "logs", "onionpress-tor", "--tail", "50"],
-                capture_output=True, env=env, timeout=10)
-            logs = (result.stderr + result.stdout).decode("utf-8", errors="replace")
+                capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=10)
+            logs = (result.stderr or "") + (result.stdout or "")
             # Signs of trouble that a restart can fix
             sick_patterns = [
                 "No usable guards",
                 "Too many preemptive onion service circuits failed",
                 "Rejected 60/60 as down",
+                "Could not connect rendezvous circuit",
             ]
-            # Signs of health — Arti is working, just waiting
+            # Signs of health — Arti is working, just waiting for propagation.
+            # "reuploading descriptor" is NOT included because it can coexist
+            # with a circuit failure spiral — Arti can still upload descriptors
+            # even when it can't build rendezvous circuits.
             healthy_patterns = [
                 "Sufficiently bootstrapped",
-                "reuploading descriptor",
             ]
             has_sick = any(p in logs for p in sick_patterns)
             has_healthy = any(p in logs for p in healthy_patterns)
-            if has_sick and not has_healthy:
+            if has_sick:
+                # Any sick pattern means trouble — restart will help
                 self.log("Tor health check: unhealthy (circuit/guard failures)")
                 return True
-            if has_healthy and not has_sick:
+            if has_healthy:
                 self.log("Tor health check: healthy, waiting for propagation")
-                return False
-            if has_sick and has_healthy:
-                # Mixed signals — check which came last (later in log = more recent)
-                last_sick = max(logs.rfind(p) for p in sick_patterns if p in logs)
-                last_healthy = max(logs.rfind(p) for p in healthy_patterns if p in logs)
-                if last_sick > last_healthy:
-                    self.log("Tor health check: degraded after healthy start")
-                    return True
-                self.log("Tor health check: recovered, waiting for propagation")
                 return False
             # No recognizable patterns — assume unhealthy if we've been waiting
             self.log("Tor health check: no clear signals, restarting as precaution")
@@ -2409,6 +2499,11 @@ class OnionPressApp(rumps.App):
         thread = threading.Thread(target=checker, daemon=True)
         thread.start()
 
+    @property
+    def local_url(self):
+        """The local URL for accessing WordPress."""
+        return f"http://localhost:{self.wp_port}"
+
     @rumps.clicked("Copy Onion Address")
     def copy_address(self, _):
         """Copy onion address to clipboard"""
@@ -2420,6 +2515,12 @@ class OnionPressApp(rumps.App):
             )
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
+
+    def open_local_site(self, _):
+        """Open the local WordPress site in the default browser"""
+        url = self.local_url
+        subprocess.run(["open", url])
+        self.log(f"Opened local site: {url}")
 
     def monitor_tor_browser_install(self):
         """Monitor for Tor Browser installation and offer to open site when detected"""
@@ -2839,8 +2940,8 @@ class OnionPressApp(rumps.App):
                 )
                 hostname = result.stdout.strip().replace(".onion", "")
                 if hostname:
-                    # Extract the prefix that was used (first 3 chars as best guess)
-                    current_prefix = hostname[:3]
+                    # Extract the prefix from the current address
+                    current_prefix = hostname[:len(prefix)] if len(hostname) >= len(prefix) else hostname[:3]
             except Exception:
                 pass
 
@@ -3094,7 +3195,7 @@ class OnionPressApp(rumps.App):
 
         def stop():
             # Notify OnionHeaven before stopping services
-            if self._onionheaven_registration_started and not self.is_onionheaven:
+            if self._onionheaven_registration_succeeded and not self.is_onionheaven:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
@@ -3276,7 +3377,7 @@ class OnionPressApp(rumps.App):
         "LAUNCH_ON_LOGIN": (
             "Launch on Login\n\n"
             "Automatically start OnionPress when you log in to macOS.\n"
-            "You can also manage this in System Settings \u2192 General \u2192 Login Items."
+            "Installs a LaunchAgent that runs OnionPress at login."
         ),
         "UPDATE_ON_LAUNCH": (
             "Update Docker Images on Launch\n\n"
@@ -3295,6 +3396,23 @@ class OnionPressApp(rumps.App):
             "Register with OnionHeaven\n\n"
             "Registers your site with OnionHeaven so it can redirect page "
             "requests to the Wayback Machine as a fallback when your Mac is offline."
+        ),
+        "ONIONHEAVEN_ADDRESS": (
+            "OnionHeaven Hub Address\n\n"
+            "The .onion address of the OnionHeaven hub your site registers with. "
+            "When your site goes offline, the hub redirects visitors to the "
+            "Wayback Machine copy.\n\n"
+            "Default: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+        ),
+        "TOR_IMPL": (
+            "Tor Implementation\n\n"
+            "Choose which Tor implementation runs your onion services.\n\n"
+            "Arti: Tor Project's modern Rust implementation (default). "
+            "Native arm64 on Apple Silicon.\n\n"
+            "C Tor: The classic C implementation. Faster onion service releases "
+            "(sends DESTROY cells to intro relays). Available via apt-get.\n\n"
+            "Keys are automatically converted between formats when switching.\n"
+            "Requires restart to take effect."
         ),
         "CLOUDFLARE_TUNNEL_TOKEN": (
             "Cloudflare Tunnel (Clearnet Access)\n\n"
@@ -3345,6 +3463,10 @@ class OnionPressApp(rumps.App):
             "yes": "Site will register with OnionHeaven.",
             "no": "OnionHeaven registration disabled. Wayback fallback won't work.",
         },
+        "TOR_IMPL": {
+            "arti": "Tor will run using Arti (Rust). Requires restart.",
+            "tor": "Tor will run using C Tor. Faster releases. Requires restart.",
+        },
         "CLOUDFLARE_TUNNEL_TOKEN": {
             "set": (
                 "Your site will be exposed on the clearnet via Cloudflare. "
@@ -3383,6 +3505,8 @@ class OnionPressApp(rumps.App):
             ("UPDATE_ON_LAUNCH", "yes"),
             ("INSTALL_IA_PLUGIN", "yes"),
             ("REGISTER_WITH_ONIONHEAVEN", "yes"),
+            ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
+            ("TOR_IMPL", "tor"),
             ("CLOUDFLARE_TUNNEL_TOKEN", ""),
         ]
         old_values = {}
@@ -3407,7 +3531,7 @@ class OnionPressApp(rumps.App):
         input_w = 100
         help_x = 280
         help_w = 25
-        container_h = 9 * row_h + 10
+        container_h = 12 * row_h + 10
 
         def _alert(title, message):
             """Show an alert with the OnionPress icon."""
@@ -3425,7 +3549,8 @@ class OnionPressApp(rumps.App):
         help_keys = [
             "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU", "PREVENT_SLEEP",
             "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH", "INSTALL_IA_PLUGIN",
-            "REGISTER_WITH_ONIONHEAVEN", "CLOUDFLARE_TUNNEL_TOKEN",
+            "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS",
+            "TOR_IMPL", "CLOUDFLARE_TUNNEL_TOKEN",
         ]
         help_target._help_texts = {
             i: self._SETTINGS_HELP[k] for i, k in enumerate(help_keys)
@@ -3539,7 +3664,19 @@ class OnionPressApp(rumps.App):
             y -= row_h
             add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", form_values["INSTALL_IA_PLUGIN"])
             y -= row_h
-            add_check_row(y, "Register with OnionHeaven", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
+            add_check_row(y, "Register with OnionHeaven (advanced)", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
+            y -= row_h
+            oh_addr_field = add_text_row(y, "OnionHeaven Hub (advanced):", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"])
+            oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
+            oh_addr_field.setFrame_(AppKit.NSMakeRect(input_x, oh_addr_field.frame().origin.y, input_w, 24))
+            y -= row_h
+            tor_impl_val = form_values.get("TOR_IMPL", "tor").lower()
+            if tor_impl_val not in ("arti", "tor"):
+                tor_impl_val = "tor"
+            add_popup_row(y, "Tor Implementation (advanced):", "TOR_IMPL", tor_impl_val, [
+                ("C Tor (default)", "tor"),
+                ("Arti", "arti"),
+            ])
             y -= row_h
             cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"])
             cf_field.setPlaceholderString_("paste tunnel token")
@@ -3561,11 +3698,15 @@ class OnionPressApp(rumps.App):
             # -- Collect new values from form --
             new_values = {}
             sleep_options_map = ["normal", "on-battery", "never"]
+            tor_impl_options_map = ["arti", "tor"]
             for key in [k for k, _ in settings_keys]:
                 widget = fields[key]
                 if key == "PREVENT_SLEEP":
                     idx = widget.indexOfSelectedItem()
                     new_values[key] = sleep_options_map[idx] if 0 <= idx < len(sleep_options_map) else "normal"
+                elif key == "TOR_IMPL":
+                    idx = widget.indexOfSelectedItem()
+                    new_values[key] = tor_impl_options_map[idx] if 0 <= idx < len(tor_impl_options_map) else "arti"
                 elif key in ("LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
                              "INSTALL_IA_PLUGIN", "REGISTER_WITH_ONIONHEAVEN"):
                     new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
@@ -3612,6 +3753,58 @@ class OnionPressApp(rumps.App):
                 form_values["VM_CPU"] = old_values["VM_CPU"]
                 continue
 
+            # -- Validate OnionHeaven address --
+            oh_addr = new_values.get("ONIONHEAVEN_ADDRESS", "").strip()
+            if oh_addr and oh_addr != old_values.get("ONIONHEAVEN_ADDRESS", ""):
+                self.log(f"Validating OnionHeaven address: {oh_addr}")
+                try:
+                    script = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "MacOS", "onionpress")
+                    result = subprocess.run(
+                        [script, "validate-oh-address", oh_addr],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=90
+                    )
+                    import json as _json
+                    vr = _json.loads(result.stdout.strip()) if result.stdout.strip() else {}
+                    status = vr.get("status", "")
+                    message = vr.get("message", "")
+
+                    if status == "invalid_format" or status == "self":
+                        _alert("Invalid OnionHeaven Address", message)
+                        form_values = new_values
+                        form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
+                        continue
+                    elif status == "site":
+                        resp = rumps.alert(
+                            title="Not an OnionHeaven Hub",
+                            message=f"{message}\n\nUse it anyway?",
+                            ok="Use Anyway",
+                            cancel="Cancel"
+                        )
+                        if resp != 1:
+                            form_values = new_values
+                            form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
+                            continue
+                        self.log(f"User accepted non-hub address: {oh_addr}")
+                    elif status == "unreachable":
+                        resp = rumps.alert(
+                            title="Address Unreachable",
+                            message=f"{message}\n\nUse it anyway?",
+                            ok="Use Anyway",
+                            cancel="Cancel"
+                        )
+                        if resp != 1:
+                            form_values = new_values
+                            form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
+                            continue
+                        self.log(f"User accepted unreachable address: {oh_addr}")
+                    else:
+                        self.log(f"OnionHeaven hub validated: {oh_addr}")
+                except Exception as e:
+                    self.log(f"OnionHeaven address validation error: {e}")
+
             # Validation passed
             break
 
@@ -3641,6 +3834,8 @@ class OnionPressApp(rumps.App):
                 "UPDATE_ON_LAUNCH": "Update Docker on Launch",
                 "INSTALL_IA_PLUGIN": "Install IA Plugin",
                 "REGISTER_WITH_ONIONHEAVEN": "Register with OnionHeaven",
+                "ONIONHEAVEN_ADDRESS": "OnionHeaven Hub",
+                "TOR_IMPL": "Tor Implementation",
                 "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Token",
             }
             label = labels.get(key, key)
@@ -3699,6 +3894,13 @@ class OnionPressApp(rumps.App):
         if "PREVENT_SLEEP" in changes:
             self.stop_caffeinate()
             self.start_caffeinate()
+
+        # Apply login item change immediately
+        if "LAUNCH_ON_LOGIN" in changes:
+            if new_values["LAUNCH_ON_LOGIN"] == "yes":
+                self.add_login_item()
+            else:
+                self.remove_login_item()
 
         self.log(f"Settings updated: {', '.join(changes)}")
         saved = AppKit.NSAlert.alloc().init()
@@ -4019,15 +4221,19 @@ class OnionPressApp(rumps.App):
 
                 if latest_version and parse_version(latest_version) > parse_version(current_version):
                     app_update_available = True
-                    response = rumps.alert(
-                        title="App Update Available",
-                        message=f"A new version of OnionPress is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nWould you like to download it?",
-                        ok="Download Update",
-                        cancel="Later"
+                    response = self.show_native_alert(
+                        "App Update Available",
+                        f"A new version of OnionPress is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nInstall will download and replace the app, then restart.",
+                        buttons=["Install Update", "Later"],
+                        cancel_button=1
                     )
-                    if response == 1:  # OK clicked
-                        release_url = data.get('html_url', 'https://github.com/brewsterkahle/onionpress/releases/latest')
-                        subprocess.run(["open", release_url])
+                    if response == 0:  # Install Update clicked
+                        threading.Thread(
+                            target=self._install_update,
+                            args=(data, latest_version),
+                            daemon=True
+                        ).start()
+                        return  # Skip Docker update check — we're about to restart
             else:
                 self.log(f"Update check curl failed: exit={result.returncode} stderr={result.stderr.strip()}")
         except Exception as e:
@@ -4041,6 +4247,191 @@ class OnionPressApp(rumps.App):
 
         # Check for Docker image updates
         threading.Thread(target=self._check_docker_updates_async, args=(app_update_available,), daemon=True).start()
+
+    def _install_update(self, release_data, latest_version):
+        """Download DMG, extract app, replace /Applications/OnionPress.app, prompt restart"""
+        import tempfile
+        import shutil
+
+        # Find the DMG asset in the release
+        dmg_url = None
+        for asset in release_data.get('assets', []):
+            if asset['name'].endswith('.dmg'):
+                dmg_url = asset['browser_download_url']
+                break
+
+        if not dmg_url:
+            self.log("Update failed: no .dmg asset found in release")
+            self.show_native_alert(
+                "Update Failed",
+                "No DMG file found in the release.\n\nPlease update manually from:\nhttps://github.com/brewsterkahle/onionpress/releases",
+                style="warning"
+            )
+            return
+
+        self.log(f"Auto-update: downloading {dmg_url}")
+
+        # Show downloading notification
+        rumps.notification(
+            title="OnionPress",
+            subtitle="Downloading Update...",
+            message=f"Downloading v{latest_version}. This may take a minute.",
+            sound=False
+        )
+
+        tmp_dir = tempfile.mkdtemp(prefix="onionpress-update-")
+        dmg_path = os.path.join(tmp_dir, "onionpress.dmg")
+        mount_point = os.path.join(tmp_dir, "dmg-mount")
+
+        try:
+            # Download the DMG
+            result = subprocess.run(
+                ["curl", "-L", "-s", "--cacert", "/etc/ssl/cert.pem",
+                 "-H", "User-Agent: onionpress", "--max-time", "300",
+                 "-o", dmg_path, dmg_url],
+                capture_output=True,
+                text=True, encoding='utf-8', errors='replace',
+                timeout=360
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Download failed (curl exit {result.returncode}): {result.stderr.strip()}")
+
+            dmg_size = os.path.getsize(dmg_path)
+            self.log(f"Auto-update: downloaded {dmg_size / 1024 / 1024:.1f} MB")
+
+            if dmg_size < 1_000_000:  # Sanity check — DMG should be >> 1MB
+                raise RuntimeError(f"Downloaded file too small ({dmg_size} bytes), likely not a valid DMG")
+
+            # Mount the DMG
+            os.makedirs(mount_point, exist_ok=True)
+            result = subprocess.run(
+                ["hdiutil", "attach", dmg_path, "-mountpoint", mount_point, "-nobrowse", "-quiet"],
+                capture_output=True,
+                text=True, encoding='utf-8', errors='replace',
+                timeout=30
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to mount DMG: {result.stderr.strip()}")
+
+            self.log(f"Auto-update: DMG mounted at {mount_point}")
+
+            # Find OnionPress.app inside the DMG
+            source_app = os.path.join(mount_point, "OnionPress.app")
+            if not os.path.isdir(source_app):
+                # Some DMGs have the app in a subdirectory
+                for item in os.listdir(mount_point):
+                    candidate = os.path.join(mount_point, item, "OnionPress.app")
+                    if os.path.isdir(candidate):
+                        source_app = candidate
+                        break
+                else:
+                    raise RuntimeError(f"OnionPress.app not found in DMG. Contents: {os.listdir(mount_point)}")
+
+            # Determine install location — replace wherever we're currently running from
+            # Default to /Applications/OnionPress.app
+            current_app = os.path.realpath(os.path.join(self.resources_dir, "..", ".."))
+            if current_app.endswith(".app"):
+                install_path = current_app
+            else:
+                install_path = "/Applications/OnionPress.app"
+
+            self.log(f"Auto-update: replacing {install_path}")
+
+            # Back up the current app (in case something goes wrong)
+            backup_path = install_path + ".bak"
+            if os.path.exists(backup_path):
+                shutil.rmtree(backup_path)
+
+            # Move current app to backup, copy new app in
+            os.rename(install_path, backup_path)
+            try:
+                # Use cp -R to preserve permissions and structure
+                result = subprocess.run(
+                    ["cp", "-R", source_app, install_path],
+                    capture_output=True,
+                    text=True, encoding='utf-8', errors='replace',
+                    timeout=120
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Copy failed: {result.stderr.strip()}")
+            except Exception:
+                # Restore from backup if copy failed
+                self.log("Auto-update: copy failed, restoring backup")
+                if os.path.exists(install_path):
+                    shutil.rmtree(install_path)
+                os.rename(backup_path, install_path)
+                raise
+
+            # Remove Gatekeeper quarantine flag so macOS doesn't block the downloaded app
+            subprocess.run(
+                ["xattr", "-dr", "com.apple.quarantine", install_path],
+                capture_output=True, timeout=10
+            )
+
+            # Remove backup
+            shutil.rmtree(backup_path, ignore_errors=True)
+
+            self.log(f"Auto-update: installed v{latest_version} successfully")
+
+            # Unmount DMG
+            subprocess.run(
+                ["hdiutil", "detach", mount_point, "-quiet"],
+                capture_output=True, timeout=15
+            )
+
+            # Clean up temp dir
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            # Prompt user to restart
+            response = self.show_native_alert(
+                "Update Installed",
+                f"OnionPress v{latest_version} has been installed.\n\nRestart now to use the new version.\n\nThis will briefly stop and restart all containers to pick up any changes. Your onion address stays the same.",
+                buttons=["Restart Now", "Later"]
+            )
+            if response == 0:  # Restart Now
+                self._relaunch_app(install_path)
+
+        except Exception as e:
+            self.log(f"Auto-update failed: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+
+            # Clean up mount if still mounted
+            subprocess.run(
+                ["hdiutil", "detach", mount_point, "-quiet", "-force"],
+                capture_output=True, timeout=15
+            )
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            self.show_native_alert(
+                "Update Failed",
+                f"Could not install the update automatically.\n\n{e}\n\nYou can update manually from:\nhttps://github.com/brewsterkahle/onionpress/releases",
+                style="warning"
+            )
+
+    def _relaunch_app(self, app_path):
+        """Full quit (stop containers + VM) then launch the new app"""
+        self.log(f"Auto-update: relaunching from {app_path}")
+
+        # Spawn a background process that waits for us to exit, then relaunches
+        pid = os.getpid()
+        relaunch_script = f'''
+            while kill -0 {pid} 2>/dev/null; do sleep 0.5; done
+            sleep 1
+            open "{app_path}"
+        '''
+        subprocess.Popen(
+            ["bash", "-c", relaunch_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+
+        # Skip OnionHeaven /offline — we're coming right back up
+        self._updating = True
+
+        # Full quit — stops containers, VM, and relaunches with new images
+        self.quit_app(None)
 
     def _check_docker_updates_async(self, app_update_available):
         """Check for Docker updates in background thread"""
@@ -4172,14 +4563,14 @@ Run your own website from your Mac. Just Works. Free, forever.
 WordPress + Tor Onion Service
 
 Features:
-• Tor Onion Service with custom address prefixes (op2*)
+• Full WordPress that you own and run
+• Internet Archive's Wayback Machine integration
+• Tor Onion Service with an address you own, forever
 • Requires visitors to use Tor or Brave browsers
-• Internet Archive Wayback Machine integration
-• Bundled container runtime (no Docker needed)
 • Privacy-first design
 • Free and open source
 
-Created by Brewster Kahle
+Created by the Internet Archive
 License: AGPL v3"""
 
         github_url = "https://github.com/brewsterkahle/onionpress"
@@ -4335,6 +4726,9 @@ License: AGPL v3"""
                 subprocess.run(["pkill", "-f", f"{self.colima_home}"], capture_output=True, timeout=10)
                 # Note: Docker volumes lived inside the Colima VM and are deleted with it
 
+                # Remove login item LaunchAgent
+                self.remove_login_item()
+
                 # Step 3: Remove data directory (but keep it until after we show dialog)
                 self.log("Uninstall: Preparing to remove data directory...")
                 import shutil
@@ -4366,11 +4760,710 @@ License: AGPL v3"""
         # Run uninstall in background thread to avoid blocking UI
         threading.Thread(target=do_uninstall, daemon=True).start()
 
+    # ── Settings Page Support ─────────────────────────────────────
+
+    def write_status_to_volume(self):
+        """Write status.json, config-current.json, recent-logs.txt to the shared Docker volume
+        so the WordPress settings/status pages can display current state."""
+        try:
+            # Determine state
+            if not self.is_running:
+                state = "stopped"
+            elif self.is_ready:
+                state = "running"
+            elif not self._has_internet:
+                state = "offline"
+            elif self._yellow_since and (time.time() - self._yellow_since) > 300:
+                state = "stuck"
+            else:
+                state = "starting"
+
+            # Get container states
+            containers = {}
+            try:
+                result = subprocess.run(
+                    ["docker", "ps", "--format", "{{.Names}}\t{{.State}}",
+                     "--filter", "name=onionpress"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().splitlines():
+                        parts = line.split("\t", 1)
+                        if len(parts) == 2:
+                            containers[parts[0]] = parts[1]
+            except Exception:
+                pass
+
+            # Get uptime
+            uptime_seconds = int(time.time() - self.startup_time) if self.is_running else 0
+
+            # Bootstrap percentage
+            bootstrap_pct = self._last_bootstrap_pct if hasattr(self, '_last_bootstrap_pct') else 0
+            if self.is_ready:
+                bootstrap_pct = 100
+
+            # Wayback queue count
+            wq_count = 0
+            try:
+                with self._wayback_queue_lock:
+                    wq_count = len(self._wayback_queue)
+            except Exception:
+                pass
+
+            # OnionHeaven stats
+            oh_server_active = getattr(self, 'is_onionheaven', False)
+            oh_stats = {'server_active': oh_server_active, 'client_registered': False,
+                        'client_enabled': True, 'client_hub': '', 'registered_count': 0,
+                        'online_count': 0, 'taken_over_count': 0, 'takeover_containers': 0}
+            if oh_server_active:
+                try:
+                    result = subprocess.run(
+                        ["docker", "exec", "onionheaven", "sqlite3",
+                         "/var/lib/onionpress/onionheaven/registry.db",
+                         "SELECT COUNT(*), SUM(CASE WHEN status='online' THEN 1 ELSE 0 END), "
+                         "SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) FROM registry"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        parts = result.stdout.strip().split("|")
+                        oh_stats['registered_count'] = int(parts[0] or 0)
+                        oh_stats['online_count'] = int(parts[1] or 0)
+                        oh_stats['taken_over_count'] = int(parts[2] or 0)
+                except Exception:
+                    pass
+                try:
+                    result = subprocess.run(
+                        ["docker", "ps", "--format", "{{.Names}}",
+                         "--filter", "name=onionheaven-takeover"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        oh_stats['takeover_containers'] = len([
+                            l for l in result.stdout.strip().splitlines() if l.strip()
+                        ])
+                except Exception:
+                    pass
+            oh_stats['client_enabled'] = self._read_config_value("REGISTER_WITH_ONIONHEAVEN", "yes") == "yes"
+            oh_stats['client_hub'] = self._read_config_value(
+                "ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
+
+            onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
+
+            # System load averages and host uptime
+            load_avg = list(os.getloadavg())
+            try:
+                host_uptime = int(time.time() - self._host_boot_time)
+            except AttributeError:
+                # Cache boot time on first call
+                try:
+                    r = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                                       capture_output=True, text=True, timeout=2)
+                    # Output like: { sec = 1710345600, usec = 0 } ...
+                    import re
+                    m = re.search(r'sec\s*=\s*(\d+)', r.stdout)
+                    self._host_boot_time = int(m.group(1)) if m else time.time()
+                except Exception:
+                    self._host_boot_time = time.time()
+                host_uptime = int(time.time() - self._host_boot_time)
+
+            import datetime
+            status = {
+                'state': state,
+                'version': self.version,
+                'onion_address': onion_addr,
+                'tor_impl': self._read_config_value("TOR_IMPL", "tor"),
+                'uptime_seconds': uptime_seconds,
+                'bootstrap_pct': bootstrap_pct,
+                'containers': containers,
+                'wayback_queue_count': wq_count,
+                'updated_at': datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                'platform': 'macos',
+                'load_avg': load_avg,
+                'host_uptime_seconds': host_uptime,
+                'onionheaven': oh_stats,
+            }
+
+            status_json = json.dumps(status, indent=2)
+
+            # Write status.json
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/status.json"],
+                input=status_json, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+
+            # Write version file
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/version"],
+                input=self.version, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+
+            # Write config-current.json
+            config = {}
+            config_file = os.path.join(self.app_support, "config")
+            try:
+                with open(config_file, encoding='utf-8', errors='replace') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        if '=' in line:
+                            key, val = line.split('=', 1)
+                            config[key] = val
+            except (OSError, IOError):
+                pass
+
+            config_json = json.dumps(config, indent=2)
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/config-current.json"],
+                input=config_json, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+
+            # Write recent logs
+            log_file = os.path.join(self.app_support, "onionpress.log")
+            try:
+                with open(log_file, encoding='utf-8', errors='replace') as f:
+                    lines = f.readlines()
+                recent = "".join(lines[-100:])
+                subprocess.run(
+                    ["docker", "exec", "-i", "onionpress-wordpress",
+                     "tee", "/var/lib/onionpress/recent-logs.txt"],
+                    input=recent, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=5
+                )
+            except (OSError, IOError):
+                pass
+
+        except Exception:
+            pass  # Container may not be running
+
+    def poll_config_updates(self):
+        """Check for config changes written by the WordPress settings page."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "cat", "/var/lib/onionpress/config-updates.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+
+            updates = json.loads(result.stdout.strip())
+            if not updates or not isinstance(updates, dict):
+                return
+
+            self.log(f"Settings page: applying {len(updates)} config update(s)")
+
+            # Apply each setting to ~/.onionpress/config
+            for key, val in updates.items():
+                old_val = self._read_config_value(key)
+                if old_val != val:
+                    self.write_config_value(key, val)
+                    self.log(f"  {key}: {old_val!r} → {val!r}")
+
+            # Delete the updates file
+            subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "rm", "-f", "/var/lib/onionpress/config-updates.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+
+            # Re-read settings that the menubar app uses at runtime
+            self.cloudflare_tunnel_enabled = bool(self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
+
+        except json.JSONDecodeError:
+            pass
+        except Exception:
+            pass  # Container may not be running
+
+    def poll_requested_actions(self):
+        """Check for action requests from the WordPress settings page."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "cat", "/var/lib/onionpress/requested-action"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+
+            action = result.stdout.strip()
+
+            # Clear the action file immediately
+            subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "sh", "-c", "rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+
+            if action == "refresh-status":
+                self.write_status_to_volume()
+                return
+
+            self.log(f"Settings page: handling action '{action}'")
+
+            # Run action in background thread so it doesn't block the polling loop
+            threading.Thread(
+                target=self._handle_requested_action, args=(action,),
+                daemon=True
+            ).start()
+
+        except Exception:
+            pass
+
+    def _handle_requested_action(self, action):
+        """Execute a requested action from the WordPress settings page."""
+        import datetime
+
+        def _write_result(filename, data):
+            """Write a JSON result file to the WordPress shared volume."""
+            try:
+                result_json = json.dumps(data)
+                subprocess.run(
+                    ["docker", "exec", "-i", "onionpress-wordpress",
+                     "tee", f"/var/lib/onionpress/{filename}"],
+                    input=result_json, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=5
+                )
+            except Exception:
+                pass
+
+        def _clear_pending():
+            try:
+                subprocess.run(
+                    ["docker", "exec", "onionpress-wordpress",
+                     "sh", "-c", "rm -f /var/lib/onionpress/service-pending"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=5
+                )
+            except Exception:
+                pass
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        try:
+            if action in ("restart", "start"):
+                # Write pending marker
+                try:
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "sh", "-c", f"echo {action} > /var/lib/onionpress/service-pending"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                except Exception:
+                    pass
+
+                if action == "restart":
+                    self.log("Settings page: restarting OnionPress...")
+                    self.run_command("restart")
+                else:
+                    self.log("Settings page: starting OnionPress...")
+                    self.run_command("start")
+
+                # Wait for services to come back
+                import time
+                for _ in range(30):
+                    time.sleep(2)
+                    if self.is_running:
+                        break
+
+                self.write_status_to_volume()
+                containers_info = ""
+                try:
+                    r = subprocess.run(
+                        ["docker", "ps", "--filter", "name=onionpress", "--format", "{{.Names}}: {{.Status}}"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
+                    )
+                    if r.returncode == 0:
+                        containers_info = r.stdout.strip().replace("onionpress-", "").replace("\n", ", ")
+                except Exception:
+                    pass
+                _write_result("service-result.json", {
+                    "success": True, "action": action,
+                    "message": f"{'Restarted' if action == 'restart' else 'Started'} {containers_info}",
+                    "completed_at": now_iso
+                })
+                _clear_pending()
+
+            elif action == "stop":
+                self.log("Settings page: stopping OnionPress...")
+                self.run_command("stop")
+                _write_result("service-result.json", {
+                    "success": True, "action": "stop",
+                    "message": "OnionPress stopped", "completed_at": now_iso
+                })
+
+            elif action == "check-reachability":
+                self.log("Settings page: running reachability test...")
+                onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
+                if not onion_addr:
+                    _write_result("reachability-result.json", {
+                        "reachable": False, "error": "No onion address found",
+                        "tested_at": now_iso
+                    })
+                else:
+                    try:
+                        r = subprocess.run(
+                            ["docker", "exec", "onionpress-tor-client",
+                             "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                             "--max-time", "60", "--socks5-hostname", "127.0.0.1:9050",
+                             f"http://{onion_addr}/"],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=75
+                        )
+                        http_code = r.stdout.strip() or "000"
+                        reachable = http_code.isdigit() and 200 <= int(http_code) < 500
+                    except Exception:
+                        http_code = "000"
+                        reachable = False
+                    _write_result("reachability-result.json", {
+                        "reachable": reachable, "http_code": http_code,
+                        "address": onion_addr, "tested_at": now_iso
+                    })
+                    self.log(f"Settings page: reachability test -> HTTP {http_code} (reachable={reachable})")
+
+            elif action == "generate-vanity":
+                self.log("Settings page: generating vanity address...")
+                prefix = self._read_config_value("ADDRESS_PREFIX", "op2")
+                try:
+                    # Use the onionpress script's prefix change mechanism:
+                    # stop → delete arti state volume → start (triggers key regen)
+                    self.run_command("stop")
+                    import time
+                    time.sleep(2)
+                    # Delete the arti state volume so a new key is generated on next start
+                    subprocess.run(
+                        ["docker", "volume", "rm", "onionpress-arti-state"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=15
+                    )
+                    self.run_command("start")
+                    for _ in range(60):
+                        time.sleep(2)
+                        if self.is_running and self.onion_address and ".onion" in str(self.onion_address):
+                            break
+                    self.write_status_to_volume()
+                    new_addr = self.onion_address or ""
+                    _write_result("vanity-result.json", {
+                        "success": True, "address": new_addr,
+                        "generated_at": now_iso
+                    })
+                    self.log(f"Settings page: vanity address generated: {new_addr}")
+                except Exception as e:
+                    _write_result("vanity-result.json", {
+                        "success": False, "error": str(e),
+                        "generated_at": now_iso
+                    })
+                    self.log(f"Settings page: vanity generation failed: {e}")
+
+            elif action == "import-key-file":
+                self.log("Settings page: importing key...")
+                try:
+                    r = subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "cat", "/var/lib/onionpress/import-key-data"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    key_data = r.stdout.strip() if r.returncode == 0 else ""
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/import-key-data"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if not key_data:
+                        _write_result("import-result.json", {
+                            "success": False, "error": "No key data found",
+                            "imported_at": now_iso
+                        })
+                    else:
+                        # Use the onionpress script's import-key command
+                        r = subprocess.run(
+                            [self.launcher_script, "import-key", key_data],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=120
+                        )
+                        if r.returncode == 0:
+                            # Restart to pick up the imported key
+                            self.run_command("restart")
+                            import time
+                            for _ in range(60):
+                                time.sleep(2)
+                                if self.is_running and self.onion_address and ".onion" in str(self.onion_address):
+                                    break
+                            self.write_status_to_volume()
+                            new_addr = self.onion_address or ""
+                            _write_result("import-result.json", {
+                                "success": True, "address": new_addr,
+                                "imported_at": now_iso
+                            })
+                            self.log(f"Settings page: key imported, address: {new_addr}")
+                        else:
+                            error_msg = r.stderr.strip() or r.stdout.strip() or "Import failed"
+                            _write_result("import-result.json", {
+                                "success": False, "error": error_msg,
+                                "imported_at": now_iso
+                            })
+                            self.log(f"Settings page: key import failed: {error_msg}")
+                except Exception as e:
+                    _write_result("import-result.json", {
+                        "success": False, "error": str(e),
+                        "imported_at": now_iso
+                    })
+                    self.log(f"Settings page: key import failed: {e}")
+
+            elif action == "create-backup":
+                self.log("Settings page: creating backup...")
+                try:
+                    r = subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "cat", "/var/lib/onionpress/backup-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    password = r.stdout.strip() if r.returncode == 0 else ""
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/backup-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if not password:
+                        _write_result("backup-result.json", {
+                            "success": False, "error": "No password provided",
+                            "created_at": now_iso
+                        })
+                    else:
+                        import tempfile
+                        onion_short = (self.onion_address or "site").replace(".onion", "")[:8]
+                        import time
+                        filename = f"OnionPress-{onion_short}-{time.strftime('%Y-%m-%d-%H-%M')}.zip"
+                        tmp_path = os.path.join(tempfile.gettempdir(), filename)
+
+                        import backup_manager
+                        onion_addr = self.onion_address or "unknown"
+                        backup_manager.create_backup(
+                            onion_addr, "admin", password,
+                            tmp_path, self.version, self.log
+                        )
+
+                        # Copy into WordPress container for download
+                        subprocess.run(
+                            ["docker", "cp", tmp_path,
+                             f"onionpress-wordpress:/var/lib/onionpress/{filename}"],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=30
+                        )
+                        subprocess.run(
+                            ["docker", "exec", "onionpress-wordpress",
+                             "chown", "www-data:www-data", f"/var/lib/onionpress/{filename}"],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=5
+                        )
+                        try:
+                            os.remove(tmp_path)
+                        except OSError:
+                            pass
+                        _write_result("backup-result.json", {
+                            "success": True, "filename": filename,
+                            "created_at": now_iso
+                        })
+                        self.log(f"Settings page: backup created: {filename}")
+                except Exception as e:
+                    _write_result("backup-result.json", {
+                        "success": False, "error": str(e),
+                        "created_at": now_iso
+                    })
+                    self.log(f"Settings page: backup failed: {e}")
+
+            elif action == "restore-backup":
+                self.log("Settings page: restoring from backup...")
+                try:
+                    r = subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "cat", "/var/lib/onionpress/restore-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    password = r.stdout.strip() if r.returncode == 0 else ""
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/restore-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+
+                    import tempfile
+                    local_zip = os.path.join(tempfile.gettempdir(), "onionpress-restore.zip")
+                    subprocess.run(
+                        ["docker", "cp",
+                         "onionpress-wordpress:/var/lib/onionpress/restore-upload.zip",
+                         local_zip],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=60
+                    )
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/restore-upload.zip"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+
+                    if not password or not os.path.exists(local_zip):
+                        _write_result("restore-result.json", {
+                            "success": False, "error": "Missing password or backup file",
+                            "restored_at": now_iso
+                        })
+                    else:
+                        import backup_manager
+                        backup_manager.restore_from_backup(local_zip, password, self.log)
+                        try:
+                            os.remove(local_zip)
+                        except OSError:
+                            pass
+                        # Restart to pick up restored keys
+                        self.run_command("restart")
+                        import time
+                        for _ in range(30):
+                            time.sleep(2)
+                            if self.is_running:
+                                break
+                        self.write_status_to_volume()
+                        new_addr = self.onion_address or ""
+                        _write_result("restore-result.json", {
+                            "success": True, "address": new_addr,
+                            "restored_at": now_iso
+                        })
+                        self.log(f"Settings page: restore complete, address: {new_addr}")
+                except Exception as e:
+                    _write_result("restore-result.json", {
+                        "success": False, "error": str(e),
+                        "restored_at": now_iso
+                    })
+                    self.log(f"Settings page: restore failed: {e}")
+
+            else:
+                self.log(f"Settings page: unknown action '{action}'")
+
+        except Exception as e:
+            self.log(f"Settings page: action '{action}' failed: {e}")
+
+    # ── Wayback Queue ──────────────────────────────────────────────
+
+    def poll_wayback_queue(self):
+        """Read the Wayback queue from the WordPress container's shared volume."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "cat", "/var/lib/onionpress/wayback-queue.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                queue = json.loads(result.stdout.strip())
+                with self._wayback_queue_lock:
+                    self._wayback_queue = queue if isinstance(queue, list) else []
+            else:
+                with self._wayback_queue_lock:
+                    self._wayback_queue = []
+        except Exception:
+            pass  # Container may not be running
+
+    def drain_wayback_queue(self):
+        """Process one item from the Wayback queue (rate-limited to 1 per 30s)."""
+        now = time.time()
+        if now - self._wayback_last_drain < 30:
+            return
+
+        with self._wayback_queue_lock:
+            if not self._wayback_queue:
+                return
+            item = self._wayback_queue[0]
+
+        url = item.get("url", "")
+        if not url:
+            self._remove_wayback_queue_item(url)
+            return
+
+        self._wayback_last_drain = now
+        self.log(f"Wayback queue: archiving {url}")
+
+        try:
+            # Try clearnet endpoint first (faster)
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "30",
+                 "--data-urlencode", f"url={url}",
+                 "https://web.archive.org/save"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=45
+            )
+            http_code = result.stdout.strip()
+
+            if http_code and 200 <= int(http_code) < 500:
+                self.log(f"Wayback queue: archived {url} (HTTP {http_code})")
+                self._remove_wayback_queue_item(url)
+                return
+        except Exception as e:
+            self.log(f"Wayback queue: clearnet failed for {url}: {e}")
+
+        try:
+            # Fall back to .onion endpoint via tor container
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-tor",
+                 "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "30",
+                 "--socks5-hostname", "127.0.0.1:9050",
+                 "--data-urlencode", f"url={url}",
+                 "http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=45
+            )
+            http_code = result.stdout.strip()
+
+            if http_code and 200 <= int(http_code) < 500:
+                self.log(f"Wayback queue: archived {url} via Tor (HTTP {http_code})")
+                self._remove_wayback_queue_item(url)
+            else:
+                self.log(f"Wayback queue: failed for {url} (HTTP {http_code})")
+        except Exception as e:
+            self.log(f"Wayback queue: tor endpoint failed for {url}: {e}")
+
+    def _remove_wayback_queue_item(self, url):
+        """Remove a URL from the Wayback queue in the container."""
+        with self._wayback_queue_lock:
+            self._wayback_queue = [i for i in self._wayback_queue if i.get("url") != url]
+            updated = json.dumps(self._wayback_queue)
+        try:
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/wayback-queue.json"],
+                input=updated, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+        except Exception:
+            pass
+
     @rumps.clicked("Quit")
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.21 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.35 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
@@ -4400,7 +5493,8 @@ License: AGPL v3"""
             self.stop_caffeinate()
 
             # Notify OnionHeaven before stopping services (containers needed for curl)
-            if self._onionheaven_registration_started and not self.is_onionheaven:
+            # Skip if restarting for an update — we're coming right back
+            if self._onionheaven_registration_succeeded and not self.is_onionheaven and not getattr(self, '_updating', False):
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:

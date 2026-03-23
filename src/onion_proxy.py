@@ -136,25 +136,6 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
             </div>
           </td>
         </tr>
-        <tr>
-          <td colspan="2" style="padding-top:16px; border-top:1px solid #dcdcde;">
-            <strong style="font-size:1.05em;">Internet Archive Wayback Machine</strong>
-            <span style="font-size:12px; color:#646970;">(required until requested upgrade goes through)</span>
-          </td>
-        </tr>
-        <tr>
-          <th><label for="archive_email">Archive.org Email</label></th>
-          <td>
-            <input type="email" name="archive_email" id="archive_email" value="{{ARCHIVE_EMAIL}}" />
-            <p class="description">OnionPress posts are available even when you are offline because they are saved in the <a href="https://web.archive.org/" target="_blank" style="color:#7b4e9e;">Wayback Machine</a>. <a href="https://archive.org/account/signup" target="_blank" style="color:#7b4e9e;">Create a free account</a> if you don&rsquo;t have one.</p>
-          </td>
-        </tr>
-        <tr>
-          <th><label for="archive_password">Archive.org Password</label></th>
-          <td>
-            <input type="password" name="archive_password" id="archive_password" value="{{ARCHIVE_PASSWORD}}" />
-          </td>
-        </tr>
       </table>
       <div class="submit-row">
         <button type="submit" class="submit-btn" id="submit-btn">Configure OnionPress</button>
@@ -708,8 +689,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         html = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', generated_password)
         html = html.replace('{{ERROR_BANNER}}', '')
-        html = html.replace('{{ARCHIVE_EMAIL}}', '')
-        html = html.replace('{{ARCHIVE_PASSWORD}}', '')
         body = html.encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -724,19 +703,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         banner = (
             '<div class="error-banner">'
             + html_mod.escape(error_msg)
-            + ' <a href="https://archive.org/account/signup" target="_blank">Create a free account &rarr;</a>'
             + '</div>'
         )
 
         # Preserve previously entered values
-        archive_email = html_mod.escape(params.get('archive_email', [''])[0].strip())
-        archive_password = html_mod.escape(params.get('archive_password', [''])[0])
         admin_password = params.get('admin_password', [''])[0]
 
         page = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', admin_password)
         page = page.replace('{{ERROR_BANNER}}', banner)
-        page = page.replace('{{ARCHIVE_EMAIL}}', archive_email)
-        page = page.replace('{{ARCHIVE_PASSWORD}}', archive_password)
 
         # Also preserve other field values via JavaScript
         blog_title = html_mod.escape(params.get('blog_title', ['My OnionPress Site'])[0])
@@ -788,28 +762,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # Validate archive.org credentials before installing WordPress
-        # (so we can loop back to the form without side effects)
-        archive_email = params.get('archive_email', [''])[0].strip()
-        archive_password = params.get('archive_password', [''])[0]
-        archive_s3_keys = None
-
-        if archive_email or archive_password:
-            # If either field is filled in, both are required
-            if not archive_email or not archive_password:
-                self._send_setup_form_with_error(
-                    params,
-                    'Please fill in both archive.org email and password. (Required until a fix goes through with the Internet Archive.)'
-                )
-                return
-
-            archive_s3_keys = self._fetch_archive_s3_keys(archive_email, archive_password)
-            if archive_s3_keys is None:
-                self._send_setup_form_with_error(
-                    params,
-                    'Could not log in to archive.org. Please check your email and password.'
-                )
-                return
+        # Use shared archive.org credentials for Wayback Machine archiving
+        archive_s3_keys = self._fetch_archive_s3_keys(
+            'onionpress@internetarchive.eu', 'aat:aep7'
+        )
+        if archive_s3_keys is None and self.server.log_func:
+            self.server.log_func("Warning: could not fetch archive.org S3 keys — Wayback archiving may not work")
 
         # Run wp core multisite-install (subdirectory mode)
         try:
