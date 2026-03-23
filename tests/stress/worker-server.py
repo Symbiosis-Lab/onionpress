@@ -102,6 +102,86 @@ def _send_notify(worker_idx, endpoint, onionheaven_addr, stress_version=""):
         return {"error": str(e)}
 
 
+def _wait_for_hsdesc(service_ids, event_type="UPLOADED", timeout=60):
+    """Wait for HS_DESC events for the given service IDs.
+
+    Args:
+        service_ids: set of service IDs (without .onion) to wait for
+        event_type: "UPLOADED" for ADD_ONION confirmation, "FAILED" to detect issues
+        timeout: max seconds to wait
+
+    Returns:
+        (confirmed, unconfirmed) — sets of service IDs
+    """
+    import socket as _socket
+    import time
+
+    if not service_ids:
+        return set(), set()
+
+    remaining = set(service_ids)
+    confirmed = set()
+
+    try:
+        cookie = open("/var/lib/tor/control_auth_cookie", "rb").read().hex()
+        s = _socket.create_connection(("127.0.0.1", 9051), timeout=10)
+        s.settimeout(5)
+
+        s.sendall(f"AUTHENTICATE {cookie}\r\n".encode())
+        auth = s.recv(4096)
+        if b"250 OK" not in auth:
+            s.close()
+            return set(), remaining
+
+        s.sendall(b"SETEVENTS HS_DESC\r\n")
+        resp = s.recv(4096)
+        if b"250 OK" not in resp:
+            s.close()
+            return set(), remaining
+
+        deadline = time.time() + timeout
+        buf = b""
+        while remaining and time.time() < deadline:
+            try:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\r\n" in buf:
+                    line, buf = buf.split(b"\r\n", 1)
+                    text = line.decode("utf-8", errors="replace")
+                    if f"650 HS_DESC {event_type}" in text:
+                        parts = text.split()
+                        if len(parts) >= 4 and parts[3] in remaining:
+                            confirmed.add(parts[3])
+                            remaining.discard(parts[3])
+                            print(f"  HS_DESC {event_type}: {parts[3]}", flush=True)
+            except _socket.timeout:
+                continue
+            except Exception:
+                break
+
+        try:
+            s.sendall(b"QUIT\r\n")
+            s.close()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"  HS_DESC monitor error: {e}", flush=True)
+
+    return confirmed, remaining
+
+
+def _verify_del_onion(expected_gone):
+    """Check if service IDs are still in detached list after DEL_ONION."""
+    out = _ctor_control("GETINFO onions/detached")
+    still_active = set()
+    for sid in expected_gone:
+        if sid in out:
+            still_active.add(sid)
+    return still_active
+
+
 def _ctor_control(cmd):
     """Send a command to C Tor's control port. Returns the raw response.
 
@@ -254,19 +334,40 @@ async def handle_control(reader, writer):
                 sid = w["content_address"].replace(".onion", "")
                 out = await asyncio.get_event_loop().run_in_executor(
                     None, _ctor_control, f"DEL_ONION {sid}")
-                results[str(widx)] = "ok" if "250 OK" in out else f"fail:{out[:80]}"
+                if "250 OK" in out:
+                    results[str(widx)] = "ok"
+                else:
+                    results[str(widx)] = f"fail:{out[:80]}"
                 # Also DEL healthcheck if it exists and is a real service
                 hc = w.get("healthcheck_address", "")
                 if hc and hc.endswith(".onion") and not hc.startswith("hc"):
                     hc_sid = hc.replace(".onion", "")
                     await asyncio.get_event_loop().run_in_executor(
                         None, _ctor_control, f"DEL_ONION {hc_sid}")
+            # Verify services are gone from detached list
+            ok_sids = {_worker_info[int(w)]["content_address"].replace(".onion", "")
+                       for w, r in results.items() if r == "ok" and int(w) in _worker_info}
+            if ok_sids:
+                still_active = await asyncio.get_event_loop().run_in_executor(
+                    None, _verify_del_onion, ok_sids)
+                for widx_str, r in results.items():
+                    if r == "ok":
+                        w = _worker_info.get(int(widx_str))
+                        if w:
+                            sid = w["content_address"].replace(".onion", "")
+                            if sid in still_active:
+                                # DEL said ok but service still exists — retry
+                                print(f"  DEL_ONION false-ok for {sid}, retrying", flush=True)
+                                out = _ctor_control(f"DEL_ONION {sid}")
+                                results[widx_str] = "ok_retry" if "250 OK" in out else f"fail_retry:{out[:80]}"
             resp = json.dumps({"ok": True, "results": results}).encode()
         elif path == "/add_onion" and method == "POST":
             data = json.loads(body)
             worker_indices = data.get("workers", [])
             _load_worker_info()
             results = {}
+            # Map service_id -> (widx, key, port) for HS_DESC tracking
+            pending_sids = {}
             for widx in worker_indices:
                 w = _worker_info.get(widx)
                 if not w or not w.get("ctor_key_b64"):
@@ -278,7 +379,12 @@ async def handle_control(reader, writer):
                     None, _ctor_control,
                     f"ADD_ONION ED25519-V3:{key} Flags=Detach Port=80,127.0.0.1:{cp}")
                 ok = "250 OK" in out or "250-ServiceID=" in out
-                results[str(widx)] = "ok" if ok else f"fail:{out[:80]}"
+                if ok:
+                    sid = w["content_address"].replace(".onion", "")
+                    pending_sids[sid] = (widx, key, cp)
+                    results[str(widx)] = "ok"
+                else:
+                    results[str(widx)] = f"fail:{out[:80]}"
                 # Also re-ADD healthcheck if it was a real service
                 hc = w.get("healthcheck_address", "")
                 hc_key = w.get("ctor_hc_key_b64", "")
@@ -287,6 +393,36 @@ async def handle_control(reader, writer):
                     await asyncio.get_event_loop().run_in_executor(
                         None, _ctor_control,
                         f"ADD_ONION ED25519-V3:{hc_key} Flags=Detach Port=80,127.0.0.1:{hp}")
+            # Wait for HS_DESC UPLOADED confirmation
+            if pending_sids:
+                confirmed, unconfirmed = await asyncio.get_event_loop().run_in_executor(
+                    None, _wait_for_hsdesc, set(pending_sids.keys()), "UPLOADED", 60)
+                # DEL+ADD retry for unconfirmed
+                retry_sids = {}
+                for sid in unconfirmed:
+                    widx, key, cp = pending_sids[sid]
+                    print(f"  HS_DESC not uploaded for {sid}, DEL+ADD retry", flush=True)
+                    _ctor_control(f"DEL_ONION {sid}")
+                    out = _ctor_control(
+                        f"ADD_ONION ED25519-V3:{key} Flags=Detach Port=80,127.0.0.1:{cp}")
+                    ok = "250 OK" in out or "250-ServiceID=" in out
+                    if ok:
+                        retry_sids[sid] = widx
+                        print(f"  DEL+ADD retry sent for {sid}, waiting for upload...", flush=True)
+                    else:
+                        results[str(widx)] = f"fail_retry:{out[:80]}"
+                        print(f"  DEL+ADD retry FAILED for {sid}: {out[:80]}", flush=True)
+                # Wait another 60s for retry uploads
+                if retry_sids:
+                    confirmed2, unconfirmed2 = _wait_for_hsdesc(set(retry_sids.keys()), "UPLOADED", 60)
+                    for sid in confirmed2:
+                        widx = retry_sids[sid]
+                        results[str(widx)] = "ok_retry"
+                        print(f"  HS_DESC UPLOADED after retry for {sid}", flush=True)
+                    for sid in unconfirmed2:
+                        widx = retry_sids[sid]
+                        results[str(widx)] = "fail_no_upload"
+                        print(f"  ERROR: HS_DESC still not uploaded after retry for {sid}", flush=True)
             resp = json.dumps({"ok": True, "results": results}).encode()
         elif path == "/notify" and method == "POST":
             data = json.loads(body)
