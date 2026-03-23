@@ -622,13 +622,28 @@ def check_worker_bootstrap(conn):
                 capture_output=True, text=True, timeout=10
             )
             if "PROGRESS=100" in result.stdout:
+                # Also verify queue manager is accepting commands
+                qm_result = subprocess.run(
+                    ["docker", "exec", name,
+                     "python3", "/onionheaven-queue-manager.py", "status"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if qm_result.returncode != 0 or not qm_result.stdout.strip():
+                    continue  # queue manager not ready yet, retry next cycle
+                try:
+                    qm_status = json.loads(qm_result.stdout.strip())
+                    if "error" in qm_status:
+                        continue  # queue manager returned an error
+                except (json.JSONDecodeError, ValueError):
+                    continue  # invalid response
+
                 conn.execute(
                     "UPDATE takeover_containers SET bootstrapped = 1 "
                     "WHERE container_name = ?",
                     (name,)
                 )
                 db_commit_with_retry(conn)
-                log(f"Takeover worker {name} is bootstrapped and ready")
+                log(f"Takeover worker {name} is bootstrapped and ready (Tor + queue manager)")
         except Exception:
             pass  # container may not be running yet, retry next cycle
 
