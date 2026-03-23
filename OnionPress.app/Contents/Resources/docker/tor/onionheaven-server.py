@@ -405,6 +405,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     "last_redirect": row["last_redirect"],
                     "wordpress_healthy": row["wordpress_healthy"],
                     "audit_result": row["audit_result"],
+                    "audit_pending": row["audit_pending"],
                 }
 
                 # serving_status: registered, queued-to-activate, activating, active, failed
@@ -680,7 +681,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     unregistered_at = NULL,
                     unregistered_reason = NULL,
                     audit_result = NULL,
-                    audit_at = NULL""",
+                    audit_at = NULL,
+                    audit_pending = NULL""",
                 (content_address, healthcheck_address, now, version, now, is_oh,
                  wp_healthy_val, now if wp_healthy_val is not None else None))
             db_commit_with_retry(conn)
@@ -704,7 +706,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "UPDATE registry SET last_healthy = ?, "
                 "is_onionheaven = ?, "
                 "unregistered_at = NULL, unregistered_reason = NULL, "
-                "audit_result = NULL, audit_at = NULL "
+                "audit_result = NULL, audit_at = NULL, audit_pending = NULL "
                 "WHERE content_address = ?",
                 (now, is_oh, content_address)
             )

@@ -404,6 +404,7 @@ def db_ensure_schema(conn):
             wordpress_checked_at TEXT,
             audit_result        TEXT,
             audit_at            TEXT,
+            audit_pending       TEXT,
             is_onionheaven      INTEGER DEFAULT 0,
             PRIMARY KEY (content_address, healthcheck_address)
         )""")
@@ -415,7 +416,7 @@ def db_ensure_schema(conn):
             "last_checked", "last_healthy", "last_released",
             "last_taken_over", "last_redirect",
             "takeover_container", "takeover_pending", "release_pending",
-            "wordpress_checked_at", "audit_result", "audit_at",
+            "wordpress_checked_at", "audit_result", "audit_at", "audit_pending",
         ]:
             if col not in cols:
                 conn.execute(f"ALTER TABLE registry ADD COLUMN {col} TEXT")
@@ -972,7 +973,8 @@ def release_function(conn, content_address, healthcheck_address):
     # Mark this row as online — release_function owns this status change
     conn.execute(
         "UPDATE registry SET status = 'online', last_released = ?, "
-        "takeover_container = NULL, takeover_pending = NULL, release_pending = NULL "
+        "takeover_container = NULL, takeover_pending = NULL, release_pending = NULL, "
+        "audit_pending = NULL, audit_result = NULL, audit_at = NULL "
         "WHERE content_address = ? AND healthcheck_address = ?",
         (now, content_address, healthcheck_address)
     )
