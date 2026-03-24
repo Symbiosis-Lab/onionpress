@@ -51,7 +51,9 @@ OPTIONS = {
                  'onion_proxy', 'install_native_messaging', 'onionheaven', 'onion_auth',
                  'onionpress', 'onionpress.backup', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
-                 'onionpress.tor', 'onionpress.colima'],
+                 'onionpress.tor', 'onionpress.colima',
+                 'onionpress.ui_helpers', 'onionpress.settings_ui',
+                 'onionpress.browser'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size
