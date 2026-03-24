@@ -115,8 +115,9 @@ def run_verify_worker(
 
         now = time.time()
         if now - last_dashboard >= 10:
+            elapsed = int(now - start_ts)
             codes_str = " ".join(f"{code}:{n}" for code, n in sorted(code_counts.items()))
-            logger.log(f"  (verified: {total_verified}/{target_count}, pending: {total_pending}) [{codes_str}]")
+            logger.log(f"  ({elapsed}s) (verified: {total_verified}/{target_count}, pending: {total_pending}) [{codes_str}]")
             last_dashboard = now
 
             # Pull NEW verify-worker log lines when stuck (every 60s)
