@@ -237,7 +237,7 @@ def c(color, text):
 
 
 def print_dashboard(iteration):
-    now = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now().astimezone().strftime("%H:%M:%S %Z")
 
     reg = query_registry()
     if not reg:

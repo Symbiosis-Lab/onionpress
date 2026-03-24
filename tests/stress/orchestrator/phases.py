@@ -83,9 +83,14 @@ class StressLogger:
             pass
         self._mid_progress = False
 
+    @staticmethod
+    def _local_ts(fmt: str = "%H:%M:%S %Z") -> str:
+        """Format current local time with timezone abbreviation."""
+        return datetime.now().astimezone().strftime(fmt)
+
     def log(self, msg: str):
         """Log a message to stdout + log file + phase log."""
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = self._local_ts()
         line = f"[{ts}] {msg}"
         print(line, flush=True)
         if self.log_file:
@@ -101,7 +106,7 @@ class StressLogger:
     def log_json(self, fields: str):
         """Append a JSON metrics line."""
         if self._metrics_path:
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            ts = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
             with open(self._metrics_path, "a") as f:
                 f.write(f'{{"ts":"{ts}",{fields}}}\n')
 
@@ -121,14 +126,14 @@ class StressLogger:
     def phase_start(self, phase: str, desc: str):
         """Write phase start to phase log."""
         if self.phase_log:
-            ts = datetime.now().strftime("%H:%M:%S")
+            ts = self._local_ts()
             with open(self.phase_log, "a") as f:
                 f.write(f"[{ts}] PHASE {phase}: {desc}\n")
 
     def phase_result(self, phase: str, result: str):
         """Write phase result to phase log."""
         if self.phase_log:
-            ts = datetime.now().strftime("%H:%M:%S")
+            ts = self._local_ts()
             with open(self.phase_log, "a") as f:
                 f.write(f"[{ts}]   -> {result}\n")
 
@@ -139,7 +144,7 @@ class StressLogger:
         with open(self.phase_log, "a") as f:
             f.write(f"""====================================================================
   OnionHeaven Stress Test
-  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+  {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}
 --------------------------------------------------------------------
   Sites: {config.total} total ({config.healthy} healthy, {config.failing} failing)
   Containers: {config.num_containers} x {config.per_ctr} sites/container
@@ -158,7 +163,7 @@ class StressLogger:
         with open(self.phase_log, "a") as f:
             f.write(f"""
 ====================================================================
-  SUMMARY — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} — total {fmt_duration(total_elapsed)}
+  SUMMARY — {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')} — total {fmt_duration(total_elapsed)}
 --------------------------------------------------------------------
   Phase 2 (bootstrap):   {results.get('phase2', '(not run)')}
   Phase 3 (healthy):     {results.get('phase3', '(not run)')}

@@ -1885,7 +1885,9 @@ for f in files:
                     pubkey = base64.b64decode(pub)
                     ts = make_timestamp()
                     sig = sign_payload(privkey, pubkey, 'online', ca, ha, ts)
-                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
+                    from key_manager import build_openssh_key, derive_public_key
+                    pem = build_openssh_key(privkey, pubkey)
+                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig, 'arti_key_pem': base64.b64encode(pem).decode()}))
     except Exception as e:
         print(f'ERROR generating payload from {f}: {e}', file=sys.stderr)
 print(f'{len(payloads)} /online payload(s) for sites ${start}..$(( start + count - 1))', file=sys.stderr)

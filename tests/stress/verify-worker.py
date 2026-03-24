@@ -94,7 +94,7 @@ def curl_check(addr, expected_code, timeout=15):
         gen += 1
         last_rotate = now
         from datetime import datetime
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.now().astimezone().strftime("%H:%M:%S %Z")
         print(f"  [{ts}] ROTATE {addr} gen={gen} (stale circuit after {_ROTATE_INTERVAL}s)", flush=True)
     _addr_generation[addr] = (gen, last_rotate)
     try:

@@ -223,22 +223,32 @@ if [ "${REAL_TOTAL:-0}" -gt 0 ]; then
     pass "Leftover test state cleaned up (live node, onionheaven container stays)"
 else
     LIVE_OH_NODE=false
-    # Remove activate flag so the lazy watcher doesn't restart containers
-    docker exec "$TOR_CONTAINER" rm -f /var/lib/onionpress/onionheaven/activate 2>/dev/null || true
-    # Stop any leftover onionheaven containers
-    for c in onionheaven onionheaven-takeover-0 onionheaven-takeover-1 onionheaven-takeover-2; do
-        if docker ps -a --format '{{.Names}}' | grep -q "^${c}$"; then
-            docker stop "$c" >/dev/null 2>&1 && docker rm "$c" >/dev/null 2>&1 && log "  Cleaned up $c"
+    # onionheaven is always-on (part of core stack since v2.4.37).
+    # Recreate it to ensure it runs the latest image, then clean test data.
+    log "Recreating onionheaven container with latest image..."
+    COMPOSE_DIR="$PROJECT_DIR/OnionPress.app/Contents/Resources/docker"
+    SECRETS_FILE="$HOME/.onionpress/secrets"
+    if [ -f "$COMPOSE_DIR/docker-compose.yml" ]; then
+        # Source database secrets so compose doesn't warn about missing vars
+        [ -f "$SECRETS_FILE" ] && set -a && . "$SECRETS_FILE" && set +a
+        docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d --force-recreate onionheaven 2>&1 | while read -r line; do log "  $line"; done
+        sleep 5
+        if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
+            pass "onionheaven container recreated with latest image"
+        else
+            fail "onionheaven container failed to start after recreate"
+            exit 1
         fi
-    done
-    # Brief pause to let the lazy watcher cycle past without restarting
-    sleep 12
-    # Verify containers stayed down
-    if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
-        fail "onionheaven container respawned after cleanup — check for leftover DB entries"
-        exit 1
+    else
+        log "WARNING: docker-compose.yml not found, checking existing container"
+        if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
+            pass "onionheaven container running (could not recreate — compose file missing)"
+        else
+            fail "onionheaven container not running and cannot recreate"
+            exit 1
+        fi
     fi
-    pass "Leftover OnionHeaven state cleaned up"
+    pass "Leftover test state cleaned up"
 fi
 
 # Generate faux OnionPress identity
@@ -257,20 +267,11 @@ step 1 "Verify initial state (OnionPress up, OnionHeaven API responding)"
 
 # On a live OnionHeaven node, the container is already running — that's fine.
 # On a fresh node, it should not be running yet (lazy activation).
-if [ "$LIVE_OH_NODE" = true ]; then
-    if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
-        pass "onionheaven container running (live node with real registrations)"
-    else
-        log "WARNING: Live node but onionheaven container not running — test will still proceed"
-    fi
+if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
+    pass "onionheaven container running"
 else
-    if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
-        fail "onionheaven container is already running — stop it first for a clean test"
-        log "  Run: docker stop onionheaven && docker rm onionheaven"
-        exit 1
-    else
-        pass "No onionheaven container running (lazy activation not yet triggered)"
-    fi
+    fail "onionheaven container not running — heartbeat monitor needs it"
+    exit 1
 fi
 
 # Check that our faux address is not already registered
@@ -475,8 +476,8 @@ fi
 
 step 5 "Release via heartbeat (send /online again)"
 
-# Generate a new signed /online payload (no key needed this time)
-sign_payload sign-online "$IDENTITY" > "$PAYLOAD"
+# Generate a new signed /online payload with key (required for release)
+sign_payload sign-online "$IDENTITY" --with-key > "$PAYLOAD"
 RESPONSE=$(oh_api POST /online "$(cat "$PAYLOAD")")
 log "Response: $RESPONSE"
 
@@ -552,7 +553,7 @@ for i in $(seq 1 180); do
     # Send a heartbeat every 60s to keep the entry "online" and prevent re-takeover
     SINCE_HEARTBEAT=$(( $(date +%s) - LAST_HEARTBEAT ))
     if [ "$SINCE_HEARTBEAT" -ge 60 ]; then
-        sign_payload sign-online "$IDENTITY" > "$PAYLOAD"
+        sign_payload sign-online "$IDENTITY" --with-key > "$PAYLOAD"
         oh_api POST /online "$(cat "$PAYLOAD")" >/dev/null 2>&1
         LAST_HEARTBEAT=$(date +%s)
     fi

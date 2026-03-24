@@ -469,7 +469,7 @@ fi
 
 step 5 "Release via heartbeat (send /online again)"
 
-sign_payload sign-online "$IDENTITY" > "$PAYLOAD"
+sign_payload sign-online "$IDENTITY" --with-key > "$PAYLOAD"
 RESPONSE=$(oh_api POST /online "$(cat "$PAYLOAD")")
 log "Response: $RESPONSE"
 
@@ -519,7 +519,7 @@ for i in $(seq 1 180); do
     # Send a heartbeat every 60s to keep the entry "online" and prevent re-takeover
     SINCE_HEARTBEAT=$(( $(date +%s) - LAST_HEARTBEAT ))
     if [ "$SINCE_HEARTBEAT" -ge 60 ]; then
-        sign_payload sign-online "$IDENTITY" > "$PAYLOAD"
+        sign_payload sign-online "$IDENTITY" --with-key > "$PAYLOAD"
         oh_api POST /online "$(cat "$PAYLOAD")" >/dev/null 2>&1
         LAST_HEARTBEAT=$(date +%s)
     fi
