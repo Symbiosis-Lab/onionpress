@@ -393,25 +393,32 @@ class QueueManager:
         self._check_stuck()
 
     def _check_stuck(self):
-        """Log stuck in-flight addresses. No automatic recovery — NEWNYM and
-        Tor restarts cause more harm than good by disrupting working services.
-        Stuck uploads will either eventually succeed or be cleaned up by the
-        heartbeat's reconciliation check.
+        """Move stuck in-flight addresses to active and open slots.
+
+        After STUCK_TIMEOUT, stop waiting for HS_DESC UPLOADED — the
+        ADD_ONION succeeded so Tor has the service, descriptors will
+        propagate eventually. Don't block the queue waiting for confirmation.
         """
         now = time.time()
         with self.lock:
             if not self.in_flight:
                 return
-            oldest = min(self.in_flight.values())
-            elapsed = now - oldest
 
-        if elapsed > self.STUCK_TIMEOUT:
-            with self.lock:
-                stuck_count = sum(1 for t in self.in_flight.values()
-                                  if now - t > self.STUCK_TIMEOUT)
-            log(f"STUCK: {stuck_count} in-flight addresses waiting >{self.STUCK_TIMEOUT}s "
-                f"for descriptor upload ({len(self.active)} active, "
-                f"oldest {elapsed:.0f}s) — no recovery action taken")
+            promoted = []
+            for addr, ts in list(self.in_flight.items()):
+                if now - ts > self.STUCK_TIMEOUT:
+                    promoted.append(addr)
+
+            for addr in promoted:
+                self.active.add(addr)
+                del self.in_flight[addr]
+
+        if promoted:
+            self._ever_active = True
+            for addr in promoted:
+                log(f"STUCK→ACTIVE: {addr[:20]}... (no HS_DESC after {self.STUCK_TIMEOUT}s, "
+                    f"promoting anyway)")
+            self._process_queue()
 
     def _restart_tor(self):
         """Restart Tor with fresh guard selection. Re-queues all services."""
