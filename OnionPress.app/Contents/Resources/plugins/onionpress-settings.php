@@ -13,20 +13,47 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
+ * Run a curl request through Tor SOCKS proxy to archive.org's .onion.
+ *
+ * @param string $url     The .onion URL to request.
+ * @param array  $opts    Extra curl options (CURLOPT_* => value).
+ * @return array{body:string,code:int,error:string}
+ */
+function onionpress_ia_curl_tor( $url, $opts = array() ) {
+    $ch = curl_init( $url );
+    curl_setopt( $ch, CURLOPT_PROXY, 'socks5h://onionpress-tor:9050' );
+    curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
+    curl_setopt( $ch, CURLOPT_FOLLOWLOCATION, true );
+    curl_setopt( $ch, CURLOPT_TIMEOUT, 30 );
+    curl_setopt( $ch, CURLOPT_USERAGENT, 'OnionPress (+https://github.com/brewsterkahle/onionpress)' );
+    foreach ( $opts as $k => $v ) {
+        curl_setopt( $ch, $k, $v );
+    }
+    $body  = curl_exec( $ch );
+    $code  = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $error = curl_error( $ch );
+    curl_close( $ch );
+    return array( 'body' => $body, 'code' => $code, 'error' => $error );
+}
+
+/**
  * Convert Archive.org account + password into S3 API keys via xauthn.
+ * Routes through Tor (.onion) to avoid clearnet leaks.
  *
  * @return array{'access':string,'secret':string}|string  Keys on success, error message on failure.
  */
 function onionpress_fetch_ia_s3_keys( $email, $password ) {
-    $resp = wp_remote_post( 'https://archive.org/services/xauthn/?op=login', array(
-        'timeout' => 15,
-        'headers' => array( 'User-Agent' => 'OnionPress (+https://github.com/brewsterkahle/onionpress)' ),
-        'body'    => array( 'email' => $email, 'password' => $password ),
-    ) );
-    if ( is_wp_error( $resp ) ) {
-        return $resp->get_error_message();
+    $resp = onionpress_ia_curl_tor(
+        'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login',
+        array(
+            CURLOPT_POST       => true,
+            CURLOPT_POSTFIELDS => http_build_query( array( 'email' => $email, 'password' => $password ) ),
+        )
+    );
+    if ( $resp['error'] ) {
+        return 'Tor request failed: ' . $resp['error'];
     }
-    $data = json_decode( wp_remote_retrieve_body( $resp ), true );
+    $data = json_decode( $resp['body'], true );
     if ( empty( $data['success'] ) ) {
         return $data['values']['reason'] ?? 'Login failed';
     }
@@ -41,15 +68,14 @@ function onionpress_fetch_ia_s3_keys( $email, $password ) {
     $sig  = $data['values']['cookies']['logged-in-sig'] ?? '';
     $user = $data['values']['cookies']['logged-in-user'] ?? '';
     if ( $sig && $user ) {
-        $resp2 = wp_remote_get( 'https://archive.org/account/s3.php?output_json=1', array(
-            'timeout' => 15,
-            'headers' => array(
-                'User-Agent' => 'OnionPress (+https://github.com/brewsterkahle/onionpress)',
-                'Cookie'     => "logged-in-sig=$sig; logged-in-user=$user",
-            ),
-        ) );
-        if ( ! is_wp_error( $resp2 ) ) {
-            $s3 = json_decode( wp_remote_retrieve_body( $resp2 ), true );
+        $resp2 = onionpress_ia_curl_tor(
+            'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/account/s3.php?output_json=1',
+            array(
+                CURLOPT_COOKIE => "logged-in-sig=$sig; logged-in-user=$user",
+            )
+        );
+        if ( ! $resp2['error'] ) {
+            $s3 = json_decode( $resp2['body'], true );
             $access = $s3['key']['s3accesskey'] ?? '';
             $secret = $s3['key']['s3secretkey'] ?? '';
             if ( $access && $secret ) {

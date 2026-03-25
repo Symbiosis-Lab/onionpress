@@ -1238,6 +1238,19 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy offline-publish mu-plugin
+    if [ -f "$plugins_dir/onionpress-offline-publish.php" ]; then
+        if docker cp "$plugins_dir/onionpress-offline-publish.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-offline-publish.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-offline-publish.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-offline-publish.php"
+            log "✓ onionpress-offline-publish.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-offline-publish.php"
+        fi
+    fi
+
     return 0
 }
 
