@@ -229,10 +229,16 @@ class HealthChecker:
         return http_code in ("200", "301"), http_code
 
     def check_internet_connectivity(self) -> bool:
-        """Check if the host has internet access."""
+        """Check if the host has internet access via Tor SOCKS proxy.
+
+        Tests that the tor-client SOCKS port accepts connections — if it does,
+        we have network access (Tor bootstrapped). No clearnet requests needed.
+        """
         result = self.docker.exec(
-            "onionpress-wordpress",
-            ["curl", "-sf", "--max-time", "5", "http://1.1.1.1/"],
+            "onionpress-tor-client",
+            ["curl", "-sf", "--max-time", "5",
+             "--socks5-hostname", "127.0.0.1:9050",
+             "http://check.torproject.org/"],
             timeout=10,
         )
         return result.ok
