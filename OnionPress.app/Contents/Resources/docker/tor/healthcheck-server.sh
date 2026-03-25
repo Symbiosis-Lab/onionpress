@@ -7,6 +7,7 @@ HEALTHCHECK_PORT=8081
 MESSAGES_DIR="/var/lib/tor/healthcheck-messages"
 MESSAGES_MAX=100
 MESSAGES_TTL=86400  # 24 hours in seconds
+MAX_REQUEST_BODY=1048576  # 1 MB
 CONTENT_HOSTNAME_FILE="/var/lib/tor/hidden_service/wordpress/hostname"
 HEALTHCHECK_HOSTNAME_FILE="/var/lib/tor/hidden_service/healthcheck/hostname"
 VERSION_FILE="/var/lib/tor/healthcheck-version"
@@ -144,6 +145,11 @@ handle_get() {
 handle_post() {
     local content_length="$1"
     local body=""
+
+    if [ "$content_length" -gt "$MAX_REQUEST_BODY" ] 2>/dev/null; then
+        printf "HTTP/1.0 413 Request Entity Too Large\r\nContent-Type: text/plain\r\nContent-Length: 22\r\n\r\nRequest body too large"
+        return
+    fi
 
     if [ "$content_length" -gt 0 ] 2>/dev/null; then
         body=$(dd bs=1 count="$content_length" 2>/dev/null)

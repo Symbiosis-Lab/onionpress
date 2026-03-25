@@ -28,6 +28,8 @@ disabled_ports = set()
 # Stats
 stats = {"requests": 0, "disabled_hits": 0, "healthy_hits": 0}
 
+MAX_REQUEST_BODY = 1_048_576  # 1 MB
+
 # Cached worker info (loaded from /worker-info.db on demand)
 _worker_info = None
 
@@ -308,6 +310,11 @@ async def handle_control(reader, writer):
 
         body = b""
         cl = int(headers.get("content-length", 0))
+        if cl > MAX_REQUEST_BODY:
+            writer.write(b"HTTP/1.0 413 Request Entity Too Large\r\nContent-Length: 22\r\n\r\nRequest body too large")
+            await writer.drain()
+            writer.close()
+            return
         if cl > 0:
             body = await asyncio.wait_for(reader.readexactly(cl), timeout=10)
 

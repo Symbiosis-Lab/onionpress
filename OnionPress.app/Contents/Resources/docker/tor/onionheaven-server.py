@@ -17,6 +17,8 @@ Endpoints:
 
 ONIONHEAVEN_SERVER_VERSION = "2.4.39"
 
+MAX_REQUEST_BODY = 1_048_576  # 1 MB — reject larger POST bodies to prevent memory exhaustion
+
 import base64
 import hashlib
 import json
@@ -250,6 +252,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return None
+        if length > MAX_REQUEST_BODY:
+            self._send_json(413, {"error": "Request body too large"})
+            return False  # distinguishes from None (no body) — caller must check
         body = self.rfile.read(length)
         try:
             return json.loads(body)
@@ -488,6 +493,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
     def _handle_unregister(self):
         data = self._read_json()
+        if data is False:
+            return  # 413 already sent
         if not data:
             self._send_json(400, {"error": "Invalid JSON"})
             return
@@ -564,6 +571,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         the key — only the first call needs it.
         """
         data = self._read_json()
+        if data is False:
+            return  # 413 already sent
         if not data:
             self._send_json(400, {"error": "Invalid JSON"})
             return
@@ -741,6 +750,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
     def _handle_offline(self):
         data = self._read_json()
+        if data is False:
+            return  # 413 already sent
         if not data:
             self._send_json(400, {"error": "Invalid JSON"})
             return
