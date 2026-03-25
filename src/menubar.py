@@ -1898,10 +1898,19 @@ class OnionPressApp(rumps.App):
             self.log(f"Failed to auto-restart Tor container: {e}")
 
     def _auto_restart_tor_client(self):
-        """Auto-restart tor-client when it's stuck at bootstrap."""
+        """Auto-restart tor-client with a clean descriptor cache.
+
+        Deletes cached Tor state before restart so stale descriptors
+        (e.g. from before sleep) don't prevent reconnection.
+        """
         try:
+            self._docker.exec(
+                "onionpress-tor-client",
+                ["sh", "-c", "rm -rf /var/lib/tor/cached-* /var/lib/tor/state"],
+                timeout=10,
+            )
             self._docker.run(["restart", "onionpress-tor-client"], timeout=30)
-            self.log("tor-client container restarted")
+            self.log("tor-client restarted (cache cleared)")
         except Exception as e:
             self.log(f"Failed to auto-restart tor-client: {e}")
 
