@@ -4053,47 +4053,35 @@ License: AGPL v3"""
         self._wayback_last_drain = now
         self.log(f"Wayback queue: archiving {url}")
 
-        try:
-            # Try clearnet endpoint first (faster)
-            result = subprocess.run(
-                ["docker", "exec", "onionpress-wordpress",
-                 "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                 "--max-time", "30",
-                 "--data-urlencode", f"url={url}",
-                 "https://web.archive.org/save"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace',
-                timeout=45
-            )
-            http_code = result.stdout.strip()
+        # .onion first, clearnet-via-Tor fallback. Never direct clearnet.
+        endpoints = [
+            ("http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save",
+             ["--socks5-hostname", "127.0.0.1:9050"]),
+            ("https://web.archive.org/save",
+             ["--socks5-hostname", "127.0.0.1:9050"]),
+        ]
 
-            if http_code and 200 <= int(http_code) < 500:
-                self.log(f"Wayback queue: archived {url} (HTTP {http_code})")
-                self._remove_wayback_queue_item(url)
-                return
-        except Exception as e:
-            self.log(f"Wayback queue: clearnet failed for {url}: {e}")
+        for save_url, proxy_args in endpoints:
+            try:
+                result = subprocess.run(
+                    ["docker", "exec", "onionpress-tor",
+                     "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                     "--max-time", "30"] + proxy_args + [
+                     "--data-urlencode", f"url={url}",
+                     save_url],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=45
+                )
+                http_code = result.stdout.strip()
 
-        try:
-            # Fall back to .onion endpoint via tor container
-            result = subprocess.run(
-                ["docker", "exec", "onionpress-tor",
-                 "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                 "--max-time", "30",
-                 "--socks5-hostname", "127.0.0.1:9050",
-                 "--data-urlencode", f"url={url}",
-                 "http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace',
-                timeout=45
-            )
-            http_code = result.stdout.strip()
+                if http_code and 200 <= int(http_code) < 500:
+                    self.log(f"Wayback queue: archived {url} (HTTP {http_code})")
+                    self._remove_wayback_queue_item(url)
+                    return
+            except Exception as e:
+                self.log(f"Wayback queue: failed for {url} via {save_url}: {e}")
 
-            if http_code and 200 <= int(http_code) < 500:
-                self.log(f"Wayback queue: archived {url} via Tor (HTTP {http_code})")
-                self._remove_wayback_queue_item(url)
-            else:
-                self.log(f"Wayback queue: failed for {url} (HTTP {http_code})")
-        except Exception as e:
-            self.log(f"Wayback queue: tor endpoint failed for {url}: {e}")
+        self.log(f"Wayback queue: all endpoints failed for {url}")
 
     def _remove_wayback_queue_item(self, url):
         """Remove a URL from the Wayback queue in the container."""
