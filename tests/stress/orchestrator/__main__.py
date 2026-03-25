@@ -3,7 +3,7 @@
 Usage:
     python3 -m tests.stress.orchestrator --total 5
     python3 -m tests.stress.orchestrator --cleanup
-    python3 -m tests.stress.orchestrator --mode coordinator
+    python3 tests/stress/dashboard.py            # standalone dashboard
 """
 
 import atexit
@@ -12,6 +12,10 @@ import signal
 import subprocess
 import sys
 import time
+
+# Add src to path for onionpress imports — must be before any .orchestrator imports
+# that reference onionpress at module level (e.g. containers.py)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 
 from .config import StressConfig
 from .phases import StressLogger, fmt_duration
@@ -26,9 +30,6 @@ from .verification import (
     run_verify_worker, verify_redirects,
 )
 from .cleanup import cleanup_stress_test, run_cleanup, run_cleanup_stale
-
-# Add src to path for onion_auth / onionpress imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 
 from onionpress.docker import Docker
 from onionpress.platform import resolve_paths
@@ -372,41 +373,6 @@ def _run_phases(config, docker, logger, workers, store, dashboard):
     print()
 
 
-def run_coordinator(config: StressConfig):
-    """Coordinator mode — read-only dashboard monitor."""
-    docker = _create_docker(config)
-    logger = StressLogger(config.output_dir)
-
-    _preflight(config, docker, logger)
-
-    # Follow latest symlink
-    latest = os.path.join(config.output_dir, "latest")
-    if os.path.islink(latest):
-        config.output_dir = latest
-
-    os.makedirs(config.output_dir, exist_ok=True)
-    phase_log = os.path.join(config.output_dir, "phase.log")
-
-    _detect_onionheaven_addr(config, logger)
-    dashboard = Dashboard(config, docker, logger)
-
-    logger.log("=== OnionHeaven Stress Test (coordinator — read-only monitor) ===")
-    logger.log(f"Output: {config.output_dir}")
-    logger.log("Press Ctrl-C to stop")
-    print()
-
-    if os.path.exists(phase_log):
-        _open_phase_log_window(phase_log)
-
-    log_opened = os.path.exists(phase_log)
-    while True:
-        if not log_opened and os.path.exists(phase_log):
-            _open_phase_log_window(phase_log)
-            log_opened = True
-        dashboard.print_dashboard()
-        time.sleep(10)
-
-
 def main():
     config = StressConfig.from_args()
 
@@ -432,9 +398,7 @@ def main():
         run_cleanup(docker, config, logger)
         sys.exit(0)
 
-    if config.mode == "coordinator":
-        run_coordinator(config)
-    elif config.mode == "worker":
+    if config.mode == "worker":
         run_worker(config)
     else:
         print(f"Unknown mode: {config.mode}")

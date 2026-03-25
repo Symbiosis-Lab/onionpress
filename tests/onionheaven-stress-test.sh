@@ -1,4 +1,5 @@
 #!/bin/bash
+# OBSOLETE — use onionheaven-stress-test.py instead
 # OnionHeaven Stress Test — Real Arti Onion Services
 #
 # Architecture:

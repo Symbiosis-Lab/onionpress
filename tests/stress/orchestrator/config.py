@@ -95,7 +95,7 @@ class StressConfig:
             description="OnionHeaven Stress Test",
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
-        parser.add_argument("--mode", default="worker", choices=["worker", "coordinator"])
+        parser.add_argument("--mode", default="worker", choices=["worker"])
         parser.add_argument("--total", type=int, default=5)
         parser.add_argument("--healthy", type=int, default=None)
         parser.add_argument("--failing", type=int, default=None)
