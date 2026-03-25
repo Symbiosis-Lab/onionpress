@@ -228,20 +228,34 @@ class HealthChecker:
         http_code = result.output.strip()
         return http_code in ("200", "301"), http_code
 
-    def check_internet_connectivity(self) -> bool:
-        """Check if the host has internet access via Tor SOCKS proxy.
+    @staticmethod
+    def check_internet_connectivity() -> bool:
+        """Check if the host has network access via macOS SCNetworkReachability.
 
-        Tests that the tor-client SOCKS port accepts connections — if it does,
-        we have network access (Tor bootstrapped). No clearnet requests needed.
+        Queries the OS network stack directly — no HTTP requests, no traffic,
+        no DNS lookups. Returns True if a default route exists (WiFi/ethernet
+        connected).
         """
-        result = self.docker.exec(
-            "onionpress-tor-client",
-            ["curl", "-sf", "--max-time", "5",
-             "--socks5-hostname", "127.0.0.1:9050",
-             "http://check.torproject.org/"],
-            timeout=10,
-        )
-        return result.ok
+        try:
+            import ctypes
+            import ctypes.util
+
+            lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("SystemConfiguration"))
+            lib.SCNetworkReachabilityCreateWithName.restype = ctypes.c_void_p
+            lib.SCNetworkReachabilityCreateWithName.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+            lib.SCNetworkReachabilityGetFlags.restype = ctypes.c_bool
+            lib.SCNetworkReachabilityGetFlags.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+
+            target = lib.SCNetworkReachabilityCreateWithName(None, b"0.0.0.0")
+            flags = ctypes.c_uint32(0)
+            ok = lib.SCNetworkReachabilityGetFlags(target, ctypes.byref(flags))
+            if not ok:
+                return False
+            kSCNetworkReachabilityFlagsReachable = 1 << 1
+            return bool(flags.value & kSCNetworkReachabilityFlagsReachable)
+        except Exception:
+            # Not on macOS or framework unavailable — assume connected
+            return True
 
     def tor_container_unhealthy(self) -> bool:
         """Check Tor container logs for signs of sickness.
