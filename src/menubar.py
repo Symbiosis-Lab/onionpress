@@ -279,9 +279,10 @@ class OnionPressApp(rumps.App):
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
         self._tor_internally_ready = False # Checks 1-4 passed (Arti+WordPress up)
-        self._onionheaven_reclaim_succeeded = False  # Whether /online reclaim succeeded
-        self._onionheaven_reclaim_in_flight = False  # Whether a reclaim thread is running
-        self._onionheaven_reclaim_last_attempt = 0   # Timestamp of last reclaim attempt
+        # Reclaim fields kept for compatibility (notify_onionheaven_online still sets them)
+        self._onionheaven_reclaim_succeeded = False
+        self._onionheaven_reclaim_in_flight = False
+        self._onionheaven_reclaim_last_attempt = 0
         self._tor_last_auto_restart = 0    # Timestamp of last auto-restart (cooldown-based)
         self._tor_client_last_restart = 0  # Timestamp of last tor-client auto-restart
         self._wordpress_confirmed = False  # WordPress responded at least once (stays up reliably)
@@ -1412,35 +1413,15 @@ class OnionPressApp(rumps.App):
                         self.start_caffeinate()
                         self.update_menu()
 
-                # OnionHeaven: register or notify online (retries until success)
-                if (self.is_ready and not self.is_onionheaven
+                # OnionHeaven: start heartbeat as soon as Tor is internally ready.
+                # Don't wait for purple — the heartbeat IS the reclaim mechanism.
+                # If OnionHeaven has taken over our address, the heartbeat's /online
+                # will release it. The heartbeat loop retries every 60s on failure.
+                if (self._tor_internally_ready and not self.is_onionheaven
                         and not self._onionheaven_registration_succeeded
                         and not self._onionheaven_registration_in_flight):
-                    # First time or previous registration failed — full registration with keys
                     self._onionheaven_registration_in_flight = True
                     onionheaven.start_registration_thread(self)
-                elif (self.is_ready and not self.is_onionheaven
-                        and self._onionheaven_registration_succeeded
-                        and ready_now and not previous_ready):
-                    # Already registered, coming back online (wake/reconnect)
-                    onionheaven.start_online_notification_thread(self)
-
-                # OnionHeaven: reclaim address after takeover.
-                # If internally ready (checks 1-4) but self-check fails (check 5),
-                # OnionHeaven may have taken over our address (serving 302 redirect).
-                # Send /online as soon as Tor network is up — don't wait for
-                # the self-check, which can't pass until the takeover is released.
-                # This also handles fresh launches where a previous session's address
-                # was taken over while we were offline.
-                # Keep retrying every 60s until we get a positive response.
-                if (self._tor_internally_ready and not self.is_ready
-                        and not self._onionheaven_reclaim_succeeded
-                        and not self._onionheaven_reclaim_in_flight
-                        and (time.time() - self._onionheaven_reclaim_last_attempt) > 60):
-                    self._onionheaven_reclaim_in_flight = True
-                    self._onionheaven_reclaim_last_attempt = time.time()
-                    self.log("Internally ready but self-check failing — sending /online to reclaim address")
-                    onionheaven.start_online_notification_thread(self)
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
