@@ -1,7 +1,7 @@
 # Stage 1: Compile Arti from source — builds native arch (arm64 on Apple Silicon)
 # The official Tor Project image is amd64-only, which forces qemu emulation on
 # ARM Macs. Building from source gives us a native binary instead.
-FROM rust:slim-trixie AS builder
+FROM rust:trixie AS builder
 RUN cargo install arti --locked --features onion-service-service,static-sqlite
 
 # Stage 2: Runtime — Debian stable (trixie). Use Tor Project's own repo for
