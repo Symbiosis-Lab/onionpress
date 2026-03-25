@@ -1,13 +1,20 @@
 # Stage 1: Compile Arti from source — builds native arch (arm64 on Apple Silicon)
 # The official Tor Project image is amd64-only, which forces qemu emulation on
 # ARM Macs. Building from source gives us a native binary instead.
-FROM rust:latest AS builder
+FROM rust:slim-trixie AS builder
 RUN cargo install arti --locked --features onion-service-service,static-sqlite
 
-# Stage 2: Runtime (must match builder's glibc — rust:latest uses trixie)
+# Stage 2: Runtime — Debian stable (trixie). Use Tor Project's own repo for
+# latest stable Tor (0.4.9.x) instead of Debian's older 0.4.8.16 which has
+# false-positive "compression bomb" warnings that break onion services after ~20h.
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    socat openssl ca-certificates sqlite3 python3 curl wget procps tor netcat-openbsd xxd \
+    socat openssl ca-certificates sqlite3 python3 curl wget procps netcat-openbsd xxd gpg \
+    && curl -s https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc \
+       | gpg --dearmor -o /usr/share/keyrings/tor-archive-keyring.gpg \
+    && echo 'deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org trixie main' \
+       > /etc/apt/sources.list.d/tor.list \
+    && apt-get update && apt-get install -y --no-install-recommends tor \
     && rm -rf /var/lib/apt/lists/*
 # Docker CLI for heartbeat to manage takeover containers via docker exec/run
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
