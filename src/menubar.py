@@ -283,6 +283,7 @@ class OnionPressApp(rumps.App):
         self._onionheaven_reclaim_in_flight = False  # Whether a reclaim thread is running
         self._onionheaven_reclaim_last_attempt = 0   # Timestamp of last reclaim attempt
         self._tor_last_auto_restart = 0    # Timestamp of last auto-restart (cooldown-based)
+        self._tor_client_last_restart = 0  # Timestamp of last tor-client auto-restart
         self._wordpress_confirmed = False  # WordPress responded at least once (stays up reliably)
         self.healthcheck_address = None    # Healthcheck .onion address
         self.onionheaven_messages = []          # Messages received from OnionHeaven
@@ -1107,6 +1108,18 @@ class OnionPressApp(rumps.App):
 
             self._tor_internally_ready = True
 
+            # Check 4.5: Verify tor-client has bootstrapped before using it
+            tc_bootstrapped, tc_pct = self._health_checker.check_tor_client_bootstrap()
+            if not tc_bootstrapped:
+                if log_result:
+                    self.log(f"✗ tor-client not bootstrapped ({tc_pct}%) — cannot check external reachability")
+                # Auto-restart tor-client if stuck (5 min cooldown)
+                if ((time.time() - self._tor_client_last_restart) > 300
+                        and self._health_checker.tor_client_stuck()):
+                    self._tor_client_last_restart = time.time()
+                    threading.Thread(target=self._auto_restart_tor_client, daemon=True).start()
+                return False
+
             # Check 5: External reachability via independent tor-client container
             reachable, http_code = self._health_checker.check_external_reachability(self.onion_address)
             if not reachable:
@@ -1898,6 +1911,14 @@ class OnionPressApp(rumps.App):
             self.log("Tor container restarted — retrying onion service setup")
         except Exception as e:
             self.log(f"Failed to auto-restart Tor container: {e}")
+
+    def _auto_restart_tor_client(self):
+        """Auto-restart tor-client when it's stuck at bootstrap."""
+        try:
+            self._docker.run(["restart", "onionpress-tor-client"], timeout=30)
+            self.log("tor-client container restarted")
+        except Exception as e:
+            self.log(f"Failed to auto-restart tor-client: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
