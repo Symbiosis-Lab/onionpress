@@ -248,8 +248,12 @@ def print_dashboard(iteration):
     versions = query_versions()
     hb_age, hb_msg = get_heartbeat_info()
 
+    # Get OnionHeaven address (first 20 chars)
+    oh_addr = docker_exec("onionpress-tor", "cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null") or "unknown"
+    oh_short = oh_addr[:20] + "…" if len(oh_addr) > 20 else oh_addr
+
     # Header
-    print(f"[{now}] OnionHeaven Dashboard  #{iteration}  (heartbeat: {hb_age})")
+    print(f"[{now}] OnionHeaven Dashboard  #{iteration}  {oh_short}  (heartbeat: {hb_age})")
     print(f"{'─' * 72}")
 
     # Registry with deltas
