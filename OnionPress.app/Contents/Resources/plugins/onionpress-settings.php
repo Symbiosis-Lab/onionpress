@@ -37,21 +37,39 @@ function onionpress_curl_tor( $url, $opts = array() ) {
 }
 
 /**
+ * Request an archive.org path via Tor: .onion first, clearnet-via-Tor-exit fallback.
+ *
+ * @param string $path  Path with query string (e.g. "/services/xauthn/?op=login").
+ * @param array  $opts  Extra curl options.
+ * @return array{body:string,code:int,error:string}
+ */
+function onionpress_ia_request( $path, $opts = array() ) {
+    $resp = onionpress_curl_tor(
+        'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion' . $path, $opts
+    );
+    if ( ! $resp['error'] && $resp['code'] > 0 ) {
+        return $resp;
+    }
+    // Fallback: clearnet via Tor exit
+    return onionpress_curl_tor( 'https://archive.org' . $path, $opts );
+}
+
+/**
  * Convert Archive.org account + password into S3 API keys via xauthn.
- * Routes through Tor (.onion) to avoid clearnet leaks.
+ * .onion first, clearnet-via-Tor-exit fallback.
  *
  * @return array{'access':string,'secret':string}|string  Keys on success, error message on failure.
  */
 function onionpress_fetch_ia_s3_keys( $email, $password ) {
-    $resp = onionpress_curl_tor(
-        'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login',
+    $resp = onionpress_ia_request(
+        '/services/xauthn/?op=login',
         array(
             CURLOPT_POST       => true,
             CURLOPT_POSTFIELDS => http_build_query( array( 'email' => $email, 'password' => $password ) ),
         )
     );
     if ( $resp['error'] ) {
-        return 'Tor request failed: ' . $resp['error'];
+        return 'Request failed: ' . $resp['error'];
     }
     $data = json_decode( $resp['body'], true );
     if ( empty( $data['success'] ) ) {
@@ -68,8 +86,8 @@ function onionpress_fetch_ia_s3_keys( $email, $password ) {
     $sig  = $data['values']['cookies']['logged-in-sig'] ?? '';
     $user = $data['values']['cookies']['logged-in-user'] ?? '';
     if ( $sig && $user ) {
-        $resp2 = onionpress_curl_tor(
-            'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/account/s3.php?output_json=1',
+        $resp2 = onionpress_ia_request(
+            '/account/s3.php?output_json=1',
             array(
                 CURLOPT_COOKIE => "logged-in-sig=$sig; logged-in-user=$user",
             )
