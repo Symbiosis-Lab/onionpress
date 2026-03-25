@@ -565,21 +565,22 @@ def notify_onionheaven_offline(app):
 def notify_onionheaven_online(app):
     """Notify OnionHeaven that this instance is back online (wake/reconnect).
 
-    Keeps retrying with backoff until successful — this is critical for
-    reclaiming an address after OnionHeaven takeover. Without a successful
-    /online, the site stays unreachable behind OnionHeaven's redirect.
-    Sets app._onionheaven_reclaim_succeeded on success; clears
+    Uses the same heartbeat code path that's proven to work — sends /online
+    with arti_key_pem, retries once on failure. Sets
+    app._onionheaven_reclaim_succeeded on success; clears
     app._onionheaven_reclaim_in_flight when done.
     """
     if getattr(app, 'is_onionheaven', False):
         app._onionheaven_reclaim_in_flight = False
         return False
-    app.log("Notifying OnionHeaven: coming online")
+    app.log("Notifying OnionHeaven: coming online (via heartbeat)")
     try:
-        result = _send_onionheaven_notification(app, "online", "online", max_attempts=30, max_time=30)
-        if result:
+        _send_heartbeat(app)
+        # _send_heartbeat sets _onionheaven_registration_succeeded on success
+        if getattr(app, '_onionheaven_registration_succeeded', False):
             app._onionheaven_reclaim_succeeded = True
-        return result
+            return True
+        return False
     finally:
         app._onionheaven_reclaim_in_flight = False
 
