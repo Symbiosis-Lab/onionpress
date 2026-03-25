@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * @param array  $opts    Extra curl options (CURLOPT_* => value).
  * @return array{body:string,code:int,error:string}
  */
-function onionpress_ia_curl_tor( $url, $opts = array() ) {
+function onionpress_curl_tor( $url, $opts = array() ) {
     $ch = curl_init( $url );
     curl_setopt( $ch, CURLOPT_PROXY, 'socks5h://onionpress-tor:9050' );
     curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
@@ -43,7 +43,7 @@ function onionpress_ia_curl_tor( $url, $opts = array() ) {
  * @return array{'access':string,'secret':string}|string  Keys on success, error message on failure.
  */
 function onionpress_fetch_ia_s3_keys( $email, $password ) {
-    $resp = onionpress_ia_curl_tor(
+    $resp = onionpress_curl_tor(
         'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login',
         array(
             CURLOPT_POST       => true,
@@ -68,7 +68,7 @@ function onionpress_fetch_ia_s3_keys( $email, $password ) {
     $sig  = $data['values']['cookies']['logged-in-sig'] ?? '';
     $user = $data['values']['cookies']['logged-in-user'] ?? '';
     if ( $sig && $user ) {
-        $resp2 = onionpress_ia_curl_tor(
+        $resp2 = onionpress_curl_tor(
             'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/account/s3.php?output_json=1',
             array(
                 CURLOPT_COOKIE => "logged-in-sig=$sig; logged-in-user=$user",
@@ -571,16 +571,13 @@ add_action( 'wp_ajax_onionpress_check_update', function () {
         ) );
     }
 
-    // Fetch from GitHub releases API
-    $resp = wp_remote_get( 'https://api.github.com/repos/brewsterkahle/onionpress/releases/latest', array(
-        'timeout' => 10,
-        'headers' => array( 'User-Agent' => 'OnionPress (+https://github.com/brewsterkahle/onionpress)' ),
-    ) );
-    if ( is_wp_error( $resp ) || wp_remote_retrieve_response_code( $resp ) !== 200 ) {
+    // Fetch from GitHub releases API (via Tor to avoid clearnet leak)
+    $resp = onionpress_curl_tor( 'https://api.github.com/repos/brewsterkahle/onionpress/releases/latest' );
+    if ( $resp['error'] || $resp['code'] !== 200 ) {
         wp_send_json( array( 'current' => $current, 'latest' => null, 'update' => false, 'error' => 'Failed to check for updates' ) );
     }
 
-    $data = json_decode( wp_remote_retrieve_body( $resp ), true );
+    $data = json_decode( $resp['body'], true );
     $tag  = $data['tag_name'] ?? '';
 
     set_transient( 'onionpress_latest_release', array( 'tag' => $tag ), 600 ); // 10 min
