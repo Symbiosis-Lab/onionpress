@@ -119,8 +119,7 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     // Deduplicate (e.g. if the post IS the homepage)
     $urls = array_unique( $urls );
 
-    // Route through Tor to avoid clearnet leaks. Fall back to clearnet
-    // only if Tor is unavailable (e.g. during early bootstrap).
+    // .onion first, clearnet via Tor exit as fallback. Never direct clearnet.
     $endpoints = array(
         array(
             'url'   => 'http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
@@ -128,7 +127,7 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         ),
         array(
             'url'   => 'https://web.archive.org/save',
-            'proxy' => null,
+            'proxy' => 'socks5h://onionpress-tor:9050',
         ),
     );
 
@@ -481,7 +480,7 @@ add_action( 'onionpress_drain_wayback_queue', function () {
         ),
         array(
             'url'   => 'https://web.archive.org/save',
-            'proxy' => null,
+            'proxy' => 'socks5h://onionpress-tor:9050',
         ),
     );
 
