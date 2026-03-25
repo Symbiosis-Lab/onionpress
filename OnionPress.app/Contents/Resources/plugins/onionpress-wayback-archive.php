@@ -11,6 +11,20 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+/**
+ * Log a Wayback message to both PHP error_log and the persistent host log.
+ */
+function onionpress_wayback_log( $msg ) {
+    $line = '[OnionPress Wayback] ' . $msg;
+    error_log( $line );
+    $ts   = gmdate( 'Y-m-d H:i:s' );
+    @file_put_contents(
+        '/var/lib/onionpress/wayback.log',
+        '[' . $ts . '] ' . $msg . "\n",
+        FILE_APPEND | LOCK_EX
+    );
+}
+
 // OnionPress version — read once from the shared volume, cached per request.
 function onionpress_version() {
     static $ver = null;
@@ -105,23 +119,23 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     // Deduplicate (e.g. if the post IS the homepage)
     $urls = array_unique( $urls );
 
-    // Try clearnet first (faster, no Tor overhead), fall back to .onion via Tor.
-    // The clearnet endpoint works because the WordPress container has internet
-    // access through Colima's NAT.
+    // Route through Tor to avoid clearnet leaks. Fall back to clearnet
+    // only if Tor is unavailable (e.g. during early bootstrap).
     $endpoints = array(
-        array(
-            'url'   => 'https://web.archive.org/save',
-            'proxy' => null,
-        ),
         array(
             'url'   => 'http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
             'proxy' => 'socks5h://onionpress-tor:9050',
+        ),
+        array(
+            'url'   => 'https://web.archive.org/save',
+            'proxy' => null,
         ),
     );
 
     $auth = onionpress_wayback_auth_header();
 
-    $failed_urls = array();
+    $failed_urls   = array();
+    $cooldown_urls = array();
     $first = true;
     foreach ( $urls as $url ) {
         // Small delay between requests to avoid SPN rate limits (429)
@@ -130,14 +144,23 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         }
         $first = false;
 
-        if ( ! onionpress_wayback_submit( $endpoints, $url, $auth ) ) {
+        $result = onionpress_wayback_submit( $endpoints, $url, $auth );
+        if ( $result === 'cooldown' ) {
+            $cooldown_urls[] = $url;
+        } elseif ( $result !== 'ok' ) {
             $failed_urls[] = $url;
         }
     }
 
-    // Queue any URLs that failed all endpoints
+    // Queue failed URLs for immediate retry
     if ( ! empty( $failed_urls ) ) {
         onionpress_wayback_queue_urls( $failed_urls );
+    }
+
+    // Queue cooldown URLs for retry in 65 minutes
+    if ( ! empty( $cooldown_urls ) ) {
+        $retry_after = gmdate( 'Y-m-d\TH:i:s\Z', time() + 3900 ); // 65 minutes
+        onionpress_wayback_queue_urls( $cooldown_urls, $retry_after );
     }
 }, 10, 3 );
 
@@ -148,18 +171,19 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
  * does not support SOCKS5 proxies.
  *
  * Tries each endpoint in order; stops on first success.
- * Returns true on success, false if all endpoints failed.
+ * Returns 'ok' on success, 'cooldown' if SPN deduped (retry after ~1 hour),
+ * or false if all endpoints failed.
  */
 function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
     if ( ! function_exists( 'curl_init' ) ) {
-        error_log( '[OnionPress Wayback] curl extension not available' );
+        onionpress_wayback_log( 'curl extension not available' );
         return false;
     }
 
     $user_agent = 'OnionPress/' . onionpress_version() . ' (+https://github.com/brewsterkahle/onionpress)';
 
     foreach ( $endpoints as $ep ) {
-        error_log( '[OnionPress Wayback] Archiving: ' . $url . ' via ' . $ep['url'] . ( $auth ? ' (authenticated)' : ' (no auth)' ) );
+        onionpress_wayback_log( 'Archiving: ' . $url . ' via ' . $ep['url'] . ( $auth ? ' (authenticated)' : ' (no auth)' ) );
 
         $headers = array( 'Accept: application/json' );
         if ( $auth ) {
@@ -197,39 +221,45 @@ function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
         curl_close( $ch );
 
         if ( $err ) {
-            error_log( '[OnionPress Wayback] Curl error for ' . $url . ' via ' . $ep['url'] . ': ' . $err );
+            onionpress_wayback_log( 'Curl error for ' . $url . ' via ' . $ep['url'] . ': ' . $err );
             continue; // Try next endpoint
         }
 
-        error_log( '[OnionPress Wayback] Submitted ' . $url . ' — HTTP ' . $http_code );
+        onionpress_wayback_log( 'Submitted ' . $url . ' — HTTP ' . $http_code . ' — ' . substr( $response, 0, 500 ) );
 
         // Check for auth failure
         if ( $http_code === 401 || $http_code === 403 ) {
             $msg = @json_decode( $response, true );
             $reason = isset( $msg['message'] ) ? $msg['message'] : 'authentication required';
-            error_log( '[OnionPress Wayback] Auth failed: ' . $reason . ' — trying next endpoint' );
+            onionpress_wayback_log( 'Auth failed: ' . $reason . ' — trying next endpoint' );
             continue;
         }
 
         // Rate-limited — do NOT treat as success; queue for retry
         if ( $http_code === 429 ) {
-            error_log( '[OnionPress Wayback] Rate-limited (HTTP 429) for ' . $url . ' — will queue for retry' );
+            onionpress_wayback_log( 'Rate-limited (HTTP 429) for ' . $url . ' — will queue for retry' );
             return false;
         }
 
         // Any 2xx/3xx response means the endpoint accepted it
         if ( $http_code >= 200 && $http_code < 400 ) {
-            return true; // Success
+            // Detect SPN dedup cooldown: "The same snapshot had been made X ago"
+            $body = @json_decode( $response, true );
+            if ( is_array( $body ) && isset( $body['message'] ) && strpos( $body['message'], 'same snapshot' ) !== false ) {
+                onionpress_wayback_log( 'SPN cooldown for ' . $url . ' — will retry in ~65 minutes' );
+                return 'cooldown';
+            }
+            return 'ok';
         }
 
         // 4xx client error (other than auth/rate-limit) — log and try next
         if ( $http_code >= 400 && $http_code < 500 ) {
-            error_log( '[OnionPress Wayback] Client error (HTTP ' . $http_code . ') for ' . $url . ', trying next endpoint' );
+            onionpress_wayback_log( 'Client error (HTTP ' . $http_code . ') for ' . $url . ', trying next endpoint' );
             continue;
         }
 
         // 5xx: server error, try next endpoint
-        error_log( '[OnionPress Wayback] Server error (HTTP ' . $http_code . '), trying next endpoint' );
+        onionpress_wayback_log( 'Server error (HTTP ' . $http_code . '), trying next endpoint' );
     }
 
     return false; // All endpoints failed
@@ -241,7 +271,7 @@ function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
  * The menubar app polls this file and drains it when the onion service
  * is reachable (purple state).
  */
-function onionpress_wayback_queue_urls( $urls ) {
+function onionpress_wayback_queue_urls( $urls, $retry_after = '' ) {
     $queue_file = '/var/lib/onionpress/wayback-queue.json';
 
     // Read existing queue
@@ -267,23 +297,31 @@ function onionpress_wayback_queue_urls( $urls ) {
     // Add new URLs (deduplicated)
     $now = gmdate( 'Y-m-d\TH:i:s\Z' );
     foreach ( $urls as $url ) {
+        $entry = array( 'url' => $url, 'queued_at' => $now );
+        if ( $retry_after ) {
+            $entry['retry_after'] = $retry_after;
+        }
+
         if ( isset( $existing[ $url ] ) ) {
-            // Update timestamp for existing entry
+            // Update timestamp and retry_after for existing entry
             foreach ( $queue as &$item ) {
                 if ( $item['url'] === $url ) {
                     $item['queued_at'] = $now;
+                    if ( $retry_after ) {
+                        $item['retry_after'] = $retry_after;
+                    }
                     break;
                 }
             }
             unset( $item );
         } else {
-            $queue[] = array( 'url' => $url, 'queued_at' => $now );
+            $queue[] = $entry;
             $existing[ $url ] = true;
         }
     }
 
     @file_put_contents( $queue_file, json_encode( $queue ) );
-    error_log( '[OnionPress Wayback] Queued ' . count( $urls ) . ' URL(s) for later archiving (' . count( $queue ) . ' total in queue)' );
+    onionpress_wayback_log( 'Queued ' . count( $urls ) . ' URL(s) for later archiving (' . count( $queue ) . ' total in queue)' );
 }
 
 /**
@@ -315,7 +353,7 @@ function onionpress_wayback_queue_path( $path ) {
 
     $queue[] = array( 'path' => $path, 'queued_at' => gmdate( 'Y-m-d\TH:i:s\Z' ) );
     @file_put_contents( $queue_file, json_encode( $queue ) );
-    error_log( '[OnionPress Wayback] Queued path ' . $path . ' for archiving once Tor is ready' );
+    onionpress_wayback_log( 'Queued path ' . $path . ' for archiving once Tor is ready' );
 }
 
 // ── wp_cron queue drain ──────────────────────────────────────────────
@@ -363,7 +401,28 @@ add_action( 'onionpress_drain_wayback_queue', function () {
         return;
     }
 
-    $item = $queue[0];
+    // Find the first item that's ready to process (retry_after has passed)
+    $now_ts = time();
+    $item   = null;
+    $idx    = null;
+    foreach ( $queue as $i => $candidate ) {
+        if ( isset( $candidate['retry_after'] ) ) {
+            $retry_ts = strtotime( $candidate['retry_after'] );
+            if ( $retry_ts && $retry_ts > $now_ts ) {
+                continue; // Not ready yet
+            }
+        }
+        $item = $candidate;
+        $idx  = $i;
+        break;
+    }
+
+    if ( $item === null ) {
+        return; // All items are waiting for cooldown
+    }
+
+    // Remove the item from its position (might not be index 0)
+    array_splice( $queue, $idx, 1 );
 
     // Handle path-only items (queued before onion address was available)
     if ( isset( $item['path'] ) && ! isset( $item['url'] ) ) {
@@ -399,47 +458,48 @@ add_action( 'onionpress_drain_wayback_queue', function () {
             }
         }
 
-        // Remove the path item, queue the resolved URLs
-        array_shift( $queue );
-        @file_put_contents( $queue_file, json_encode( $queue ) );
+        // Save queue (item already removed), then queue the resolved URLs
+        @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
         onionpress_wayback_queue_urls( array_unique( $urls ) );
 
-        error_log( '[OnionPress Wayback] Resolved path ' . $path . ' to ' . count( $urls ) . ' URL(s)' );
+        onionpress_wayback_log( 'Resolved path ' . $path . ' to ' . count( $urls ) . ' URL(s)' );
         return;
     }
 
     // Handle normal URL items
     $url = isset( $item['url'] ) ? $item['url'] : '';
     if ( empty( $url ) ) {
-        // Invalid item — remove and move on
-        array_shift( $queue );
-        @file_put_contents( $queue_file, json_encode( $queue ) );
+        // Invalid item — already removed, just save
+        @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
         return;
     }
 
     $endpoints = array(
         array(
-            'url'   => 'https://web.archive.org/save',
-            'proxy' => null,
-        ),
-        array(
             'url'   => 'http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
             'proxy' => 'socks5h://onionpress-tor:9050',
+        ),
+        array(
+            'url'   => 'https://web.archive.org/save',
+            'proxy' => null,
         ),
     );
 
     $auth = onionpress_wayback_auth_header();
 
-    if ( onionpress_wayback_submit( $endpoints, $url, $auth ) ) {
-        error_log( '[OnionPress Wayback] Queue drain: archived ' . $url );
-        // Remove from queue
-        array_shift( $queue );
-        @file_put_contents( $queue_file, json_encode( $queue ) );
-    } else {
-        error_log( '[OnionPress Wayback] Queue drain: failed to archive ' . $url . ' — will retry next cycle' );
-        // Leave in queue for next cycle. Move to end so other URLs get a chance.
-        $item = array_shift( $queue );
+    $result = onionpress_wayback_submit( $endpoints, $url, $auth );
+    if ( $result === 'ok' ) {
+        onionpress_wayback_log( 'Queue drain: archived ' . $url );
+        @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
+    } elseif ( $result === 'cooldown' ) {
+        // Re-queue at end with 65-minute delay
+        $item['retry_after'] = gmdate( 'Y-m-d\TH:i:s\Z', time() + 3900 );
         $queue[] = $item;
-        @file_put_contents( $queue_file, json_encode( $queue ) );
+        @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
+    } else {
+        onionpress_wayback_log( 'Queue drain: failed to archive ' . $url . ' — will retry next cycle' );
+        // Put back at end for next cycle
+        $queue[] = $item;
+        @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
     }
 } );
