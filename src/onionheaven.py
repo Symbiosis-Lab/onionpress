@@ -264,15 +264,15 @@ def _send_heartbeat(app, wordpress_healthy=True):
     calls omit the key to save bandwidth.
     """
     if getattr(app, 'is_onionheaven', False):
-        return
+        return False
 
     content_addr = getattr(app, 'onion_address', None)
     hc_addr = getattr(app, 'healthcheck_address', None)
 
     if not content_addr or not content_addr.endswith('.onion'):
-        return
+        return False
     if not hc_addr or not hc_addr.endswith('.onion'):
-        return
+        return False
 
     try:
         import key_manager
@@ -285,7 +285,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
         )
     except Exception as e:
         app.log(f"OnionHeaven: heartbeat sign error: {e}")
-        return
+        return False
 
     payload_dict = {
         "content_address": content_addr,
@@ -316,8 +316,10 @@ def _send_heartbeat(app, wordpress_healthy=True):
         f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/online"
     ]
 
+    app.log("OnionHeaven: heartbeat sending /online...")
     rc, output = _run_docker_rc(app, curl_args, timeout=45)
     ok = (rc == 0)
+    app.log(f"OnionHeaven: heartbeat /online rc={rc}, output={output[:100] if output else 'empty'}")
 
     # Retry once after 3s on transient Tor HSDir failures
     if not (ok and output):
@@ -341,12 +343,15 @@ def _send_heartbeat(app, wordpress_healthy=True):
                         "content_address": content_addr,
                     })
                     app.log(f"OnionHeaven: registered via heartbeat ({content_addr})")
-                return  # success, silent
+                return True  # success
             app.log(f"OnionHeaven: heartbeat rejected: {resp.get('error', 'unknown')}")
+            return False
         except json.JSONDecodeError:
             app.log(f"OnionHeaven: heartbeat got non-JSON response: {output[:200]}")
+            return False
     else:
         app.log(f"OnionHeaven: heartbeat failed after retry: curl_rc={rc}, output={repr(output[:200]) if output else 'empty'}")
+        return False
 
 
 def unregister_from_onionheaven(app, content_address=None):
@@ -575,12 +580,11 @@ def notify_onionheaven_online(app):
         return False
     app.log("Notifying OnionHeaven: coming online (via heartbeat)")
     try:
-        _send_heartbeat(app)
-        # _send_heartbeat sets _onionheaven_registration_succeeded on success
-        if getattr(app, '_onionheaven_registration_succeeded', False):
+        result = _send_heartbeat(app)
+        if result:
             app._onionheaven_reclaim_succeeded = True
-            return True
-        return False
+            app.log("OnionHeaven: reclaim succeeded")
+        return bool(result)
     finally:
         app._onionheaven_reclaim_in_flight = False
 
