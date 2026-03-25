@@ -1128,7 +1128,7 @@ class OnionPressApp(rumps.App):
                     if http_code == "302":
                         self.log("✗ Onion service returning 302 (OnionHeaven takeover active)")
                     elif http_code in ("000", ""):
-                        self.log("✗ Onion service not yet reachable through Tor network")
+                        self.log("✗ Our onion service not yet reachable through Tor network")
                     else:
                         self.log(f"✗ Onion service returned HTTP {http_code}")
                 return False
