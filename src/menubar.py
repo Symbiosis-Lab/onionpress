@@ -1373,8 +1373,9 @@ class OnionPressApp(rumps.App):
                     self.proxy_server.healthcheck_address = self.healthcheck_address
                     self.proxy_server.tor_ready = self.is_ready
 
-                # Read healthcheck address if not yet known
-                if self.healthcheck_address is None and self.is_ready:
+                # Read healthcheck address as soon as tor is internally ready
+                # (needed for OnionHeaven heartbeat, which starts before purple)
+                if self.healthcheck_address is None and self._tor_internally_ready:
                     self.read_healthcheck_address()
 
                 # Poll for OnionHeaven messages from healthcheck service
