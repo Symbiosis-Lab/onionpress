@@ -252,6 +252,13 @@ class HealthChecker:
 
         output = result.stdout
 
+        # Never restart a tor that recently bootstrapped — it just needs
+        # time for descriptor propagation (10-60s).  Restarting resets the
+        # descriptor upload and creates a self-defeating restart loop.
+        if "Bootstrapped 100%" in output or "Sufficiently bootstrapped" in output:
+            self._log("Tor bootstrapped — waiting for descriptor propagation")
+            return False
+
         for pattern in SICK_PATTERNS:
             if pattern in output:
                 return True

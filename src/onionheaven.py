@@ -56,8 +56,14 @@ def _run_docker(app, args, timeout=15):
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
             env=_docker_env(app)
         )
+        if result.returncode != 0 and result.stderr.strip():
+            app.log(f"OnionHeaven: docker cmd failed (rc={result.returncode}): {result.stderr.strip()[:200]}")
         return result.returncode == 0, result.stdout.strip()
-    except Exception:
+    except subprocess.TimeoutExpired:
+        app.log(f"OnionHeaven: docker cmd timed out after {timeout}s: {' '.join(str(a) for a in args[:4])}")
+        return False, ""
+    except Exception as e:
+        app.log(f"OnionHeaven: docker cmd error: {e}")
         return False, ""
 
 
@@ -84,7 +90,11 @@ def _run_docker_rc(app, args, timeout=15):
             env=_docker_env(app)
         )
         return result.returncode, result.stdout.strip()
-    except Exception:
+    except subprocess.TimeoutExpired:
+        app.log(f"OnionHeaven: docker cmd timed out after {timeout}s: {' '.join(str(a) for a in args[:4])}")
+        return -1, ""
+    except Exception as e:
+        app.log(f"OnionHeaven: docker cmd error: {e}")
         return -1, ""
 
 
@@ -525,11 +535,15 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
                 app.log(f"OnionHeaven: /{endpoint} rejected: {error_msg}")
                 return False
             except json.JSONDecodeError:
-                pass
+                app.log(f"OnionHeaven: /{endpoint} got non-JSON response: {output[:200]}")
+        elif not ok:
+            app.log(f"OnionHeaven: /{endpoint} curl failed (attempt {attempt + 1}/{max_attempts})")
+        else:
+            app.log(f"OnionHeaven: /{endpoint} got empty response (attempt {attempt + 1}/{max_attempts})")
 
         if attempt < max_attempts - 1:
             delay = backoff[min(attempt, len(backoff) - 1)]
-            app.log(f"OnionHeaven: /{endpoint} attempt {attempt + 1}/{max_attempts} failed, retrying in {delay}s...")
+            app.log(f"OnionHeaven: /{endpoint} retrying in {delay}s...")
             time.sleep(delay)
 
     app.log(f"OnionHeaven: /{endpoint} failed after {max_attempts} attempts — last response: {last_output!r}")
