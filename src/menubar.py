@@ -1842,6 +1842,8 @@ class OnionPressApp(rumps.App):
         # Restart tor-client — it has stale circuits and cached descriptors
         # from before sleep. A fresh start is faster than NEWNYM+HSFETCH.
         threading.Thread(target=self._auto_restart_tor_client, daemon=True).start()
+        # Restart any takeover containers too — same stale state problem
+        threading.Thread(target=self._restart_takeover_containers, daemon=True).start()
 
     def _sighup_tor(self, generation):
         """Send SIGHUP to Tor container to force circuit rebuild after wake.
@@ -1913,6 +1915,33 @@ class OnionPressApp(rumps.App):
             self.log("tor-client restarted (cache cleared)")
         except Exception as e:
             self.log(f"Failed to auto-restart tor-client: {e}")
+
+    def _restart_takeover_containers(self):
+        """Restart any onionheaven-takeover-* containers with clean caches.
+
+        Takeover containers have their own Tor instances that go stale
+        after sleep, just like tor-client.
+        """
+        try:
+            result = self._docker.run(
+                ["ps", "-q", "--filter", "name=onionheaven-takeover"],
+                timeout=10,
+            )
+            if not result.ok or not result.output.strip():
+                return  # No takeover containers running
+            for container_id in result.output.strip().split('\n'):
+                container_id = container_id.strip()
+                if not container_id:
+                    continue
+                self._docker.exec(
+                    container_id,
+                    ["sh", "-c", "rm -rf /var/lib/tor/cached-* /var/lib/tor/state"],
+                    timeout=10,
+                )
+                self._docker.run(["restart", container_id], timeout=30)
+                self.log(f"Takeover container {container_id[:12]} restarted (cache cleared)")
+        except Exception as e:
+            self.log(f"Failed to restart takeover containers: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
