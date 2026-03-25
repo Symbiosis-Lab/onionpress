@@ -1839,6 +1839,9 @@ class OnionPressApp(rumps.App):
         # SIGHUP Tor so it rebuilds stale circuits immediately
         gen = self._run_generation
         threading.Thread(target=self._sighup_tor, args=(gen,), daemon=True).start()
+        # Restart tor-client — it has stale circuits and cached descriptors
+        # from before sleep. A fresh start is faster than NEWNYM+HSFETCH.
+        threading.Thread(target=self._auto_restart_tor_client, daemon=True).start()
 
     def _sighup_tor(self, generation):
         """Send SIGHUP to Tor container to force circuit rebuild after wake.
