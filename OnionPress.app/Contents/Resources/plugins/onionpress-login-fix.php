@@ -111,6 +111,6 @@ add_action( 'admin_bar_menu', function ( $wp_admin_bar ) {
     $wp_admin_bar->add_node( [
         'id'     => 'onionpress-follow',
         'title'  => '<span class="ab-icon"></span><span class="ab-label">Follow</span>',
-        'href'   => 'http://op2ijk3cvd7kswainvwlg7uqxuoghaxzns6quht2csz3cdp5sgr2lnqd.onion/wp-admin/admin.php?page=onionpress-settings',
+        'href'   => admin_url( 'admin.php?page=onionpress-settings' ),
     ] );
 }, 100 );
