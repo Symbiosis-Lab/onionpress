@@ -12,6 +12,17 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
+ * Extend login session to 1 year.
+ *
+ * OnionPress is a single-user personal site — short sessions just force
+ * the admin to re-login constantly.  A long session keeps the admin bar
+ * visible so the site owner always sees the logged-in experience.
+ */
+add_filter( 'auth_cookie_expiration', function () {
+    return YEAR_IN_SECONDS;
+} );
+
+/**
  * Replace the "cookies blocked" error with helpful inline text.
  *
  * WordPress's test-cookie check can false-positive when the cookie domain
@@ -55,3 +66,51 @@ add_filter( 'login_redirect', function ( $redirect_to ) {
 
     return $redirect_to;
 }, 99 );
+
+/**
+ * Add a "Follow" item with purple onion icon to the admin bar.
+ *
+ * Placeholder for the Follow feature (issue #133) — no action yet.
+ */
+$onionpress_follow_icon = content_url( 'mu-plugins/onionpress-follow-icon.png' );
+
+// CSS for the follow icon — must be top-level so it runs before admin_bar_menu
+$onionpress_follow_css = '<style>
+#wpadminbar #wp-admin-bar-onionpress-follow .ab-icon::before {
+    content: "" !important;
+    display: inline-block;
+    background: url("' . $onionpress_follow_icon . '") no-repeat center !important;
+    background-size: 20px 20px !important;
+    width: 20px;
+    height: 20px;
+    top: 4px;
+    font: normal 20px/1 dashicons;
+}
+@media screen and (max-width: 782px) {
+    #wpadminbar #wp-admin-bar-onionpress-follow {
+        display: block !important;
+    }
+    #wpadminbar #wp-admin-bar-onionpress-follow .ab-icon::before {
+        background-size: 36px 36px !important;
+        width: 52px;
+        height: 46px !important;
+        top: 0;
+        line-height: 1.26;
+        text-align: center;
+    }
+}
+</style>';
+add_action( 'wp_head', function () use ( $onionpress_follow_css ) {
+    echo $onionpress_follow_css . "\n";
+} );
+add_action( 'admin_head', function () use ( $onionpress_follow_css ) {
+    echo $onionpress_follow_css . "\n";
+} );
+
+add_action( 'admin_bar_menu', function ( $wp_admin_bar ) {
+    $wp_admin_bar->add_node( [
+        'id'     => 'onionpress-follow',
+        'title'  => '<span class="ab-icon"></span><span class="ab-label">Follow</span>',
+        'href'   => 'http://op2ijk3cvd7kswainvwlg7uqxuoghaxzns6quht2csz3cdp5sgr2lnqd.onion/wp-admin/admin.php?page=onionpress-settings',
+    ] );
+}, 100 );
