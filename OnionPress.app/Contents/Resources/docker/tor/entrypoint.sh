@@ -72,6 +72,8 @@ TORRC_EOF
         if ! kill -0 $TOR_PID 2>/dev/null; then
             echo "ERROR: C Tor failed to start"
         fi
+        # Start watchdog to monitor Tor health via control port
+        python3 /tor-watchdog.py &
     else
         # Start Arti with OnionHeaven config (SOCKS + keystore for takeover services)
         su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
@@ -140,6 +142,8 @@ TORRC_EOF
             if ! kill -0 $TOR_PID 2>/dev/null; then
                 echo "ERROR: C Tor failed to start"
             fi
+            # Start watchdog to monitor Tor health via control port
+            python3 /tor-watchdog.py &
         else
             # Start Arti with OnionHeaven config (SOCKS + keystore)
             su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
@@ -219,6 +223,8 @@ DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+            # Start watchdog in background (will connect once control port is ready)
+            python3 /tor-watchdog.py &
             su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc"
         else
             echo "SOCKS-only mode: starting Arti SOCKS proxy (no onion services)..."
@@ -307,6 +313,9 @@ if [ "$TOR_IMPL" = "tor" ]; then
     if ! kill -0 $TOR_PID 2>/dev/null; then
         echo "ERROR: C Tor failed to start — check config at /etc/tor/torrc"
     fi
+
+    # Start watchdog to monitor Tor health via control port
+    python3 /tor-watchdog.py &
 
     # C Tor writes hostname files directly — wait for them, then log
     write_ctor_hostnames() {
