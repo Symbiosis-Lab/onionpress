@@ -213,6 +213,8 @@ TORRC_EOF
             # Minimal torrc for SOCKS-only
             cat > /etc/tor/torrc << TORRC_EOF
 SocksPort 0.0.0.0:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF

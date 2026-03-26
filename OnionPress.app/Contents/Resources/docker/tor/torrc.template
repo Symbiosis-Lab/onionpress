@@ -3,6 +3,10 @@
 
 SocksPort 0.0.0.0:9050
 
+# Control port for programmatic commands (DROPGUARDS, NEWNYM, etc.)
+ControlPort 9051
+CookieAuthentication 1
+
 DataDirectory /var/lib/tor
 
 # Logging
