@@ -116,7 +116,7 @@ function onionpress_menu_icon_base64() {
  * Register the admin menu page.
  */
 add_action( 'admin_menu', function () {
-    $icon = 'data:image/png;base64,' . onionpress_menu_icon_base64();
+    $icon = content_url( 'mu-plugins/onionpress-sidebar-icon.png' );
     add_menu_page(
         'OnionPress Settings',
         'OnionPress',
@@ -126,11 +126,21 @@ add_action( 'admin_menu', function () {
         $icon,
         80
     );
+    // Constrain the icon to match other sidebar icons
+    add_action( 'admin_head', function () {
+        echo '<style>
+#adminmenu .toplevel_page_onionpress-settings .wp-menu-image img {
+    width: 20px;
+    height: 20px;
+    padding: 7px 0;
+}
+</style>' . "\n";
+    } );
 } );
 
 // For multisite, also add to network admin
 add_action( 'network_admin_menu', function () {
-    $icon = 'data:image/png;base64,' . onionpress_menu_icon_base64();
+    $icon = content_url( 'mu-plugins/onionpress-sidebar-icon.png' );
     add_menu_page(
         'OnionPress Settings',
         'OnionPress',
