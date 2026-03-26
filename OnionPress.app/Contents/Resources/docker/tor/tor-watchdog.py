@@ -114,6 +114,10 @@ def send_cmd(s, cmd):
 # ---------------------------------------------------------------------------
 # Watchdog state
 # ---------------------------------------------------------------------------
+# How much wall clock drift indicates a sleep/wake
+SLEEP_DETECT_THRESHOLD = 30  # seconds — event timeout is 15s, so >30s means we slept
+
+
 class WatchdogState:
     def __init__(self):
         self.bootstrapped = False
@@ -122,6 +126,7 @@ class WatchdogState:
         self.last_dropguards = 0
         self.last_halt = 0
         self.failed_node_count = 0
+        self.last_loop_time = time.time()  # for sleep detection
         self.failed_node_window_start = time.time()
         self.last_recovery_time = 0  # when we last did DROPGUARDS
         self.hs_desc_uploaded_since_recovery = False
@@ -250,6 +255,15 @@ def _extract_bootstrap_pct(line):
 def check_stalls(cmd_sock, state):
     """Periodic check for stalls that events alone can't catch."""
     now = time.time()
+
+    # Sleep/wake detection: if wall clock jumped more than expected,
+    # the system slept. Tor may not emit any events about this but
+    # circuits are likely dead.
+    elapsed = now - state.last_loop_time
+    state.last_loop_time = now
+    if elapsed > SLEEP_DETECT_THRESHOLD and state.bootstrapped:
+        do_dropguards(cmd_sock, state,
+                      f"system sleep detected (wall clock jumped {elapsed:.0f}s)")
 
     # Bootstrap stall: not at 100% and no progress for BOOTSTRAP_STALL_TIMEOUT
     if (not state.bootstrapped
