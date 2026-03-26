@@ -1092,7 +1092,7 @@ class OnionPressApp(rumps.App):
             tor_output = result.stdout + result.stderr
             if "Sufficiently bootstrapped" not in tor_output and "Bootstrapped 100% (done)" not in tor_output:
                 if log_result:
-                    self.log("✗ Tor not fully bootstrapped yet")
+                    self.log("✗ onionpress-tor not fully bootstrapped yet")
                 return False
 
             # Check 3: Verify no critical errors in logs
@@ -1836,14 +1836,93 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = time.time()
             self.update_menu()
-        # SIGHUP Tor so it rebuilds stale circuits immediately
+        # Send DROPGUARDS + NEWNYM via control port to recover stale circuits
         gen = self._run_generation
-        threading.Thread(target=self._sighup_tor, args=(gen,), daemon=True).start()
-        # Restart tor-client — it has stale circuits and cached descriptors
-        # from before sleep. A fresh start is faster than NEWNYM+HSFETCH.
-        threading.Thread(target=self._auto_restart_tor_client, daemon=True).start()
+        threading.Thread(target=self._recover_tor_on_wake, args=(gen,), daemon=True).start()
+        threading.Thread(target=self._recover_tor_client_on_wake, daemon=True).start()
         # Restart any takeover containers too — same stale state problem
         threading.Thread(target=self._restart_takeover_containers, daemon=True).start()
+
+    def _tor_control_cmd(self, container, commands):
+        """Send commands to a Tor container's control port via docker exec.
+
+        commands: list of control port command strings (e.g. ['DROPGUARDS', 'SIGNAL NEWNYM'])
+        Returns True if all commands succeeded.
+        """
+        # Build a script that authenticates and sends commands
+        script = 'printf "AUTHENTICATE \\\"\\\"\\r\\n'
+        for cmd in commands:
+            script += f'{cmd}\\r\\n'
+        script += 'QUIT\\r\\n"'
+        script += ' | nc 127.0.0.1 9051'
+        try:
+            result = self._docker.exec(container, ["sh", "-c", script], timeout=10)
+            output = (result.stdout if hasattr(result, 'stdout') and result.stdout else '') + \
+                     (result.stderr if hasattr(result, 'stderr') and result.stderr else '')
+            if '250' in output:
+                return True
+            self.log(f"Control port command to {container} unexpected response: {output[:200]}")
+            return False
+        except Exception as e:
+            self.log(f"Control port command to {container} failed: {e}")
+            return False
+
+    def _recover_tor_on_wake(self, generation):
+        """Recover main tor after wake using control port commands.
+
+        Sends DROPGUARDS + SIGNAL NEWNYM to force fresh guard selection
+        and new circuits. Falls back to container restart if control port
+        is unavailable or Tor doesn't recover within 2 minutes.
+        """
+        if generation != self._run_generation:
+            return
+        if self._tor_control_cmd("onionpress-tor", ["DROPGUARDS", "SIGNAL NEWNYM"]):
+            self.log("Sent DROPGUARDS + NEWNYM to onionpress-tor via control port")
+        else:
+            # Fall back to SIGHUP
+            self._sighup_tor_once()
+
+        # Wait up to 2 minutes; restart if still unhealthy
+        time.sleep(120)
+        if generation != self._run_generation:
+            return
+        if not self.is_ready and not self._stopping and not self._quitting and self._tor_container_unhealthy():
+            self.log("onionpress-tor unhealthy 2min after wake recovery — restarting container")
+            try:
+                self._docker.exec(
+                    "onionpress-tor",
+                    ["sh", "-c", "rm -rf /var/lib/tor/cached-* /var/lib/tor/state"],
+                    timeout=10,
+                )
+                self._docker.run(["restart", "onionpress-tor"], timeout=30)
+                self.log("onionpress-tor restarted (cache cleared)")
+            except Exception as e:
+                self.log(f"Failed to restart onionpress-tor: {e}")
+
+    def _recover_tor_client_on_wake(self):
+        """Recover tor-client after wake using control port commands."""
+        if self._tor_control_cmd("onionpress-tor-client", ["DROPGUARDS", "SIGNAL NEWNYM"]):
+            self.log("Sent DROPGUARDS + NEWNYM to onionpress-tor-client via control port")
+        else:
+            # Fall back to restart with cache clear
+            self._auto_restart_tor_client()
+
+    def _sighup_tor_once(self):
+        """Send SIGHUP to main tor container (fallback if control port unavailable)."""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor", "kill", "-HUP", "1"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=10)
+            if result.returncode == 0:
+                self.log("Sent SIGHUP to onionpress-tor (control port fallback)")
+            else:
+                self.log(f"Failed to SIGHUP onionpress-tor: {result.stderr.strip()}")
+        except Exception as e:
+            self.log(f"Failed to SIGHUP onionpress-tor: {e}")
 
     def _sighup_tor(self, generation):
         """Send SIGHUP to Tor container to force circuit rebuild after wake.
