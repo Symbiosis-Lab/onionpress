@@ -1156,11 +1156,11 @@ start_containers() {
     log "Pulling pre-built images..."
     docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will use cached)"
 
-    # Start WordPress, DB, and tor-client first
+    # Start WordPress, DB, and OnionHeaven first
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d wordpress db tor-client >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d wordpress db onionheaven >> "$LOG_FILE" 2>&1; then
             break
         fi
         log "WARNING: docker compose up failed (attempt $attempt/$max_attempts)"
@@ -1676,7 +1676,7 @@ print(json.dumps(containers))
         # Verify onion service is actually reachable via Tor network
         if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
             local reach_code
-            reach_code=$(docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/" 2>/dev/null || echo "000")
+            reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/" 2>/dev/null || echo "000")
             if [ "$reach_code" = "200" ] || [ "$reach_code" = "301" ] || [ "$reach_code" = "302" ]; then
                 state="running"
             else
@@ -1953,7 +1953,7 @@ _validate_oh_address() {
 
     # Probe the OnionHeaven API endpoint (:8083/status)
     local api_result
-    api_result=$(docker exec onionpress-tor-client curl -s --max-time 30 \
+    api_result=$(docker exec onionheaven curl -s --max-time 30 \
         --socks5-hostname 127.0.0.1:9050 \
         "http://${addr}:8083/status" 2>/dev/null) || true
 
@@ -1964,7 +1964,7 @@ _validate_oh_address() {
 
     # API didn't respond — try the base address (port 80)
     local http_code
-    http_code=$(docker exec onionpress-tor-client curl -s --max-time 30 \
+    http_code=$(docker exec onionheaven curl -s --max-time 30 \
         -o /dev/null -w "%{http_code}" \
         --socks5-hostname 127.0.0.1:9050 \
         "http://${addr}/" 2>/dev/null) || true
@@ -2318,7 +2318,7 @@ main() {
                         log "Reachability test: no onion address"
                     else
                         local http_code
-                        http_code=$(docker exec onionpress-tor-client curl -s -o /dev/null -w '%{http_code}' --max-time 60 --socks5-hostname 127.0.0.1:9050 "http://$onion_addr_test/" 2>/dev/null || echo "000")
+                        http_code=$(docker exec onionheaven curl -s -o /dev/null -w '%{http_code}' --max-time 60 --socks5-hostname 127.0.0.1:9050 "http://$onion_addr_test/" 2>/dev/null || echo "000")
                         local reachable=false
                         if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 500 ] 2>/dev/null; then
                             reachable=true
@@ -2667,7 +2667,7 @@ main() {
             local scrub_ok=true
 
             # Check containers are running
-            local expected_containers="onionpress-tor onionpress-wordpress onionpress-db onionpress-tor-client"
+            local expected_containers="onionpress-tor onionpress-wordpress onionpress-db onionheaven"
             for ctr in $expected_containers; do
                 if docker ps --format '{{.Names}}' | grep -q "^${ctr}$"; then
                     echo "  ✓ $ctr running"

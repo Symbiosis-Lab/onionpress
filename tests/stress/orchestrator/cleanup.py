@@ -60,7 +60,7 @@ def cleanup_stress_test(
 
     # Clean stress test entries and refresh workers via /reset-onionheaven.
     # Always call over Tor to reach the OnionHeaven that was actually used.
-    result = docker.exec("onionpress-tor-client",
+    result = docker.exec("onionpress-tor",
         f'curl -s --socks5-hostname "reset:x@127.0.0.1:9050" --max-time 120 '
         f'-X POST "http://{config.onionheaven_addr}:8083/reset-onionheaven"',
         timeout=130)
@@ -71,7 +71,7 @@ def cleanup_stress_test(
         payloads = generate_unregister_payloads(store)
         count = 0
         for payload in payloads:
-            docker.exec("onionpress-tor-client",
+            docker.exec("onionpress-tor",
                 f'curl -s --socks5-hostname "unreg{count}:x@127.0.0.1:9050" --max-time 30 '
                 f'-X POST "http://{config.onionheaven_addr}:8083/unregister" '
                 f'-H "Content-Type: application/json" '
@@ -115,7 +115,7 @@ def run_cleanup(
         futures = {}
         for i, payload in enumerate(payloads):
             fut = executor.submit(
-                docker.exec, "onionpress-tor-client",
+                docker.exec, "onionpress-tor",
                 f'curl -s --socks5-hostname "cleanup{i}:x@127.0.0.1:9050" --max-time 30 '
                 f'-X POST "http://{config.onionheaven_addr}:8083/unregister" '
                 f'-H "Content-Type: application/json" '

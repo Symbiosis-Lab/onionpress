@@ -180,7 +180,7 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key, 
     payload_json = json.dumps(payload)
 
     ok, output = docker_exec(
-        "onionpress-tor-client",
+        "onionpress-tor",
         [
             "curl", "-s", "-X", "POST",
             "--socks5-hostname", "127.0.0.1:9050",

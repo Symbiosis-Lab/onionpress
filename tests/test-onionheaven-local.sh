@@ -106,11 +106,11 @@ oh_api() {
     local data="${3:-}"
 
     if [ "$method" = "GET" ]; then
-        docker exec onionpress-tor-client curl -s --max-time 30 \
+        docker exec onionpress-tor curl -s --max-time 30 \
             --socks5-hostname 127.0.0.1:9050 \
             "http://${ONION_ADDR}:8083${path}" 2>/dev/null
     else
-        docker exec onionpress-tor-client curl -s --max-time 30 \
+        docker exec onionpress-tor curl -s --max-time 30 \
             --socks5-hostname 127.0.0.1:9050 \
             -X POST -H "Content-Type: application/json" \
             -d "$data" \
@@ -195,7 +195,7 @@ fi
 log "Checking onion address reachability via Tor (may take a moment)..."
 TOR_REACHABLE=false
 for attempt in $(seq 1 12); do
-    TOR_STATUS=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${ONION_ADDR}/" 2>/dev/null || echo "000")
+    TOR_STATUS=$(docker exec onionpress-tor curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${ONION_ADDR}/" 2>/dev/null || echo "000")
     if [ "$TOR_STATUS" = "200" ] || [ "$TOR_STATUS" = "301" ] || [ "$TOR_STATUS" = "302" ]; then
         TOR_REACHABLE=true
         break
@@ -447,7 +447,7 @@ PROP_START=$(date +%s)
 for i in $(seq 1 60); do
     sleep 10
     PROP_ELAPSED=$(( $(date +%s) - PROP_START ))
-    REDIRECT_CODE=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
+    REDIRECT_CODE=$(docker exec onionpress-tor curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
     log "  [${PROP_ELAPSED}s] HTTP $REDIRECT_CODE"
     if [ "$REDIRECT_CODE" = "302" ]; then
         REDIRECT_DETECTED=true
@@ -462,7 +462,7 @@ fi
 
 # If we got the 302, verify it points to Wayback Machine
 if [ "$REDIRECT_DETECTED" = true ]; then
-    REDIRECT_LOCATION=$(docker exec onionpress-tor-client curl -s -D - -o /dev/null --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null | grep -i "^Location:" | tr -d '\r')
+    REDIRECT_LOCATION=$(docker exec onionpress-tor curl -s -D - -o /dev/null --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null | grep -i "^Location:" | tr -d '\r')
     if echo "$REDIRECT_LOCATION" | grep -q "archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"; then
         pass "Redirect points to Wayback Machine onion service"
     else
@@ -558,7 +558,7 @@ for i in $(seq 1 180); do
         LAST_HEARTBEAT=$(date +%s)
     fi
 
-    RELEASE_CODE=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
+    RELEASE_CODE=$(docker exec onionpress-tor curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
     log "  [${REL_MINS}m ${REL_SECS}s] HTTP $RELEASE_CODE"
     if [ "$RELEASE_CODE" != "302" ]; then
         RELEASE_CONFIRMED=true
@@ -581,7 +581,7 @@ log "Final Tor network verification..."
 # Allow retries — descriptor propagation may still be in progress.
 FAUX_RESTORED=false
 for attempt in $(seq 1 2); do
-    VERIFY_CODE=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
+    VERIFY_CODE=$(docker exec onionpress-tor curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
     log "  Faux address verification attempt $attempt: HTTP $VERIFY_CODE"
     if [ "$VERIFY_CODE" = "200" ]; then
         FAUX_RESTORED=true

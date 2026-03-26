@@ -221,11 +221,11 @@ detect_socks() {
 
     # Option 1: OnionPress tor-client container
     if [ -z "$SOCKS_MODE" ] && docker info >/dev/null 2>&1; then
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^onionpress-tor-client$"; then
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^onionpress-tor$"; then
             # Verify SOCKS is responding inside the container
-            if docker exec onionpress-tor-client curl -s -o /dev/null --max-time 5 --socks5-hostname 127.0.0.1:9050 "http://check.torproject.org/" 2>/dev/null; then
+            if docker exec onionpress-tor curl -s -o /dev/null --max-time 5 --socks5-hostname 127.0.0.1:9050 "http://check.torproject.org/" 2>/dev/null; then
                 SOCKS_MODE="docker"
-                DOCKER_CTR="onionpress-tor-client"
+                DOCKER_CTR="onionpress-tor"
                 log "  Using OnionPress tor-client container"
                 return
             fi
@@ -256,7 +256,7 @@ detect_socks() {
         fail "No Tor SOCKS proxy found"
         echo ""
         echo "  The remote test needs a Tor SOCKS proxy.  Options:"
-        echo "    1. Run OnionPress (provides onionpress-tor-client container)"
+        echo "    1. Run OnionPress (provides onionpress-tor container)"
         echo "    2. Open Tor Browser (provides SOCKS on 127.0.0.1:9150)"
         echo "    3. Install Tor (provides SOCKS on 127.0.0.1:9050)"
         echo "    4. Pass --socks host:port"

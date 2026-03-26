@@ -28,7 +28,7 @@ class HealthResult:
     wp_healthy: bool = False
     tor_bootstrapped: bool = False
     tor_internally_ready: bool = False  # Checks 1-4 passed
-    tor_externally_reachable: bool = False  # Check 5 passed (via tor-client)
+    tor_externally_reachable: bool = False  # Check 5 passed (via onionheaven)
     onion_address: str = ""
     bootstrap_pct: int = 0
     external_http_code: str = ""  # HTTP status from external reachability check
@@ -142,78 +142,18 @@ class HealthChecker:
         )
         return result.ok
 
-    def check_tor_client_bootstrap(self) -> tuple[bool, int]:
-        """Check if tor-client container has bootstrapped.
-
-        Returns:
-            (bootstrapped, percentage) — bootstrapped is True if 100%.
-        """
-        result = self.docker.run(
-            ["logs", "--tail", "50", "onionpress-tor-client"],
-            timeout=10,
-        )
-        if not result.ok:
-            return False, 0
-
-        output = result.stdout + result.stderr
-        pct = 0
-
-        # Find highest bootstrap percentage in C Tor format
-        for m in re.finditer(r"Bootstrapped (\d+)%", output):
-            p = int(m.group(1))
-            if p > pct:
-                pct = p
-
-        # Arti format
-        if "Sufficiently bootstrapped" in output:
-            pct = max(pct, 100)
-
-        return pct >= 100, pct
-
-    def tor_client_stuck(self) -> bool:
-        """Check if tor-client is stuck at bootstrap (not progressing).
-
-        Returns True if tor-client has not bootstrapped and shows signs of
-        being stuck (repeated connection failures).
-        """
-        bootstrapped, pct = self.check_tor_client_bootstrap()
-        if bootstrapped:
-            return False
-
-        # Check logs for stuck indicators
-        result = self.docker.run(
-            ["logs", "--tail", "30", "onionpress-tor-client"],
-            timeout=10,
-        )
-        if not result.ok:
-            return True  # Can't read logs — assume stuck
-
-        output = result.stdout + result.stderr
-
-        # Stuck at 5% with connection failures is the classic pattern
-        stuck_patterns = [
-            "CONNECTREFUSED",
-            "No usable guards",
-            "connections have failed",
-        ]
-        for pattern in stuck_patterns:
-            if pattern in output:
-                self._log(f"tor-client stuck at {pct}% — {pattern}")
-                return True
-
-        return False
-
     def check_external_reachability(self, onion_address: str) -> tuple[bool, str]:
         """Check if the onion service is reachable through the Tor network.
 
-        Uses the independent tor-client container (not self-connection).
+        Uses the onionheaven container which has an independent Tor instance
+        with its own circuits and descriptor cache — a true external test.
         Returns (reachable, http_code). Only HTTP 200 or 301 counts as
         reachable — 302 indicates OnionHeaven takeover.
         """
         if not onion_address:
             return False, ""
         result = self.docker.exec(
-            "onionpress-tor-client",
+            "onionheaven",
             [
                 "curl", "-s", "--max-time", "30",
                 "--socks5-hostname", "127.0.0.1:9050",
@@ -316,7 +256,7 @@ class HealthChecker:
             if not internal:
                 hr.errors.append("WordPress not reachable from Tor container")
 
-        # Check 5: External reachability (via tor-client)
+        # Check 5: External reachability (via onionheaven's independent Tor)
         if hr.tor_internally_ready and hr.onion_address:
             reachable, http_code = self.check_external_reachability(hr.onion_address)
             hr.tor_externally_reachable = reachable
@@ -350,7 +290,6 @@ class HealthState:
     last_bootstrap_pct: int = 0
     bootstrap_stall_count: int = 0
     last_auto_restart: float = 0
-    last_tor_client_restart: float = 0
     has_internet: bool = True
     tor_internally_ready: bool = False
     # OnionHeaven reclaim
@@ -459,21 +398,6 @@ class HealthMonitor:
         ):
             self.state.last_auto_restart = now
             self._log("Tor container unhealthy after 2min — restarting")
-            return True
-
-        return False
-
-    def should_restart_tor_client(self, tor_client_stuck: bool) -> bool:
-        """Decide whether to auto-restart the tor-client container.
-
-        Uses same cooldown as main Tor but tracked independently.
-        """
-        now = time.time()
-        cooldown = now - self.state.last_tor_client_restart
-
-        if tor_client_stuck and cooldown > RESTART_COOLDOWN_SECONDS:
-            self.state.last_tor_client_restart = now
-            self._log("tor-client stuck — restarting")
             return True
 
         return False

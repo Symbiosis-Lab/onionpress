@@ -586,7 +586,7 @@ start_all_workers() {
 
 # ── Polling client farm ───────────────────────────────────────────────────────
 # Dedicated Tor SOCKS containers for polling reachability. These are separate
-# from the stress workers (which publish services) and from onionpress-tor-client
+# from the stress workers (which publish services) and from onionpress-tor
 # (which may have stale circuits). Each polling client has fresh circuits
 # optimized for client-side descriptor lookups.
 
@@ -789,7 +789,7 @@ query_onionheaven_status() {
         result=$(docker_cmd exec onionpress-tor curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || \
         result=$(docker_cmd exec onionheaven curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || result=""
     else
-        result=$(docker_cmd exec onionpress-tor-client \
+        result=$(docker_cmd exec onionpress-tor \
             curl -s --socks5-hostname "status:x@127.0.0.1:9050" --max-time 30 \
             "http://${ONIONHEAVEN_ADDR}:8083/status" 2>/dev/null) || result=""
     fi
@@ -978,7 +978,7 @@ parallel_check_addrs() {
     PCHECK_000=0
 
     # Use dedicated polling clients for descriptor lookups.
-    # Falls back to onionpress-tor-client if no polling clients running.
+    # Falls back to onionpress-tor if no polling clients running.
     local check_ctrs=""
     local num_check_ctrs=0
     for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
@@ -989,7 +989,7 @@ parallel_check_addrs() {
         fi
     done
     if [ "$num_check_ctrs" -eq 0 ]; then
-        check_ctrs="onionpress-tor-client"
+        check_ctrs="onionpress-tor"
         num_check_ctrs=1
     fi
     local ctr_arr=($check_ctrs)
@@ -1814,7 +1814,7 @@ for p in payloads:
         ' 2>>"$_notify_log")
     else
         # Remote: send over Tor with parallelism (up to 10 concurrent)
-        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor sh -c '
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
@@ -1935,7 +1935,7 @@ for p in payloads:
         ' 2>>"$_notify_log")
     else
         # Remote: send over Tor with parallelism (up to 10 concurrent)
-        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor sh -c '
             tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
@@ -2031,7 +2031,7 @@ verify_redirects() {
     sampled_addrs=$(echo "$addrs" | awk 'BEGIN{srand()}{print rand()"\t"$0}' | sort -n | cut -f2 | head -n "$sample_size")
 
     # Use dedicated polling clients for verification.
-    # Falls back to onionpress-tor-client if none available.
+    # Falls back to onionpress-tor if none available.
     local verify_ctrs=""
     local num_verify_ctrs=0
     for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
@@ -2212,7 +2212,7 @@ for idx in range(${NUM_CONTAINERS}):
     if [ -n "$payloads" ]; then
         while IFS= read -r payload; do
             [ -z "$payload" ] && continue
-            docker_cmd exec onionpress-tor-client \
+            docker_cmd exec onionpress-tor \
                 curl -s --socks5-hostname "unreg${count}:x@127.0.0.1:9050" --max-time 30 \
                 -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                 -H "Content-Type: application/json" \
@@ -2644,7 +2644,7 @@ print(f'Found {len(seen)} unique addresses across all runs', file=sys.stderr)
         [ -z "$payload" ] && continue
 
         (
-            docker_cmd exec onionpress-tor-client \
+            docker_cmd exec onionpress-tor \
                 curl -s --socks5-hostname "cleanup${job_count}:x@127.0.0.1:9050" --max-time 30 \
                 -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                 -H "Content-Type: application/json" \

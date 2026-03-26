@@ -174,7 +174,7 @@ class Dashboard:
         if now - self._status_ts < 5 and self._status_cache:
             return self._status_cache
 
-        result = self.docker.exec("onionpress-tor-client",
+        result = self.docker.exec("onionpress-tor",
             f'curl -s --socks5-hostname "status:x@127.0.0.1:9050" --max-time 30 '
             f'"http://{self.config.onionheaven_addr}:8083/status"',
             timeout=35)

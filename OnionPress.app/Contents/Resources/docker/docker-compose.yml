@@ -88,29 +88,6 @@ services:
     networks:
       - onionpress-network
 
-  tor-client:
-    image: ghcr.io/brewsterkahle/onionpress-tor:latest
-    build: ./tor
-    container_name: onionpress-tor-client
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    ulimits:
-      nofile:
-        soft: 10000
-        hard: 10000
-    environment:
-      - TZ=${TZ:-UTC}
-      - TOR_IMPL=${TOR_IMPL:-tor}
-      - NO_ONION_SERVICE=1
-    volumes:
-      - arti-state-client:/var/lib/arti/
-    restart: unless-stopped
-    networks:
-      - onionpress-network
-
   onionheaven:
     image: ${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}
     build: ./tor
@@ -145,8 +122,6 @@ volumes:
     name: onionpress-arti-state
   tor-state:
     name: onionpress-tor-state
-  arti-state-client:
-    name: onionpress-arti-state-client
   arti-state-polling:
     name: onionpress-arti-state-polling
   wordpress-data:

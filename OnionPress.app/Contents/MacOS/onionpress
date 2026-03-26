@@ -1433,12 +1433,12 @@ start_containers() {
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d wordpress db tor-client >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d wordpress db onionheaven >> "$LOG_FILE" 2>&1; then
             break
         fi
-        log "WARNING: 'docker compose up -d wordpress db tor-client' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
+        log "WARNING: 'docker compose up -d wordpress db onionheaven' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
         if [ $attempt -eq $max_attempts ]; then
-            log "ERROR: 'docker compose up -d wordpress db tor-client' failed after $max_attempts attempts."
+            log "ERROR: 'docker compose up -d wordpress db onionheaven' failed after $max_attempts attempts."
             return 1
         fi
         attempt=$((attempt + 1))
@@ -1691,7 +1691,7 @@ _validate_oh_address() {
 
     # Probe the OnionHeaven API endpoint (:8083/status)
     local api_result
-    api_result=$(docker exec onionpress-tor-client curl -s --max-time 30 \
+    api_result=$(docker exec onionheaven curl -s --max-time 30 \
         --socks5-hostname 127.0.0.1:9050 \
         "http://${addr}:8083/status" 2>/dev/null) || true
 
@@ -1702,7 +1702,7 @@ _validate_oh_address() {
 
     # API didn't respond — try the base address (port 80)
     local http_code
-    http_code=$(docker exec onionpress-tor-client curl -s --max-time 30 \
+    http_code=$(docker exec onionheaven curl -s --max-time 30 \
         -o /dev/null -w "%{http_code}" \
         --socks5-hostname 127.0.0.1:9050 \
         "http://${addr}/" 2>/dev/null) || true
@@ -2222,7 +2222,7 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
-            docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor containers started"
             ;;
 
@@ -2283,7 +2283,7 @@ main() {
                 # Start Tor if not running
                 if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
                     echo "  Starting Tor..."
-                    docker compose up -d tor tor-client >> "$LOG_FILE" 2>&1
+                    docker compose up -d tor >> "$LOG_FILE" 2>&1
                 fi
             fi
             echo ""
@@ -2340,7 +2340,7 @@ main() {
             cd "$DOCKER_DIR"
             log "Restore: starting Tor containers..."
             setup_db_passwords 2>/dev/null || true
-            docker compose up -d tor tor-client onionheaven >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start Tor containers"
+            docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start Tor containers"
             wait_for_services
             echo "Done! OnionPress restarted with restored data."
             ;;
@@ -2465,7 +2465,7 @@ main() {
             local scrub_ok=true
 
             # Check containers are running
-            local expected_containers="onionpress-tor onionpress-wordpress onionpress-db onionpress-tor-client"
+            local expected_containers="onionpress-tor onionpress-wordpress onionpress-db onionheaven"
             for ctr in $expected_containers; do
                 if docker ps --format '{{.Names}}' | grep -q "^${ctr}$"; then
                     echo "  ✓ $ctr running"

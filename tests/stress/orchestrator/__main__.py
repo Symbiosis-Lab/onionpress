@@ -77,11 +77,11 @@ def _preflight(config: StressConfig, docker: Docker, logger: StressLogger):
         logger.log(f"  Local address: {local_addr}")
 
     # Verify we can reach OnionHeaven API over Tor
-    if not docker.container_running("onionpress-tor-client"):
-        logger.log("ERROR: onionpress-tor-client is not running (needed for Tor SOCKS)")
+    if not docker.container_running("onionpress-tor"):
+        logger.log("ERROR: onionpress-tor is not running (needed for Tor SOCKS)")
         sys.exit(1)
     logger.log(f"  Checking OnionHeaven API at {config.onionheaven_addr}:8083/status ...")
-    result = docker.exec("onionpress-tor-client",
+    result = docker.exec("onionpress-tor",
         f'curl -s -w "\\n%{{http_code}}" --socks5-hostname "preflight:x@127.0.0.1:9050" --max-time 30 '
         f'"http://{config.onionheaven_addr}:8083/status"',
         timeout=35)

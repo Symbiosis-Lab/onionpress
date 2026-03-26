@@ -1107,15 +1107,7 @@ class OnionPressApp(rumps.App):
 
             self._tor_internally_ready = True
 
-            # Check 4.5: Verify tor-client has bootstrapped before using it
-            tc_bootstrapped, tc_pct = self._health_checker.check_tor_client_bootstrap()
-            if not tc_bootstrapped:
-                if log_result:
-                    self.log(f"✗ tor-client not bootstrapped ({tc_pct}%) — cannot check external reachability")
-                # Watchdog inside tor-client container handles recovery via control port
-                return False
-
-            # Check 5: External reachability via independent tor-client container
+            # Check 5: External reachability via onionheaven's independent Tor
             reachable, http_code = self._health_checker.check_external_reachability(self.onion_address)
             if not reachable:
                 if log_result:
@@ -1999,7 +1991,7 @@ class OnionPressApp(rumps.App):
 
         self.log("Waiting for onion service to become reachable before opening browser...")
 
-        # Test reachability through independent tor-client container
+        # Test reachability through onionheaven's independent Tor
         onion_url = f"http://{self.onion_address}/"
         reachable = False
         for attempt in range(30):  # Up to 90s (30 x 3s)
@@ -2007,7 +1999,7 @@ class OnionPressApp(rumps.App):
                 ok, http_code = self._health_checker.check_external_reachability(self.onion_address)
                 if ok:
                     reachable = True
-                    self.log(f"Onion service reachable via tor-client after {(attempt + 1) * 3}s")
+                    self.log(f"Onion service reachable after {(attempt + 1) * 3}s")
                     break
             except Exception:
                 pass
@@ -3671,7 +3663,7 @@ License: AGPL v3"""
                 else:
                     try:
                         r = subprocess.run(
-                            ["docker", "exec", "onionpress-tor-client",
+                            ["docker", "exec", "onionheaven",
                              "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                              "--max-time", "60", "--socks5-hostname", "127.0.0.1:9050",
                              f"http://{onion_addr}/"],
