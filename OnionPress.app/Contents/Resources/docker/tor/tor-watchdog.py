@@ -308,6 +308,12 @@ def run():
             time.sleep(CONNECT_RETRY_DELAY)
             continue
 
+        # Flush stale descriptor cache from before restart so reachability
+        # checks (which use this Tor's SOCKS proxy) get fresh descriptors.
+        resp = send_cmd(cmd_sock, "SIGNAL NEWNYM")
+        if "250" in resp:
+            log("Flushed descriptor cache (NEWNYM on startup)")
+
         log("Connected — monitoring Tor health")
 
         state = WatchdogState()
