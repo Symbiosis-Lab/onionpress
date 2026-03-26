@@ -20,7 +20,7 @@ DOCKER_ARGS="--host unix://$HOME/.onionpress/colima/default/docker.sock"
 
 # Check if Tor SOCKS proxy can route traffic
 tor_ready() {
-    "$DOCKER" $DOCKER_ARGS exec onionpress-tor-client \
+    "$DOCKER" $DOCKER_ARGS exec onionpress-tor \
         curl -s --max-time 5 --socks5-hostname 127.0.0.1:9050 \
         https://example.com -o /dev/null -w '%{http_code}' 2>/dev/null | grep -q 200
 }
@@ -42,20 +42,20 @@ if [ ${#ARGS[@]} -eq 0 ]; then
     exit 1
 fi
 
-# Check if tor-client container is running
-if ! "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-tor-client 2>/dev/null | grep -q true; then
+# Check if tor container is running
+if ! "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-tor 2>/dev/null | grep -q true; then
     if [ "$FORCE_START" = true ]; then
         echo "OnionPress not running, launching..." >&2
         "$ONIONPRESS" launch
-        # Wait for tor-client container to come up
+        # Wait for tor container to come up
         echo "Waiting for OnionPress to be ready..." >&2
         for i in $(seq 1 120); do
-            if "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-tor-client 2>/dev/null | grep -q true; then
+            if "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-tor 2>/dev/null | grep -q true; then
                 break
             fi
             sleep 2
         done
-        if ! "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-tor-client 2>/dev/null | grep -q true; then
+        if ! "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-tor 2>/dev/null | grep -q true; then
             echo "Timed out waiting for OnionPress to start." >&2
             exit 1
         fi
@@ -65,8 +65,8 @@ if ! "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-tor
     fi
 fi
 
-# Run the request through tor-client's independent SOCKS proxy
-"$DOCKER" $DOCKER_ARGS exec onionpress-tor-client curl -s --max-time 30 --socks5-hostname 127.0.0.1:9050 "${ARGS[@]}"
+# Run the request through Tor's SOCKS proxy
+"$DOCKER" $DOCKER_ARGS exec onionpress-tor curl -s --max-time 30 --socks5-hostname 127.0.0.1:9050 "${ARGS[@]}"
 rc=$?
 
 # If curl failed with SOCKS error (97), it could be:
@@ -81,7 +81,7 @@ if [ $rc -eq 97 ]; then
     echo "Tor not ready yet, waiting for circuits..." >&2
     for i in $(seq 1 30); do
         if tor_ready; then
-            "$DOCKER" $DOCKER_ARGS exec onionpress-tor-client curl -s --max-time 30 --socks5-hostname 127.0.0.1:9050 "${ARGS[@]}"
+            "$DOCKER" $DOCKER_ARGS exec onionpress-tor curl -s --max-time 30 --socks5-hostname 127.0.0.1:9050 "${ARGS[@]}"
             exit $?
         fi
         sleep 2

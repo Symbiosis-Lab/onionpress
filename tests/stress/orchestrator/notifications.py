@@ -111,7 +111,7 @@ def _send_one_notification(
         socks_tag = f"{tag}{index}r{attempt}"
         # Capture both HTTP code and response body
         result = docker.exec(
-            "onionpress-tor-client",
+            "onionpress-tor",
             [
                 "curl", "-s", "-w", "\n%{http_code}",
                 "--socks5-hostname", f"{socks_tag}:x@127.0.0.1:9050",
@@ -220,7 +220,7 @@ def send_notifications_via_workers(
 ) -> int:
     """Send notifications through the worker containers' own Tor circuits.
 
-    Instead of routing all notifications through onionpress-tor-client,
+    Instead of routing all notifications through onionpress-tor,
     tells each worker container to sign and send its own /offline or /online
     payloads via its already-warm Tor SOCKS proxy.
 

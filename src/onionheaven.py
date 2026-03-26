@@ -309,7 +309,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
     curl_args = [
         "exec", "onionpress-wordpress",
         "curl", "-s", "-S", "-X", "POST",
-        "--socks5-hostname", "onionpress-tor-client:9050",
+        "--socks5-hostname", "onionpress-tor:9050",
         "-H", "Content-Type: application/json",
         "-d", payload,
         "--max-time", "30",
@@ -517,12 +517,10 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     last_output = ""
 
     for attempt in range(max_attempts):
-        # Use tor-client — it has independent circuits and likely a warm
-        # connection to OnionHeaven from healthcheck polling
         ok, output = _run_docker(app, [
             "exec", "onionpress-wordpress",
             "curl", "-s", "-X", "POST",
-            "--socks5-hostname", "onionpress-tor-client:9050",
+            "--socks5-hostname", "onionpress-tor:9050",
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", str(max_time),
