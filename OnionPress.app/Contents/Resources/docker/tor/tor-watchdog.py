@@ -265,6 +265,12 @@ def check_stalls(cmd_sock, state):
         do_dropguards(cmd_sock, state,
                       f"system sleep detected (wall clock jumped {elapsed:.0f}s)")
 
+    # Active circuit health check — if Tor reports no circuits, recover
+    if state.bootstrapped:
+        resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
+        if "circuit-established=0" in resp:
+            do_dropguards(cmd_sock, state, "circuit-established=0 (circuits lost)")
+
     # Bootstrap stall: not at 100% and no progress for BOOTSTRAP_STALL_TIMEOUT
     if (not state.bootstrapped
             and state.last_bootstrap_pct > 0
