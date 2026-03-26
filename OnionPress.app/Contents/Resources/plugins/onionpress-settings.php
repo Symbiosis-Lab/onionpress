@@ -312,6 +312,54 @@ add_action( 'admin_init', function () {
 } );
 
 /**
+ * Handle follow/unfollow submissions.
+ */
+add_action( 'admin_init', function () {
+    if ( ! isset( $_POST['onionpress_follow_nonce'] ) ) {
+        return;
+    }
+    if ( ! wp_verify_nonce( $_POST['onionpress_follow_nonce'], 'onionpress_follow_save' ) ) {
+        return;
+    }
+    if ( ! current_user_can( 'manage_options' ) ) {
+        return;
+    }
+
+    $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' ) );
+    if ( ! is_array( $following ) ) {
+        $following = array();
+    }
+
+    // Unfollow
+    if ( ! empty( $_POST['onionpress_unfollow_address'] ) ) {
+        $remove = sanitize_text_field( wp_unslash( $_POST['onionpress_unfollow_address'] ) );
+        $following = array_values( array_filter( $following, function ( $a ) use ( $remove ) {
+            return $a !== $remove;
+        } ) );
+        update_option( 'onionpress_following', $following );
+        wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
+        exit;
+    }
+
+    // Follow — extract .onion from URL if needed
+    if ( ! empty( $_POST['onionpress_follow_address'] ) ) {
+        $raw = sanitize_text_field( wp_unslash( $_POST['onionpress_follow_address'] ) );
+        $raw = strtolower( trim( $raw ) );
+        if ( preg_match( '/([a-z2-7]{56}\.onion)/', $raw, $m ) ) {
+            $addr = $m[1];
+        } else {
+            $addr = $raw;
+        }
+        if ( ! in_array( $addr, $following, true ) ) {
+            $following[] = $addr;
+            update_option( 'onionpress_following', $following );
+        }
+        wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
+        exit;
+    }
+} );
+
+/**
  * Handle form submission — write config-updates.json to the shared volume.
  */
 add_action( 'admin_init', function () {
@@ -797,6 +845,75 @@ function onionpress_settings_page() {
             <?php endif; ?>
             &mdash; <a href="/onionpress-status">View full status &amp; logs &rarr;</a>
         </p>
+
+        <!-- Following Section -->
+        <?php
+        $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' ) );
+        if ( ! is_array( $following ) ) {
+            $following = array();
+        }
+        ?>
+        <div style="margin-bottom: 20px; border: 1px solid #c3c4c7; border-radius: 4px; padding: 12px 16px; background: #f9f9f9;">
+            <h2 style="margin-top: 0;">Following</h2>
+            <div id="onionpress-following-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 10px;">
+                <?php if ( empty( $following ) ) : ?>
+                <p class="description" id="onionpress-following-empty">No onion services followed yet. Add one below.</p>
+                <?php endif; ?>
+                <?php foreach ( $following as $addr ) : ?>
+                <div class="onionpress-following-entry" style="display: flex; align-items: center; margin-bottom: 4px;">
+                    <span class="onionpress-following-status" style="margin-right: 6px;"><?php
+                        echo preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ? '&#10003;' : '&#9888;';
+                    ?></span>
+                    <code style="flex: 1; font-size: 12px;"><?php echo esc_html( $addr ); ?></code>
+                    <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $addr ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
+                </div>
+                <?php endforeach; ?>
+            </div>
+            <form method="post" id="onionpress-follow-form" style="display: flex; gap: 8px;">
+                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
+                <input type="text" name="onionpress_follow_address" id="onionpress-follow-input"
+                       placeholder="Paste .onion address or URL" class="regular-text" style="flex: 1;">
+                <button type="submit" class="button button-primary">Follow</button>
+            </form>
+            <?php foreach ( $following as $addr ) : ?>
+            <input type="hidden" name="onionpress_following_existing[]" form="onionpress-unfollow-form" value="<?php echo esc_attr( $addr ); ?>">
+            <?php endforeach; ?>
+            <form method="post" id="onionpress-unfollow-form" style="display: none;">
+                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
+                <input type="hidden" name="onionpress_unfollow_address" id="onionpress-unfollow-address" value="">
+            </form>
+        </div>
+        <script>
+        (function() {
+            // Extract .onion from pasted URLs
+            var input = document.getElementById('onionpress-follow-input');
+            input.addEventListener('paste', function(e) {
+                setTimeout(function() {
+                    var val = input.value.trim();
+                    var match = val.match(/([a-z2-7]{56}\.onion)/i);
+                    if (match) {
+                        input.value = match[1].toLowerCase();
+                    }
+                }, 0);
+            });
+            input.addEventListener('change', function() {
+                var val = input.value.trim();
+                var match = val.match(/([a-z2-7]{56}\.onion)/i);
+                if (match) {
+                    input.value = match[1].toLowerCase();
+                }
+            });
+            // Unfollow buttons
+            document.querySelectorAll('.onionpress-unfollow').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    document.getElementById('onionpress-unfollow-address').value = btn.dataset.address;
+                    document.getElementById('onionpress-unfollow-form').submit();
+                });
+            });
+        })();
+        </script>
+
+        <hr style="border: none; border-top: 1px solid #c3c4c7; margin: 20px 0;">
 
         <form method="post">
             <?php wp_nonce_field( 'onionpress_settings_save', 'onionpress_settings_nonce' ); ?>
