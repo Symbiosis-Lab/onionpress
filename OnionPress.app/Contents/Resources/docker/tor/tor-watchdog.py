@@ -127,6 +127,7 @@ class WatchdogState:
         self.last_halt = 0
         self.failed_node_count = 0
         self.last_loop_time = time.time()  # for sleep detection
+        self.last_heartbeat_log = time.time()  # periodic "alive" log
         self.failed_node_window_start = time.time()
         self.last_recovery_time = 0  # when we last did DROPGUARDS
         self.hs_desc_uploaded_since_recovery = False
@@ -265,6 +266,15 @@ def check_stalls(cmd_sock, state):
         do_dropguards(cmd_sock, state,
                       f"system sleep detected (wall clock jumped {elapsed:.0f}s)")
 
+    # Periodic heartbeat log (every 5 minutes) so we can tell the watchdog is alive
+    if now - state.last_heartbeat_log > 300:
+        ce = "?"
+        resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
+        if "circuit-established=" in resp:
+            ce = resp.split("circuit-established=")[1].split()[0].strip()
+        log(f"alive — bootstrapped={state.bootstrapped}, circuit-established={ce}")
+        state.last_heartbeat_log = now
+
     # Active circuit health check — if Tor reports no circuits, recover
     if state.bootstrapped:
         resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
@@ -320,7 +330,7 @@ def run():
                 time.sleep(CONNECT_RETRY_DELAY)
 
         # Subscribe to events
-        resp = send_cmd(event_sock, "SETEVENTS STATUS_CLIENT STATUS_GENERAL WARN HS_DESC")
+        resp = send_cmd(event_sock, "SETEVENTS STATUS_CLIENT STATUS_GENERAL NOTICE WARN HS_DESC")
         if "250" not in resp:
             log(f"Failed to subscribe to events: {resp.strip()}")
             event_sock.close()
