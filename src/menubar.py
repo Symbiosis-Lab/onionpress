@@ -1761,14 +1761,19 @@ class OnionPressApp(rumps.App):
         return False
 
     def _signal_tor_dormant(self):
-        """Send DORMANT to all Tor containers before sleep."""
-        for container in ["onionpress-tor", "onionheaven"]:
+        """Send DORMANT to SOCKS-only Tor containers before sleep.
+
+        DORMANT is NOT safe for onionpress-tor — it unloads onion services
+        and they don't come back after ACTIVE. Only send to containers
+        that don't host onion services (onionheaven, tor-client).
+        """
+        for container in ["onionheaven"]:
             if self._tor_control_signal(container, "DORMANT"):
                 self.log(f"Sent DORMANT to {container}")
 
     def _signal_tor_active(self):
-        """Send ACTIVE to all Tor containers on wake."""
-        for container in ["onionpress-tor", "onionheaven"]:
+        """Send ACTIVE to SOCKS-only Tor containers on wake."""
+        for container in ["onionheaven"]:
             if self._tor_control_signal(container, "ACTIVE"):
                 self.log(f"Sent ACTIVE to {container}")
 

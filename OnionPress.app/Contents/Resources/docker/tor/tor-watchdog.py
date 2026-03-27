@@ -327,8 +327,10 @@ def check_stalls(cmd_sock, state):
         # Reset so we don't warn repeatedly
         state.last_recovery_time = 0
 
-    # Escalation: DORMANT/ACTIVE if DROPGUARDS didn't work after 2 minutes
-    if (state.last_dropguards > 0
+    # Escalation: DORMANT/ACTIVE if DROPGUARDS didn't work after 2 minutes.
+    # Only safe for SOCKS-only containers — DORMANT kills onion services permanently.
+    if (os.environ.get("NO_ONION_SERVICE") == "1"
+            and state.last_dropguards > 0
             and not state.bootstrapped
             and now - state.last_dropguards > DORMANT_COOLDOWN
             and now - state.last_dormant > DORMANT_COOLDOWN):
