@@ -1743,10 +1743,40 @@ class OnionPressApp(rumps.App):
             lambda notification: self._handle_terminate())
         self.log("Registered for system sleep/wake/terminate notifications")
 
+    def _tor_control_signal(self, container, signal):
+        """Send a control port signal to a Tor container via docker exec."""
+        try:
+            script = (
+                'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
+                '| xxd -p -c 32)\\r\\n'
+                f'SIGNAL {signal}\\r\\nQUIT\\r\\n"'
+                ' | nc 127.0.0.1 9051'
+            )
+            result = self._docker.exec(container, ["sh", "-c", script], timeout=10)
+            output = result.output if hasattr(result, 'output') and result.output else ''
+            if '250' in output:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _signal_tor_dormant(self):
+        """Send DORMANT to all Tor containers before sleep."""
+        for container in ["onionpress-tor", "onionheaven"]:
+            if self._tor_control_signal(container, "DORMANT"):
+                self.log(f"Sent DORMANT to {container}")
+
+    def _signal_tor_active(self):
+        """Send ACTIVE to all Tor containers on wake."""
+        for container in ["onionpress-tor", "onionheaven"]:
+            if self._tor_control_signal(container, "ACTIVE"):
+                self.log(f"Sent ACTIVE to {container}")
+
     def handle_sleep(self):
-        """Handle system sleep — notify OnionHeaven and release caffeinate.
-        OnionHeaven resists sleep to keep network active."""
+        """Handle system sleep — DORMANT Tor, notify OnionHeaven, release caffeinate."""
         self.log("System going to sleep")
+        # Tell Tor containers to go dormant — clean circuit teardown
+        self._signal_tor_dormant()
         if not self.is_onionheaven:
             # Notify OnionHeaven before sleeping so it can take over quickly
             if self.is_ready and self._onionheaven_registration_succeeded:
@@ -1800,7 +1830,7 @@ class OnionPressApp(rumps.App):
         self.log("Cleanup complete")
 
     def handle_wake(self):
-        """Handle system wake — Tor circuits are dead, go yellow immediately"""
+        """Handle system wake — send ACTIVE to Tor, go yellow until verified."""
         self.log("System wake detected — marking Tor as reconnecting")
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
@@ -1813,7 +1843,8 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = time.time()
             self.update_menu()
-        # Watchdogs inside Tor containers detect clock jumps and recover autonomously
+        # Tell Tor containers to wake up — clean re-bootstrap
+        threading.Thread(target=self._signal_tor_active, daemon=True).start()
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
