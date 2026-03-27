@@ -312,6 +312,7 @@ def check_stalls(cmd_sock, state):
 # ---------------------------------------------------------------------------
 def run():
     log("Starting tor-watchdog")
+    state = WatchdogState()
 
     while True:
         # Connect event socket
@@ -345,8 +346,6 @@ def run():
             log("Flushed descriptor cache (NEWNYM on startup)")
 
         log("Connected — monitoring Tor health")
-
-        state = WatchdogState()
         event_sock.settimeout(15)  # wake up periodically for stall checks
         buf = ""
 
