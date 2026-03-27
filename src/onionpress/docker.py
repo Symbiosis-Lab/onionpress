@@ -96,6 +96,7 @@ class Docker:
         check: bool = False,
         input: str | None = None,
         extra_env: dict | None = None,
+        quiet: bool = False,
     ) -> DockerResult:
         """Run a docker command.
 
@@ -105,11 +106,13 @@ class Docker:
             check: If True, raise DockerError on non-zero exit.
             input: Optional stdin string.
             extra_env: Additional env vars merged on top of the base env.
+            quiet: If True, suppress FAILED log on non-zero exit.
         """
         cmd = [self._docker_bin] + [str(a) for a in args]
         result = self._subprocess(cmd, timeout=timeout, input=input, extra_env=extra_env)
         if not result.ok:
-            self._log(f"docker {' '.join(str(a) for a in args)} — FAILED (rc={result.returncode})")
+            if not quiet:
+                self._log(f"docker {' '.join(str(a) for a in args)} — FAILED (rc={result.returncode})")
             if check:
                 raise DockerError(cmd, result)
         return result
@@ -120,6 +123,7 @@ class Docker:
         command: list | str,
         timeout: int = 30,
         check: bool = False,
+        quiet: bool = False,
     ) -> DockerResult:
         """Run a command inside a container via docker exec.
 
@@ -128,12 +132,13 @@ class Docker:
             command: Command as list or string (string is split by shell).
             timeout: Timeout in seconds.
             check: If True, raise DockerError on non-zero exit.
+            quiet: If True, suppress FAILED log on non-zero exit.
         """
         if isinstance(command, str):
             args = ["exec", container, "sh", "-c", command]
         else:
             args = ["exec", container] + list(command)
-        return self.run(args, timeout=timeout, check=check)
+        return self.run(args, timeout=timeout, check=check, quiet=quiet)
 
     def compose(
         self,
