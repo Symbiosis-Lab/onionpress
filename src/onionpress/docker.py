@@ -107,10 +107,11 @@ class Docker:
             extra_env: Additional env vars merged on top of the base env.
         """
         cmd = [self._docker_bin] + [str(a) for a in args]
-        self._log(f"docker {' '.join(str(a) for a in args)}")
         result = self._subprocess(cmd, timeout=timeout, input=input, extra_env=extra_env)
-        if check and not result.ok:
-            raise DockerError(cmd, result)
+        if not result.ok:
+            self._log(f"docker {' '.join(str(a) for a in args)} — FAILED (rc={result.returncode})")
+            if check:
+                raise DockerError(cmd, result)
         return result
 
     def exec(
