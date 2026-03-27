@@ -23,6 +23,7 @@ COOKIE_PATH = "/var/lib/tor/control_auth_cookie"
 
 # Rate limits (seconds)
 DROPGUARDS_COOLDOWN = 30
+DORMANT_COOLDOWN = 120       # 2 min after DROPGUARDS → try DORMANT/ACTIVE
 HALT_COOLDOWN = 300  # 5 minutes — last resort
 
 # Detection thresholds
@@ -124,6 +125,7 @@ class WatchdogState:
         self.last_bootstrap_pct = 0
         self.last_bootstrap_change = time.time()
         self.last_dropguards = 0
+        self.last_dormant = 0
         self.last_halt = 0
         self.failed_node_count = 0
         self.last_loop_time = time.time()  # for sleep detection
@@ -161,6 +163,33 @@ def do_dropguards(cmd_sock, state, reason):
     state.last_recovery_time = now
     state.hs_desc_uploaded_since_recovery = False
     state.failed_node_count = 0
+
+
+def do_dormant_cycle(cmd_sock, state, reason):
+    """Mid-level recovery: DORMANT → ACTIVE forces clean re-bootstrap without restart."""
+    now = time.time()
+    if now - state.last_dormant < DORMANT_COOLDOWN:
+        return
+
+    log(f"Escalating: {reason}")
+
+    resp = send_cmd(cmd_sock, "SIGNAL DORMANT")
+    if "250" in resp:
+        log("Sent SIGNAL DORMANT — Tor closing circuits and clearing state")
+    else:
+        log(f"SIGNAL DORMANT failed: {resp.strip()}")
+        return
+
+    time.sleep(3)
+
+    resp = send_cmd(cmd_sock, "SIGNAL ACTIVE")
+    if "250" in resp:
+        log("Sent SIGNAL ACTIVE — Tor re-bootstrapping with fresh state")
+    else:
+        log(f"SIGNAL ACTIVE failed: {resp.strip()}")
+
+    state.last_dormant = now
+    state.bootstrapped = False
 
 
 def do_halt(cmd_sock, state, reason):
@@ -298,13 +327,21 @@ def check_stalls(cmd_sock, state):
         # Reset so we don't warn repeatedly
         state.last_recovery_time = 0
 
-    # Last resort: if we've done DROPGUARDS but still failing after 5 minutes
+    # Escalation: DORMANT/ACTIVE if DROPGUARDS didn't work after 2 minutes
+    if (state.last_dropguards > 0
+            and not state.bootstrapped
+            and now - state.last_dropguards > DORMANT_COOLDOWN
+            and now - state.last_dormant > DORMANT_COOLDOWN):
+        do_dormant_cycle(cmd_sock, state,
+                         f"DROPGUARDS didn't recover after {DORMANT_COOLDOWN}s — trying DORMANT/ACTIVE")
+
+    # Last resort: if DORMANT/ACTIVE also failed after 5 minutes total
     if (state.last_dropguards > 0
             and not state.bootstrapped
             and now - state.last_dropguards > HALT_COOLDOWN
             and now - state.last_halt > HALT_COOLDOWN):
         do_halt(cmd_sock, state,
-                f"still not bootstrapped {HALT_COOLDOWN}s after DROPGUARDS")
+                f"still not bootstrapped {HALT_COOLDOWN}s after recovery attempts")
 
 
 # ---------------------------------------------------------------------------
