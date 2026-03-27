@@ -1760,28 +1760,14 @@ class OnionPressApp(rumps.App):
             pass
         return False
 
-    def _signal_tor_dormant(self):
-        """Send DORMANT to SOCKS-only Tor containers before sleep.
-
-        DORMANT is NOT safe for onionpress-tor — it unloads onion services
-        and they don't come back after ACTIVE. Only send to containers
-        that don't host onion services (onionheaven, tor-client).
-        """
-        for container in ["onionheaven"]:
-            if self._tor_control_signal(container, "DORMANT"):
-                self.log(f"Sent DORMANT to {container}")
-
-    def _signal_tor_active(self):
-        """Send ACTIVE to SOCKS-only Tor containers on wake."""
-        for container in ["onionheaven"]:
-            if self._tor_control_signal(container, "ACTIVE"):
-                self.log(f"Sent ACTIVE to {container}")
-
     def handle_sleep(self):
-        """Handle system sleep — DORMANT Tor, notify OnionHeaven, release caffeinate."""
+        """Handle system sleep — notify OnionHeaven, release caffeinate.
+
+        Tor recovery is handled autonomously by tor-watchdog.py inside
+        each container (clock drift detection → DROPGUARDS → escalation).
+        DORMANT is NOT sent from here — it permanently kills onion services.
+        """
         self.log("System going to sleep")
-        # Tell Tor containers to go dormant — clean circuit teardown
-        self._signal_tor_dormant()
         if not self.is_onionheaven:
             # Notify OnionHeaven before sleeping so it can take over quickly
             if self.is_ready and self._onionheaven_registration_succeeded:
@@ -3545,6 +3531,7 @@ License: AGPL v3"""
                 "onionpress-wordpress",
                 ["cat", "/var/lib/onionpress/config-updates.json"],
                 timeout=5,
+                quiet=True,
             )
             if not result.ok or not result.output:
                 return
@@ -3581,6 +3568,7 @@ License: AGPL v3"""
                 "onionpress-wordpress",
                 ["cat", "/var/lib/onionpress/requested-action"],
                 timeout=5,
+                quiet=True,
             )
             if not result.ok or not result.output:
                 return
