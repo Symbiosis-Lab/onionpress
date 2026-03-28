@@ -1767,6 +1767,8 @@ class OnionPressApp(rumps.App):
             for container in ["onionpress-tor", "onionheaven"]:
                 if self._signal_watchdog(container, "USR1"):
                     self.log(f"Sent USR1 (sleep) to {container} watchdog")
+                else:
+                    self.log(f"Failed to send USR1 to {container} watchdog")
             # Notify OnionHeaven hub so it can take over quickly
             if self.is_ready and self._onionheaven_registration_succeeded:
                 try:
@@ -1837,6 +1839,8 @@ class OnionPressApp(rumps.App):
         for container in ["onionpress-tor", "onionheaven"]:
             if self._signal_watchdog(container, "USR2"):
                 self.log(f"Sent USR2 (wake) to {container} watchdog")
+            else:
+                self.log(f"Failed to send USR2 to {container} watchdog")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
