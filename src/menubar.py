@@ -1761,27 +1761,35 @@ class OnionPressApp(rumps.App):
             pass
         return False
 
-    def handle_sleep(self):
-        """Handle system sleep — notify OnionHeaven, halt Tor, release caffeinate.
+    def _signal_watchdog(self, container, sig):
+        """Send a Unix signal to the tor-watchdog process inside a container."""
+        result = self.docker.exec(
+            container,
+            ["sh", "-c", f"kill -{sig} $(pgrep -f tor-watchdog) 2>/dev/null"],
+            timeout=10,
+        )
+        return result.ok
 
-        Sends /offline to the hub, then SIGNAL HALT to onionpress-tor so it
-        stops serving our onion service. This lets the hub cleanly take over
-        (no competing descriptors). Docker restart policy will restart Tor,
-        and the watchdog handles recovery on wake.
+    def handle_sleep(self):
+        """Handle system sleep — DEL_ONION via watchdog, notify hub, release caffeinate.
+
+        Sends USR1 to the watchdog in each Tor container, which DEL_ONIONs all
+        services. Tor stays running with guards/circuits. Hub takes over cleanly
+        (no competing descriptors). On wake, USR2 re-ADDs the services.
         """
         self.log("System going to sleep")
         self._sleeping = True
         if not self.is_onionheaven:
-            # Notify OnionHeaven before sleeping so it can take over quickly
+            # Signal all Tor containers to DEL_ONION their services
+            for container in ["onionpress-tor", "onionheaven"]:
+                if self._signal_watchdog(container, "USR1"):
+                    self.log(f"Sent USR1 (sleep) to {container} watchdog")
+            # Notify OnionHeaven hub so it can take over quickly
             if self.is_ready and self._onionheaven_registration_succeeded:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
                     pass
-            # Stop Tor so our onion service goes dark — hub can take over cleanly.
-            # torrc-based services can't be DEL_ONION'd, so HALT is the only option.
-            self._tor_control_signal("onionpress-tor", "HALT")
-            self.log("Sent HALT to onionpress-tor — onion service stopped for sleep")
             self.stop_caffeinate()
 
     def _handle_terminate(self):
@@ -1828,7 +1836,7 @@ class OnionPressApp(rumps.App):
         self.log("Cleanup complete")
 
     def handle_wake(self):
-        """Handle system wake — go yellow until verified."""
+        """Handle system wake — signal watchdogs to ADD_ONION, go yellow until verified."""
         self.log("System wake detected — marking Tor as reconnecting")
         self._sleeping = False
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
@@ -1842,47 +1850,10 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = time.time()
             self.update_menu()
-        # After HALT on sleep, Tor sometimes restarts without loading hidden
-        # services from torrc. Check control port, RELOAD if needed, then
-        # verify with a self-connection test.
-        def _ensure_hidden_services():
-            time.sleep(10)  # wait for Tor to restart after HALT
-            if self._sleeping:
-                self.log("_ensure_hidden_services: still sleeping, skipping")
-                return
-            addr = self.onion_address
-            if not addr or not addr.endswith(".onion"):
-                return
-            service_id = addr.replace(".onion", "")
-            # Quick check: is the descriptor loaded?
-            result = self.docker.exec(
-                "onionpress-tor",
-                ["sh", "-c",
-                 'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
-                 '| od -A n -t x1 | tr -d \' \\n\')\\r\\n'
-                 f'GETINFO hs/service/desc/id/{service_id}\\r\\nQUIT\\r\\n"'
-                 ' | nc -w 5 127.0.0.1 9051'],
-                timeout=15,
-            )
-            if not (result.ok and "hs-descriptor" in result.output):
-                self.log("Hidden services not loaded after restart — sending RELOAD to onionpress-tor")
-                self._tor_control_signal("onionpress-tor", "RELOAD")
-                time.sleep(5)  # give RELOAD time to take effect
-            # End-to-end test: can we actually serve via our .onion?
-            if self._sleeping:
-                return
-            result = self.docker.exec(
-                "onionpress-tor",
-                ["curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
-                 "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
-                 f"http://{addr}/"],
-                timeout=20,
-            )
-            if result.ok and result.output.strip() in ("200", "301"):
-                self.log(f"Self-connection test passed ({result.output.strip()})")
-            else:
-                self.log(f"Self-connection test failed (rc={result.returncode}, output={result.output.strip()[:50]})")
-        threading.Thread(target=_ensure_hidden_services, daemon=True).start()
+        # Signal all Tor containers to re-ADD_ONION their services
+        for container in ["onionpress-tor", "onionheaven"]:
+            if self._signal_watchdog(container, "USR2"):
+                self.log(f"Sent USR2 (wake) to {container} watchdog")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
