@@ -3,7 +3,7 @@
 
 SocksPort 0.0.0.0:9050
 
-# Control port for programmatic commands (DROPGUARDS, NEWNYM, etc.)
+# Control port for ADD_ONION/DEL_ONION, DROPGUARDS, NEWNYM, etc.
 ControlPort 9051
 CookieAuthentication 1
 
@@ -13,17 +13,6 @@ DataDirectory /var/lib/tor
 Log notice file /var/lib/tor/tor.log
 Log notice stdout
 
-# === Main onion services (populated by entrypoint.sh) ===
-
-# WordPress onion service
-HiddenServiceDir /var/lib/tor/hidden_service/wordpress
-HiddenServicePort 80 127.0.0.1:8080
-HiddenServiceNumIntroductionPoints 3
-# OnionHeaven API port (added by entrypoint.sh if needed)
-# __WORDPRESS_API_PORT__
-
-# Healthcheck onion service
-HiddenServiceDir /var/lib/tor/hidden_service/healthcheck
-HiddenServicePort 80 127.0.0.1:8081
-
-# === OnionHeaven takeover services (appended dynamically) ===
+# Onion services are managed by tor-watchdog.py via ADD_ONION/DEL_ONION
+# on the control port (not torrc). Service definitions are in
+# /etc/tor/onion-services.json, written by entrypoint.sh.
