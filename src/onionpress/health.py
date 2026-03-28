@@ -93,12 +93,12 @@ class HealthChecker:
         Returns:
             (bootstrapped, percentage) — bootstrapped is True if 100%.
         """
-        self._log("Checking Tor bootstrap status...")
         result = self.docker.run(
             ["logs", "--tail", "100", "onionpress-tor"],
             timeout=15,
         )
         if not result.ok:
+            self._log("Checking Tor bootstrap status... failed to read logs")
             return False, 0
 
         output = result.stdout
@@ -116,6 +116,7 @@ class HealthChecker:
         if "Bootstrapped 100%" in output:
             pct = 100
 
+        self._log(f"Checking Tor bootstrap status... {pct}%")
         return pct >= 100, pct
 
     def check_tor_hostname(self, expected_address: str = "") -> str:

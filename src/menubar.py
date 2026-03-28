@@ -1842,7 +1842,47 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = time.time()
             self.update_menu()
-        # Tor recovery handled by tor-watchdog.py (clock drift → DROPGUARDS)
+        # After HALT on sleep, Tor sometimes restarts without loading hidden
+        # services from torrc. Check control port, RELOAD if needed, then
+        # verify with a self-connection test.
+        def _ensure_hidden_services():
+            time.sleep(10)  # wait for Tor to restart after HALT
+            if self._sleeping:
+                self.log("_ensure_hidden_services: still sleeping, skipping")
+                return
+            addr = self.onion_address
+            if not addr or not addr.endswith(".onion"):
+                return
+            service_id = addr.replace(".onion", "")
+            # Quick check: is the descriptor loaded?
+            result = self.docker.exec(
+                "onionpress-tor",
+                ["sh", "-c",
+                 'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
+                 '| od -A n -t x1 | tr -d \' \\n\')\\r\\n'
+                 f'GETINFO hs/service/desc/id/{service_id}\\r\\nQUIT\\r\\n"'
+                 ' | nc -w 5 127.0.0.1 9051'],
+                timeout=15,
+            )
+            if not (result.ok and "hs-descriptor" in result.output):
+                self.log("Hidden services not loaded after restart — sending RELOAD to onionpress-tor")
+                self._tor_control_signal("onionpress-tor", "RELOAD")
+                time.sleep(5)  # give RELOAD time to take effect
+            # End-to-end test: can we actually serve via our .onion?
+            if self._sleeping:
+                return
+            result = self.docker.exec(
+                "onionpress-tor",
+                ["curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
+                 "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
+                 f"http://{addr}/"],
+                timeout=20,
+            )
+            if result.ok and result.output.strip() in ("200", "301"):
+                self.log(f"Self-connection test passed ({result.output.strip()})")
+            else:
+                self.log(f"Self-connection test failed (rc={result.returncode}, output={result.output.strip()[:50]})")
+        threading.Thread(target=_ensure_hidden_services, daemon=True).start()
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
