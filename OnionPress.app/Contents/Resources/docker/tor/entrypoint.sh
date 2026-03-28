@@ -293,23 +293,23 @@ if [ "$TOR_IMPL" = "tor" ]; then
         chmod 700 "$dir"
     done
 
-    # Generate torrc from template
+    # Generate torrc from template — strip HiddenServiceDir lines since the
+    # watchdog manages onion services via ADD_ONION/DEL_ONION for clean sleep/wake.
     cp /etc/tor/torrc.template /etc/tor/torrc
+    sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d; /^# __WORDPRESS_API_PORT__/d' /etc/tor/torrc
 
-    # Add OnionHeaven API port to WordPress service
-    sed -i 's/# __WORDPRESS_API_PORT__/HiddenServicePort 8083 127.0.0.1:8083/' /etc/tor/torrc
-
-    # Every node runs the OnionHeaven API — use max intro points to handle heartbeat traffic
-    sed -i 's/HiddenServiceNumIntroductionPoints 3/HiddenServiceNumIntroductionPoints 10/' /etc/tor/torrc
+    # Write onion service definitions for the watchdog to ADD_ONION.
+    # Keys live on disk at /var/lib/tor/hidden_service/<name>/.
+    cat > /etc/tor/onion-services.json << 'SERVICES_EOF'
+[
+  {"name": "wordpress", "ports": ["80,127.0.0.1:8080", "8083,127.0.0.1:8083"]},
+  {"name": "healthcheck", "ports": ["80,127.0.0.1:8081"]}
+]
+SERVICES_EOF
+    echo "Wrote /etc/tor/onion-services.json for watchdog ADD_ONION"
 
     # Ensure all of /var/lib/tor is owned by debian-tor (C Tor checks this)
     chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
-
-    # Strip HiddenServiceDir from torrc — the watchdog manages services via
-    # ADD_ONION/DEL_ONION for clean sleep/wake. Keys are generated outside
-    # the container (vanity key setup or initial install).
-    echo "Stripping HiddenServiceDir from torrc (watchdog will ADD_ONION)"
-    sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d' /etc/tor/torrc
 
     # Start C Tor as debian-tor user (log to persistent file + docker logs)
     TOR_LOG="/var/lib/tor/tor.log"

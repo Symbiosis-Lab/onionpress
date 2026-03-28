@@ -139,18 +139,31 @@ def _read_ed25519_key(secret_key_path):
 
 
 def discover_services():
-    """Find onion services from hidden_service dirs on disk.
+    """Find onion services from /etc/tor/onion-services.json + keys on disk.
 
-    Returns list of dicts with 'service_id', 'key_b64', 'ports'.
-    Port mapping is read from the torrc or inferred from the service name.
+    The JSON file is written by entrypoint.sh with service names and port
+    mappings. Keys and hostnames live at /var/lib/tor/hidden_service/<name>/.
+
+    Returns list of dicts with 'service_id', 'service_name', 'key_b64', 'ports'.
     """
-    services = []
-    # Read torrc to find port mappings per HiddenServiceDir
-    port_map = _parse_torrc_ports()
+    import json
 
-    for hs_dir in sorted(glob.glob(f"{HS_BASE_DIR}/*/hs_ed25519_secret_key")):
-        service_dir = os.path.dirname(hs_dir)
-        service_name = os.path.basename(service_dir)
+    # Read service definitions from JSON
+    try:
+        with open("/etc/tor/onion-services.json") as f:
+            svc_defs = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"No onion-services.json found ({e}) — no services to manage")
+        return []
+
+    services = []
+    for svc_def in svc_defs:
+        name = svc_def.get("name", "")
+        ports = svc_def.get("ports", [])
+        if not name or not ports:
+            continue
+
+        service_dir = os.path.join(HS_BASE_DIR, name)
 
         # Read hostname for service_id
         hostname_file = os.path.join(service_dir, "hostname")
@@ -159,53 +172,25 @@ def discover_services():
                 hostname = f.read().strip()
             service_id = hostname.replace(".onion", "")
         except OSError:
-            log(f"Warning: no hostname file for {service_name}, skipping")
+            log(f"Warning: no hostname file for {name}, skipping")
             continue
 
         # Read key
+        secret_key_file = os.path.join(service_dir, "hs_ed25519_secret_key")
         try:
-            key_b64 = _read_ed25519_key(hs_dir)
+            key_b64 = _read_ed25519_key(secret_key_file)
         except (OSError, ValueError) as e:
-            log(f"Warning: can't read key for {service_name}: {e}")
-            continue
-
-        # Get ports from torrc parsing
-        ports = port_map.get(service_dir, [])
-        if not ports:
-            log(f"Warning: no ports found for {service_name}, skipping")
+            log(f"Warning: can't read key for {name}: {e}")
             continue
 
         services.append({
             "service_id": service_id,
-            "service_name": service_name,
+            "service_name": name,
             "key_b64": key_b64,
             "ports": ports,
         })
 
     return services
-
-
-def _parse_torrc_ports():
-    """Parse /etc/tor/torrc to extract HiddenServicePort for each HiddenServiceDir."""
-    port_map = {}  # dir_path → list of "port,target" strings
-    current_dir = None
-    try:
-        with open("/etc/tor/torrc") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("HiddenServiceDir "):
-                    current_dir = line.split(None, 1)[1]
-                    port_map.setdefault(current_dir, [])
-                elif line.startswith("HiddenServicePort ") and current_dir:
-                    # "HiddenServicePort 80 127.0.0.1:8080" → "80,127.0.0.1:8080"
-                    parts = line.split(None, 2)
-                    if len(parts) == 3:
-                        port_map[current_dir].append(f"{parts[1]},{parts[2]}")
-                    elif len(parts) == 2:
-                        port_map[current_dir].append(parts[1])
-    except OSError:
-        pass
-    return port_map
 
 
 def add_all_services(cmd_sock, services):
