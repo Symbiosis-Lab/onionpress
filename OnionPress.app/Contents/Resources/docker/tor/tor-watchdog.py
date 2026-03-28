@@ -551,13 +551,11 @@ def run():
                 state.last_bootstrap_pct = pct
                 log(f"Tor bootstrap at {pct}%")
 
-        # ADD_ONION for all services (if not already active and we have services)
+        # ADD_ONION for all services — do it before bootstrap so Tor publishes
+        # descriptors as soon as it has circuits (no delay after bootstrap).
         if state.services and not state.services_active:
-            if state.bootstrapped:
-                n = add_all_services(cmd_sock, state.services)
-                state.services_active = n > 0
-            else:
-                log("Waiting for bootstrap before ADD_ONION...")
+            n = add_all_services(cmd_sock, state.services)
+            state.services_active = n > 0
 
         log("Connected — monitoring Tor health")
         event_sock.settimeout(15)  # wake up periodically for stall checks
@@ -594,8 +592,8 @@ def run():
                 # No events — check for stalls
                 check_stalls(cmd_sock, state)
 
-                # If bootstrapped and services not yet added, add them now
-                if state.services and not state.services_active and state.bootstrapped:
+                # If services not yet added (e.g. after reconnect), add them now
+                if state.services and not state.services_active:
                     n = add_all_services(cmd_sock, state.services)
                     state.services_active = n > 0
 
