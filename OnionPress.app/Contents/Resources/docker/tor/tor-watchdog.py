@@ -15,6 +15,7 @@ Usage: Started by entrypoint.sh in the background after Tor launches.
 
 import base64
 import glob
+import json
 import os
 import signal
 import socket
@@ -146,8 +147,6 @@ def discover_services():
 
     Returns list of dicts with 'service_id', 'service_name', 'key_b64', 'ports'.
     """
-    import json
-
     # Read service definitions from JSON
     try:
         with open("/etc/tor/onion-services.json") as f:
@@ -558,7 +557,7 @@ def run():
             state.services_active = n > 0
 
         log("Connected — monitoring Tor health")
-        event_sock.settimeout(15)  # wake up periodically for stall checks
+        event_sock.settimeout(5)  # wake up frequently to check signals + stalls
         buf = ""
 
         while True:

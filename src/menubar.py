@@ -1744,23 +1744,6 @@ class OnionPressApp(rumps.App):
             lambda notification: self._handle_terminate())
         self.log("Registered for system sleep/wake/terminate notifications")
 
-    def _tor_control_signal(self, container, signal):
-        """Send a control port signal to a Tor container via docker exec."""
-        try:
-            script = (
-                'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
-                '| xxd -p -c 32)\\r\\n'
-                f'SIGNAL {signal}\\r\\nQUIT\\r\\n"'
-                ' | nc 127.0.0.1 9051'
-            )
-            result = self._docker.exec(container, ["sh", "-c", script], timeout=10)
-            output = result.output if hasattr(result, 'output') and result.output else ''
-            if '250' in output:
-                return True
-        except Exception:
-            pass
-        return False
-
     def _signal_watchdog(self, container, sig):
         """Send a Unix signal to the tor-watchdog process inside a container."""
         result = self.docker.exec(
