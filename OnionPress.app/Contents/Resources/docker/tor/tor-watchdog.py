@@ -31,6 +31,7 @@ FAILED_NODE_THRESHOLD = 5       # failures within window → DROPGUARDS
 FAILED_NODE_WINDOW = 60         # seconds
 BOOTSTRAP_STALL_TIMEOUT = 120   # no progress for 2 min → DROPGUARDS
 HS_DESC_UPLOAD_TIMEOUT = 120    # no descriptor upload 2 min after recovery
+HSFETCH_INTERVAL = 30           # flush client descriptor cache every 30s after recovery
 
 # Reconnect delay when control port isn't available yet
 CONNECT_RETRY_DELAY = 5
@@ -133,11 +134,42 @@ class WatchdogState:
         self.failed_node_window_start = time.time()
         self.last_recovery_time = 0  # when we last did DROPGUARDS
         self.hs_desc_uploaded_since_recovery = False
+        self.last_hsfetch = 0  # periodic descriptor refresh after recovery
+        self.onion_addresses = []  # populated from hostname files
 
 
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
+def discover_onion_addresses():
+    """Find onion addresses to HSFETCH — our own services + the content address.
+
+    Looks in:
+    - /var/lib/tor/hidden_service/*/hostname (our own onion services)
+    - /var/lib/onionpress/onion_address (content address from shared volume —
+      needed by onionheaven which does reachability checks via its SOCKS proxy)
+    """
+    import glob
+    addresses = set()
+    for path in glob.glob("/var/lib/tor/hidden_service/*/hostname"):
+        try:
+            with open(path) as f:
+                addr = f.read().strip()
+                if addr.endswith(".onion"):
+                    addresses.add(addr.replace(".onion", ""))
+        except OSError:
+            pass
+    # Content address (shared volume) — the address we're checking reachability for
+    try:
+        with open("/var/lib/onionpress/onion_address") as f:
+            addr = f.read().strip()
+            if addr.endswith(".onion"):
+                addresses.add(addr.replace(".onion", ""))
+    except OSError:
+        pass
+    return list(addresses)
+
+
 def do_dropguards(cmd_sock, state, reason):
     """Send DROPGUARDS + NEWNYM with rate limiting."""
     now = time.time()
@@ -327,6 +359,26 @@ def check_stalls(cmd_sock, state):
         # Reset so we don't warn repeatedly
         state.last_recovery_time = 0
 
+    # Periodic HSFETCH after recovery — flush stale descriptor cache so
+    # reachability checks (via this Tor's SOCKS) pick up fresh descriptors.
+    # NEWNYM clears the client cache; HSFETCH forces a fresh fetch from HSDirs.
+    if (state.last_recovery_time > 0
+            and state.bootstrapped
+            and now - state.last_hsfetch > HSFETCH_INTERVAL):
+        # Discover addresses on first use
+        if not state.onion_addresses:
+            state.onion_addresses = discover_onion_addresses()
+        if state.onion_addresses:
+            # NEWNYM first to clear cached (stale) descriptors, then HSFETCH
+            send_cmd(cmd_sock, "SIGNAL NEWNYM")
+            for addr in state.onion_addresses:
+                resp = send_cmd(cmd_sock, f"HSFETCH {addr}")
+                if "250" in resp:
+                    log(f"HSFETCH {addr[:16]}... — refreshing descriptor")
+                else:
+                    log(f"HSFETCH failed: {resp.strip()}")
+        state.last_hsfetch = now
+
     # Escalation: DORMANT/ACTIVE if DROPGUARDS didn't work after 2 minutes.
     # Only safe for SOCKS-only containers — DORMANT kills onion services permanently.
     if (os.environ.get("NO_ONION_SERVICE") == "1"
@@ -383,6 +435,18 @@ def run():
         resp = send_cmd(cmd_sock, "SIGNAL NEWNYM")
         if "250" in resp:
             log("Flushed descriptor cache (NEWNYM on startup)")
+
+        # Check current bootstrap status so we don't start with bootstrapped=False
+        # when Tor is already at 100% (e.g. after watchdog restart).
+        resp = send_cmd(cmd_sock, "GETINFO status/bootstrap-phase")
+        if "PROGRESS=100" in resp:
+            state.bootstrapped = True
+            log("Tor already bootstrapped to 100%")
+        else:
+            pct = _extract_bootstrap_pct(resp)
+            if pct is not None:
+                state.last_bootstrap_pct = pct
+                log(f"Tor bootstrap at {pct}%")
 
         log("Connected — monitoring Tor health")
         event_sock.settimeout(15)  # wake up periodically for stall checks
