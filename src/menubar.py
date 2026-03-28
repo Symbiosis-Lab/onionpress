@@ -256,6 +256,7 @@ class OnionPressApp(rumps.App):
             self.onion_address = "Starting..."
         self.is_running = False
         self.is_ready = False  # WordPress is ready to serve requests
+        self._sleeping = False  # True between sleep/wake events — suppresses heartbeats
         self.checking = False
         self._checking_lock = threading.Lock()  # Protect self.checking from race conditions
         self.web_log_process = None  # Background process for web logs
@@ -1768,6 +1769,7 @@ class OnionPressApp(rumps.App):
         DORMANT is NOT sent from here — it permanently kills onion services.
         """
         self.log("System going to sleep")
+        self._sleeping = True
         if not self.is_onionheaven:
             # Notify OnionHeaven before sleeping so it can take over quickly
             if self.is_ready and self._onionheaven_registration_succeeded:
@@ -1821,8 +1823,9 @@ class OnionPressApp(rumps.App):
         self.log("Cleanup complete")
 
     def handle_wake(self):
-        """Handle system wake — send ACTIVE to Tor, go yellow until verified."""
+        """Handle system wake — go yellow until verified."""
         self.log("System wake detected — marking Tor as reconnecting")
+        self._sleeping = False
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
         # Reset OnionHeaven check so /online fires when Tor reconnects
@@ -1834,8 +1837,7 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = time.time()
             self.update_menu()
-        # Tell Tor containers to wake up — clean re-bootstrap
-        threading.Thread(target=self._signal_tor_active, daemon=True).start()
+        # Tor recovery handled by tor-watchdog.py (clock drift → DROPGUARDS)
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""

@@ -230,10 +230,15 @@ def _heartbeat_loop(app):
 
     while True:
         try:
-            # Check WordPress health locally before sending heartbeat
-            wp_healthy = _check_wordpress_healthy(app)
-
-            _send_heartbeat(app, wp_healthy)
+            # Don't send /online while sleeping — let the hub detect us as
+            # offline and take over. Power Nap keeps the app running but
+            # doesn't trigger wake events, so _sleeping stays True.
+            if getattr(app, '_sleeping', False):
+                pass  # skip heartbeat while sleeping
+            else:
+                # Check WordPress health locally before sending heartbeat
+                wp_healthy = _check_wordpress_healthy(app)
+                _send_heartbeat(app, wp_healthy)
         except Exception as e:
             app.log(f"OnionHeaven: heartbeat error: {e}")
 
