@@ -305,15 +305,11 @@ if [ "$TOR_IMPL" = "tor" ]; then
     # Ensure all of /var/lib/tor is owned by debian-tor (C Tor checks this)
     chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
 
-    # If keys already exist, strip HiddenServiceDir from torrc so the watchdog
-    # manages services via ADD_ONION/DEL_ONION (enables clean sleep/wake).
-    # On first run, leave them so Tor generates keys.
-    if [ -f /var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key ]; then
-        echo "Keys exist — stripping HiddenServiceDir from torrc (watchdog will ADD_ONION)"
-        sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d' /etc/tor/torrc
-    else
-        echo "First run — keeping HiddenServiceDir in torrc for key generation"
-    fi
+    # Strip HiddenServiceDir from torrc — the watchdog manages services via
+    # ADD_ONION/DEL_ONION for clean sleep/wake. Keys are generated outside
+    # the container (vanity key setup or initial install).
+    echo "Stripping HiddenServiceDir from torrc (watchdog will ADD_ONION)"
+    sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d' /etc/tor/torrc
 
     # Start C Tor as debian-tor user (log to persistent file + docker logs)
     TOR_LOG="/var/lib/tor/tor.log"
