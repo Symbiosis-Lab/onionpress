@@ -305,6 +305,16 @@ if [ "$TOR_IMPL" = "tor" ]; then
     # Ensure all of /var/lib/tor is owned by debian-tor (C Tor checks this)
     chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
 
+    # If keys already exist, strip HiddenServiceDir from torrc so the watchdog
+    # manages services via ADD_ONION/DEL_ONION (enables clean sleep/wake).
+    # On first run, leave them so Tor generates keys.
+    if [ -f /var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key ]; then
+        echo "Keys exist — stripping HiddenServiceDir from torrc (watchdog will ADD_ONION)"
+        sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d' /etc/tor/torrc
+    else
+        echo "First run — keeping HiddenServiceDir in torrc for key generation"
+    fi
+
     # Start C Tor as debian-tor user (log to persistent file + docker logs)
     TOR_LOG="/var/lib/tor/tor.log"
     su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" 2>&1 | tee -a "$TOR_LOG" &
@@ -314,10 +324,10 @@ if [ "$TOR_IMPL" = "tor" ]; then
         echo "ERROR: C Tor failed to start — check config at /etc/tor/torrc"
     fi
 
-    # Start watchdog to monitor Tor health via control port
+    # Start watchdog to monitor Tor health and manage onion services
     python3 /tor-watchdog.py &
 
-    # C Tor writes hostname files directly — wait for them, then log
+    # Wait for hostname files (first run: Tor creates them; subsequent: watchdog ADD_ONION)
     write_ctor_hostnames() {
         for nickname in wordpress healthcheck; do
             local hfile="/var/lib/tor/hidden_service/${nickname}/hostname"

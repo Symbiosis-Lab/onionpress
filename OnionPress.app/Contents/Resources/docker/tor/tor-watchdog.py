@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Tor control port watchdog — monitors Tor health and recovers from failures.
+"""Tor control port watchdog — monitors Tor health and manages onion services.
 
 Runs inside every C Tor container. Connects to the local control port,
-subscribes to events, and sends DROPGUARDS / NEWNYM when Tor gets stuck
-(stale guards after sleep, clock jumps, bootstrap stalls, etc.).
+manages onion services via ADD_ONION/DEL_ONION, subscribes to events,
+and recovers from failures (stale guards, bootstrap stalls, etc.).
+
+Signal protocol (from host MenubarApp via docker exec kill):
+  USR1 = sleep  → DEL_ONION all services (Tor stays running with circuits)
+  USR2 = wake   → ADD_ONION all services (re-publish on existing circuits)
 
 Usage: Started by entrypoint.sh in the background after Tor launches.
        Only runs when TOR_IMPL=tor (not Arti).
 """
 
+import base64
+import glob
 import os
+import signal
 import socket
 import sys
 import time
@@ -31,10 +38,13 @@ FAILED_NODE_THRESHOLD = 5       # failures within window → DROPGUARDS
 FAILED_NODE_WINDOW = 60         # seconds
 BOOTSTRAP_STALL_TIMEOUT = 120   # no progress for 2 min → DROPGUARDS
 HS_DESC_UPLOAD_TIMEOUT = 60     # no descriptor upload 60s after recovery → HSFETCH
-HSFETCH_INTERVAL = 30           # flush client descriptor cache every 30s after recovery
+SLEEP_DETECT_THRESHOLD = 20     # seconds — event timeout is 15s, so >20s means we paused
 
 # Reconnect delay when control port isn't available yet
 CONNECT_RETRY_DELAY = 5
+
+# Hidden service key paths
+HS_BASE_DIR = "/var/lib/tor/hidden_service"
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +124,141 @@ def send_cmd(s, cmd):
 
 
 # ---------------------------------------------------------------------------
+# Onion service management (ADD_ONION / DEL_ONION)
+# ---------------------------------------------------------------------------
+
+def _read_ed25519_key(secret_key_path):
+    """Read a C Tor hs_ed25519_secret_key file and return base64 for ADD_ONION."""
+    with open(secret_key_path, "rb") as f:
+        data = f.read()
+    if len(data) != 96:
+        raise ValueError(f"Secret key wrong size: {len(data)} (expected 96)")
+    # 32-byte header + 64-byte expanded key
+    expanded_key = data[32:]
+    return base64.b64encode(expanded_key).decode("ascii")
+
+
+def discover_services():
+    """Find onion services from hidden_service dirs on disk.
+
+    Returns list of dicts with 'service_id', 'key_b64', 'ports'.
+    Port mapping is read from the torrc or inferred from the service name.
+    """
+    services = []
+    # Read torrc to find port mappings per HiddenServiceDir
+    port_map = _parse_torrc_ports()
+
+    for hs_dir in sorted(glob.glob(f"{HS_BASE_DIR}/*/hs_ed25519_secret_key")):
+        service_dir = os.path.dirname(hs_dir)
+        service_name = os.path.basename(service_dir)
+
+        # Read hostname for service_id
+        hostname_file = os.path.join(service_dir, "hostname")
+        try:
+            with open(hostname_file) as f:
+                hostname = f.read().strip()
+            service_id = hostname.replace(".onion", "")
+        except OSError:
+            log(f"Warning: no hostname file for {service_name}, skipping")
+            continue
+
+        # Read key
+        try:
+            key_b64 = _read_ed25519_key(hs_dir)
+        except (OSError, ValueError) as e:
+            log(f"Warning: can't read key for {service_name}: {e}")
+            continue
+
+        # Get ports from torrc parsing
+        ports = port_map.get(service_dir, [])
+        if not ports:
+            log(f"Warning: no ports found for {service_name}, skipping")
+            continue
+
+        services.append({
+            "service_id": service_id,
+            "service_name": service_name,
+            "key_b64": key_b64,
+            "ports": ports,
+        })
+
+    return services
+
+
+def _parse_torrc_ports():
+    """Parse /etc/tor/torrc to extract HiddenServicePort for each HiddenServiceDir."""
+    port_map = {}  # dir_path → list of "port,target" strings
+    current_dir = None
+    try:
+        with open("/etc/tor/torrc") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("HiddenServiceDir "):
+                    current_dir = line.split(None, 1)[1]
+                    port_map.setdefault(current_dir, [])
+                elif line.startswith("HiddenServicePort ") and current_dir:
+                    # "HiddenServicePort 80 127.0.0.1:8080" → "80,127.0.0.1:8080"
+                    parts = line.split(None, 2)
+                    if len(parts) == 3:
+                        port_map[current_dir].append(f"{parts[1]},{parts[2]}")
+                    elif len(parts) == 2:
+                        port_map[current_dir].append(parts[1])
+    except OSError:
+        pass
+    return port_map
+
+
+def add_all_services(cmd_sock, services):
+    """ADD_ONION for all services. Returns number of successes."""
+    count = 0
+    for svc in services:
+        port_args = " ".join(f"Port={p}" for p in svc["ports"])
+        cmd = f"ADD_ONION ED25519-V3:{svc['key_b64']} Flags=Detach {port_args}"
+        resp = send_cmd(cmd_sock, cmd)
+        if "250" in resp:
+            log(f"ADD_ONION {svc['service_name']} ({svc['service_id'][:16]}...) — ok")
+            count += 1
+        elif "Onion address collision" in resp:
+            log(f"ADD_ONION {svc['service_name']} — already active (collision)")
+            count += 1
+        else:
+            log(f"ADD_ONION {svc['service_name']} — FAILED: {resp.strip()[:100]}")
+    return count
+
+
+def del_all_services(cmd_sock, services):
+    """DEL_ONION for all services. Returns number of successes."""
+    count = 0
+    for svc in services:
+        resp = send_cmd(cmd_sock, f"DEL_ONION {svc['service_id']}")
+        if "250" in resp:
+            log(f"DEL_ONION {svc['service_name']} ({svc['service_id'][:16]}...) — ok")
+            count += 1
+        else:
+            log(f"DEL_ONION {svc['service_name']} — FAILED: {resp.strip()[:100]}")
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Signal handling (USR1=sleep, USR2=wake)
+# ---------------------------------------------------------------------------
+_signal_sleep = False
+_signal_wake = False
+
+
+def _handle_usr1(signum, frame):
+    global _signal_sleep
+    _signal_sleep = True
+
+
+def _handle_usr2(signum, frame):
+    global _signal_wake
+    _signal_wake = True
+
+
+# ---------------------------------------------------------------------------
 # Watchdog state
 # ---------------------------------------------------------------------------
-# How much wall clock drift indicates a sleep/wake
-SLEEP_DETECT_THRESHOLD = 30  # seconds — event timeout is 15s, so >30s means we slept
-
-
 class WatchdogState:
     def __init__(self):
         self.bootstrapped = False
@@ -132,26 +271,20 @@ class WatchdogState:
         self.last_loop_time = time.time()  # for sleep detection
         self.last_heartbeat_log = time.time()  # periodic "alive" log
         self.failed_node_window_start = time.time()
-        self.last_recovery_time = 0  # when we last did DROPGUARDS
+        self.last_recovery_time = 0  # when we last detected a wake
         self.hs_desc_uploaded_since_recovery = False
-        self.last_hsfetch = 0  # periodic descriptor refresh after recovery
-        self.onion_addresses = []  # populated from hostname files
+        self.onion_addresses = []  # for HSFETCH
+        self.services = []  # discovered onion services
+        self.services_active = False  # True when ADD_ONION has been done
 
 
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
 def discover_onion_addresses():
-    """Find onion addresses to HSFETCH — our own services + the content address.
-
-    Looks in:
-    - /var/lib/tor/hidden_service/*/hostname (our own onion services)
-    - /var/lib/onionpress/onion_address (content address from shared volume —
-      needed by onionheaven which does reachability checks via its SOCKS proxy)
-    """
-    import glob
+    """Find onion addresses for HSFETCH — our own services + the content address."""
     addresses = set()
-    for path in glob.glob("/var/lib/tor/hidden_service/*/hostname"):
+    for path in glob.glob(f"{HS_BASE_DIR}/*/hostname"):
         try:
             with open(path) as f:
                 addr = f.read().strip()
@@ -159,7 +292,7 @@ def discover_onion_addresses():
                     addresses.add(addr.replace(".onion", ""))
         except OSError:
             pass
-    # Content address (shared volume) — the address we're checking reachability for
+    # Content address (shared volume) — for reachability checks
     try:
         with open("/var/lib/onionpress/onion_address") as f:
             addr = f.read().strip()
@@ -184,7 +317,6 @@ def do_dropguards(cmd_sock, state, reason):
     else:
         log(f"DROPGUARDS failed: {resp.strip()}")
 
-    # NEWNYM is rate-limited by Tor to 10s, but we just send it
     resp = send_cmd(cmd_sock, "SIGNAL NEWNYM")
     if "250" in resp:
         log("Sent SIGNAL NEWNYM — new circuits")
@@ -249,7 +381,6 @@ def process_event(line, cmd_sock, state):
     # --- Failed to find node for hop #1 ---
     if "Failed to find node" in line:
         now = time.time()
-        # Reset window if expired
         if now - state.failed_node_window_start > FAILED_NODE_WINDOW:
             state.failed_node_count = 0
             state.failed_node_window_start = now
@@ -272,7 +403,6 @@ def process_event(line, cmd_sock, state):
 
     # --- Bootstrap progress ---
     if "BOOTSTRAP" in line or "Bootstrapped" in line:
-        # Try to extract percentage
         pct = _extract_bootstrap_pct(line)
         if pct is not None:
             if pct != state.last_bootstrap_pct:
@@ -295,7 +425,6 @@ def process_event(line, cmd_sock, state):
 
 def _extract_bootstrap_pct(line):
     """Extract bootstrap percentage from a log or event line."""
-    # Event format: "STATUS_CLIENT ... BOOTSTRAP PROGRESS=55 ..."
     if "PROGRESS=" in line:
         for part in line.split():
             if part.startswith("PROGRESS="):
@@ -303,7 +432,6 @@ def _extract_bootstrap_pct(line):
                     return int(part.split("=")[1])
                 except ValueError:
                     pass
-    # Log format: "Bootstrapped 55% ..."
     if "Bootstrapped" in line:
         for part in line.split():
             if part.endswith("%"):
@@ -318,25 +446,22 @@ def check_stalls(cmd_sock, state):
     """Periodic check for stalls that events alone can't catch."""
     now = time.time()
 
-    # Sleep/wake detection: update last_loop_time so heartbeat log timing
-    # stays correct. Don't fire DROPGUARDS — Tor usually recovers on its own
-    # after sleep, and DROPGUARDS throws away potentially good guards.
-    # Real problems (lost circuits) are caught by circuit-established=0 below.
+    # Sleep/wake detection via clock drift
     elapsed = now - state.last_loop_time
     state.last_loop_time = now
     if elapsed > SLEEP_DETECT_THRESHOLD:
-        log(f"Clock jumped {elapsed:.0f}s (system sleep) — letting Tor recover naturally")
-        # Set recovery time so HSFETCH fires at 60s if descriptor is stale
+        log(f"Clock jumped {elapsed:.0f}s (system sleep) — setting recovery timer")
         state.last_recovery_time = now
         state.hs_desc_uploaded_since_recovery = False
 
-    # Periodic heartbeat log (every 5 minutes) so we can tell the watchdog is alive
+    # Periodic heartbeat log (every 5 minutes)
     if now - state.last_heartbeat_log > 300:
         ce = "?"
         resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
         if "circuit-established=" in resp:
             ce = resp.split("circuit-established=")[1].split()[0].strip()
-        log(f"alive — bootstrapped={state.bootstrapped}, circuit-established={ce}")
+        log(f"alive — bootstrapped={state.bootstrapped}, "
+            f"circuit-established={ce}, services_active={state.services_active}")
         state.last_heartbeat_log = now
 
     # Active circuit health check — if Tor reports no circuits, recover
@@ -345,7 +470,7 @@ def check_stalls(cmd_sock, state):
         if "circuit-established=0" in resp:
             do_dropguards(cmd_sock, state, "circuit-established=0 (circuits lost)")
 
-    # Bootstrap stall: not at 100% and no progress for BOOTSTRAP_STALL_TIMEOUT
+    # Bootstrap stall
     if (not state.bootstrapped
             and state.last_bootstrap_pct > 0
             and now - state.last_bootstrap_change > BOOTSTRAP_STALL_TIMEOUT
@@ -353,15 +478,12 @@ def check_stalls(cmd_sock, state):
         do_dropguards(cmd_sock, state,
                       f"bootstrap stalled at {state.last_bootstrap_pct}% for {BOOTSTRAP_STALL_TIMEOUT}s")
 
-    # Descriptor upload stall (only for onion service containers)
+    # Descriptor upload stall — HSFETCH if stuck
     if (state.last_recovery_time > 0
             and not state.hs_desc_uploaded_since_recovery
             and now - state.last_recovery_time > HS_DESC_UPLOAD_TIMEOUT
             and state.bootstrapped):
         log(f"Warning: no HS_DESC upload {HS_DESC_UPLOAD_TIMEOUT}s after recovery — flushing descriptor cache")
-        # Flush stale descriptors so reachability checks can pick up fresh ones.
-        # Only do this when we're clearly stuck, not proactively — early HSFETCH
-        # can pull the wrong (hub takeover) descriptor and make things worse.
         if not state.onion_addresses:
             state.onion_addresses = discover_onion_addresses()
         if state.onion_addresses:
@@ -382,7 +504,7 @@ def check_stalls(cmd_sock, state):
         do_dormant_cycle(cmd_sock, state,
                          f"DROPGUARDS didn't recover after {DORMANT_COOLDOWN}s — trying DORMANT/ACTIVE")
 
-    # Last resort: if DORMANT/ACTIVE also failed after 5 minutes total
+    # Last resort: HALT
     if (state.last_dropguards > 0
             and not state.bootstrapped
             and now - state.last_dropguards > HALT_COOLDOWN
@@ -395,8 +517,18 @@ def check_stalls(cmd_sock, state):
 # Main loop
 # ---------------------------------------------------------------------------
 def run():
+    global _signal_sleep, _signal_wake
+
     log("Starting tor-watchdog")
     state = WatchdogState()
+
+    # Discover onion services from disk (keys + torrc port mappings)
+    state.services = discover_services()
+    if state.services:
+        log(f"Discovered {len(state.services)} onion service(s): "
+            + ", ".join(s["service_name"] for s in state.services))
+    else:
+        log("No onion services found on disk (SOCKS-only container?)")
 
     while True:
         # Connect event socket
@@ -423,8 +555,7 @@ def run():
             time.sleep(CONNECT_RETRY_DELAY)
             continue
 
-        # Check current bootstrap status so we don't start with bootstrapped=False
-        # when Tor is already at 100% (e.g. after watchdog restart).
+        # Check current bootstrap status
         resp = send_cmd(cmd_sock, "GETINFO status/bootstrap-phase")
         if "PROGRESS=100" in resp:
             state.bootstrapped = True
@@ -435,24 +566,58 @@ def run():
                 state.last_bootstrap_pct = pct
                 log(f"Tor bootstrap at {pct}%")
 
+        # ADD_ONION for all services (if not already active and we have services)
+        if state.services and not state.services_active:
+            if state.bootstrapped:
+                n = add_all_services(cmd_sock, state.services)
+                state.services_active = n > 0
+            else:
+                log("Waiting for bootstrap before ADD_ONION...")
+
         log("Connected — monitoring Tor health")
         event_sock.settimeout(15)  # wake up periodically for stall checks
         buf = ""
 
         while True:
+            # Check for USR1 (sleep) signal
+            if _signal_sleep:
+                _signal_sleep = False
+                log("Received USR1 (sleep) — removing onion services")
+                if state.services and state.services_active:
+                    del_all_services(cmd_sock, state.services)
+                    state.services_active = False
+
+            # Check for USR2 (wake) signal
+            if _signal_wake:
+                _signal_wake = False
+                log("Received USR2 (wake) — re-adding onion services")
+                state.last_recovery_time = time.time()
+                state.hs_desc_uploaded_since_recovery = False
+                if state.services:
+                    n = add_all_services(cmd_sock, state.services)
+                    state.services_active = n > 0
+
             # Read events
             try:
                 data = event_sock.recv(4096)
                 if not data:
                     log("Control port connection closed — reconnecting")
+                    state.services_active = False
                     break
                 buf += data.decode("utf-8", errors="replace")
             except socket.timeout:
                 # No events — check for stalls
                 check_stalls(cmd_sock, state)
+
+                # If bootstrapped and services not yet added, add them now
+                if state.services and not state.services_active and state.bootstrapped:
+                    n = add_all_services(cmd_sock, state.services)
+                    state.services_active = n > 0
+
                 continue
             except (ConnectionResetError, BrokenPipeError, OSError):
                 log("Control port connection lost — reconnecting")
+                state.services_active = False
                 break
 
             # Process complete lines
@@ -460,7 +625,6 @@ def run():
                 line, buf = buf.split("\r\n", 1)
                 if not line:
                     continue
-                # Async events start with "650"
                 if line.startswith("650"):
                     process_event(line, cmd_sock, state)
 
@@ -484,6 +648,10 @@ if __name__ == "__main__":
     if os.environ.get("TOR_IMPL", "tor") != "tor":
         log("TOR_IMPL is not 'tor' — watchdog not needed for Arti")
         sys.exit(0)
+
+    # Install signal handlers
+    signal.signal(signal.SIGUSR1, _handle_usr1)
+    signal.signal(signal.SIGUSR2, _handle_usr2)
 
     try:
         run()
