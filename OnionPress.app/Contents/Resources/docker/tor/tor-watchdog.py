@@ -318,14 +318,17 @@ def check_stalls(cmd_sock, state):
     """Periodic check for stalls that events alone can't catch."""
     now = time.time()
 
-    # Sleep/wake detection: if wall clock jumped more than expected,
-    # the system slept. Tor may not emit any events about this but
-    # circuits are likely dead.
+    # Sleep/wake detection: update last_loop_time so heartbeat log timing
+    # stays correct. Don't fire DROPGUARDS — Tor usually recovers on its own
+    # after sleep, and DROPGUARDS throws away potentially good guards.
+    # Real problems (lost circuits) are caught by circuit-established=0 below.
     elapsed = now - state.last_loop_time
     state.last_loop_time = now
-    if elapsed > SLEEP_DETECT_THRESHOLD and state.bootstrapped:
-        do_dropguards(cmd_sock, state,
-                      f"system sleep detected (wall clock jumped {elapsed:.0f}s)")
+    if elapsed > SLEEP_DETECT_THRESHOLD:
+        log(f"Clock jumped {elapsed:.0f}s (system sleep) — letting Tor recover naturally")
+        # Set recovery time so HSFETCH fires at 60s if descriptor is stale
+        state.last_recovery_time = now
+        state.hs_desc_uploaded_since_recovery = False
 
     # Periodic heartbeat log (every 5 minutes) so we can tell the watchdog is alive
     if now - state.last_heartbeat_log > 300:
