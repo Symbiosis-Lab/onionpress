@@ -39,8 +39,6 @@ FAILED_NODE_THRESHOLD = 5       # failures within window → DROPGUARDS
 FAILED_NODE_WINDOW = 60         # seconds
 BOOTSTRAP_STALL_TIMEOUT = 120   # no progress for 2 min → DROPGUARDS
 HS_DESC_UPLOAD_TIMEOUT = 60     # no descriptor upload 60s after recovery → HSFETCH
-SLEEP_DETECT_THRESHOLD = 20     # seconds — event timeout is 15s, so >20s means we paused
-
 # Reconnect delay when control port isn't available yet
 CONNECT_RETRY_DELAY = 5
 
@@ -252,7 +250,6 @@ class WatchdogState:
         self.last_dormant = 0
         self.last_halt = 0
         self.failed_node_count = 0
-        self.last_loop_time = time.time()  # for sleep detection
         self.last_heartbeat_log = time.time()  # periodic "alive" log
         self.failed_node_window_start = time.time()
         self.last_recovery_time = 0  # when we last detected a wake
@@ -429,14 +426,6 @@ def _extract_bootstrap_pct(line):
 def check_stalls(cmd_sock, state):
     """Periodic check for stalls that events alone can't catch."""
     now = time.time()
-
-    # Sleep/wake detection via clock drift
-    elapsed = now - state.last_loop_time
-    state.last_loop_time = now
-    if elapsed > SLEEP_DETECT_THRESHOLD:
-        log(f"Clock jumped {elapsed:.0f}s (system sleep) — setting recovery timer")
-        state.last_recovery_time = now
-        state.hs_desc_uploaded_since_recovery = False
 
     # Periodic heartbeat log (every 5 minutes)
     if now - state.last_heartbeat_log > 300:
