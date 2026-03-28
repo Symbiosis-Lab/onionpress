@@ -1762,11 +1762,12 @@ class OnionPressApp(rumps.App):
         return False
 
     def handle_sleep(self):
-        """Handle system sleep — notify OnionHeaven, release caffeinate.
+        """Handle system sleep — notify OnionHeaven, halt Tor, release caffeinate.
 
-        Tor recovery is handled autonomously by tor-watchdog.py inside
-        each container (clock drift detection → DROPGUARDS → escalation).
-        DORMANT is NOT sent from here — it permanently kills onion services.
+        Sends /offline to the hub, then SIGNAL HALT to onionpress-tor so it
+        stops serving our onion service. This lets the hub cleanly take over
+        (no competing descriptors). Docker restart policy will restart Tor,
+        and the watchdog handles recovery on wake.
         """
         self.log("System going to sleep")
         self._sleeping = True
@@ -1777,6 +1778,10 @@ class OnionPressApp(rumps.App):
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
                     pass
+            # Stop Tor so our onion service goes dark — hub can take over cleanly.
+            # torrc-based services can't be DEL_ONION'd, so HALT is the only option.
+            self._tor_control_signal("onionpress-tor", "HALT")
+            self.log("Sent HALT to onionpress-tor — onion service stopped for sleep")
             self.stop_caffeinate()
 
     def _handle_terminate(self):
@@ -1844,6 +1849,9 @@ class OnionPressApp(rumps.App):
         def checker():
             while True:
                 if self._port_conflict:
+                    time.sleep(30)
+                    continue
+                if self._sleeping:
                     time.sleep(30)
                     continue
                 self.check_status()
