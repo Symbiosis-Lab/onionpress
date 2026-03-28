@@ -355,29 +355,19 @@ def check_stalls(cmd_sock, state):
             and not state.hs_desc_uploaded_since_recovery
             and now - state.last_recovery_time > HS_DESC_UPLOAD_TIMEOUT
             and state.bootstrapped):
-        log(f"Warning: no HS_DESC upload {HS_DESC_UPLOAD_TIMEOUT}s after recovery")
-        # Reset so we don't warn repeatedly
-        state.last_recovery_time = 0
-
-    # Periodic HSFETCH after recovery — flush stale descriptor cache so
-    # reachability checks (via this Tor's SOCKS) pick up fresh descriptors.
-    # NEWNYM clears the client cache; HSFETCH forces a fresh fetch from HSDirs.
-    if (state.last_recovery_time > 0
-            and state.bootstrapped
-            and now - state.last_hsfetch > HSFETCH_INTERVAL):
-        # Discover addresses on first use
+        log(f"Warning: no HS_DESC upload {HS_DESC_UPLOAD_TIMEOUT}s after recovery — flushing descriptor cache")
+        # Flush stale descriptors so reachability checks can pick up fresh ones.
+        # Only do this when we're clearly stuck, not proactively — early HSFETCH
+        # can pull the wrong (hub takeover) descriptor and make things worse.
         if not state.onion_addresses:
             state.onion_addresses = discover_onion_addresses()
         if state.onion_addresses:
-            # NEWNYM first to clear cached (stale) descriptors, then HSFETCH
             send_cmd(cmd_sock, "SIGNAL NEWNYM")
             for addr in state.onion_addresses:
                 resp = send_cmd(cmd_sock, f"HSFETCH {addr}")
                 if "250" in resp:
                     log(f"HSFETCH {addr[:16]}... — refreshing descriptor")
-                else:
-                    log(f"HSFETCH failed: {resp.strip()}")
-        state.last_hsfetch = now
+        state.last_recovery_time = 0
 
     # Escalation: DORMANT/ACTIVE if DROPGUARDS didn't work after 2 minutes.
     # Only safe for SOCKS-only containers — DORMANT kills onion services permanently.
@@ -429,12 +419,6 @@ def run():
             cmd_sock.close()
             time.sleep(CONNECT_RETRY_DELAY)
             continue
-
-        # Flush stale descriptor cache from before restart so reachability
-        # checks (which use this Tor's SOCKS proxy) get fresh descriptors.
-        resp = send_cmd(cmd_sock, "SIGNAL NEWNYM")
-        if "250" in resp:
-            log("Flushed descriptor cache (NEWNYM on startup)")
 
         # Check current bootstrap status so we don't start with bootstrapped=False
         # when Tor is already at 100% (e.g. after watchdog restart).
