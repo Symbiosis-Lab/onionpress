@@ -1746,9 +1746,10 @@ class OnionPressApp(rumps.App):
 
     def _signal_watchdog(self, container, sig):
         """Send a Unix signal to the tor-watchdog process inside a container."""
+        # [t]or-watchdog bracket trick prevents pgrep from matching the sh -c command itself
         result = self.docker.exec(
             container,
-            ["sh", "-c", f"kill -{sig} $(pgrep -f tor-watchdog) 2>/dev/null"],
+            ["sh", "-c", f'kill -{sig} $(pgrep -f "[t]or-watchdog") 2>/dev/null'],
             timeout=10,
         )
         return result.ok
