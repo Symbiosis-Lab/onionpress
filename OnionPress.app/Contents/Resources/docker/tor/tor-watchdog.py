@@ -30,7 +30,7 @@ HALT_COOLDOWN = 300  # 5 minutes — last resort
 FAILED_NODE_THRESHOLD = 5       # failures within window → DROPGUARDS
 FAILED_NODE_WINDOW = 60         # seconds
 BOOTSTRAP_STALL_TIMEOUT = 120   # no progress for 2 min → DROPGUARDS
-HS_DESC_UPLOAD_TIMEOUT = 120    # no descriptor upload 2 min after recovery
+HS_DESC_UPLOAD_TIMEOUT = 60     # no descriptor upload 60s after recovery → HSFETCH
 HSFETCH_INTERVAL = 30           # flush client descriptor cache every 30s after recovery
 
 # Reconnect delay when control port isn't available yet
