@@ -88,29 +88,48 @@ class HealthChecker:
         return False
 
     def check_tor_bootstrap(self) -> tuple[bool, int]:
-        """Check Tor bootstrap status from container logs.
+        """Check Tor bootstrap status via control port (with log fallback).
 
         Returns:
             (bootstrapped, percentage) — bootstrapped is True if 100%.
         """
+        # Primary: query control port directly (reliable, not affected by log rotation)
+        result = self.docker.exec(
+            "onionpress-tor",
+            ["sh", "-c",
+             'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
+             '| od -A n -t x1 | tr -d \' \\n\')\\r\\n'
+             'GETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n"'
+             ' | nc -w 5 127.0.0.1 9051'],
+            timeout=15,
+        )
+        if result.ok and "PROGRESS=" in result.output:
+            for part in result.output.split():
+                if part.startswith("PROGRESS="):
+                    try:
+                        pct = int(part.split("=")[1])
+                        self._log(f"Checking Tor bootstrap status... {pct}%")
+                        return pct >= 100, pct
+                    except ValueError:
+                        pass
+
+        # Fallback: parse container logs (for Arti or if control port unavailable)
         result = self.docker.run(
             ["logs", "--tail", "100", "onionpress-tor"],
             timeout=15,
         )
         if not result.ok:
-            self._log("Checking Tor bootstrap status... failed to read logs")
+            self._log("Checking Tor bootstrap status... failed")
             return False, 0
 
         output = result.stdout
         pct = 0
 
-        # Find highest bootstrap percentage
         for m in re.finditer(r"PROGRESS=(\d+)", output):
             p = int(m.group(1))
             if p > pct:
                 pct = p
 
-        # Also check for Arti's message
         if "Sufficiently bootstrapped" in output:
             pct = max(pct, 100)
         if "Bootstrapped 100%" in output:
