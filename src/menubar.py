@@ -2335,6 +2335,11 @@ class OnionPressApp(rumps.App):
                 time.sleep(2)
                 waited += 2
 
+            # Send USR2 to arm onionheaven's HSFETCH timer for cold start
+            # (watchdog already ADD_ONION'd, this just sets last_recovery_time)
+            for container in ["onionpress-tor", "onionheaven"]:
+                self._signal_watchdog(container, "USR2")
+
             self.check_status()
 
             # Start caffeinate to prevent sleep while service runs
@@ -2362,6 +2367,10 @@ class OnionPressApp(rumps.App):
                 break
             time.sleep(2)
             waited += 2
+
+        # Send USR2 to arm onionheaven's HSFETCH timer for cold start
+        for container in ["onionpress-tor", "onionheaven"]:
+            self._signal_watchdog(container, "USR2")
 
         self.check_status()
         self.start_caffeinate()
