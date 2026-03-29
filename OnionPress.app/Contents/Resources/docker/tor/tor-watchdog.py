@@ -378,8 +378,10 @@ def process_event(line, cmd_sock, state):
         return
 
     # --- Network recovery ---
+    # Don't DROPGUARDS here — Tor recovers naturally and USR2 handles wake.
+    # DROPGUARDS throws away guards right when ADD_ONION needs them to publish.
     if "Tor now sees network activity" in line:
-        do_dropguards(cmd_sock, state, "network came back")
+        log("Network came back — letting Tor recover naturally")
         return
 
     # --- Bootstrap progress ---
