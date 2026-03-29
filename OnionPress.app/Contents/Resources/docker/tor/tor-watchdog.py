@@ -382,8 +382,10 @@ def process_event(line, cmd_sock, state):
     """Process a single event line from the control port."""
 
     # --- Clock jump ---
+    # Don't DROPGUARDS — Tor recovers naturally after clock skew.
+    # USR1/USR2 signals handle sleep/wake.
     if "CLOCK_SKEW" in line or "clock just jumped" in line:
-        do_dropguards(cmd_sock, state, "clock jump detected")
+        log("Clock skew detected — letting Tor recover naturally")
         return
 
     # --- Failed to find node for hop #1 ---
