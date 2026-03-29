@@ -1085,19 +1085,11 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Hostname mismatch: {hostname} != {self.onion_address}")
                 return False
 
-            # Check 2: Verify Tor has bootstrapped
-            # Use full logs — bootstrap message can be pushed out of --tail by HSDir spam
-            result = self._docker.run(["logs", "onionpress-tor"], timeout=10)
-            tor_output = result.stdout + result.stderr
-            if "Sufficiently bootstrapped" not in tor_output and "Bootstrapped 100% (done)" not in tor_output:
+            # Check 2: Verify Tor has bootstrapped (via control port)
+            bootstrapped, pct = self._health_checker.check_tor_bootstrap()
+            if not bootstrapped:
                 if log_result:
-                    self.log("✗ onionpress-tor not fully bootstrapped yet")
-                return False
-
-            # Check 3: Verify no critical errors in logs
-            if "failed to publish" in tor_output.lower():
-                if log_result:
-                    self.log("✗ Tor errors detected in logs")
+                    self.log(f"✗ onionpress-tor not fully bootstrapped yet ({pct}%)")
                 return False
 
             # Check 4: Internal connectivity (Tor → WordPress over Docker network)

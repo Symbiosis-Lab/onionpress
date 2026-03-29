@@ -324,7 +324,14 @@ def _send_heartbeat(app, wordpress_healthy=True):
     app.log("OnionHeaven: heartbeat sending /online...")
     rc, output = _run_docker_rc(app, curl_args, timeout=45)
     ok = (rc == 0)
-    app.log(f"OnionHeaven: heartbeat /online rc={rc}, output={output[:100] if output else 'empty'}")
+    if ok and output:
+        try:
+            addr = json.loads(output).get("content_address", "")[:12]
+            app.log(f"OnionHeaven: heartbeat /online {addr}...onion success")
+        except (json.JSONDecodeError, KeyError):
+            app.log(f"OnionHeaven: heartbeat /online rc={rc}")
+    else:
+        app.log(f"OnionHeaven: heartbeat /online rc={rc}")
 
     # Retry once after 3s on transient Tor HSDir failures
     if not (ok and output):
