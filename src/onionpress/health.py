@@ -108,7 +108,8 @@ class HealthChecker:
                 if part.startswith("PROGRESS="):
                     try:
                         pct = int(part.split("=")[1])
-                        self._log(f"Checking Tor bootstrap status... {pct}%")
+                        if pct < 100:
+                            self._log(f"Checking Tor bootstrap status... {pct}%")
                         return pct >= 100, pct
                     except ValueError:
                         pass
@@ -135,7 +136,8 @@ class HealthChecker:
         if "Bootstrapped 100%" in output:
             pct = 100
 
-        self._log(f"Checking Tor bootstrap status... {pct}%")
+        if pct < 100:
+            self._log(f"Checking Tor bootstrap status... {pct}%")
         return pct >= 100, pct
 
     def check_tor_hostname(self, expected_address: str = "") -> str:
