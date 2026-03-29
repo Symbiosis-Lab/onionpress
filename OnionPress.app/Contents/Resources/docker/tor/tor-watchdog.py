@@ -444,10 +444,6 @@ def process_event(line, cmd_sock, state):
             if pct >= 100:
                 if not state.bootstrapped:
                     log("Tor bootstrapped to 100%")
-                    # Check if we're missing descriptors for addresses we need
-                    # (e.g. onionheaven needs our content address descriptor).
-                    # HSFETCH immediately — no competing descriptors on cold start.
-                    _hsfetch_missing_descriptors(cmd_sock, state)
                 state.bootstrapped = True
                 state.failed_node_count = 0
             else:
