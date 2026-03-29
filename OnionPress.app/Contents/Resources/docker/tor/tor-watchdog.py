@@ -137,6 +137,24 @@ def _read_ed25519_key(secret_key_path):
     return base64.b64encode(expanded_key).decode("ascii")
 
 
+def _derive_onion_address(public_key_path):
+    """Derive .onion address from hs_ed25519_public_key file.
+
+    v3 onion address = base32(pubkey + checksum + version)
+    checksum = SHA3-256(".onion checksum" + pubkey + version)[:2]
+    """
+    import hashlib
+    with open(public_key_path, "rb") as f:
+        data = f.read()
+    if len(data) != 64:
+        raise ValueError(f"Public key wrong size: {len(data)} (expected 64)")
+    pubkey = data[32:]  # 32-byte header + 32-byte key
+    version = b'\x03'
+    checksum = hashlib.sha3_256(b".onion checksum" + pubkey + version).digest()[:2]
+    addr_bytes = pubkey + checksum + version
+    return base64.b32encode(addr_bytes).decode("ascii").lower() + ".onion"
+
+
 def discover_services():
     """Find onion services from /etc/tor/onion-services.json + keys on disk.
 
@@ -162,15 +180,24 @@ def discover_services():
 
         service_dir = os.path.join(HS_BASE_DIR, name)
 
-        # Read hostname for service_id
+        # Read hostname for service_id (or derive from public key)
         hostname_file = os.path.join(service_dir, "hostname")
+        public_key_file = os.path.join(service_dir, "hs_ed25519_public_key")
         try:
             with open(hostname_file) as f:
                 hostname = f.read().strip()
-            service_id = hostname.replace(".onion", "")
         except OSError:
-            log(f"Warning: no hostname file for {name}, skipping")
-            continue
+            # No hostname file — derive from public key (fresh install)
+            try:
+                hostname = _derive_onion_address(public_key_file)
+                # Write it so we don't have to derive again
+                with open(hostname_file, "w") as f:
+                    f.write(hostname + "\n")
+                log(f"Derived hostname for {name}: {hostname}")
+            except (OSError, ValueError) as e:
+                log(f"Warning: no hostname or public key for {name}: {e}")
+                continue
+        service_id = hostname.replace(".onion", "")
 
         # Read key
         secret_key_file = os.path.join(service_dir, "hs_ed25519_secret_key")
