@@ -289,6 +289,27 @@ class WatchdogState:
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
+def _hsfetch_missing_descriptors(cmd_sock, state):
+    """Check client descriptor cache and HSFETCH any missing addresses.
+
+    Called right after bootstrap hits 100%. Queries the control port
+    (read-only) for each address we care about, and only HSFETCHes
+    the ones that aren't cached. Safe on cold start — no competing
+    descriptors to poison the cache.
+    """
+    if not state.onion_addresses:
+        state.onion_addresses = discover_onion_addresses()
+    if not state.onion_addresses:
+        return
+    for addr in state.onion_addresses:
+        resp = send_cmd(cmd_sock, f"GETINFO hs/client/desc/id/{addr}")
+        if "hs-descriptor" in resp:
+            continue  # already cached
+        resp = send_cmd(cmd_sock, f"HSFETCH {addr}")
+        if "250" in resp:
+            log(f"HSFETCH {addr[:16]}... — descriptor not cached, fetching")
+
+
 def discover_onion_addresses():
     """Find onion addresses for HSFETCH — our own services + the content address."""
     addresses = set()
@@ -423,6 +444,10 @@ def process_event(line, cmd_sock, state):
             if pct >= 100:
                 if not state.bootstrapped:
                     log("Tor bootstrapped to 100%")
+                    # Check if we're missing descriptors for addresses we need
+                    # (e.g. onionheaven needs our content address descriptor).
+                    # HSFETCH immediately — no competing descriptors on cold start.
+                    _hsfetch_missing_descriptors(cmd_sock, state)
                 state.bootstrapped = True
                 state.failed_node_count = 0
             else:
