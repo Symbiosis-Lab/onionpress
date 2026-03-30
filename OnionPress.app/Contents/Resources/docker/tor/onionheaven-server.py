@@ -15,7 +15,7 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-ONIONHEAVEN_SERVER_VERSION = "2.4.39"
+ONIONHEAVEN_SERVER_VERSION = "2.4.40"
 
 MAX_REQUEST_BODY = 1_048_576  # 1 MB — reject larger POST bodies to prevent memory exhaustion
 
