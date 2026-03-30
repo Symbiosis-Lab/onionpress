@@ -1722,22 +1722,35 @@ class OnionPressApp(rumps.App):
         """Register for macOS wake notification to immediately update icon"""
         ws = AppKit.NSWorkspace.sharedWorkspace()
         nc = ws.notificationCenter()
+        def _safe_callback(handler_name, handler):
+            """Wrap notification callbacks to guard against early/crash calls."""
+            def wrapper(notification):
+                try:
+                    if not getattr(self, '_quitting', False):
+                        handler()
+                except Exception as e:
+                    try:
+                        self.log(f"WARNING: {handler_name} callback error: {e}")
+                    except Exception:
+                        pass
+            return wrapper
+
         nc.addObserverForName_object_queue_usingBlock_(
             AppKit.NSWorkspaceWillSleepNotification,
             None,
             AppKit.NSOperationQueue.mainQueue(),
-            lambda notification: self.handle_sleep())
+            _safe_callback("sleep", self.handle_sleep))
         nc.addObserverForName_object_queue_usingBlock_(
             AppKit.NSWorkspaceDidWakeNotification,
             None,
             AppKit.NSOperationQueue.mainQueue(),
-            lambda notification: self.handle_wake())
+            _safe_callback("wake", self.handle_wake))
         # Register for app termination (catches osascript quit / Apple Event quit)
         AppKit.NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
             AppKit.NSApplicationWillTerminateNotification,
             None,
             None,  # Deliver on posting thread (main thread)
-            lambda notification: self._handle_terminate())
+            _safe_callback("terminate", self._handle_terminate))
         self.log("Registered for system sleep/wake/terminate notifications")
 
     def _signal_watchdog(self, container, sig):
