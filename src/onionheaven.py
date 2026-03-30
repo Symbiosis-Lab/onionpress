@@ -321,13 +321,17 @@ def _send_heartbeat(app, wordpress_healthy=True):
         f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/online"
     ]
 
-    app.log("OnionHeaven: heartbeat sending /online...")
+    had_success = getattr(app, '_onionheaven_heartbeat_succeeded', False)
+    if not had_success:
+        app.log("OnionHeaven: heartbeat sending /online...")
     rc, output = _run_docker_rc(app, curl_args, timeout=45)
     ok = (rc == 0)
     if ok and output:
         try:
-            addr = json.loads(output).get("content_address", "")[:12]
-            app.log(f"OnionHeaven: heartbeat /online {addr}...onion success")
+            json.loads(output)  # validate JSON
+            if not had_success:
+                hub = ONIONHEAVEN_ADDRESS[:12]
+                app.log(f"OnionHeaven: heartbeat /online {hub}...onion success")
         except (json.JSONDecodeError, KeyError):
             app.log(f"OnionHeaven: heartbeat /online rc={rc}")
     else:
@@ -355,6 +359,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
                         "content_address": content_addr,
                     })
                     app.log(f"OnionHeaven: registered via heartbeat ({content_addr})")
+                app._onionheaven_heartbeat_succeeded = True
                 return True  # success
             app.log(f"OnionHeaven: heartbeat rejected: {resp.get('error', 'unknown')}")
             return False

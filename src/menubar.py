@@ -291,6 +291,7 @@ class OnionPressApp(rumps.App):
         self.is_onionheaven = False             # True if this instance is OnionHeaven
         self._onionheaven_checked = False       # Whether onionheaven mode has been checked
         self._onionheaven_registration_succeeded = False  # Whether registration succeeded
+        self._onionheaven_heartbeat_succeeded = False     # Suppresses repeat heartbeat logs
         self._onionheaven_registration_in_flight = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
         self._quitting = False                 # True once quit cleanup has started
@@ -1306,6 +1307,7 @@ class OnionPressApp(rumps.App):
                             self.is_ready = False
                             self._yellow_since = time.time()
                             self._bootstrap_stall_count = 0
+                            self._onionheaven_heartbeat_succeeded = False
                             self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
@@ -1449,6 +1451,7 @@ class OnionPressApp(rumps.App):
                 self._onionheaven_alert_shown = False
                 self._onionheaven_checked = False
                 self._onionheaven_registration_succeeded = False
+                self._onionheaven_heartbeat_succeeded = False
                 self._onionheaven_registration_in_flight = False
                 self._onionheaven_reclaim_succeeded = False
                 self._onionheaven_reclaim_in_flight = False
@@ -1755,6 +1758,7 @@ class OnionPressApp(rumps.App):
         """
         self.log("System going to sleep")
         self._sleeping = True
+        self._onionheaven_heartbeat_succeeded = False
         if not self.is_onionheaven:
             # Signal all Tor containers to DEL_ONION their services
             for container in ["onionpress-tor", "onionheaven"]:
