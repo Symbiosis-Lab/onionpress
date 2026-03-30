@@ -333,13 +333,15 @@ def _send_heartbeat(app, wordpress_healthy=True):
                 hub = ONIONHEAVEN_ADDRESS[:12]
                 app.log(f"OnionHeaven: heartbeat /online {hub}...onion success")
         except (json.JSONDecodeError, KeyError):
-            app.log(f"OnionHeaven: heartbeat /online rc={rc}")
+            app.log(f"OnionHeaven: heartbeat /online FAILED — bad JSON rc={rc}")
     else:
-        app.log(f"OnionHeaven: heartbeat /online rc={rc}")
+        reason = {6: "DNS error", 7: "connection refused", 28: "timed out",
+                  52: "empty reply", 56: "connection reset"}.get(rc, "unknown")
+        app.log(f"OnionHeaven: heartbeat /online FAILED — {reason} rc={rc}")
 
     # Retry once after 3s on transient Tor HSDir failures
     if not (ok and output):
-        app.log(f"OnionHeaven: heartbeat failed (curl_rc={rc}), retrying in 3s...")
+        app.log("OnionHeaven: retrying in 3s...")
         import time
         time.sleep(3)
         rc, output = _run_docker_rc(app, curl_args, timeout=45)
