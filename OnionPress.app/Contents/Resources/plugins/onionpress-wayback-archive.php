@@ -119,48 +119,8 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     // Deduplicate (e.g. if the post IS the homepage)
     $urls = array_unique( $urls );
 
-    // .onion first, clearnet via Tor exit as fallback. Never direct clearnet.
-    $endpoints = array(
-        array(
-            'url'   => 'http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
-            'proxy' => 'socks5h://onionpress-tor:9050',
-        ),
-        array(
-            'url'   => 'https://web.archive.org/save',
-            'proxy' => 'socks5h://onionpress-tor:9050',
-        ),
-    );
-
-    $auth = onionpress_wayback_auth_header();
-
-    $failed_urls   = array();
-    $cooldown_urls = array();
-    $first = true;
-    foreach ( $urls as $url ) {
-        // Small delay between requests to avoid SPN rate limits (429)
-        if ( ! $first ) {
-            sleep( 2 );
-        }
-        $first = false;
-
-        $result = onionpress_wayback_submit( $endpoints, $url, $auth );
-        if ( $result === 'cooldown' ) {
-            $cooldown_urls[] = $url;
-        } elseif ( $result !== 'ok' ) {
-            $failed_urls[] = $url;
-        }
-    }
-
-    // Queue failed URLs for immediate retry
-    if ( ! empty( $failed_urls ) ) {
-        onionpress_wayback_queue_urls( $failed_urls );
-    }
-
-    // Queue cooldown URLs for retry in 65 minutes
-    if ( ! empty( $cooldown_urls ) ) {
-        $retry_after = gmdate( 'Y-m-d\TH:i:s\Z', time() + 3900 ); // 65 minutes
-        onionpress_wayback_queue_urls( $cooldown_urls, $retry_after );
-    }
+    // Queue for background archiving by the menubar app — never block publish
+    onionpress_wayback_queue_urls( $urls );
 }, 10, 3 );
 
 /**
@@ -198,6 +158,7 @@ function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
             CURLOPT_TIMEOUT        => 30,
             CURLOPT_CONNECTTIMEOUT => 15,
             CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_UNRESTRICTED_AUTH => true,  // Keep Authorization header across redirects (.onion 307)
             CURLOPT_MAXREDIRS      => 3,
             CURLOPT_USERAGENT      => $user_agent,
             CURLOPT_HTTPHEADER     => $headers,
