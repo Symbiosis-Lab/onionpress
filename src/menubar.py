@@ -1308,6 +1308,7 @@ class OnionPressApp(rumps.App):
                             self._yellow_since = time.time()
                             self._bootstrap_stall_count = 0
                             self._onionheaven_heartbeat_succeeded = False
+                            self.startup_time = time.time()  # Reset so "launched in Xs" shows recovery time
                             self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
