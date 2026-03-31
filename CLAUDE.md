@@ -14,7 +14,7 @@
 ## Key Architecture
 - macOS menubar app (py2app built from `src/menubar.py`)
 - Launcher shell script at `OnionPress.app/Contents/MacOS/onionpress`
-- Docker containers (tor, tor-client, wordpress, mariadb) run inside Colima VM
+- Docker containers (tor, wordpress, mariadb) run inside Colima VM
 - Logs at `~/.onionpress/onionpress.log` and `~/.onionpress/launcher.log`
 
 ## Why py2app
@@ -32,8 +32,7 @@
   - `src/key_manager.py` — vanity key management
   - `src/backup_manager.py` — backup/restore
   - `src/setup_window.py` — native setup window
-  - `src/onionheaven.py` — OnionHeaven integration
-  - `src/onion_auth.py` — ed25519 signatures for OnionHeaven API auth (also copied to `docker/tor/`)
+  - `src/cellar.py` — OnionCellar integration
   - `src/install_native_messaging.py` — browser extension support
   - `setup.py` — py2app config (if you add a new local module, add it to `includes` AND the build script's `cp` lines)
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
@@ -43,7 +42,6 @@
   3. `setup.py` — `CFBundleVersion` and `CFBundleShortVersionString` (2 values, same line area)
   4. `OnionPress.app/Contents/Info.plist` — `CFBundleShortVersionString`
   5. `OnionPress.app/Contents/Resources/MenubarApp/Contents/Info.plist` — `CFBundleShortVersionString` AND `CFBundleVersion` (py2app build artifact; the build script overwrites this, but it must also be updated manually for non-rebuild releases)
-  6. `OnionPress.app/Contents/Resources/docker/tor/onionheaven-server.py` — `ONIONHEAVEN_SERVER_VERSION` (shown in `/status` response)
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Security
@@ -57,19 +55,6 @@
 - All other container data uses Docker named volumes (which live inside the VM)
 - **Do not add additional `--mount` flags without considering security implications**
 
-## Docker Compose and Environment Variables (IMPORTANT)
-- **Never run `docker compose up` directly** from the `docker/` directory — the `onionpress` launcher script sets required env vars (`WORDPRESS_DB_PASSWORD`, `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` from `~/.onionpress/secrets`) before starting containers
-- Running `docker compose up` without these vars causes containers to recreate with blank passwords → WordPress 500 "Error establishing a database connection"
-- **To recreate a single container safely**: use `sudo systemctl restart onionpress` which re-reads secrets and passes them to docker compose
-- If you must recreate a container mid-session (e.g., to pick up a compose change), source the secrets first: `. ~/.onionpress/secrets && cd /opt/onionpress/docker && docker compose up -d <service>`
-
-## Docker Image Pull Strategy (IMPORTANT)
-- **Do NOT use `--pull always` on `docker compose up`** — it causes double container recreation
-- The launcher already pulls images via `docker compose pull` before starting containers
-- `docker compose up -d` (without `--pull always`) automatically recreates containers if the local image changed from the pull
-- Adding `--pull always` back causes a redundant pull → container recreated mid-bootstrap → double Tor bootstrap → brief reachability then gap → browser opens to a dead service
-- This has been added and reverted multiple times — the separate `pull` step is the correct approach
-
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers
@@ -81,79 +66,17 @@
 - **`LSMultipleInstancesProhibited` must NOT be in any Info.plist** — macOS enforces it across ALL users sharing the same app bundle, not just per-user
 - **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes
 - **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP
-- **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `onionpress-tor-client:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
+- **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
 - **`git add -f OnionPress.app/`** after a build will pick up large downloaded binaries (docker, limactl, docker-compose) — always stage specific paths instead
 
-## Tor Client Container (`onionpress-tor-client`)
-- **Independent Arti SOCKS proxy** for true external reachability tests (~20-50MB RAM)
-- Same image as `onionpress-tor` (`ghcr.io/brewsterkahle/onionpress-tor:latest`) but runs with `NO_ONION_SERVICE=1` (pure SOCKS, no onion services)
-- Has its own Tor circuits and must discover `.onion` addresses through the real Tor network — unlike `onionpress-tor` which resolves its own `.onion` locally via self-connection shortcut
-- **No host port mapping** — accessed only via `docker exec` or container-to-container networking (`onionpress-tor-client:9050`)
-- Started early alongside WordPress and DB (no dependencies), giving it 60+ seconds to bootstrap while WordPress warms up
-- `docker compose down` stops it automatically (no profile needed)
-- **Used by**: `torcurl`, `_auto_open_browser_inner()`, `check_tor_reachability()` Check 5, `onion-forward.php` (browser extension PHP proxy)
-- **NOT used by**: `src/onionheaven.py` (outbound Tor to external `.onion`), `onionpress-wayback-archive.php` (Wayback Machine), `onionheaven-heartbeat.py` (runs inside container)
-
-## Colima Networking
-- **SOCKS proxy DOES work through Colima VM port forwarding** (tested 2026-03-20 — previously documented as broken, now works for both clearnet and .onion)
-- `curl --socks5-hostname 127.0.0.1:<host_port>` from the Mac host works fine
-- **`docker exec` is still needed for Tor control port** — ControlPort (9051) is not exposed in the main tor container's torrc and not port-mapped in docker-compose
-- To enable direct control port access from the host, would need: add `ControlPort 0.0.0.0:9051` + `CookieAuthentication 1` to torrc, expose port in docker-compose, then use Python sockets directly
-  - Example: `docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 http://some-address.onion/`
+## Colima Networking Gotcha
+- **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
+- **For ANY communication over Tor from the Mac, always use `docker exec` into the tor container** — this is reliable
   - Do NOT use `curl --socks5-hostname 127.0.0.1:9050` from the Mac host — it will fail
 - This applies to future mirror system communication (health checks, challenge-response, etc.)
-- The tor image is Debian-based and has both `curl` and `wget`
-- WordPress container also has `curl`
-- Test onion service reachability: `docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 http://<onion-address>/`
-- Test internal WordPress path: `docker exec onionpress-tor curl -s http://wordpress:80/`
-
-## Tor Descriptor Propagation & HSFETCH
-- **After ADD_ONION, descriptors take 10-60s to propagate to HSDirs** — clients can't connect until then
-- **HSFETCH** forces a client to fetch a descriptor from HSDirs, but if the new descriptor hasn't landed on HSDirs yet, HSFETCH just re-fetches the old one
-- **SIGNAL NEWNYM clears the client-side descriptor cache** — must be issued BEFORE HSFETCH, or Tor returns the cached (stale) descriptor instead of fetching fresh
-- **Correct sequence**: `SIGNAL NEWNYM` → wait 3s → `HSFETCH <service-id>` → then try connecting. Must be two separate control port connections (can't sleep inside an `nc` pipe)
-- **One-shot flush is insufficient** — after a DEL_ONION/ADD_ONION handoff, the descriptor may not be on HSDirs yet when the first flush fires. Flush must be repeated periodically (every 30s) inside polling loops until the client gets the new descriptor
-- **NEWNYM is rate-limited** to once per 10 seconds by Tor — don't call it more frequently
-
-## Onion Service Handoff (DEL_ONION/ADD_ONION)
-- **Clean handoff = 10-20s transitions. Competing descriptors = minutes of failure.**
-- When transferring an onion address (e.g. takeover/recovery), the old holder MUST `DEL_ONION` before the new holder does `ADD_ONION`. If both publish descriptors simultaneously, clients get confused and connections fail for minutes
-- ADD_ONION with `ED25519-V3:<key> Flags=Detach` keeps the same .onion address across handoffs
-- Detached services survive the control connection closing (`GETINFO onions/detached` to list them)
-
-## Tor Bootstrap Resilience
-- **Guard selection is luck-based** — Tor can pick bad/slow guards and get stuck at 5% ("Connecting to a relay") indefinitely
-- Deleting `/var/lib/tor/state` and restarting Tor forces fresh guard selection — usually bootstraps in seconds
-- Stress test containers have no persistent volumes, so stale state files are from the current session (not old runs)
-- **Recommended**: add a watchdog — if Tor doesn't reach 100% bootstrap within 120s, delete state and restart
-
-## Scrub Procedure (backup → reset → restore)
-- The "scrub" wipes and rebuilds an OnionPress instance while preserving data
-- **Steps**:
-  1. Quit OnionPress from menubar (full quit)
-  2. `onionpress start` (Colima + containers needed for backup)
-  3. `onionpress backup <wp-admin-password> <output.zip>`
-  4. `ONIONPRESS_YES=true onionpress reset` (wipes volumes, keys, config, secrets; starts fresh containers)
-  5. `onionpress restore <wp-admin-password> <backup.zip>` (imports DB, Tor keys, wp-content, config, re-adds multisite constants, starts Tor)
-  6. Relaunch `/Applications/OnionPress.app`, verify purple
-- **Restore multisite bug** (partially fixed in v2.4.37): After container recreation, wp-config.php loses multisite constants. The restore flow now force-adds them and starts Tor explicitly. See issue #122 for the proper fix (move backup/restore to Python).
-- **Reset vanity key copy bug**: The `log` function's output contaminates `$VANITY_DIR` in the docker mount command. Reset still works; restore overwrites the key anyway.
-- The backup password is the WordPress admin password, verified before proceeding
-
-## Docker Image Builds
-- **GitHub Actions workflow**: `.github/workflows/docker-publish.yml`
-- **Images**: `ghcr.io/brewsterkahle/onionpress-tor:latest` and `ghcr.io/brewsterkahle/onionpress-wordpress:latest`
-- **Manual trigger only** (`workflow_dispatch`) — run via `gh workflow run docker-publish.yml`
-- **Multi-arch**: amd64 on GitHub runners, arm64 on self-hosted runner, then manifest merge
-- **When to trigger**: after changes to `docker/tor/` or `docker/wordpress/` (entrypoint.sh, onionheaven-server.py, onionheaven-heartbeat.py, etc.)
-
-## OnionHeaven Always-On (v2.4.37+)
-- The `onionheaven` container is a **core service** — starts with every `docker compose up`, no profile gate
-- `ONIONHEAVEN=1` is hardcoded in docker-compose.yml (was `${ONIONHEAVEN:-0}` with a fragile lazy activation watcher)
-- The heartbeat monitor starts automatically; takeover workers start when registrations exist
-- **op2pi** (Raspberry Pi OnionHeaven): `op2pieoieuwgwkgps4pz25rrh4mi4tolesyiduy7zrol2uh7luaxhwad.onion`
-
-## Bash `wait` Gotcha
-- **Bare `wait` (no arguments) waits for ALL background children** — including `tail -f` processes, background log watchers, etc.
-- In scripts that spawn background monitoring processes, always capture PIDs and `wait "$pid"` on specific ones
-- This caused `flush_client_descriptor_cache` to hang indefinitely (fixed in commit `2c36656`)
+- **`wget` inside the tor container CANNOT fetch external .onion addresses** — it doesn't support SOCKS proxies, so it can't resolve .onion via Arti. `wget` only works for internal container-to-container requests (e.g., `wget http://wordpress:80/`).
+- **To fetch external .onion addresses, use `socat` with SOCKS4A** inside the tor container:
+  - `printf "GET / HTTP/1.1\r\nHost: <address>.onion\r\nConnection: close\r\n\r\n" | socat -t 10 - SOCKS4A:127.0.0.1:<address>.onion:80,socksport=9050`
+  - Or install `curl` in the tor container and use `curl --socks5-hostname 127.0.0.1:9050`
+- WordPress container has `curl`
+- Test onion service path (internal): `docker exec onionpress-tor wget -q -O /dev/null http://wordpress:80/`

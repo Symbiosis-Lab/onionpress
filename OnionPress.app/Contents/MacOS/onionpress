@@ -156,6 +156,14 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export TOR_IMPL
 
+# Analytics directory — bind-mounted into the tor container so analytics
+# data survives VM deletion.  Lives under shared/ which is already
+# mounted into the Colima VM.
+ONIONPRESS_SHARED_DIR="$DATA_DIR/shared"
+mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
+export ONIONPRESS_SHARED_DIR
+
+
 # Build compose flags — include cloudflare override file only when token is set
 if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
     CF_COMPOSE="-f docker-compose.yml -f docker-compose.cloudflare.yml"
