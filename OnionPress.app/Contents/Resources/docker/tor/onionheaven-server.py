@@ -876,8 +876,24 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-        # Determine which files we don't have yet
+        # Persist instance metadata
         site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
+        os.makedirs(site_dir, exist_ok=True)
+        meta = {
+            "content_address": content_address,
+            "healthcheck_address": healthcheck_address,
+            "version": data.get("version", ""),
+            "tor_impl": data.get("tor_impl", ""),
+            "os_version": data.get("os_version", ""),
+            "last_seen": data.get("timestamp", ""),
+        }
+        try:
+            with open(os.path.join(site_dir, "meta.json"), "w") as f:
+                json.dump(meta, f, indent=2)
+        except OSError:
+            pass
+
+        # Determine which files we don't have yet
         wanted = []
         for f in files:
             name = f.get("name", "")
