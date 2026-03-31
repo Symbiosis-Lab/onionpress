@@ -53,7 +53,8 @@ OPTIONS = {
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
                  'onionpress.tor', 'onionpress.colima',
                  'onionpress.ui_helpers', 'onionpress.settings_ui',
-                 'onionpress.browser'],
+                 'onionpress.browser', 'onionpress.log_rotation',
+                 'onionpress.analytics_sharing'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

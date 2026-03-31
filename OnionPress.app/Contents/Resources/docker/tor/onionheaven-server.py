@@ -11,6 +11,8 @@ Endpoints:
   POST /unregister   — Release takeover and hard-delete from registry
   POST /offline      — Notify OnionHeaven that instance is going offline
   POST /reset-onionheaven — Clean stress tests + refresh workers with current code (internal only)
+  POST /logs/manifest — (OnionHome only) Accept log file manifests for analytics sharing
+  POST /logs/upload   — (OnionHome only) Accept log file uploads for analytics sharing
   GET  /status       — Public status summary (no auth)
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
@@ -24,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import struct
 import sys
 from datetime import datetime, timezone
@@ -42,6 +45,16 @@ from onionheaven_common import (
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 8083
+
+# OnionHome mode: only OnionHome instances accept /logs/* endpoints
+IS_ONIONHOME = os.environ.get("IS_ONIONHOME", "0") == "1"
+
+# Analytics storage
+ANALYTICS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "analytics")
+ANALYTICS_DISK_THRESHOLD = 0.85  # 85% full → stop accepting / clean up
+ANALYTICS_LOG_NAME_RE = re.compile(
+    r"^(onionpress|wordpress-access|wordpress-visitors)-\d{4}-\d{2}-\d{2}-\d{3}\.log$"
+)
 
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
 
@@ -248,11 +261,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
-    def _read_json(self):
+    def _read_json(self, max_size=None):
+        if max_size is None:
+            max_size = MAX_REQUEST_BODY
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return None
-        if length > MAX_REQUEST_BODY:
+        if length > max_size:
             self._send_json(413, {"error": "Request body too large"})
             return False  # distinguishes from None (no body) — caller must check
         body = self.rfile.read(length)
@@ -478,6 +493,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "/online": self._handle_online,
             "/offline": self._handle_offline,
             "/reset-onionheaven": self._handle_reset_onionheaven,
+            "/logs/manifest": self._handle_logs_manifest,
+            "/logs/upload": self._handle_logs_upload,
         }
         handler = handlers.get(path)
         if handler is None:
@@ -811,6 +828,162 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"reset": True, **stats})
 
 
+    # -- POST /logs/manifest (OnionHome only) ---------------------------------
+
+    def _handle_logs_manifest(self):
+        if not IS_ONIONHOME:
+            self._send_json(403, {"error": "Not an OnionHome instance"})
+            return
+
+        data = self._read_json()
+        if data is False:
+            return  # 413 already sent
+        if not data:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        content_address = data.get("content_address", "")
+        healthcheck_address = data.get("healthcheck_address", "")
+        if not content_address or not ONION_RE.match(content_address):
+            self._send_json(400, {"error": "Invalid content_address"})
+            return
+        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+            self._send_json(400, {"error": "Invalid healthcheck_address"})
+            return
+
+        # Verify signature
+        ok, err = verify_payload(
+            content_address, "logs",
+            healthcheck_address, data.get("timestamp", ""),
+            data.get("signature", ""),
+        )
+        if not ok:
+            self._send_json(403, {"error": f"Signature verification failed: {err}"})
+            return
+
+        files = data.get("files", [])
+        if not files:
+            self._send_json(200, {"wanted": []})
+            return
+
+        # Check disk usage
+        try:
+            usage = shutil.disk_usage("/")
+            if usage.used / usage.total > ANALYTICS_DISK_THRESHOLD:
+                self.log_message("Analytics: disk >85%% full, rejecting manifest")
+                self._send_json(200, {"wanted": []})
+                return
+        except OSError:
+            pass
+
+        # Determine which files we don't have yet
+        site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
+        wanted = []
+        for f in files:
+            name = f.get("name", "")
+            if not ANALYTICS_LOG_NAME_RE.match(name):
+                continue
+            if not os.path.exists(os.path.join(site_dir, name)):
+                wanted.append(name)
+
+        self._send_json(200, {"wanted": wanted})
+
+    # -- POST /logs/upload (OnionHome only) ------------------------------------
+
+    def _handle_logs_upload(self):
+        if not IS_ONIONHOME:
+            self._send_json(403, {"error": "Not an OnionHome instance"})
+            return
+
+        data = self._read_json(max_size=10_485_760)  # 10 MB for log uploads
+        if data is False:
+            return  # 413 already sent
+        if not data:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        content_address = data.get("content_address", "")
+        healthcheck_address = data.get("healthcheck_address", "")
+        file_name = data.get("file_name", "")
+
+        if not content_address or not ONION_RE.match(content_address):
+            self._send_json(400, {"error": "Invalid content_address"})
+            return
+        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+            self._send_json(400, {"error": "Invalid healthcheck_address"})
+            return
+        if not ANALYTICS_LOG_NAME_RE.match(file_name):
+            self._send_json(400, {"error": "Invalid file_name"})
+            return
+
+        # Verify signature
+        ok, err = verify_payload(
+            content_address, "logs",
+            healthcheck_address, data.get("timestamp", ""),
+            data.get("signature", ""),
+        )
+        if not ok:
+            self._send_json(403, {"error": f"Signature verification failed: {err}"})
+            return
+
+        file_content_b64 = data.get("file_content", "")
+        try:
+            file_bytes = base64.b64decode(file_content_b64)
+        except Exception:
+            self._send_json(400, {"error": "Invalid file_content base64"})
+            return
+
+        # Check / manage disk space
+        try:
+            usage = shutil.disk_usage("/")
+            if usage.used / usage.total > ANALYTICS_DISK_THRESHOLD:
+                self._analytics_cleanup()
+                # Re-check after cleanup
+                usage = shutil.disk_usage("/")
+                if usage.used / usage.total > ANALYTICS_DISK_THRESHOLD:
+                    self._send_json(507, {"error": "Disk full"})
+                    return
+        except OSError:
+            pass
+
+        # Write the file
+        site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
+        os.makedirs(site_dir, exist_ok=True)
+        dest = os.path.join(site_dir, file_name)
+        try:
+            with open(dest, "wb") as f:
+                f.write(file_bytes)
+            self.log_message("Analytics: stored %s from %s", file_name, content_address[:12])
+        except OSError as e:
+            self._send_json(500, {"error": f"Write failed: {e}"})
+            return
+
+        self._send_json(200, {"stored": True, "file_name": file_name})
+
+    @staticmethod
+    def _analytics_cleanup():
+        """Delete oldest analytics files until disk usage is under threshold."""
+        if not os.path.isdir(ANALYTICS_DIR):
+            return
+        all_files = []
+        for root, _dirs, files in os.walk(ANALYTICS_DIR):
+            for name in files:
+                p = os.path.join(root, name)
+                try:
+                    all_files.append((os.path.getmtime(p), p))
+                except OSError:
+                    continue
+        all_files.sort()  # oldest first
+        for _mtime, path in all_files:
+            try:
+                usage = shutil.disk_usage("/")
+                if usage.used / usage.total <= ANALYTICS_DISK_THRESHOLD:
+                    break
+                os.remove(path)
+            except OSError:
+                continue
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -818,6 +991,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 def main():
     # Ensure data directories exist
     os.makedirs(KEYS_DIR, exist_ok=True)
+    if IS_ONIONHOME:
+        os.makedirs(ANALYTICS_DIR, exist_ok=True)
 
     # Initialize DB schema
     conn = db_connect()

@@ -41,6 +41,8 @@ from onionpress.ui_helpers import (
     LogViewerWindow as _LogViewerWindow,
 )
 from onionpress import browser as op_browser
+from onionpress.log_rotation import RotatingLog
+from onionpress import analytics_sharing
 
 
 class OnionPressApp(rumps.App):
@@ -111,7 +113,11 @@ class OnionPressApp(rumps.App):
             self.bin_dir = os.path.join(self.resources_dir, "bin")
         self.colima_home = os.path.join(self.app_support, "colima")
         self.info_plist = os.path.join(self.contents_dir, "Info.plist")
-        self.log_file = os.path.join(self.app_support, "onionpress.log")
+        logs_dir = os.path.join(self.app_support, "logs")
+        self._onionpress_log = RotatingLog(logs_dir, "onionpress")
+        self._wp_access_log = RotatingLog(logs_dir, "wordpress-access")
+        self._wp_visitors_log = RotatingLog(logs_dir, "wordpress-visitors")
+        self.log_file = self._onionpress_log.current_path()  # backward compat
         self.config_file = os.path.join(self.app_support, "config")
 
         # Create OnionPressPaths and Docker/HealthChecker for module interop
@@ -172,21 +178,17 @@ class OnionPressApp(rumps.App):
 
         # Do slow I/O operations in background after icon appears
         def background_init():
-            # Append to existing log file (continuous log across sessions)
-            with open(self.log_file, 'a') as f:
-                f.write(f"\n{'=' * 60}\n")
-                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] === New session starting ===\n")
-                f.write(f"{'=' * 60}\n")
-
-            # Debug logging
-            with open(self.log_file, 'a') as f:
-                f.write(f"DEBUG: frozen={getattr(sys, 'frozen', False)}\n")
-                f.write(f"DEBUG: resources_dir={self.resources_dir}\n")
-                f.write(f"DEBUG: bin_dir={self.bin_dir}\n")
-                f.write(f"DEBUG: launcher_script={self.launcher_script}\n")
-                f.write(f"DEBUG: icon_stopped exists={os.path.exists(self.icon_stopped)}\n")
-                f.write(f"DEBUG: icon_stopped path={self.icon_stopped}\n")
-                f.write(f"DEBUG: rumps initialized successfully\n")
+            # Session separator and debug info via rotating log
+            self.log("=" * 60)
+            self.log("=== New session starting ===")
+            self.log("=" * 60)
+            self.log(f"DEBUG: frozen={getattr(sys, 'frozen', False)}")
+            self.log(f"DEBUG: resources_dir={self.resources_dir}")
+            self.log(f"DEBUG: bin_dir={self.bin_dir}")
+            self.log(f"DEBUG: launcher_script={self.launcher_script}")
+            self.log(f"DEBUG: icon_stopped exists={os.path.exists(self.icon_stopped)}")
+            self.log(f"DEBUG: icon_stopped path={self.icon_stopped}")
+            self.log(f"DEBUG: rumps initialized successfully")
 
             # Create Docker config without credential store (avoids docker-credential-osxkeychain errors)
             os.makedirs(docker_config_dir, exist_ok=True)
@@ -464,9 +466,8 @@ class OnionPressApp(rumps.App):
         try:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             log_message = f"[{timestamp}] {message}\n"
-            fd = os.open(self.log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, 'a', encoding='utf-8') as f:
-                f.write(log_message)
+            self._onionpress_log.write(log_message)
+            self.log_file = self._onionpress_log.current_path()
         except Exception as e:
             print(f"Error writing to log: {e}")
 
@@ -768,27 +769,22 @@ class OnionPressApp(rumps.App):
 
         self.log("=" * 60)
 
-    def _web_log_reader_thread(self, process, raw_path, filtered_path):
-        """Read docker logs and write to both raw and filtered log files"""
+    def _web_log_reader_thread(self, process):
+        """Read docker logs and write to both raw and filtered rotating logs"""
         try:
-            with open(raw_path, 'a') as raw_f, open(filtered_path, 'a') as filtered_f:
-                for line in process.stdout:
-                    raw_f.write(line)
-                    raw_f.flush()
-                    if "OnionPress-HealthCheck" not in line:
-                        filtered_f.write(line)
-                        filtered_f.flush()
+            for line in process.stdout:
+                self._wp_access_log.write(line)
+                if "OnionPress-HealthCheck" not in line:
+                    self._wp_visitors_log.write(line)
         except Exception:
             pass
 
     def start_web_log_capture(self):
-        """Start capturing WordPress logs to a file"""
+        """Start capturing WordPress logs to rotating log files"""
         if self.web_log_process is not None:
             return  # Already running
 
         try:
-            web_log_file = os.path.join(self.app_support, "wordpress-access.log")
-            visitors_log_file = os.path.join(self.app_support, "wordpress-visitors.log")
             docker_bin = os.path.join(self.bin_dir, "docker")
 
             # Start docker logs process in background, capture stdout as text
@@ -802,15 +798,15 @@ class OnionPressApp(rumps.App):
                 }
             )
 
-            # Start reader thread that splits logs into raw + filtered files
+            # Start reader thread that splits logs into raw + filtered rotating logs
             self.web_log_thread = threading.Thread(
                 target=self._web_log_reader_thread,
-                args=(self.web_log_process, web_log_file, visitors_log_file),
+                args=(self.web_log_process,),
                 daemon=True
             )
             self.web_log_thread.start()
 
-            print(f"Started web log capture to {web_log_file}")
+            print(f"Started web log capture to {self._wp_access_log.current_path()}")
         except Exception as e:
             print(f"Error starting web log capture: {e}")
             self.web_log_process = None
@@ -1396,6 +1392,11 @@ class OnionPressApp(rumps.App):
                         and not self._onionheaven_registration_in_flight):
                     self._onionheaven_registration_in_flight = True
                     onionheaven.start_registration_thread(self)
+
+                    # Start analytics sharing (opt-in, checks config each cycle)
+                    if not getattr(self, '_analytics_sharing_started', False):
+                        self._analytics_sharing_started = True
+                        analytics_sharing.start_analytics_sharing(self)
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
@@ -2457,7 +2458,7 @@ class OnionPressApp(rumps.App):
     @rumps.clicked("View Logs")
     def view_logs(self, _):
         """Open logs in built-in log viewer"""
-        log_file = os.path.join(self.app_support, "onionpress.log")
+        log_file = self._onionpress_log.current_path()
         if os.path.exists(log_file):
             _LogViewerWindow.show_for_file(log_file, "OnionPress Log")
         else:
@@ -2470,7 +2471,7 @@ class OnionPressApp(rumps.App):
             rumps.alert("Service not running. Please start the service first.")
             return
 
-        web_log_file = os.path.join(self.app_support, "wordpress-visitors.log")
+        web_log_file = self._wp_visitors_log.current_path()
 
         # Ensure the log file exists
         if not os.path.exists(web_log_file):
