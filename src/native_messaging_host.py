@@ -88,12 +88,27 @@ def write_extension_marker():
         pass
 
 
+def _find_app_bundle():
+    """Walk up from this file to find the enclosing .app bundle."""
+    current = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(10):
+        if current.endswith(".app") and os.path.isdir(os.path.join(current, "Contents", "MacOS")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
 def _find_docker():
     """Find the docker binary."""
-    # Prefer the bundled docker in OnionPress.app
-    app_docker = "/Applications/OnionPress.app/Contents/Resources/bin/docker"
-    if os.path.exists(app_docker):
-        return app_docker
+    # Prefer the bundled docker in the app bundle
+    bundle = _find_app_bundle()
+    if bundle:
+        app_docker = os.path.join(bundle, "Contents", "Resources", "bin", "docker")
+        if os.path.exists(app_docker):
+            return app_docker
     # Fall back to PATH
     return "docker"
 

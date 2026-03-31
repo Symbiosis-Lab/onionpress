@@ -980,7 +980,7 @@ class OnionPressApp(rumps.App):
         try:
             plist = {
                 "Label": self.LAUNCHAGENT_LABEL,
-                "ProgramArguments": ["open", "-a", "/Applications/OnionPress.app"],
+                "ProgramArguments": ["open", "-a", os.path.dirname(self.contents_dir)],
                 "RunAtLoad": True,
                 "LimitLoadToSessionType": "Aqua",
             }
@@ -2857,7 +2857,7 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=self._check_docker_updates_async, args=(app_update_available,), daemon=True).start()
 
     def _install_update(self, release_data, latest_version):
-        """Download DMG, extract app, replace /Applications/OnionPress.app, prompt restart"""
+        """Download DMG, extract app, replace currently running app bundle, prompt restart"""
         import tempfile
         import shutil
 
@@ -2936,12 +2936,7 @@ class OnionPressApp(rumps.App):
                     raise RuntimeError(f"OnionPress.app not found in DMG. Contents: {os.listdir(mount_point)}")
 
             # Determine install location — replace wherever we're currently running from
-            # Default to /Applications/OnionPress.app
-            current_app = os.path.realpath(os.path.join(self.resources_dir, "..", ".."))
-            if current_app.endswith(".app"):
-                install_path = current_app
-            else:
-                install_path = "/Applications/OnionPress.app"
+            install_path = os.path.dirname(self.contents_dir)
 
             self.log(f"Auto-update: replacing {install_path}")
 

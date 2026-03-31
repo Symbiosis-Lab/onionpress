@@ -34,12 +34,26 @@ BROWSER_DIRS = {
 }
 
 
+def _find_app_bundle():
+    """Walk up from this file to find the enclosing .app bundle."""
+    current = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(10):
+        if current.endswith(".app") and os.path.isdir(os.path.join(current, "Contents", "MacOS")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
 def _host_script_path():
-    """Return the path to the native messaging host script inside OnionPress.app."""
-    # When installed: OnionPress.app/Contents/Resources/native-messaging-host.py
-    app_path = "/Applications/OnionPress.app/Contents/Resources/native-messaging-host.py"
-    if os.path.exists(app_path):
-        return app_path
+    """Return the path to the native messaging host script inside the app bundle."""
+    bundle = _find_app_bundle()
+    if bundle:
+        app_path = os.path.join(bundle, "Contents", "Resources", "native-messaging-host.py")
+        if os.path.exists(app_path):
+            return app_path
     # Fallback for development: use src/ relative to this script
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "native_messaging_host.py")
 

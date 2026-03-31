@@ -153,16 +153,26 @@ def resolve_paths(data_dir: str = None, app_bundle: str = None) -> OnionPressPat
     )
 
 
-def find_app_bundle() -> str | None:
-    """Try to locate OnionPress.app.
+def _is_app_bundle(path: str) -> bool:
+    """Check if a directory looks like a macOS .app bundle."""
+    return (
+        path.endswith(".app")
+        and os.path.isdir(path)
+        and os.path.isdir(os.path.join(path, "Contents", "MacOS"))
+    )
 
-    Walks up from this file's location looking for an OnionPress.app directory,
-    then checks /Applications/OnionPress.app.
+
+def find_app_bundle() -> str | None:
+    """Try to locate the OnionPress app bundle.
+
+    Walks up from this file's location looking for a .app bundle directory
+    (by structure, not by name — the user may have renamed it in Finder).
+    Falls back to /Applications/OnionPress.app.
     """
     # Walk up from this module
     current = os.path.dirname(os.path.abspath(__file__))
     for _ in range(10):
-        if os.path.basename(current) == "OnionPress.app" and os.path.isdir(current):
+        if _is_app_bundle(current):
             return current
         parent = os.path.dirname(current)
         if parent == current:
