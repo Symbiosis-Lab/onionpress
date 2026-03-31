@@ -19,7 +19,7 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-SERVER_VERSION = "2.4.41"
+SERVER_VERSION = "2.4.42"
 
 MAX_REQUEST_BODY = 1_048_576  # 1 MB — reject larger POST bodies to prevent memory exhaustion
 
