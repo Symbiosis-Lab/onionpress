@@ -186,7 +186,7 @@ class HealthChecker:
             timeout=45,
         )
         if not result.ok:
-            return False, "000"
+            return False, f"000:rc={result.returncode}"
         http_code = result.output.strip()
         return http_code in ("200", "301"), http_code
 

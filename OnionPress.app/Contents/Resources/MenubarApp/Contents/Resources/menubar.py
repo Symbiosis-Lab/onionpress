@@ -1102,8 +1102,18 @@ class OnionPressApp(rumps.App):
                 if log_result:
                     if http_code == "302":
                         self.log("✗ Onion service returning 302 (OnionHeaven takeover active)")
-                    elif http_code in ("000", ""):
-                        self.log("✗ Our onion service not yet reachable through Tor network")
+                    elif http_code.startswith("000"):
+                        # Decode curl exit code for debugging
+                        _curl_reasons = {
+                            "7": "connection refused",
+                            "28": "timeout (30s)",
+                            "52": "empty reply",
+                            "56": "connection reset",
+                            "97": "SOCKS handshake failed (descriptor not yet available)",
+                        }
+                        rc = http_code.split("rc=")[1] if "rc=" in http_code else ""
+                        reason = _curl_reasons.get(rc, f"curl rc={rc}" if rc else "unknown")
+                        self.log(f"✗ Our onion service not yet reachable through Tor network ({reason})")
                     else:
                         self.log(f"✗ Onion service returned HTTP {http_code}")
                 return False
