@@ -1430,6 +1430,23 @@ start_containers() {
         fi
     fi
 
+    # Wait for Docker daemon to be ready (on first run, Colima VM may still be booting)
+    local docker_wait=0
+    while ! docker info >/dev/null 2>&1; do
+        if [ $docker_wait -eq 0 ]; then
+            log "Waiting for Docker daemon to be ready..."
+        fi
+        docker_wait=$((docker_wait + 2))
+        if [ $docker_wait -ge 60 ]; then
+            log "ERROR: Docker daemon not ready after 60s"
+            break
+        fi
+        sleep 2
+    done
+    if [ $docker_wait -gt 0 ] && docker info >/dev/null 2>&1; then
+        log "Docker daemon ready after ${docker_wait}s"
+    fi
+
     # Update images if enabled in config
     update_images
 
