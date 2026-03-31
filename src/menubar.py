@@ -427,8 +427,7 @@ class OnionPressApp(rumps.App):
 
             # Log splash creation
             try:
-                with open(self.log_file, 'a') as f:
-                    f.write(f"DEBUG: Launch splash created and shown\n")
+                self.log("DEBUG: Launch splash created and shown")
             except Exception:
                 pass
 
