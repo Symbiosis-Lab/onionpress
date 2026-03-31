@@ -416,21 +416,31 @@ echo "App bundle re-signed"
 echo "Creating Applications folder symlink..."
 ln -s /Applications "$TEMP_DIR/Applications"
 
-# Generate DMG background image using the py2app build venv (still alive)
-echo "Generating DMG background image..."
+# DMG background and styling — use pre-baked assets from build/dmg-assets/
+# These were captured from a correctly-styled DMG and avoid the need for
+# Finder AppleScript automation (which requires special macOS permissions).
+DMG_ASSETS_DIR="$BUILD_DIR/dmg-assets"
 DMG_BG_DIR="$TEMP_DIR/.background"
-mkdir -p "$DMG_BG_DIR"
-LOGO_PATH="$PROJECT_DIR/assets/branding/logo.png"
-STORY_PATH="$PROJECT_DIR/assets/branding/story.png"
-"$MENUBAR_BUILD_DIR/venv/bin/pip" install Pillow >/dev/null 2>&1
-"$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/create-dmg-background.py" \
-    "$DMG_BG_DIR/dmg-background.png" \
-    --logo "$LOGO_PATH" \
-    --story "$STORY_PATH" 2>&1 || {
-    echo "WARNING: Could not generate DMG background"
-    echo "         Building plain DMG instead"
-    rm -rf "$DMG_BG_DIR"
-}
+if [ -f "$DMG_ASSETS_DIR/dmg-background.png" ]; then
+    echo "Using pre-baked DMG background image..."
+    mkdir -p "$DMG_BG_DIR"
+    cp "$DMG_ASSETS_DIR/dmg-background.png" "$DMG_BG_DIR/dmg-background.png"
+else
+    # Fallback: generate background dynamically (requires Pillow)
+    echo "Generating DMG background image..."
+    mkdir -p "$DMG_BG_DIR"
+    LOGO_PATH="$PROJECT_DIR/assets/branding/logo.png"
+    STORY_PATH="$PROJECT_DIR/assets/branding/story.png"
+    "$MENUBAR_BUILD_DIR/venv/bin/pip" install Pillow >/dev/null 2>&1
+    "$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/create-dmg-background.py" \
+        "$DMG_BG_DIR/dmg-background.png" \
+        --logo "$LOGO_PATH" \
+        --story "$STORY_PATH" 2>&1 || {
+        echo "WARNING: Could not generate DMG background"
+        echo "         Building plain DMG instead"
+        rm -rf "$DMG_BG_DIR"
+    }
+fi
 
 # Now clean up the py2app build venv
 rm -rf "$MENUBAR_BUILD_DIR"
@@ -467,14 +477,16 @@ VOL_NAME=$(basename "$MOUNT_POINT")
 
 echo "  Mounted at: $MOUNT_POINT (volume: $VOL_NAME)"
 
-# Step 3: Apply Finder styling via AppleScript (if background exists)
-if [ -f "$MOUNT_POINT/.background/dmg-background.png" ]; then
-    echo "Applying Finder window styling..."
-
-    # Give Finder a moment to index the volume
+# Step 3: Apply DMG styling — use pre-baked .DS_Store if available,
+# fall back to AppleScript (requires Finder automation permission).
+if [ -f "$DMG_ASSETS_DIR/DS_Store" ]; then
+    echo "Applying pre-baked DMG styling..."
+    cp "$DMG_ASSETS_DIR/DS_Store" "$MOUNT_POINT/.DS_Store"
+    echo "  Styling applied from build/dmg-assets/DS_Store"
+elif [ -f "$MOUNT_POINT/.background/dmg-background.png" ]; then
+    echo "Applying Finder window styling via AppleScript..."
     sleep 2
-
-    osascript <<APPLESCRIPT
+    osascript <<APPLESCRIPT || echo "  WARNING: AppleScript failed — DMG will have no styling"
 tell application "Finder"
     tell disk "$VOL_NAME"
         open
