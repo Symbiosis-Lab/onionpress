@@ -191,6 +191,10 @@ def _do_upload_cycle(app):
             "signature": sig2,
         }
         resp = _post_json(app, f"{base_url}/logs/upload", upload_payload)
+        if not resp or not resp.get("stored"):
+            # Retry once after 10s
+            time.sleep(10)
+            resp = _post_json(app, f"{base_url}/logs/upload", upload_payload)
         if resp and resp.get("stored"):
             app.log(f"Analytics sharing: uploaded {name}")
 
@@ -210,9 +214,9 @@ def _post_json(app, url, payload_dict):
     payload_json = json.dumps(payload_dict)
 
     cmd = [
-        docker_bin, "exec", "-i", "onionpress-wordpress",
+        docker_bin, "exec", "-i", "onionpress-tor",
         "curl", "-s", "-X", "POST",
-        "--socks5-hostname", "onionpress-tor:9050",
+        "--socks5-hostname", "127.0.0.1:9050",
         "-H", "Content-Type: application/json",
         "-d", "@-",  # read payload from stdin
         "--max-time", "120",
