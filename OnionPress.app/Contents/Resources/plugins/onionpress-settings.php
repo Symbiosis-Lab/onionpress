@@ -740,6 +740,12 @@ function onionpress_settings_fields() {
             'type'        => 'select',
             'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
         ),
+        'SHARE_ANALYTICS_WITH_ONIONHOME' => array(
+            'label'       => 'Share diagnostic logs with OnionHome',
+            'description' => 'Periodically upload completed log files to the OnionHome hub for remote debugging. Logs are scrubbed of your home directory path before upload. Disabled by default.',
+            'type'        => 'select',
+            'options'     => array( 'no' => 'Disabled', 'yes' => 'Enabled' ),
+        ),
         'ONIONHEAVEN_ADDRESS' => array(
             'label'       => 'OnionHeaven Hub Address (advanced)',
             'description' => 'The .onion address of the OnionHeaven hub to register with for Wayback Machine fallback.',
