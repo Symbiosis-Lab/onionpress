@@ -46,11 +46,29 @@ from onionheaven_common import (
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 8083
 
-# OnionHome mode: only OnionHome instances accept /logs/* endpoints
-IS_ONIONHOME = os.environ.get("IS_ONIONHOME", "0") == "1"
+# OnionHome address — the /logs/* endpoints only accept requests when this
+# instance IS OnionHome (detected lazily by comparing onion_address file).
+_ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
+_is_onionhome_cache = None
+
+
+def _is_onionhome():
+    """Return True if this instance is OnionHome.  Cached after first check."""
+    global _is_onionhome_cache
+    if _is_onionhome_cache is not None:
+        return _is_onionhome_cache
+    try:
+        addr_path = "/var/lib/onionpress/onion_address"
+        if os.path.exists(addr_path):
+            with open(addr_path) as f:
+                _is_onionhome_cache = f.read().strip() == _ONIONHOME_ADDRESS
+                return _is_onionhome_cache
+    except OSError:
+        pass
+    return False
 
 # Analytics storage
-ANALYTICS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "analytics")
+ANALYTICS_DIR = "/var/lib/onionhome/analytics"
 ANALYTICS_DISK_THRESHOLD = 0.85  # 85% full → stop accepting / clean up
 ANALYTICS_LOG_NAME_RE = re.compile(
     r"^(onionpress|wordpress-access|wordpress-visitors)-\d{4}-\d{2}-\d{2}-\d{3}\.log$"
@@ -831,7 +849,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     # -- POST /logs/manifest (OnionHome only) ---------------------------------
 
     def _handle_logs_manifest(self):
-        if not IS_ONIONHOME:
+        if not _is_onionhome():
             self._send_json(403, {"error": "Not an OnionHome instance"})
             return
 
@@ -915,7 +933,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     # -- POST /logs/upload (OnionHome only) ------------------------------------
 
     def _handle_logs_upload(self):
-        if not IS_ONIONHOME:
+        if not _is_onionhome():
             self._send_json(403, {"error": "Not an OnionHome instance"})
             return
 
@@ -1015,7 +1033,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 def main():
     # Ensure data directories exist
     os.makedirs(KEYS_DIR, exist_ok=True)
-    if IS_ONIONHOME:
+    if _is_onionhome():
         os.makedirs(ANALYTICS_DIR, exist_ok=True)
 
     # Initialize DB schema

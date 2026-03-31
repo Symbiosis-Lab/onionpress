@@ -20,6 +20,7 @@ services:
       - arti-state:/var/lib/arti/
       - tor-state:/var/lib/tor/
       - onionpress-data:/var/lib/onionpress
+      - ${ONIONPRESS_SHARED_DIR:-/tmp/onionpress-no-shared}/analytics:/var/lib/onionhome/analytics
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - wordpress
