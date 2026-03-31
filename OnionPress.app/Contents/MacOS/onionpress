@@ -1548,11 +1548,13 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # Configure WP Statistics with privacy-friendly defaults
     configure_wp_statistics
 
-    # Install multisite domain mapping PHP files (sunrise.php + mu-plugin)
-    install_multisite_domain_map
-
-    # Ensure multisite is active (converts single-site installs if needed)
-    ensure_multisite
+    # Install multisite domain mapping PHP files and convert to multisite
+    # Only after WordPress is installed — sunrise.php queries wp_site table
+    # which doesn't exist until multisite-convert runs
+    if wp_is_installed; then
+        install_multisite_domain_map
+        ensure_multisite
+    fi
 
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
