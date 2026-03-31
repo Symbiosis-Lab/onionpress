@@ -40,6 +40,7 @@ OPTIONS = {
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
         'LSApplicationCategoryType': 'public.app-category.utilities',
+        'NSLocalNetworkUsageDescription': 'OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.',
     },
     'packages': ['rumps', 'objc', 'AppKit'],
     # CRITICAL: Local modules that menubar.py imports at runtime.
