@@ -167,6 +167,13 @@ SETTINGS_CONSEQUENCES = {
     },
 }
 
+# Settings that require a restart to take effect.
+# All others are applied immediately (read from config on next cycle).
+_NEEDS_RESTART = {
+    "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU", "TOR_IMPL",
+    "CLOUDFLARE_TUNNEL_TOKEN",
+}
+
 # Human-readable labels for each setting key
 _LABELS = {
     "ADDRESS_PREFIX": "Address Prefix",
@@ -588,9 +595,12 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
     log_func(f"Settings updated: {', '.join(changes)}")
     saved = AppKit.NSAlert.alloc().init()
     saved.setMessageText_("Settings Saved")
-    saved.setInformativeText_(
-        "Settings saved. Restart OnionPress from the menu bar "
-        "for changes to take effect.")
+    if set(changes) & _NEEDS_RESTART:
+        saved.setInformativeText_(
+            "Settings saved. Restart OnionPress from the menu bar "
+            "for changes to take effect.")
+    else:
+        saved.setInformativeText_("Settings saved.")
     if icon_path and os.path.exists(icon_path):
         icon3 = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
         if icon3:
