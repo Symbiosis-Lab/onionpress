@@ -1437,8 +1437,8 @@ start_containers() {
             log "Waiting for Docker daemon to be ready..."
         fi
         docker_wait=$((docker_wait + 2))
-        if [ $docker_wait -ge 60 ]; then
-            log "ERROR: Docker daemon not ready after 60s"
+        if [ $docker_wait -ge 180 ]; then
+            log "ERROR: Docker daemon not ready after 180s"
             break
         fi
         sleep 2
