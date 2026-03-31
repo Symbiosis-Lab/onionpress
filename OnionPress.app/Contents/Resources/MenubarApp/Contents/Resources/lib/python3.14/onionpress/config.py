@@ -30,6 +30,8 @@ DEFAULTS = {
     "TOR_IMPL": "arti",
     "ONIONHEAVEN_ADDRESS": "",
     "ONIONHEAVEN_MAX_SERVICES": "10",
+    "SHARE_ANALYTICS_WITH_ONIONHOME": "no",
+    "ONIONHOME_ADDRESS": "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
 }
 
 

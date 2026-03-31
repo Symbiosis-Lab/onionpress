@@ -1,7 +1,7 @@
 """Container lifecycle management for OnionPress.
 
-Handles starting/stopping the core service stack (Tor, WordPress, MariaDB,
-tor-client) and OnionHeaven farm workers.
+Handles starting/stopping the core service stack (Tor, WordPress, MariaDB)
+and OnionHeaven farm workers.
 """
 
 import os
@@ -18,8 +18,8 @@ from .config import (
 from .platform import OnionPressPaths
 
 
-CORE_SERVICES = ["wordpress", "db", "tor-client", "onionheaven"]
-ALL_SERVICES = ["wordpress", "db", "tor", "tor-client", "onionheaven"]
+CORE_SERVICES = ["wordpress", "db", "onionheaven"]
+ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven"]
 ONIONHEAVEN_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 
 
@@ -102,7 +102,7 @@ class ContainerManager:
         return result.ok
 
     def start_core(self, retries: int = 3) -> bool:
-        """Start core services (WordPress, DB, tor-client). Not Tor yet.
+        """Start core services (WordPress, DB, OnionHeaven). Not Tor yet.
 
         Returns True on success. Retries on failure.
         """

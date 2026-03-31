@@ -28,7 +28,7 @@ class HealthResult:
     wp_healthy: bool = False
     tor_bootstrapped: bool = False
     tor_internally_ready: bool = False  # Checks 1-4 passed
-    tor_externally_reachable: bool = False  # Check 5 passed (via tor-client)
+    tor_externally_reachable: bool = False  # Check 5 passed (via onionheaven)
     onion_address: str = ""
     bootstrap_pct: int = 0
     external_http_code: str = ""  # HTTP status from external reachability check
@@ -88,34 +88,56 @@ class HealthChecker:
         return False
 
     def check_tor_bootstrap(self) -> tuple[bool, int]:
-        """Check Tor bootstrap status from container logs.
+        """Check Tor bootstrap status via control port (with log fallback).
 
         Returns:
             (bootstrapped, percentage) — bootstrapped is True if 100%.
         """
-        self._log("Checking Tor bootstrap status...")
+        # Primary: query control port directly (reliable, not affected by log rotation)
+        result = self.docker.exec(
+            "onionpress-tor",
+            ["sh", "-c",
+             'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
+             '| od -A n -t x1 | tr -d \' \\n\')\\r\\n'
+             'GETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n"'
+             ' | nc -w 5 127.0.0.1 9051'],
+            timeout=15,
+        )
+        if result.ok and "PROGRESS=" in result.output:
+            for part in result.output.split():
+                if part.startswith("PROGRESS="):
+                    try:
+                        pct = int(part.split("=")[1])
+                        if pct < 100:
+                            self._log(f"Checking Tor bootstrap status... {pct}%")
+                        return pct >= 100, pct
+                    except ValueError:
+                        pass
+
+        # Fallback: parse container logs (for Arti or if control port unavailable)
         result = self.docker.run(
             ["logs", "--tail", "100", "onionpress-tor"],
             timeout=15,
         )
         if not result.ok:
+            self._log("Checking Tor bootstrap status... failed")
             return False, 0
 
         output = result.stdout
         pct = 0
 
-        # Find highest bootstrap percentage
         for m in re.finditer(r"PROGRESS=(\d+)", output):
             p = int(m.group(1))
             if p > pct:
                 pct = p
 
-        # Also check for Arti's message
         if "Sufficiently bootstrapped" in output:
             pct = max(pct, 100)
         if "Bootstrapped 100%" in output:
             pct = 100
 
+        if pct < 100:
+            self._log(f"Checking Tor bootstrap status... {pct}%")
         return pct >= 100, pct
 
     def check_tor_hostname(self, expected_address: str = "") -> str:
@@ -145,14 +167,15 @@ class HealthChecker:
     def check_external_reachability(self, onion_address: str) -> tuple[bool, str]:
         """Check if the onion service is reachable through the Tor network.
 
-        Uses the independent tor-client container (not self-connection).
+        Uses the onionheaven container which has an independent Tor instance
+        with its own circuits and descriptor cache — a true external test.
         Returns (reachable, http_code). Only HTTP 200 or 301 counts as
         reachable — 302 indicates OnionHeaven takeover.
         """
         if not onion_address:
             return False, ""
         result = self.docker.exec(
-            "onionpress-tor-client",
+            "onionheaven",
             [
                 "curl", "-s", "--max-time", "30",
                 "--socks5-hostname", "127.0.0.1:9050",
@@ -167,14 +190,34 @@ class HealthChecker:
         http_code = result.output.strip()
         return http_code in ("200", "301"), http_code
 
-    def check_internet_connectivity(self) -> bool:
-        """Check if the host has internet access."""
-        result = self.docker.exec(
-            "onionpress-wordpress",
-            ["curl", "-sf", "--max-time", "5", "http://1.1.1.1/"],
-            timeout=10,
-        )
-        return result.ok
+    @staticmethod
+    def check_internet_connectivity() -> bool:
+        """Check if the host has network access via macOS SCNetworkReachability.
+
+        Queries the OS network stack directly — no HTTP requests, no traffic,
+        no DNS lookups. Returns True if a default route exists (WiFi/ethernet
+        connected).
+        """
+        try:
+            import ctypes
+            import ctypes.util
+
+            lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("SystemConfiguration"))
+            lib.SCNetworkReachabilityCreateWithName.restype = ctypes.c_void_p
+            lib.SCNetworkReachabilityCreateWithName.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+            lib.SCNetworkReachabilityGetFlags.restype = ctypes.c_bool
+            lib.SCNetworkReachabilityGetFlags.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+
+            target = lib.SCNetworkReachabilityCreateWithName(None, b"0.0.0.0")
+            flags = ctypes.c_uint32(0)
+            ok = lib.SCNetworkReachabilityGetFlags(target, ctypes.byref(flags))
+            if not ok:
+                return False
+            kSCNetworkReachabilityFlagsReachable = 1 << 1
+            return bool(flags.value & kSCNetworkReachabilityFlagsReachable)
+        except Exception:
+            # Not on macOS or framework unavailable — assume connected
+            return True
 
     def tor_container_unhealthy(self) -> bool:
         """Check Tor container logs for signs of sickness.
@@ -190,6 +233,13 @@ class HealthChecker:
             return True  # Can't read logs — assume unhealthy
 
         output = result.stdout
+
+        # Never restart a tor that recently bootstrapped — it just needs
+        # time for descriptor propagation (10-60s).  Restarting resets the
+        # descriptor upload and creates a self-defeating restart loop.
+        if "Bootstrapped 100%" in output or "Sufficiently bootstrapped" in output:
+            self._log("Tor bootstrapped — waiting for descriptor propagation")
+            return False
 
         for pattern in SICK_PATTERNS:
             if pattern in output:
@@ -228,7 +278,7 @@ class HealthChecker:
             if not internal:
                 hr.errors.append("WordPress not reachable from Tor container")
 
-        # Check 5: External reachability (via tor-client)
+        # Check 5: External reachability (via onionheaven's independent Tor)
         if hr.tor_internally_ready and hr.onion_address:
             reachable, http_code = self.check_external_reachability(hr.onion_address)
             hr.tor_externally_reachable = reachable
