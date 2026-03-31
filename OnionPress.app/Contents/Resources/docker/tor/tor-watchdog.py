@@ -218,8 +218,9 @@ def discover_services():
 
 
 def add_all_services(cmd_sock, services):
-    """ADD_ONION for all services. Returns number of successes."""
+    """ADD_ONION for all services. Returns (successes, collisions)."""
     count = 0
+    collisions = 0
     for svc in services:
         port_args = " ".join(f"Port={p}" for p in svc["ports"])
         cmd = f"ADD_ONION ED25519-V3:{svc['key_b64']} Flags=Detach {port_args}"
@@ -229,10 +230,10 @@ def add_all_services(cmd_sock, services):
             count += 1
         elif "Onion address collision" in resp:
             log(f"ADD_ONION {svc['service_name']} — already active (collision)")
-            count += 1
+            collisions += 1
         else:
             log(f"ADD_ONION {svc['service_name']} — FAILED: {resp.strip()[:100]}")
-    return count
+    return count, collisions
 
 
 def del_all_services(cmd_sock, services):
@@ -284,6 +285,7 @@ class WatchdogState:
         self.onion_addresses = []  # for HSFETCH
         self.services = []  # discovered onion services
         self.services_active = False  # True when ADD_ONION has been done
+        self.sleeping = False  # True between USR1 (sleep) and USR2 (wake)
 
 
 # ---------------------------------------------------------------------------
@@ -593,9 +595,9 @@ def run():
 
         # ADD_ONION for all services — do it before bootstrap so Tor publishes
         # descriptors as soon as it has circuits (no delay after bootstrap).
-        if state.services and not state.services_active:
-            n = add_all_services(cmd_sock, state.services)
-            state.services_active = n > 0
+        if state.services and not state.services_active and not state.sleeping:
+            n, _c = add_all_services(cmd_sock, state.services)
+            state.services_active = (n + _c) > 0
 
         log("Connected — monitoring Tor health")
         event_sock.settimeout(5)  # wake up frequently to check signals + stalls
@@ -606,6 +608,7 @@ def run():
             if _signal_sleep:
                 _signal_sleep = False
                 log("Received USR1 (sleep) — removing onion services")
+                state.sleeping = True
                 if state.services and state.services_active:
                     del_all_services(cmd_sock, state.services)
                     state.services_active = False
@@ -614,11 +617,18 @@ def run():
             if _signal_wake:
                 _signal_wake = False
                 log("Received USR2 (wake) — re-adding onion services")
+                state.sleeping = False
                 state.last_recovery_time = time.time()
                 state.hs_desc_uploaded_since_recovery = False
                 if state.services:
-                    n = add_all_services(cmd_sock, state.services)
-                    state.services_active = n > 0
+                    n, collisions = add_all_services(cmd_sock, state.services)
+                    if collisions > 0:
+                        # Services were re-added during sleep (race condition).
+                        # DEL then ADD to force fresh descriptor publication.
+                        log(f"Collision on wake — DEL+ADD to force fresh descriptors")
+                        del_all_services(cmd_sock, state.services)
+                        n, collisions = add_all_services(cmd_sock, state.services)
+                    state.services_active = (n + collisions) > 0
 
             # Read events
             try:
@@ -633,9 +643,10 @@ def run():
                 check_stalls(cmd_sock, state)
 
                 # If services not yet added (e.g. after reconnect), add them now
-                if state.services and not state.services_active:
-                    n = add_all_services(cmd_sock, state.services)
-                    state.services_active = n > 0
+                # But NOT while sleeping — DEL_ONION was intentional
+                if state.services and not state.services_active and not state.sleeping:
+                    n, _c = add_all_services(cmd_sock, state.services)
+                    state.services_active = (n + _c) > 0
 
                 continue
             except (ConnectionResetError, BrokenPipeError, OSError):
