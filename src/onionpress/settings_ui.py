@@ -394,7 +394,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         # -- Collect new values from form --
         new_values = {}
         sleep_options_map = ["normal", "on-battery", "never"]
-        tor_impl_options_map = ["arti", "tor"]
+        tor_impl_options_map = ["tor", "arti"]
         for key in [k for k, _ in SETTINGS_KEYS]:
             widget = fields[key]
             if key == "PREVENT_SLEEP":
