@@ -312,9 +312,9 @@ def _send_heartbeat(app, wordpress_healthy=True):
     payload = json.dumps(payload_dict)
 
     curl_args = [
-        "exec", "onionpress-wordpress",
+        "exec", "onionpress-tor",
         "curl", "-s", "-S", "-X", "POST",
-        "--socks5-hostname", "onionpress-tor:9050",
+        "--socks5-hostname", "127.0.0.1:9050",
         "-H", "Content-Type: application/json",
         "-d", payload,
         "--max-time", "30",
@@ -433,9 +433,9 @@ def unregister_from_onionheaven(app, content_address=None):
 
     for attempt in range(max_attempts):
         ok, output = _run_docker(app, [
-            "exec", "onionpress-wordpress",
+            "exec", "onionpress-tor",
             "curl", "-s", "-X", "POST",
-            "--socks5-hostname", "onionpress-tor:9050",
+            "--socks5-hostname", "127.0.0.1:9050",
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", "60",
@@ -537,9 +537,9 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
 
     for attempt in range(max_attempts):
         ok, output = _run_docker(app, [
-            "exec", "onionpress-wordpress",
+            "exec", "onionpress-tor",
             "curl", "-s", "-X", "POST",
-            "--socks5-hostname", "onionpress-tor:9050",
+            "--socks5-hostname", "127.0.0.1:9050",
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", str(max_time),
