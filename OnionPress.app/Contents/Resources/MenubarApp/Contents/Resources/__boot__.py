@@ -3,6 +3,9 @@ def _reset_sys_path():
     import os
     import sys
 
+    # Never write .pyc files — prevents stale bytecode issues
+    sys.dont_write_bytecode = True
+
     resources = os.environ["RESOURCEPATH"]
     while sys.path[0] == resources:
         del sys.path[0]
