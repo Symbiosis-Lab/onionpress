@@ -937,7 +937,7 @@ fix_onionpress_permissions() {
 
     # Ensure the directory exists and is owned by www-data
     # Use 750 (rwxr-x---) to prevent other users from reading the directory
-    # Skip OnionHeaven/ subdirectory — onionheaven-server.py runs as root and manages its own permissions
+    # Skip OnionHeaven/ subdirectory — web-server.py runs as root and manages its own permissions
     if docker compose exec -T wordpress sh -c '
         chmod 750 /var/lib/onionpress
         find /var/lib/onionpress -maxdepth 0 -exec chown www-data:www-data {} +
@@ -1263,7 +1263,7 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 }
 
 # Function to set up OnionHeaven (onionheaven mode only)
-# Registration API now runs in the onionheaven container (onionheaven-server.py),
+# Registration API now runs in the onionheaven container (web-server.py),
 # which creates its own data directories on the shared volume at startup.
 # Function to start containers
 start_containers() {

@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 # OnionHeaven hub address — updated from config at startup
 ONIONHEAVEN_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 
-# Registration API port (served by onionheaven-server.py in the onionheaven container)
+# Registration API port (served by web-server.py in the onionheaven container)
 ONIONHEAVEN_API_PORT = 8083
 
 # Wayback Machine .onion address

@@ -252,11 +252,11 @@ fi
 # can accept registrations. The onionheaven container (heartbeat monitor +
 # takeover Arti) starts lazily when the first registration arrives.
 mkdir -p /var/lib/onionpress/onionheaven/keys
-python3 /onionheaven-server.py &
+python3 /web-server.py &
 ONIONHEAVEN_SERVER_PID=$!
 sleep 1
 if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
-    echo "ERROR: onionheaven-server.py failed to start"
+    echo "ERROR: web-server.py failed to start"
 fi
 
 # Start healthcheck HTTP server in background (port 8081)

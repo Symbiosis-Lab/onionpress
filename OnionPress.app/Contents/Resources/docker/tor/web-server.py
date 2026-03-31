@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-OnionHeaven Registration API Server
+OnionPress Web Server
 
-Lightweight HTTP server (Python stdlib only) that handles onionheaven registration,
-unregistration, and lifecycle notifications. Runs inside the onionheaven
-container on port 8083, exposed through the main tor container's onion service.
+Lightweight HTTP server (Python stdlib only) that handles:
+- OnionHeaven registration, unregistration, and lifecycle notifications
+- OnionHome analytics log collection (auto-detected, no config needed)
+
+Runs inside the tor container on port 8083, exposed through the onion service.
 
 Endpoints:
   POST /online       — Heartbeat / register (upserts registry entry, optionally stores arti key)
@@ -17,7 +19,7 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-ONIONHEAVEN_SERVER_VERSION = "2.4.41"
+SERVER_VERSION = "2.4.41"
 
 MAX_REQUEST_BODY = 1_048_576  # 1 MB — reject larger POST bodies to prevent memory exhaustion
 
@@ -270,7 +272,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         """Override to add timestamp prefix (local time to match host logs)."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sys.stderr.write(f"[{ts}] onionheaven-server: {format % args}\n")
+        sys.stderr.write(f"[{ts}] web-server: {format % args}\n")
         sys.stderr.flush()
 
     def _send_json(self, status_code, data):
@@ -377,7 +379,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 workers.append(worker_info)
 
             self._send_json(200, {
-                "version": ONIONHEAVEN_SERVER_VERSION,
+                "version": SERVER_VERSION,
                 "total": total,
                 "online": online,
                 "taken_over": taken_over,
@@ -1043,7 +1045,7 @@ def main():
 
     server = HTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] onionheaven-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
+    print(f"[{ts}] web-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -2,7 +2,7 @@
 """
 Local integration test for OnionHeaven ed25519 signature auth.
 
-Starts onionheaven-server.py on localhost and exercises register/unregister/
+Starts web-server.py on localhost and exercises register/unregister/
 online/offline with real ed25519 signatures. No Tor, no Docker required.
 
 Usage:
@@ -86,7 +86,7 @@ def _make_arti_pem(expanded_key, public_key):
 
 SERVER_DIR = os.path.join(PROJECT_DIR, "OnionPress.app", "Contents",
                           "Resources", "docker", "tor")
-SERVER_SCRIPT = os.path.join(SERVER_DIR, "onionheaven-server.py")
+SERVER_SCRIPT = os.path.join(SERVER_DIR, "web-server.py")
 
 
 def _find_free_port():
@@ -96,7 +96,7 @@ def _find_free_port():
 
 
 class ServerProcess:
-    """Manages a local onionheaven-server.py process for testing."""
+    """Manages a local web-server.py process for testing."""
 
     def __init__(self, port=None):
         self.port = port or _find_free_port()
@@ -148,10 +148,10 @@ def _stub_release(conn, ca, ha, force=False):
 onionheaven_common.takeover_function = _stub_takeover
 onionheaven_common.release_function = _stub_release
 
-# Import onionheaven-server.py (dash in filename, can't use normal import)
+# Import web-server.py (dash in filename, can't use normal import)
 spec = importlib.util.spec_from_file_location(
     "onionheaven_server",
-    os.path.join({SERVER_DIR!r}, "onionheaven-server.py"))
+    os.path.join({SERVER_DIR!r}, "web-server.py"))
 srv = importlib.util.module_from_spec(spec)
 sys.modules["onionheaven_server"] = srv
 spec.loader.exec_module(srv)

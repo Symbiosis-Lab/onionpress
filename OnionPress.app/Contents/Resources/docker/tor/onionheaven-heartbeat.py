@@ -3,7 +3,7 @@
 OnionHeaven Heartbeat Monitor — passive takeover orchestrator
 
 Runs inside the onionheaven container alongside Arti (SOCKS + keystore),
-onionheaven-server.py (registration API), and onionheaven-redirect.sh (302 redirects).
+web-server.py (registration API), and onionheaven-redirect.sh (302 redirects).
 
 Unlike the old poller, this does NOT actively ping OnionPress instances.
 Instead, OnionPress instances send periodic /online heartbeats to the server,
