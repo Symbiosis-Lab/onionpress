@@ -32,18 +32,33 @@ def start_analytics_sharing(app):
 
 
 def _sharing_loop(app):
-    """Sleep until this instance's designated hour, upload, repeat daily."""
+    """Sleep until this instance's designated hour, upload, repeat daily.
+
+    If the instance was offline and missed its window, uploads on the
+    next wake-up after a short delay (so Tor has time to reconnect).
+    """
     from datetime import datetime, timezone, timedelta
 
     upload_hour = _pick_upload_hour(app)
+    last_upload_date = None
 
     while True:
-        # Sleep until the next occurrence of our upload hour (UTC)
         now = datetime.now(timezone.utc)
-        target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
-        if target <= now:
+        today = now.strftime("%Y-%m-%d")
+
+        if last_upload_date == today:
+            # Already uploaded today — sleep until tomorrow's window
+            target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
             target += timedelta(days=1)
-        time.sleep((target - now).total_seconds())
+            time.sleep((target - now).total_seconds())
+        elif now.hour >= upload_hour:
+            # Missed or hit our window today — upload after a short delay
+            # (gives Tor time to reconnect after wake)
+            time.sleep(300)
+        else:
+            # Haven't hit our window yet today — sleep until it
+            target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
+            time.sleep((target - now).total_seconds())
 
         if getattr(app, "_sleeping", False):
             continue
@@ -59,6 +74,7 @@ def _sharing_loop(app):
 
         try:
             _do_upload_cycle(app)
+            last_upload_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         except Exception as e:
             app.log(f"Analytics sharing error: {e}")
 
