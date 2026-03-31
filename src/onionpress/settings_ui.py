@@ -94,10 +94,10 @@ SETTINGS_HELP = {
     "TOR_IMPL": (
         "Tor Implementation\n\n"
         "Choose which Tor implementation runs your onion services.\n\n"
-        "Arti: Tor Project's modern Rust implementation (default). "
-        "Native arm64 on Apple Silicon.\n\n"
-        "C Tor: The classic C implementation. Faster onion service releases "
+        "C Tor: The classic C implementation (default). Faster onion service releases "
         "(sends DESTROY cells to intro relays). Available via apt-get.\n\n"
+        "Arti: Tor Project's modern Rust implementation. "
+        "Native arm64 on Apple Silicon.\n\n"
         "Keys are automatically converted between formats when switching.\n"
         "Requires restart to take effect."
     ),
@@ -409,7 +409,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
                 new_values[key] = sleep_options_map[idx] if 0 <= idx < len(sleep_options_map) else "normal"
             elif key == "TOR_IMPL":
                 idx = widget.indexOfSelectedItem()
-                new_values[key] = tor_impl_options_map[idx] if 0 <= idx < len(tor_impl_options_map) else "arti"
+                new_values[key] = tor_impl_options_map[idx] if 0 <= idx < len(tor_impl_options_map) else "tor"
             elif key in ("LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
                          "INSTALL_IA_PLUGIN", "REGISTER_WITH_ONIONHEAVEN",
                          "SHARE_ANALYTICS_WITH_ONIONHOME"):
