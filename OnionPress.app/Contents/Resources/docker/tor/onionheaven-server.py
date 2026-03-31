@@ -876,7 +876,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-        # Persist instance metadata
+        # Persist instance metadata with dated filename
         site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
         os.makedirs(site_dir, exist_ok=True)
         meta = {
@@ -885,10 +885,18 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "version": data.get("version", ""),
             "tor_impl": data.get("tor_impl", ""),
             "os_version": data.get("os_version", ""),
-            "last_seen": data.get("timestamp", ""),
+            "timestamp": data.get("timestamp", ""),
         }
         try:
-            with open(os.path.join(site_dir, "meta.json"), "w") as f:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            seq = 1
+            while True:
+                meta_name = f"meta-{today}-{seq:04d}.json"
+                meta_path = os.path.join(site_dir, meta_name)
+                if not os.path.exists(meta_path):
+                    break
+                seq += 1
+            with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=2)
         except OSError:
             pass
