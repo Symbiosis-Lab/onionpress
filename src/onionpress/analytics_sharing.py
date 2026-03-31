@@ -52,9 +52,10 @@ def _sharing_loop(app):
             target += timedelta(days=1)
             time.sleep((target - now).total_seconds())
         elif now.hour >= upload_hour:
-            # Missed or hit our window today — upload after a short delay
-            # (gives Tor time to reconnect after wake)
-            time.sleep(300)
+            # Missed or hit our window today — wait 30 minutes so the
+            # instance isn't busy right after startup, and flaky
+            # wake/sleep cycles don't spam OnionHome
+            time.sleep(1800)
         else:
             # Haven't hit our window yet today — sleep until it
             target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
