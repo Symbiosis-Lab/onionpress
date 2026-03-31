@@ -1,7 +1,7 @@
 """
 OnionHeaven shared module — constants, DB schema, takeover/release functions.
 
-Imported by both onionheaven-server.py and onionheaven-heartbeat.py to ensure
+Imported by both web-server.py and onionheaven-heartbeat.py to ensure
 consistent schema and decision logic.
 
 Takeover/release engine: the heartbeat is the single orchestrator. It picks a
