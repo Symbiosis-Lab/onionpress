@@ -37,5 +37,7 @@
     </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.</string>
 </dict>
 </plist>
