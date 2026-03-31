@@ -142,16 +142,16 @@ SHARE_ANALYTICS_WITH_ONIONHOME=no
 # ONIONHOME_ADDRESS=op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion
 
 # Tor Implementation
-# Default: "arti" (Tor Project's Rust implementation)
+# Default: "tor" (Classic C Tor)
 #
 # Choose which Tor implementation to use for onion services:
 #
-#   arti  - Tor Project's modern Rust implementation (default). Native arm64
+#   tor   - Classic C Tor (default). Faster onion service releases (sends
+#           DESTROY cells to intro relays), available via apt-get.
+#   arti  - Tor Project's modern Rust implementation. Native arm64
 #           on Apple Silicon, but lacks intro circuit teardown on release.
-#   tor   - Classic C Tor. Faster onion service releases (sends DESTROY cells
-#           to intro relays), available via apt-get (no compilation needed).
 #
 # Keys are automatically converted between formats when switching.
 # Requires restart to take effect.
 #
-TOR_IMPL=arti
+TOR_IMPL=tor
