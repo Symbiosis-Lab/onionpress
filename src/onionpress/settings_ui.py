@@ -76,6 +76,14 @@ SETTINGS_HELP = {
         "Registers your site with OnionHeaven so it can redirect page "
         "requests to the Wayback Machine as a fallback when your Mac is offline."
     ),
+    "SHARE_ANALYTICS_WITH_ONIONHOME": (
+        "Share Analytics with OnionHome\n\n"
+        "When enabled, OnionPress will periodically upload completed log files "
+        "to the OnionHome hub for remote debugging. Logs are scrubbed of your "
+        "home directory path before upload.\n\n"
+        "Disabled by default. Only enable if you want to help the OnionPress "
+        "project diagnose issues."
+    ),
     "ONIONHEAVEN_ADDRESS": (
         "OnionHeaven Hub Address\n\n"
         "The .onion address of the OnionHeaven hub your site registers with. "
@@ -142,6 +150,10 @@ SETTINGS_CONSEQUENCES = {
         "yes": "Site will register with OnionHeaven.",
         "no": "OnionHeaven registration disabled. Wayback fallback won't work.",
     },
+    "SHARE_ANALYTICS_WITH_ONIONHOME": {
+        "yes": "Diagnostic logs will be shared with OnionHome.",
+        "no": "Log sharing disabled.",
+    },
     "TOR_IMPL": {
         "arti": "Tor will run using Arti (Rust). Requires restart.",
         "tor": "Tor will run using C Tor. Faster releases. Requires restart.",
@@ -168,6 +180,7 @@ _LABELS = {
     "ONIONHEAVEN_ADDRESS": "OnionHeaven Hub",
     "TOR_IMPL": "Tor Implementation",
     "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Token",
+    "SHARE_ANALYTICS_WITH_ONIONHOME": "Share Analytics with OnionHome",
 }
 
 # Settings form definition: (key, default)
@@ -180,6 +193,7 @@ SETTINGS_KEYS = [
     ("UPDATE_ON_LAUNCH", "yes"),
     ("INSTALL_IA_PLUGIN", "yes"),
     ("REGISTER_WITH_ONIONHEAVEN", "yes"),
+    ("SHARE_ANALYTICS_WITH_ONIONHOME", "no"),
     ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
     ("TOR_IMPL", "tor"),
     ("CLOUDFLARE_TUNNEL_TOKEN", ""),
@@ -242,7 +256,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
     input_w = 100
     help_x = 280
     help_w = 25
-    container_h = 12 * row_h + 10
+    container_h = 13 * row_h + 10
 
     # Create help button target (shared across dialog rebuilds)
     help_target = HelpButtonTarget.alloc().init()
@@ -346,6 +360,8 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         y -= row_h
         add_check_row(y, "Register with OnionHeaven (advanced)", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
         y -= row_h
+        add_check_row(y, "Share diagnostic logs with OnionHome", "SHARE_ANALYTICS_WITH_ONIONHOME", form_values["SHARE_ANALYTICS_WITH_ONIONHOME"])
+        y -= row_h
         oh_addr_field = add_text_row(y, "OnionHeaven Hub (advanced):", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"])
         oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
         oh_addr_field.setFrame_(AppKit.NSMakeRect(input_x, oh_addr_field.frame().origin.y, input_w, 24))
@@ -388,7 +404,8 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
                 idx = widget.indexOfSelectedItem()
                 new_values[key] = tor_impl_options_map[idx] if 0 <= idx < len(tor_impl_options_map) else "arti"
             elif key in ("LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
-                         "INSTALL_IA_PLUGIN", "REGISTER_WITH_ONIONHEAVEN"):
+                         "INSTALL_IA_PLUGIN", "REGISTER_WITH_ONIONHEAVEN",
+                         "SHARE_ANALYTICS_WITH_ONIONHOME"):
                 new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
             else:
                 new_values[key] = widget.stringValue().strip()

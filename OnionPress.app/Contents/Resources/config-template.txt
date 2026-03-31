@@ -125,6 +125,22 @@ CLOUDFLARE_TUNNEL_TOKEN=
 #
 REGISTER_WITH_ONIONHEAVEN=yes
 
+# Share Analytics with OnionHome
+# Default: "no" (opt-in only)
+#
+# When enabled, OnionPress periodically uploads completed log files to the
+# OnionHome hub for remote debugging. Logs are scrubbed of your home
+# directory path before upload. Only enable if you want to help the
+# OnionPress project diagnose issues.
+#
+SHARE_ANALYTICS_WITH_ONIONHOME=no
+
+# OnionHome Address (advanced, config-file-only)
+# The .onion address of the OnionHome hub that receives diagnostic logs.
+# You should not need to change this unless directed by an OnionPress developer.
+#
+# ONIONHOME_ADDRESS=op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion
+
 # Tor Implementation
 # Default: "arti" (Tor Project's Rust implementation)
 #
