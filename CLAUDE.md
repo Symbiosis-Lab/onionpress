@@ -26,7 +26,8 @@
 ## Build & Release Process
 - MenubarApp built with py2app via `setup.py` (extracted from `build/build-dmg-simple.sh` lines 228-276)
 - Must copy `key_manager.py`, `backup_manager.py`, and `setup_window.py` to venv site-packages before build
-- **After editing ANY of these `src/` files, you MUST rebuild the MenubarApp** and replace `OnionPress.app/Contents/Resources/MenubarApp/`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app:
+- **After editing ANY of these `src/` files, you MUST rebuild the MenubarApp** and replace `OnionPress.app/Contents/Resources/MenubarApp/`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app.
+- **py2app entry point**: `MenubarApp/Contents/Resources/menubar.py` is the ONLY copy that matters at runtime — py2app `exec()`s it from `__boot__.py`. The copies in `lib/python3.14/` and `scripts/` are unused build artifacts. When hot-patching the installed app without a full rebuild, only update `Contents/Resources/menubar.py` (and its `__pycache__/` pyc).
   - `src/menubar.py` — main app (entry point)
   - `src/onion_proxy.py` — HTTP proxy, setup form, Wayback Machine login
   - `src/key_manager.py` — vanity key management
