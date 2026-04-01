@@ -76,6 +76,8 @@ class OnionPressApp(rumps.App):
         # Register signal handlers for clean removal on SIGTERM/SIGINT
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+        # SIGUSR1 not used — py2app/NSApplication overrides signal handlers.
+        # Instead, upload-analytics uses a file-based trigger (see .upload-analytics).
 
         # When running as py2app bundle, __file__ is in Contents/Resources/
         # so we need to use that as resources_dir, not the parent
@@ -1217,6 +1219,20 @@ class OnionPressApp(rumps.App):
         self.log(f"Received signal {signum}, initiating graceful shutdown...")
         _main_thread(lambda: self.quit_app(None))
 
+    def _manual_analytics_upload(self):
+        """Run analytics upload immediately (called from SIGUSR1 handler)."""
+        try:
+            enabled = self.read_config_value(
+                "SHARE_ANALYTICS_WITH_ONIONHOME", "no"
+            ).lower()
+            if enabled != "yes":
+                self.log("Analytics upload skipped: SHARE_ANALYTICS_WITH_ONIONHOME is not 'yes'")
+                return
+            analytics_sharing._do_upload_cycle(self)
+            self.log("Analytics upload complete")
+        except Exception as e:
+            self.log(f"Analytics upload error: {e}")
+
     def handle_reopen(self):
         """Handle reopen signal from launcher (user double-clicked app while running)"""
         self.log("Reopen signal received")
@@ -1276,6 +1292,16 @@ class OnionPressApp(rumps.App):
                 except OSError:
                     pass
                 self.handle_reopen()
+
+            # Check for upload-analytics trigger
+            upload_trigger = os.path.join(self.app_support, ".upload-analytics")
+            if os.path.exists(upload_trigger):
+                try:
+                    os.remove(upload_trigger)
+                except OSError:
+                    pass
+                self.log("Upload-analytics trigger detected")
+                threading.Thread(target=self._manual_analytics_upload, daemon=True).start()
 
             # Check if containers are running
             status_json = self.run_command("status")
