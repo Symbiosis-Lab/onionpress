@@ -117,6 +117,9 @@ class OnionPressApp(rumps.App):
         self._onionpress_log = RotatingLog(logs_dir, "onionpress")
         self._wp_access_log = RotatingLog(logs_dir, "wordpress-access")
         self._wp_visitors_log = RotatingLog(logs_dir, "wordpress-visitors")
+        self._tor_log = RotatingLog(logs_dir, "container-tor")
+        self._onionheaven_log = RotatingLog(logs_dir, "container-onionheaven")
+        self._container_log_processes = {}  # name -> (process, thread)
         self.log_file = self._onionpress_log.current_path()  # backward compat
         self.config_file = os.path.join(self.app_support, "config")
 
@@ -828,6 +831,77 @@ class OnionPressApp(rumps.App):
                 self.web_log_thread = None
             print("Stopped web log capture")
 
+    def _container_log_reader(self, process, rotating_log):
+        """Read docker logs from a process and write to a rotating log."""
+        try:
+            for line in process.stdout:
+                rotating_log.write(line)
+        except Exception:
+            pass
+
+    def start_container_log_capture(self):
+        """Start capturing logs from onionpress-tor, onionheaven, and takeover containers."""
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        docker_env = {"DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"}
+
+        # Fixed containers and their rotating logs
+        captures = [
+            ("onionpress-tor", self._tor_log),
+            ("onionheaven", self._onionheaven_log),
+        ]
+
+        # Discover takeover containers
+        try:
+            result = subprocess.run(
+                [docker_bin, "ps", "--format", "{{.Names}}", "--filter", "name=onionheaven-takeover"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=10, env=docker_env
+            )
+            if result.returncode == 0:
+                for name in result.stdout.strip().split('\n'):
+                    name = name.strip()
+                    if name and name.startswith("onionheaven-takeover"):
+                        logs_dir = os.path.join(self.app_support, "logs")
+                        rotating = RotatingLog(logs_dir, f"container-{name}")
+                        captures.append((name, rotating))
+        except Exception:
+            pass
+
+        for container_name, rotating_log in captures:
+            if container_name in self._container_log_processes:
+                continue  # Already capturing
+            try:
+                proc = subprocess.Popen(
+                    [docker_bin, "logs", "-f", "--tail", "100", container_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True, encoding='utf-8', errors='replace',
+                    env=docker_env
+                )
+                thread = threading.Thread(
+                    target=self._container_log_reader,
+                    args=(proc, rotating_log),
+                    daemon=True
+                )
+                thread.start()
+                self._container_log_processes[container_name] = (proc, thread)
+            except Exception:
+                pass
+
+    def stop_container_log_capture(self):
+        """Stop all container log capture processes."""
+        for name, (proc, thread) in list(self._container_log_processes.items()):
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            thread.join(timeout=3)
+        self._container_log_processes.clear()
+
     def ensure_docker_available(self):
         """Ensure bundled Colima is running (no-op during first-time setup as launcher handles it)"""
         try:
@@ -1338,6 +1412,10 @@ class OnionPressApp(rumps.App):
                 if self.web_log_process is None:
                     threading.Thread(target=self.start_web_log_capture, daemon=True).start()
 
+                # Start container log capture (tor, onionheaven, takeover workers)
+                if not self._container_log_processes:
+                    threading.Thread(target=self.start_container_log_capture, daemon=True).start()
+
                 # Start caffeinate if not already running (prevents sleep while service runs)
                 if self.caffeinate_process is None or self.caffeinate_process.poll() is not None:
                     self.start_caffeinate()
@@ -1472,6 +1550,7 @@ class OnionPressApp(rumps.App):
                 # Stop web log capture if running
                 if self.web_log_process is not None:
                     self.stop_web_log_capture()
+                    self.stop_container_log_capture()
 
                 # Stop caffeinate to allow Mac to sleep
                 self.stop_caffeinate()
@@ -2416,6 +2495,7 @@ class OnionPressApp(rumps.App):
 
             # Stop background processes
             self.stop_web_log_capture()
+            self.stop_container_log_capture()
             self.stop_caffeinate()
             self.stop_onion_proxy()
             self._stopping = False
@@ -3320,6 +3400,7 @@ License: AGPL v3"""
                 self.log("Uninstall: Stopping services...")
                 subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
                 self.stop_web_log_capture()
+                self.stop_container_log_capture()
                 self.stop_onion_proxy()
                 self.stop_caffeinate()
 
@@ -4062,6 +4143,7 @@ License: AGPL v3"""
         self.monitoring_tor_install = False
         self.dismiss_setup_dialog()
         self.stop_web_log_capture()
+        self.stop_container_log_capture()
 
         # Close any open log viewer windows
         _LogViewerWindow.close_all()

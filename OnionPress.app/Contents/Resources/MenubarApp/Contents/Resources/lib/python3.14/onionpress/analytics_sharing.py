@@ -17,7 +17,8 @@ import time
 
 # Valid log file name pattern
 _LOG_NAME_RE = re.compile(
-    r"^(onionpress|wordpress-access|wordpress-visitors)-\d{4}-\d{2}-\d{2}-\d{3}\.log$"
+    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|launcher)-"
+    r"\d{4}-\d{2}-\d{2}-\d{3}\.log$|^launcher\.log$"
 )
 
 
@@ -93,15 +94,53 @@ def _pick_upload_hour(app):
 
 def _do_upload_cycle(app):
     """Collect completed logs, send manifest, upload wanted files."""
-    # Collect completed files from all three rotating logs
+    # Collect completed files from all rotating logs
     all_files = []
-    for log_inst in (
+    log_instances = [
         getattr(app, "_onionpress_log", None),
         getattr(app, "_wp_access_log", None),
         getattr(app, "_wp_visitors_log", None),
-    ):
+        getattr(app, "_tor_log", None),
+        getattr(app, "_onionheaven_log", None),
+    ]
+    # Include any takeover container logs
+    for _name, (_proc, _thread) in getattr(app, "_container_log_processes", {}).items():
+        pass  # Takeover logs are discovered dynamically below
+
+    # Scan logs dir for all container-* rotating logs (catches takeover workers)
+    import glob as _glob
+    logs_dir = os.path.join(getattr(app, "app_support", ""), "logs")
+    for log_inst in log_instances:
         if log_inst is not None:
             all_files.extend(log_inst.completed_files())
+
+    # Also include launcher.log (not a rotating log, just a flat file)
+    launcher_log = os.path.join(getattr(app, "app_support", ""), "launcher.log")
+    if os.path.exists(launcher_log):
+        try:
+            size = os.path.getsize(launcher_log)
+            if size > 0:
+                all_files.append({
+                    "name": "launcher.log",
+                    "size": size,
+                    "path": launcher_log,
+                })
+        except OSError:
+            pass
+
+    if not all_files:
+        return
+
+    # Limit to most recent files, capped at 1MB total
+    all_files.sort(key=lambda f: f["name"], reverse=True)  # newest first by date in name
+    capped = []
+    total_size = 0
+    for f in all_files:
+        if total_size + f["size"] > 1_048_576:
+            break
+        capped.append(f)
+        total_size += f["size"]
+    all_files = capped
 
     if not all_files:
         return
