@@ -81,8 +81,7 @@ SETTINGS_HELP = {
         "When enabled, OnionPress will periodically upload completed log files "
         "to the OnionHome hub for remote debugging. Logs are scrubbed of your "
         "home directory path before upload.\n\n"
-        "Disabled by default. Only enable if you want to help the OnionPress "
-        "project diagnose issues."
+        "Enable to help the OnionPress project diagnose issues."
     ),
     "ONIONHEAVEN_ADDRESS": (
         "OnionHeaven Hub Address\n\n"
