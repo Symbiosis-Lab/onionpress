@@ -73,7 +73,8 @@ def _is_onionhome():
 ANALYTICS_DIR = "/var/lib/onionhome/analytics"
 ANALYTICS_DISK_THRESHOLD = 0.85  # 85% full → stop accepting / clean up
 ANALYTICS_LOG_NAME_RE = re.compile(
-    r"^(onionpress|wordpress-access|wordpress-visitors)-\d{4}-\d{2}-\d{2}-\d{3}\.log$"
+    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|launcher)-"
+    r"\d{4}-\d{2}-\d{2}-\d{3}\.log$|^launcher\.log$"
 )
 
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
