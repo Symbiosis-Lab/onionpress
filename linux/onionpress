@@ -19,8 +19,28 @@ PIDFILE="$DATA_DIR/onionpress.pid"
 # Ensure data directory exists
 mkdir -p "$DATA_DIR"
 
-# Log file
+# Log file with rotation (keep 3 x 5MB files)
 LOG_FILE="$DATA_DIR/onionpress.log"
+LOG_MAX_SIZE=$((5 * 1024 * 1024))  # 5 MB
+LOG_KEEP=3
+
+rotate_log() {
+    [ -f "$LOG_FILE" ] || return 0
+    local size
+    size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+    if [ "$size" -ge "$LOG_MAX_SIZE" ]; then
+        # Rotate: .log.3 → delete, .log.2 → .log.3, .log.1 → .log.2, .log → .log.1
+        local i=$LOG_KEEP
+        while [ $i -gt 1 ]; do
+            local prev=$((i - 1))
+            [ -f "${LOG_FILE}.$prev" ] && mv -f "${LOG_FILE}.$prev" "${LOG_FILE}.$i"
+            i=$((i - 1))
+        done
+        mv -f "$LOG_FILE" "${LOG_FILE}.1"
+        : > "$LOG_FILE"
+    fi
+}
+rotate_log
 
 # Read version
 ONIONPRESS_VERSION="unknown"
@@ -44,6 +64,13 @@ export ONIONPRESS_PROXY_PORT=9077
 # The heartbeat monitor + takeover Arti container starts lazily on first
 # registration. Takeover workers spawn on demand when a registered site
 # goes offline. ONIONHEAVEN_HUB=1 enables 10 intro points (auto-detected).
+# Tor implementation (C Tor is the default, matching Mac)
+export TOR_IMPL="${TOR_IMPL:-tor}"
+
+# OnionHome analytics directory (bind-mounted into tor container)
+export ONIONPRESS_SHARED_DIR="$DATA_DIR/shared"
+mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
+
 export ONIONHEAVEN="1"
 export ONIONHEAVEN_HUB="${ONIONHEAVEN_HUB:-0}"
 export ONIONHEAVEN_MAX_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}"
@@ -58,6 +85,7 @@ export CLOUDFLARE_TUNNEL_TOKEN
 if [ ! -f "$DATA_DIR/config" ]; then
     cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
+TOR_IMPL=tor
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
@@ -66,8 +94,10 @@ ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.oni
 EOF
 fi
 
-# Read OnionHeaven settings from config (override defaults)
+# Read settings from config (override defaults)
 if [ -f "$DATA_DIR/config" ]; then
+    _val=$(grep "^TOR_IMPL=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    [ -n "$_val" ] && export TOR_IMPL="$_val"
     _val=$(grep "^ONIONHEAVEN_MAX_SERVICES=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export ONIONHEAVEN_MAX_SERVICES="$_val"
     _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
@@ -1144,6 +1174,28 @@ start_containers() {
             log "WARNING: No C Tor key file (hs_ed25519_secret_key) -- C Tor will generate a random address"
         fi
 
+        # Restore healthcheck keys if present (saved by backup)
+        local hc_keys="$DATA_DIR/shared/healthcheck-keys"
+        if [ -d "$hc_keys" ] && [ -f "$hc_keys/hs_ed25519_secret_key" ]; then
+            docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
+            if docker run --rm \
+                -v onionpress-tor-state:/dest \
+                --mount type=bind,source="$hc_keys",target=/src \
+                alpine sh -c '
+                    mkdir -p /dest/hidden_service/healthcheck
+                    cp /src/hs_ed25519_secret_key /dest/hidden_service/healthcheck/
+                    cp /src/hs_ed25519_public_key /dest/hidden_service/healthcheck/ 2>/dev/null || true
+                    cp /src/hostname /dest/hidden_service/healthcheck/ 2>/dev/null || true
+                    chown -R 100:100 /dest/hidden_service/healthcheck
+                    chmod 700 /dest/hidden_service/healthcheck
+                    chmod 600 /dest/hidden_service/healthcheck/hs_ed25519_secret_key
+                ' >> "$LOG_FILE" 2>&1; then
+                log "Healthcheck key installed to tor-state volume"
+            else
+                log "WARNING: Failed to copy healthcheck key to tor-state volume"
+            fi
+        fi
+
         log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
     elif $FIRST_RUN; then
         log "No imported key found -- using random onion address"
@@ -1230,13 +1282,16 @@ start_containers() {
     configure_ia_plugin
     install_wp_statistics
     configure_wp_statistics
-    install_multisite_domain_map
-    ensure_multisite
+    if wp_is_installed; then
+        install_multisite_domain_map
+        ensure_multisite
+    fi
     fix_onionpress_permissions
 }
 
 stop_containers() {
     log "Stopping OnionPress containers..."
+    stop_container_log_capture
     stop_onionheaven_activation_watcher
     stop_onionheaven_farm
     cd "$DOCKER_DIR"
@@ -1260,6 +1315,50 @@ get_onion_address() {
     fi
     echo "Generating..."
     return 1
+}
+
+# Read and cache healthcheck onion address
+get_healthcheck_address() {
+    cd "$DOCKER_DIR"
+    local addr
+    addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/healthcheck/hostname 2>/dev/null || echo "")
+    if [ ! -z "$addr" ]; then
+        echo "$addr"
+        echo "$addr" > "$DATA_DIR/healthcheck-address"
+        return 0
+    fi
+    return 1
+}
+
+# ─── Container log capture ───────────────────────────────────────────
+# Capture stdout/stderr from key containers to rotating log files.
+# Runs as background processes; PIDs saved for cleanup on stop.
+
+CONTAINER_LOG_DIR="$DATA_DIR/logs"
+CONTAINER_LOG_PIDS=""
+
+start_container_log_capture() {
+    mkdir -p "$CONTAINER_LOG_DIR"
+    for container in onionpress-tor onionheaven; do
+        local logfile="$CONTAINER_LOG_DIR/container-${container#onionpress-}.log"
+        # Rotate container log if over 5MB
+        if [ -f "$logfile" ]; then
+            local sz
+            sz=$(stat -c%s "$logfile" 2>/dev/null || echo 0)
+            if [ "$sz" -ge "$LOG_MAX_SIZE" ]; then
+                mv -f "$logfile" "${logfile}.1"
+            fi
+        fi
+        docker logs -f --tail 200 "$container" >> "$logfile" 2>&1 &
+        CONTAINER_LOG_PIDS="$CONTAINER_LOG_PIDS $!"
+    done
+}
+
+stop_container_log_capture() {
+    for pid in $CONTAINER_LOG_PIDS; do
+        kill "$pid" 2>/dev/null || true
+    done
+    CONTAINER_LOG_PIDS=""
 }
 
 wait_for_services() {
@@ -1311,6 +1410,11 @@ wait_for_services() {
             docker exec onionpress-tor cp /var/lib/tor/hidden_service/wordpress/hostname /var/lib/onionpress/onion_address 2>>"$LOG_FILE" && \
                 log "Onion address written to shared volume" || \
                 log "WARNING: Failed to write onion address to shared volume"
+
+            # Read and save healthcheck address
+            if hc_addr=$(get_healthcheck_address); then
+                log "Healthcheck address: ${hc_addr}"
+            fi
 
             return 0
         fi
@@ -1408,6 +1512,20 @@ create_backup() {
 
     if [ -z "$(ls -A "$staging/tor-keys/" 2>/dev/null)" ]; then
         log "WARNING: No Tor keys found — backup will not include keys"
+    fi
+
+    # Healthcheck onion service keys (separate address, random per install)
+    mkdir -p "$staging/tor-keys/healthcheck"
+    docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_secret_key' > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
+    docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_public_key' > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
+    docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hostname' > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
+    # Clean up empty files
+    find "$staging/tor-keys/healthcheck" -empty -delete 2>/dev/null
+    if [ -d "$staging/tor-keys/healthcheck" ] && [ -n "$(ls -A "$staging/tor-keys/healthcheck" 2>/dev/null)" ]; then
+        log "Backup: healthcheck keys saved"
+    else
+        rmdir "$staging/tor-keys/healthcheck" 2>/dev/null || true
+        log "Backup: no healthcheck keys found (will be regenerated)"
     fi
 
     # 2. Dump WordPress database
@@ -1557,6 +1675,16 @@ restore_backup() {
         log "Restore: Tor keys written for $onion_address"
     else
         log "WARNING: No Tor keys in backup — skipping key restore"
+    fi
+
+    # Restore healthcheck keys if present in backup
+    local hc_backup="$staging/tor-keys/healthcheck"
+    if [ -d "$hc_backup" ] && [ -f "$hc_backup/hs_ed25519_secret_key" ]; then
+        local hc_dest="$DATA_DIR/shared/healthcheck-keys"
+        rm -rf "$hc_dest"
+        mkdir -p "$hc_dest"
+        cp "$hc_backup/"* "$hc_dest/"
+        log "Restore: healthcheck keys restored"
     fi
 
     # 2. Restore database
@@ -2002,6 +2130,7 @@ main() {
             setup_db_passwords
             start_containers
             wait_for_services
+            start_container_log_capture
 
             # Write initial status
             write_status

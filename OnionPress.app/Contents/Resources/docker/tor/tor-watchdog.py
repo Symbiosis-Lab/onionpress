@@ -183,9 +183,11 @@ def discover_services():
         # Read hostname for service_id (or derive from public key)
         hostname_file = os.path.join(service_dir, "hostname")
         public_key_file = os.path.join(service_dir, "hs_ed25519_public_key")
+        service_id = None
         try:
             with open(hostname_file) as f:
                 hostname = f.read().strip()
+            service_id = hostname.replace(".onion", "")
         except OSError:
             # No hostname file — derive from public key (fresh install)
             try:
@@ -194,27 +196,55 @@ def discover_services():
                 with open(hostname_file, "w") as f:
                     f.write(hostname + "\n")
                 log(f"Derived hostname for {name}: {hostname}")
-            except (OSError, ValueError) as e:
-                log(f"Warning: no hostname or public key for {name}: {e}")
-                continue
-        service_id = hostname.replace(".onion", "")
+                service_id = hostname.replace(".onion", "")
+            except (OSError, ValueError):
+                # No hostname or public key — will generate with NEW:BEST
+                pass
 
-        # Read key
+        # Read key — if missing, flag for NEW:BEST generation
         secret_key_file = os.path.join(service_dir, "hs_ed25519_secret_key")
+        key_b64 = None
         try:
             key_b64 = _read_ed25519_key(secret_key_file)
-        except (OSError, ValueError) as e:
-            log(f"Warning: can't read key for {name}: {e}")
-            continue
+        except (OSError, ValueError):
+            log(f"No key for {name} — will generate with NEW:BEST")
 
         services.append({
-            "service_id": service_id,
+            "service_id": service_id if key_b64 else None,
             "service_name": name,
             "key_b64": key_b64,
             "ports": ports,
+            "service_dir": service_dir,
         })
 
     return services
+
+
+def _save_generated_key(service_dir, resp_lines):
+    """Save key and hostname returned by ADD_ONION NEW:BEST to disk."""
+    service_id = None
+    key_b64 = None
+    for line in resp_lines.splitlines():
+        if line.startswith("250-ServiceID="):
+            service_id = line.split("=", 1)[1]
+        elif line.startswith("250-PrivateKey=ED25519-V3:"):
+            key_b64 = line.split(":", 1)[1]
+    if not service_id or not key_b64:
+        return None
+    try:
+        os.makedirs(service_dir, exist_ok=True)
+        # Write hostname
+        with open(os.path.join(service_dir, "hostname"), "w") as f:
+            f.write(service_id + ".onion\n")
+        # Write secret key in C Tor format (32-byte header + 64-byte key)
+        key_bytes = base64.b64decode(key_b64)
+        header = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
+        with open(os.path.join(service_dir, "hs_ed25519_secret_key"), "wb") as f:
+            f.write(header + key_bytes)
+        log(f"Saved generated key for {service_id[:16]}... to {service_dir}")
+    except OSError as e:
+        log(f"Warning: failed to save generated key: {e}")
+    return service_id
 
 
 def add_all_services(cmd_sock, services):
@@ -223,10 +253,19 @@ def add_all_services(cmd_sock, services):
     collisions = 0
     for svc in services:
         port_args = " ".join(f"Port={p}" for p in svc["ports"])
-        cmd = f"ADD_ONION ED25519-V3:{svc['key_b64']} Flags=Detach {port_args}"
+        if svc.get("key_b64"):
+            cmd = f"ADD_ONION ED25519-V3:{svc['key_b64']} Flags=Detach {port_args}"
+        else:
+            cmd = f"ADD_ONION NEW:BEST Flags=Detach {port_args}"
         resp = send_cmd(cmd_sock, cmd)
         if "250" in resp:
-            log(f"ADD_ONION {svc['service_name']} ({svc['service_id'][:16]}...) — ok")
+            if svc.get("key_b64"):
+                log(f"ADD_ONION {svc['service_name']} ({svc['service_id'][:16]}...) — ok")
+            else:
+                # Save the generated key to disk for future restarts
+                new_id = _save_generated_key(svc.get("service_dir", ""), resp)
+                svc["service_id"] = new_id
+                log(f"ADD_ONION {svc['service_name']} (generated {new_id[:16] if new_id else '?'}...) — ok")
             count += 1
         elif "Onion address collision" in resp:
             log(f"ADD_ONION {svc['service_name']} — already active (collision)")
@@ -240,6 +279,8 @@ def del_all_services(cmd_sock, services):
     """DEL_ONION for all services. Returns number of successes."""
     count = 0
     for svc in services:
+        if not svc.get("service_id"):
+            continue
         resp = send_cmd(cmd_sock, f"DEL_ONION {svc['service_id']}")
         if "250" in resp:
             log(f"DEL_ONION {svc['service_name']} ({svc['service_id'][:16]}...) — ok")
