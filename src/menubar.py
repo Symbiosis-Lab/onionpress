@@ -1338,6 +1338,8 @@ class OnionPressApp(rumps.App):
                     self.log("Internet connectivity lost")
                 elif self._has_internet and not had_internet:
                     self.log("Internet connectivity restored")
+                    # Show yellow immediately while Tor check runs
+                    self.update_menu()
 
                 if not self._has_internet:
                     # No internet — skip expensive WordPress/Tor checks
