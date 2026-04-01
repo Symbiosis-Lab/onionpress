@@ -893,24 +893,35 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         """Attempt to log in to archive.org and retrieve S3 API keys.
 
         Returns dict with 'access' and 'secret' on success, None on failure.
-        Uses the archive.org xauthn JSON API.
+        Routes through the onionheaven container's Tor SOCKS proxy to avoid
+        clearnet requests from the host.
         """
-        import urllib.request
         import urllib.parse
 
         try:
-            # Step 1: Authenticate via xauthn API
+            docker = self.server.docker_bin
+            denv = self.server.docker_env
             login_data = urllib.parse.urlencode({
                 'email': email,
                 'password': password,
-            }).encode()
-            req = urllib.request.Request(
-                'https://archive.org/services/xauthn/?op=login',
-                data=login_data,
-                headers={'User-Agent': 'OnionPress (+https://github.com/brewsterkahle/onionpress)'},
+            })
+
+            result = subprocess.run(
+                [docker, "exec", "onionheaven",
+                 "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
+                 "--max-time", "30",
+                 "-X", "POST", "-d", login_data,
+                 "https://archive.org/services/xauthn/?op=login"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=45, env=denv,
             )
-            resp = urllib.request.urlopen(req, timeout=15)
-            data = json.loads(resp.read())
+
+            if result.returncode != 0:
+                if self.server.log_func:
+                    self.server.log_func(f"archive.org login curl failed (rc={result.returncode})")
+                return None
+
+            data = json.loads(result.stdout)
 
             if not data.get('success'):
                 reason = data.get('values', {}).get('reason', 'unknown')
@@ -918,7 +929,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     self.server.log_func(f"archive.org login failed: {reason}")
                 return None
 
-            # Step 2: Fetch S3 keys using the returned auth
             s3_access = data.get('values', {}).get('s3', {}).get('access', '')
             s3_secret = data.get('values', {}).get('s3', {}).get('secret', '')
 
@@ -931,29 +941,22 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             logged_in_user = cookies.get('logged-in-user', '')
 
             if logged_in_sig and logged_in_user:
-                req2 = urllib.request.Request(
-                    'https://archive.org/account/s3.php?output_json=1',
-                    headers={
-                        'User-Agent': 'OnionPress (+https://github.com/brewsterkahle/onionpress)',
-                        'Cookie': f'logged-in-sig={logged_in_sig}; logged-in-user={logged_in_user}',
-                    },
+                result2 = subprocess.run(
+                    [docker, "exec", "onionheaven",
+                     "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
+                     "--max-time", "30",
+                     "-H", f"Cookie: logged-in-sig={logged_in_sig}; logged-in-user={logged_in_user}",
+                     "https://archive.org/account/s3.php?output_json=1"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=45, env=denv,
                 )
-                resp2 = urllib.request.urlopen(req2, timeout=15)
-                s3_data = json.loads(resp2.read())
-                access = s3_data.get('key', {}).get('s3accesskey', '')
-                secret = s3_data.get('key', {}).get('s3secretkey', '')
-                if access and secret:
-                    return {'access': access, 'secret': secret}
+                if result2.returncode == 0:
+                    s3_data = json.loads(result2.stdout)
+                    access = s3_data.get('key', {}).get('s3accesskey', '')
+                    secret = s3_data.get('key', {}).get('s3secretkey', '')
+                    if access and secret:
+                        return {'access': access, 'secret': secret}
 
-        except urllib.error.HTTPError as e:
-            body = e.read().decode('utf-8', errors='replace')
-            try:
-                err_data = json.loads(body)
-                reason = err_data.get('values', {}).get('reason', str(e))
-            except Exception:
-                reason = str(e)
-            if self.server.log_func:
-                self.server.log_func(f"archive.org auth failed: {reason}")
         except Exception as e:
             if self.server.log_func:
                 self.server.log_func(f"archive.org S3 key fetch failed: {e}")
