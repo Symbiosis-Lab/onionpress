@@ -922,14 +922,24 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-        # Determine which files we don't have yet
+        # Determine which files we need (new or grown since last upload)
         wanted = []
         for f in files:
             name = f.get("name", "")
             if not ANALYTICS_LOG_NAME_RE.match(name):
                 continue
-            if not os.path.exists(os.path.join(site_dir, name)):
+            local_path = os.path.join(site_dir, name)
+            if not os.path.exists(local_path):
                 wanted.append(name)
+            else:
+                # Re-request if the remote file is larger (partial → complete)
+                try:
+                    local_size = os.path.getsize(local_path)
+                    remote_size = f.get("size", 0)
+                    if remote_size > local_size:
+                        wanted.append(name)
+                except OSError:
+                    wanted.append(name)
 
         self._send_json(200, {"wanted": wanted})
 

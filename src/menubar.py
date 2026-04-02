@@ -1255,7 +1255,7 @@ class OnionPressApp(rumps.App):
             if enabled != "yes":
                 self.log("Analytics upload skipped: SHARE_ANALYTICS_WITH_ONIONHOME is not 'yes'")
                 return
-            analytics_sharing._do_upload_cycle(self)
+            analytics_sharing._do_upload_cycle(self, include_active=True)
             self.log("Analytics upload complete")
         except Exception as e:
             self.log(f"Analytics upload error: {e}")
