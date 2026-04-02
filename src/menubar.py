@@ -36,6 +36,7 @@ from onionpress.ui_helpers import (
     HelpButtonTarget as _HelpButtonTarget,
     parse_version,
     main_thread as _main_thread,
+    set_main_thread_logger as _set_main_thread_logger,
     BackupProgressWindow as _BackupProgressWindow,
     LogViewerActions as _LogViewerActions,
     LogViewerWindow as _LogViewerWindow,
@@ -189,6 +190,10 @@ class OnionPressApp(rumps.App):
 
         # Do slow I/O operations in background after icon appears
         def background_init():
+            # Hook up the UI crash logger so main_thread() exceptions
+            # get written to the onionpress log (and uploaded via analytics)
+            _set_main_thread_logger(self.log)
+
             # Session separator and debug info via rotating log
             self.log("=" * 60)
             self.log("=== New session starting ===")
