@@ -1333,7 +1333,7 @@ class OnionPressApp(rumps.App):
                 # Check inside Docker volume — test -f && rm is atomic enough
                 r = self._docker.exec("onionpress-wordpress",
                     ["sh", "-c", "test -f /var/lib/onionpress/.upload-analytics && rm /var/lib/onionpress/.upload-analytics"],
-                    timeout=5)
+                    timeout=5, quiet=True)
                 if r.ok:
                     trigger_found = True
             if trigger_found:
