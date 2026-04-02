@@ -76,6 +76,8 @@ class OnionPressApp(rumps.App):
         # Register signal handlers for clean removal on SIGTERM/SIGINT
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+        # SIGUSR1 not used — py2app/NSApplication overrides signal handlers.
+        # Instead, upload-analytics uses a file-based trigger (see .upload-analytics).
 
         # When running as py2app bundle, __file__ is in Contents/Resources/
         # so we need to use that as resources_dir, not the parent
@@ -119,6 +121,8 @@ class OnionPressApp(rumps.App):
         self._wp_visitors_log = RotatingLog(logs_dir, "wordpress-visitors")
         self._tor_log = RotatingLog(logs_dir, "container-tor")
         self._onionheaven_log = RotatingLog(logs_dir, "container-onionheaven")
+        self._clearnet_log = RotatingLog(logs_dir, "clearnet")
+        self._clearnet_last_offset = 0  # track dmesg position
         self._container_log_processes = {}  # name -> (process, thread)
         self.log_file = self._onionpress_log.current_path()  # backward compat
         self.config_file = os.path.join(self.app_support, "config")
@@ -148,7 +152,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.42"
+        self.version = "2.4.43"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -158,6 +162,10 @@ class OnionPressApp(rumps.App):
         os.environ["LIMA_INSTANCE"] = "onionpress"
         os.environ["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
         os.environ["DOCKER_CONFIG"] = docker_config_dir
+
+        # Stop any orphaned Colima VM from a previous crash before port detection
+        colima_bin = os.path.join(self.bin_dir, "colima")
+        op_config.stop_stale_colima(colima_bin, self.colima_home, self.pid_file)
 
         # Detect port offset for multi-user support
         _port_config = op_config.detect_port_offset()
@@ -888,6 +896,31 @@ class OnionPressApp(rumps.App):
             except Exception:
                 pass
 
+    def start_clearnet_log_capture(self):
+        """Periodically poll VM dmesg for CLEARNET iptables log entries."""
+        limactl = os.path.join(self.bin_dir, "limactl")
+        lima_env = os.environ.copy()
+        lima_env["COLIMA_HOME"] = self.colima_home
+        lima_env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
+
+        while True:
+            try:
+                result = subprocess.run(
+                    [limactl, "shell", "colima", "--", "sh", "-c", "sudo dmesg"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=15, env=lima_env,
+                )
+                if result.returncode == 0:
+                    all_lines = [l for l in result.stdout.splitlines() if "CLEARNET" in l]
+                    if len(all_lines) > self._clearnet_last_offset:
+                        new_lines = all_lines[self._clearnet_last_offset:]
+                        self._clearnet_last_offset = len(all_lines)
+                        for line in new_lines:
+                            self._clearnet_log.write(line + "\n")
+            except Exception:
+                pass
+            time.sleep(60)
+
     def stop_container_log_capture(self):
         """Stop all container log capture processes."""
         for name, (proc, thread) in list(self._container_log_processes.items()):
@@ -1217,6 +1250,20 @@ class OnionPressApp(rumps.App):
         self.log(f"Received signal {signum}, initiating graceful shutdown...")
         _main_thread(lambda: self.quit_app(None))
 
+    def _manual_analytics_upload(self):
+        """Run analytics upload immediately (called from SIGUSR1 handler)."""
+        try:
+            enabled = self.read_config_value(
+                "SHARE_ANALYTICS_WITH_ONIONHOME", "no"
+            ).lower()
+            if enabled != "yes":
+                self.log("Analytics upload skipped: SHARE_ANALYTICS_WITH_ONIONHOME is not 'yes'")
+                return
+            analytics_sharing._do_upload_cycle(self, include_active=True)
+            self.log("Analytics upload complete")
+        except Exception as e:
+            self.log(f"Analytics upload error: {e}")
+
     def handle_reopen(self):
         """Handle reopen signal from launcher (user double-clicked app while running)"""
         self.log("Reopen signal received")
@@ -1277,6 +1324,26 @@ class OnionPressApp(rumps.App):
                     pass
                 self.handle_reopen()
 
+            # Check for upload-analytics trigger (host file from CLI,
+            # or Docker volume file from WordPress "Share Now" button)
+            upload_trigger = os.path.join(self.app_support, ".upload-analytics")
+            trigger_found = os.path.exists(upload_trigger)
+            if trigger_found:
+                try:
+                    os.remove(upload_trigger)
+                except OSError:
+                    pass
+            else:
+                # Check inside Docker volume — test -f && rm is atomic enough
+                r = self._docker.exec("onionpress-wordpress",
+                    ["sh", "-c", "test -f /var/lib/onionpress/.upload-analytics && rm /var/lib/onionpress/.upload-analytics"],
+                    timeout=5, quiet=True)
+                if r.ok:
+                    trigger_found = True
+            if trigger_found:
+                self.log("Upload-analytics trigger detected")
+                threading.Thread(target=self._manual_analytics_upload, daemon=True).start()
+
             # Check if containers are running
             status_json = self.run_command("status")
 
@@ -1312,6 +1379,8 @@ class OnionPressApp(rumps.App):
                     self.log("Internet connectivity lost")
                 elif self._has_internet and not had_internet:
                     self.log("Internet connectivity restored")
+                    # Show yellow immediately while Tor check runs
+                    self.update_menu()
 
                 if not self._has_internet:
                     # No internet — skip expensive WordPress/Tor checks
@@ -1415,6 +1484,9 @@ class OnionPressApp(rumps.App):
                 # Start container log capture (tor, onionheaven, takeover workers)
                 if not self._container_log_processes:
                     threading.Thread(target=self.start_container_log_capture, daemon=True).start()
+                if not getattr(self, '_clearnet_capture_started', False):
+                    self._clearnet_capture_started = True
+                    threading.Thread(target=self.start_clearnet_log_capture, daemon=True).start()
 
                 # Start caffeinate if not already running (prevents sleep while service runs)
                 if self.caffeinate_process is None or self.caffeinate_process.poll() is not None:
@@ -4135,7 +4207,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.42 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.43 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 

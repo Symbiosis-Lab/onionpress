@@ -17,7 +17,7 @@ import time
 
 # Valid log file name pattern
 _LOG_NAME_RE = re.compile(
-    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|launcher)-"
+    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|clearnet|launcher)-"
     r"\d{4}-\d{2}-\d{2}-\d{3}\.log$|^launcher\.log$"
 )
 
@@ -92,8 +92,13 @@ def _pick_upload_hour(app):
     return random.randint(0, 23)
 
 
-def _do_upload_cycle(app):
-    """Collect completed logs, send manifest, upload wanted files."""
+def _do_upload_cycle(app, include_active=False):
+    """Collect completed logs, send manifest, upload wanted files.
+
+    When *include_active* is True (manual upload), current/active log files
+    are included alongside completed ones.  OnionHome re-requests a file if
+    the offered size is larger than what it already has.
+    """
     # Collect completed files from all rotating logs
     all_files = []
     log_instances = [
@@ -102,6 +107,7 @@ def _do_upload_cycle(app):
         getattr(app, "_wp_visitors_log", None),
         getattr(app, "_tor_log", None),
         getattr(app, "_onionheaven_log", None),
+        getattr(app, "_clearnet_log", None),
     ]
     # Include any takeover container logs
     for _name, (_proc, _thread) in getattr(app, "_container_log_processes", {}).items():
@@ -113,6 +119,19 @@ def _do_upload_cycle(app):
     for log_inst in log_instances:
         if log_inst is not None:
             all_files.extend(log_inst.completed_files())
+            if include_active:
+                # Include the current active file too
+                path = log_inst.current_path()
+                if os.path.exists(path):
+                    try:
+                        size = os.path.getsize(path)
+                        if size > 0:
+                            name = os.path.basename(path)
+                            # Avoid duplicates
+                            if not any(f["name"] == name for f in all_files):
+                                all_files.append({"name": name, "size": size, "path": path})
+                    except OSError:
+                        pass
 
     # Also include launcher.log (not a rotating log, just a flat file)
     launcher_log = os.path.join(getattr(app, "app_support", ""), "launcher.log")
@@ -131,16 +150,7 @@ def _do_upload_cycle(app):
     if not all_files:
         return
 
-    # Limit to most recent files, capped at 1MB total
     all_files.sort(key=lambda f: f["name"], reverse=True)  # newest first by date in name
-    capped = []
-    total_size = 0
-    for f in all_files:
-        if total_size + f["size"] > 1_048_576:
-            break
-        capped.append(f)
-        total_size += f["size"]
-    all_files = capped
 
     if not all_files:
         return
