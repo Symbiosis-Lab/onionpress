@@ -150,16 +150,7 @@ def _do_upload_cycle(app, include_active=False):
     if not all_files:
         return
 
-    # Limit to most recent files, capped at 1MB total
     all_files.sort(key=lambda f: f["name"], reverse=True)  # newest first by date in name
-    capped = []
-    total_size = 0
-    for f in all_files:
-        if total_size + f["size"] > 1_048_576:
-            break
-        capped.append(f)
-        total_size += f["size"]
-    all_files = capped
 
     if not all_files:
         return
