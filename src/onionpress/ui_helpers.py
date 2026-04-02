@@ -37,22 +37,32 @@ def parse_version(version_str):
         return (0,)
 
 
+_main_thread_log_func = None
+
+
+def set_main_thread_logger(log_func):
+    """Set the log function used by main_thread() for error reporting."""
+    global _main_thread_log_func
+    _main_thread_log_func = log_func
+
+
 def main_thread(func):
     """Run func on the main thread (required for AppKit UI updates).
 
     Wraps the callback in a try/except so Python exceptions don't
     propagate through PyObjC into Objective-C — that causes SIGABRT.
     """
-    import sys
-
     def _safe_wrapper():
         try:
             func()
         except Exception:
-            # Log to stderr — self.log() may not be available here
             import traceback
-            print(f"[main_thread] Exception in UI callback:", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            tb = traceback.format_exc()
+            if _main_thread_log_func:
+                _main_thread_log_func(f"CRASH PREVENTED in UI callback:\n{tb}")
+            else:
+                import sys
+                print(f"[main_thread] Exception in UI callback:\n{tb}", file=sys.stderr)
 
     AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_safe_wrapper)
 
