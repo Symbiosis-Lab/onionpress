@@ -163,6 +163,10 @@ class OnionPressApp(rumps.App):
         os.environ["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
         os.environ["DOCKER_CONFIG"] = docker_config_dir
 
+        # Stop any orphaned Colima VM from a previous crash before port detection
+        colima_bin = os.path.join(self.bin_dir, "colima")
+        op_config.stop_stale_colima(colima_bin, self.colima_home, self.pid_file)
+
         # Detect port offset for multi-user support
         _port_config = op_config.detect_port_offset()
         self.wp_port = _port_config.wp_port

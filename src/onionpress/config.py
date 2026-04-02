@@ -7,10 +7,12 @@ Handles:
 - Validating onion address prefixes
 """
 
+import logging
 import os
 import re
 import secrets
 import socket
+import subprocess
 from dataclasses import dataclass
 
 from .platform import OnionPressPaths
@@ -248,6 +250,53 @@ class PortConfig:
     wp_port: int
     socks_port: int
     proxy_port: int
+
+
+def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str) -> None:
+    """Stop an orphaned Colima VM left over from a crash or force-quit.
+
+    If our Colima VM is running but the MenubarApp PID file is stale (or
+    missing), the VM is orphaned and holding ports.  Stop it so the next
+    launch gets port 8080 instead of needlessly offsetting.
+    """
+    log = logging.getLogger("onionpress")
+
+    # If a live MenubarApp already owns these ports, leave them alone
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file) as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)  # raises if not alive
+            return  # another instance is running — not stale
+        except (ProcessLookupError, ValueError, OSError):
+            pass  # stale PID file — fall through
+
+    # Check if the onionpress Colima VM is running
+    env = os.environ.copy()
+    env["COLIMA_HOME"] = colima_home
+    env["LIMA_HOME"] = os.path.join(colima_home, "_lima")
+    env["LIMA_INSTANCE"] = "onionpress"
+
+    try:
+        result = subprocess.run(
+            [colima_bin, "list", "--json"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10, env=env,
+        )
+        if result.returncode != 0 or "Running" not in result.stdout:
+            return  # VM not running — nothing to clean up
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return
+
+    log.warning("Found orphaned Colima VM from a previous crash — stopping it")
+    try:
+        subprocess.run(
+            [colima_bin, "stop"],
+            capture_output=True, timeout=60, env=env,
+        )
+        log.warning("Orphaned Colima VM stopped successfully")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log.warning(f"Failed to stop orphaned Colima VM: {e}")
 
 
 def detect_port_offset() -> PortConfig:
