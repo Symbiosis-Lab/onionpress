@@ -972,9 +972,8 @@ function onionpress_settings_page() {
                                    placeholder="<?php echo esc_attr( $field['placeholder'] ?? '' ); ?>"
                                    class="regular-text">
                         <?php endif; ?>
-                        <p class="description"><?php echo esc_html( $field['description'] ); ?></p>
                         <?php if ( $key === 'SHARE_ANALYTICS_WITH_ONIONHOME' && ( $current[ $config_key ] ?? ( $current[ $key ] ?? '' ) ) === 'yes' ) : ?>
-                            <button type="button" id="onionpress-share-now" class="button button-secondary" style="margin-top: 6px;">Share Now</button>
+                            <button type="button" id="onionpress-share-now" class="button button-secondary" style="margin-left: 8px;">Share Now</button>
                             <span id="onionpress-share-now-status" style="margin-left: 8px;"></span>
                             <script>
                             document.getElementById('onionpress-share-now').addEventListener('click', function() {
@@ -994,6 +993,7 @@ function onionpress_settings_page() {
                             });
                             </script>
                         <?php endif; ?>
+                        <p class="description"><?php echo esc_html( $field['description'] ); ?></p>
                     </td>
                 </tr>
                 <?php endforeach; ?>
