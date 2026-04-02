@@ -38,8 +38,23 @@ def parse_version(version_str):
 
 
 def main_thread(func):
-    """Run func on the main thread (required for AppKit UI updates)."""
-    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(func)
+    """Run func on the main thread (required for AppKit UI updates).
+
+    Wraps the callback in a try/except so Python exceptions don't
+    propagate through PyObjC into Objective-C — that causes SIGABRT.
+    """
+    import sys
+
+    def _safe_wrapper():
+        try:
+            func()
+        except Exception:
+            # Log to stderr — self.log() may not be available here
+            import traceback
+            print(f"[main_thread] Exception in UI callback:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+
+    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_safe_wrapper)
 
 
 class BackupProgressWindow:

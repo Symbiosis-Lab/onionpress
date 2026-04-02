@@ -458,7 +458,7 @@ class OnionPressApp(rumps.App):
                     self.log(f"Error dismissing launch splash: {e}")
 
         # Dismiss on main thread
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(dismiss)
+        _main_thread(dismiss)
 
     def openLogFile_(self, sender):
         """Action handler for View Log button — open in built-in log viewer"""
@@ -711,7 +711,7 @@ class OnionPressApp(rumps.App):
             def run_on_main():
                 result_container[0] = show_dialog()
 
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(run_on_main)
+            _main_thread(run_on_main)
 
             # Wait for result (with timeout)
             max_wait = 300  # 5 minutes
@@ -1039,7 +1039,7 @@ class OnionPressApp(rumps.App):
                 self.log(f"Port conflict detected: ports {ports_str} already in use by another process")
                 self._port_conflict = True
                 # Must dispatch to main thread — rumps.alert() requires it
-                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                _main_thread(
                     lambda: rumps.alert(
                         title="OnionPress Cannot Start",
                         message=f"Port(s) {ports_str} already in use.\n\n"
@@ -1744,7 +1744,7 @@ class OnionPressApp(rumps.App):
                 self.local_site_item.set_callback(None)
 
         # Execute on main thread
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(do_update)
+        _main_thread(do_update)
 
     def read_healthcheck_address(self):
         """Read the healthcheck .onion address from the tor container."""
@@ -3263,7 +3263,7 @@ class OnionPressApp(rumps.App):
                     self.setup_alert = None
 
             self.setup_dialog_showing = True
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(create_and_show)
+            _main_thread(create_and_show)
             self.log("Setup dialog shown (native NSAlert)")
         except Exception as e:
             self.log(f"Error showing setup dialog: {e}")
@@ -3381,7 +3381,7 @@ License: AGPL v3"""
         if AppKit.NSThread.isMainThread():
             show_dialog()
         else:
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(show_dialog)
+            _main_thread(show_dialog)
 
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
