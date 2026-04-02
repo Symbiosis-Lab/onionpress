@@ -1320,13 +1320,23 @@ class OnionPressApp(rumps.App):
                     pass
                 self.handle_reopen()
 
-            # Check for upload-analytics trigger
+            # Check for upload-analytics trigger (host file from CLI,
+            # or Docker volume file from WordPress "Share Now" button)
             upload_trigger = os.path.join(self.app_support, ".upload-analytics")
-            if os.path.exists(upload_trigger):
+            trigger_found = os.path.exists(upload_trigger)
+            if trigger_found:
                 try:
                     os.remove(upload_trigger)
                 except OSError:
                     pass
+            else:
+                # Check inside Docker volume — test -f && rm is atomic enough
+                r = self._docker.exec("onionpress-wordpress",
+                    ["sh", "-c", "test -f /var/lib/onionpress/.upload-analytics && rm /var/lib/onionpress/.upload-analytics"],
+                    timeout=5)
+                if r.ok:
+                    trigger_found = True
+            if trigger_found:
                 self.log("Upload-analytics trigger detected")
                 threading.Thread(target=self._manual_analytics_upload, daemon=True).start()
 

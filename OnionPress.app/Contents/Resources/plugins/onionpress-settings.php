@@ -152,6 +152,21 @@ add_action( 'network_admin_menu', function () {
     );
 } );
 
+// REST endpoint: trigger analytics upload by touching the trigger file
+add_action( 'rest_api_init', function () {
+    register_rest_route( 'onionpress/v1', '/upload-analytics', array(
+        'methods'             => 'POST',
+        'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+        'callback'            => function () {
+            $trigger = '/var/lib/onionpress/.upload-analytics';
+            if ( touch( $trigger ) ) {
+                return new WP_REST_Response( array( 'message' => 'Upload triggered. Check logs for result.' ), 200 );
+            }
+            return new WP_REST_Response( array( 'message' => 'Failed to create trigger file.' ), 500 );
+        },
+    ) );
+} );
+
 /**
  * Handle service control actions (restart/stop) on Linux.
  */
@@ -958,6 +973,27 @@ function onionpress_settings_page() {
                                    class="regular-text">
                         <?php endif; ?>
                         <p class="description"><?php echo esc_html( $field['description'] ); ?></p>
+                        <?php if ( $key === 'SHARE_ANALYTICS_WITH_ONIONHOME' && ( $current[ $config_key ] ?? ( $current[ $key ] ?? '' ) ) === 'yes' ) : ?>
+                            <button type="button" id="onionpress-share-now" class="button button-secondary" style="margin-top: 6px;">Share Now</button>
+                            <span id="onionpress-share-now-status" style="margin-left: 8px;"></span>
+                            <script>
+                            document.getElementById('onionpress-share-now').addEventListener('click', function() {
+                                var btn = this;
+                                var status = document.getElementById('onionpress-share-now-status');
+                                btn.disabled = true;
+                                status.textContent = 'Triggering upload...';
+                                fetch('/wp-json/onionpress/v1/upload-analytics', { method: 'POST',
+                                    headers: { 'X-WP-Nonce': '<?php echo wp_create_nonce( 'wp_rest' ); ?>' }
+                                }).then(function(r) { return r.json(); }).then(function(data) {
+                                    status.textContent = data.message || 'Upload triggered!';
+                                    btn.disabled = false;
+                                }).catch(function(e) {
+                                    status.textContent = 'Error: ' + e.message;
+                                    btn.disabled = false;
+                                });
+                            });
+                            </script>
+                        <?php endif; ?>
                     </td>
                 </tr>
                 <?php endforeach; ?>
