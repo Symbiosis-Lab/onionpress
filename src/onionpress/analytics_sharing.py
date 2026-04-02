@@ -17,7 +17,7 @@ import time
 
 # Valid log file name pattern
 _LOG_NAME_RE = re.compile(
-    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|launcher)-"
+    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|clearnet|launcher)-"
     r"\d{4}-\d{2}-\d{2}-\d{3}\.log$|^launcher\.log$"
 )
 
@@ -102,6 +102,7 @@ def _do_upload_cycle(app):
         getattr(app, "_wp_visitors_log", None),
         getattr(app, "_tor_log", None),
         getattr(app, "_onionheaven_log", None),
+        getattr(app, "_clearnet_log", None),
     ]
     # Include any takeover container logs
     for _name, (_proc, _thread) in getattr(app, "_container_log_processes", {}).items():

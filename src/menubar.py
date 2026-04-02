@@ -121,6 +121,8 @@ class OnionPressApp(rumps.App):
         self._wp_visitors_log = RotatingLog(logs_dir, "wordpress-visitors")
         self._tor_log = RotatingLog(logs_dir, "container-tor")
         self._onionheaven_log = RotatingLog(logs_dir, "container-onionheaven")
+        self._clearnet_log = RotatingLog(logs_dir, "clearnet")
+        self._clearnet_last_offset = 0  # track dmesg position
         self._container_log_processes = {}  # name -> (process, thread)
         self.log_file = self._onionpress_log.current_path()  # backward compat
         self.config_file = os.path.join(self.app_support, "config")
@@ -890,6 +892,31 @@ class OnionPressApp(rumps.App):
             except Exception:
                 pass
 
+    def start_clearnet_log_capture(self):
+        """Periodically poll VM dmesg for CLEARNET iptables log entries."""
+        limactl = os.path.join(self.bin_dir, "limactl")
+        lima_env = os.environ.copy()
+        lima_env["COLIMA_HOME"] = self.colima_home
+        lima_env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
+
+        while True:
+            try:
+                result = subprocess.run(
+                    [limactl, "shell", "colima", "--", "sh", "-c", "sudo dmesg"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=15, env=lima_env,
+                )
+                if result.returncode == 0:
+                    all_lines = [l for l in result.stdout.splitlines() if "CLEARNET" in l]
+                    if len(all_lines) > self._clearnet_last_offset:
+                        new_lines = all_lines[self._clearnet_last_offset:]
+                        self._clearnet_last_offset = len(all_lines)
+                        for line in new_lines:
+                            self._clearnet_log.write(line + "\n")
+            except Exception:
+                pass
+            time.sleep(60)
+
     def stop_container_log_capture(self):
         """Stop all container log capture processes."""
         for name, (proc, thread) in list(self._container_log_processes.items()):
@@ -1443,6 +1470,9 @@ class OnionPressApp(rumps.App):
                 # Start container log capture (tor, onionheaven, takeover workers)
                 if not self._container_log_processes:
                     threading.Thread(target=self.start_container_log_capture, daemon=True).start()
+                if not getattr(self, '_clearnet_capture_started', False):
+                    self._clearnet_capture_started = True
+                    threading.Thread(target=self.start_clearnet_log_capture, daemon=True).start()
 
                 # Start caffeinate if not already running (prevents sleep while service runs)
                 if self.caffeinate_process is None or self.caffeinate_process.poll() is not None:
