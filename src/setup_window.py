@@ -6,12 +6,16 @@ Uses only standard AppKit controls (NSTextField, NSProgressIndicator,
 NSButton, NSScrollView/NSTextView).  No custom drawRect_, no CGColor
 layer styling, no NSTimer animations.  Retro feel comes from Monaco
 font + purple/orange/cream colour scheme.
+
+Two phases:
+  1. Welcome — collects Site Title, Username, Password then starts setup
+  2. Progress — step checklist, progress bar, live log tail
 """
 
 import AppKit
 from AppKit import (
-    NSWindow, NSView, NSTextField, NSProgressIndicator, NSButton,
-    NSImage, NSImageView, NSFont, NSColor, NSMakeRect,
+    NSWindow, NSView, NSTextField, NSSecureTextField, NSProgressIndicator,
+    NSButton, NSImage, NSImageView, NSFont, NSColor, NSMakeRect,
     NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
     NSBackingStoreBuffered, NSCenterTextAlignment, NSLeftTextAlignment,
     NSLineBreakByWordWrapping, NSApp, NSScrollView, NSTextView,
@@ -55,6 +59,19 @@ def _label(frame, text, font=None, color=None, align=NSLeftTextAlignment, wrap=F
         tf.setTextColor_(color)
     if wrap:
         tf.setLineBreakMode_(NSLineBreakByWordWrapping)
+    return tf
+
+
+def _input_field(frame, placeholder="", secure=False):
+    """Create an editable NSTextField (or NSSecureTextField)."""
+    cls = NSSecureTextField if secure else NSTextField
+    tf = cls.alloc().initWithFrame_(frame)
+    tf.setPlaceholderString_(placeholder)
+    tf.setBezeled_(True)
+    tf.setDrawsBackground_(True)
+    tf.setEditable_(True)
+    tf.setSelectable_(True)
+    tf.setFont_(NSFont.systemFontOfSize_(13))
     return tf
 
 
@@ -114,6 +131,8 @@ class SetupProgressWindow(AppKit.NSObject):
         if self is None:
             return None
         self.window = None
+        self.welcome_view = None    # Phase 1: credentials input
+        self.progress_view = None   # Phase 2: step checklist + progress
         self.step_labels = []       # NSTextField per step
         self.progress_bar = None    # NSProgressIndicator
         self.percent_label = None   # NSTextField  "55%"
@@ -121,6 +140,15 @@ class SetupProgressWindow(AppKit.NSObject):
         self.log_text_view = None   # NSTextView   log tail
         self.current_step = -1
         self._log_file_path = os.path.expanduser("~/.onionpress/onionpress.log")
+        # Credentials from welcome phase
+        self.site_title = "My OnionPress Site"
+        self.admin_user = "admin"
+        self.admin_pass = ""
+        self._title_field = None
+        self._user_field = None
+        self._pass_field = None
+        self._on_setup_callback = None  # Called when user clicks "Set Up"
+        self._showing_welcome = True
         return self
 
     # -- window creation ----------------------------------------------------
@@ -141,61 +169,188 @@ class SetupProgressWindow(AppKit.NSObject):
         self.window.setHidesOnDeactivate_(False)
 
         content = self.window.contentView()
-        y = height - 20  # top padding
+        self._create_welcome_view(content, width, height)
+        self._create_progress_view(content, width, height)
+
+        # Start showing welcome
+        self.welcome_view.setHidden_(False)
+        self.progress_view.setHidden_(True)
+        self._showing_welcome = True
+
+    def _create_welcome_view(self, content, width, height):
+        """Phase 1: Logo + credential fields + Set Up button."""
+        self.welcome_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+        content.addSubview_(self.welcome_view)
+
+        y = height - 20
 
         # -- Logo --
         logo_path = _logo_path()
         if logo_path:
             logo_image = NSImage.alloc().initWithContentsOfFile_(logo_path)
             if logo_image:
-                logo_h = 120
-                logo_w = 140
+                logo_h = 100
+                logo_w = 120
                 y -= logo_h
                 logo_view = NSImageView.alloc().initWithFrame_(
                     NSMakeRect((width - logo_w) / 2, y, logo_w, logo_h)
                 )
                 logo_view.setImage_(logo_image)
                 logo_view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
-                content.addSubview_(logo_view)
+                self.welcome_view.addSubview_(logo_view)
                 y -= 8
 
         # -- Title --
         y -= 24
         title = _label(
             NSMakeRect(20, y, width - 40, 24),
-            "[ SETTING UP YOUR ONION SERVICE ]",
-            font=_monaco(14), color=_HEADING_PURPLE,
+            "Welcome to OnionPress!",
+            font=_monaco(16), color=_HEADING_PURPLE,
             align=NSCenterTextAlignment,
         )
-        content.addSubview_(title)
+        self.welcome_view.addSubview_(title)
 
         # -- Subtitle --
-        y -= 18
+        y -= 20
         subtitle = _label(
             NSMakeRect(20, y, width - 40, 16),
-            ">> Estimated time: 2-5 minutes",
-            font=_monaco(10), color=_ACCENT_ORANGE,
+            "Set up your site and admin account",
+            font=_monaco(11), color=_TEXT_DIM,
             align=NSCenterTextAlignment,
         )
-        content.addSubview_(subtitle)
+        self.welcome_view.addSubview_(subtitle)
 
-        y -= 16  # spacing
+        y -= 30  # spacing
+
+        # -- Form fields --
+        label_x = 40
+        field_x = 180
+        field_w = width - field_x - 40
+
+        # Site Title
+        y -= 24
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(label_x, y, 130, 20),
+            "Site Title",
+            font=_monaco(12), color=_HEADING_PURPLE,
+        ))
+        self._title_field = _input_field(
+            NSMakeRect(field_x, y - 2, field_w, 24),
+            placeholder="My OnionPress Site",
+        )
+        self._title_field.setStringValue_("My OnionPress Site")
+        self.welcome_view.addSubview_(self._title_field)
+
+        # Username
+        y -= 40
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(label_x, y, 130, 20),
+            "Username",
+            font=_monaco(12), color=_HEADING_PURPLE,
+        ))
+        self._user_field = _input_field(
+            NSMakeRect(field_x, y - 2, field_w, 24),
+            placeholder="admin",
+        )
+        self._user_field.setStringValue_("admin")
+        self.welcome_view.addSubview_(self._user_field)
+
+        # Password
+        y -= 40
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(label_x, y, 130, 20),
+            "Password",
+            font=_monaco(12), color=_HEADING_PURPLE,
+        ))
+        self._pass_field = _input_field(
+            NSMakeRect(field_x, y - 2, field_w, 24),
+            placeholder="Choose a password",
+            secure=True,
+        )
+        self.welcome_view.addSubview_(self._pass_field)
+
+        # Password hint
+        y -= 20
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(field_x, y, field_w, 16),
+            "Save this password somewhere safe.",
+            font=NSFont.systemFontOfSize_(10), color=_TEXT_DIM,
+        ))
+
+        y -= 40  # spacing
+
+        # -- Set Up button --
+        setup_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect((width - 200) / 2, y, 200, 40)
+        )
+        setup_btn.setTitle_("Set Up OnionPress")
+        setup_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        setup_btn.setFont_(_monaco(13))
+        setup_btn.setTarget_(self)
+        setup_btn.setAction_(objc.selector(self.setupClicked_, signature=b'v@:@'))
+        setup_btn.setKeyEquivalent_("\r")  # Enter key
+        self.welcome_view.addSubview_(setup_btn)
+
+        y -= 30
+
+        # -- Estimated time --
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(20, y, width - 40, 16),
+            ">> Setup takes about 3-5 minutes",
+            font=_monaco(10), color=_ACCENT_ORANGE,
+            align=NSCenterTextAlignment,
+        ))
+
+    def _create_progress_view(self, content, width, height):
+        """Phase 2: Step checklist + progress bar + log area."""
+        self.progress_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+        content.addSubview_(self.progress_view)
+
+        y = height - 20
+
+        # -- Logo (smaller) --
+        logo_path = _logo_path()
+        if logo_path:
+            logo_image = NSImage.alloc().initWithContentsOfFile_(logo_path)
+            if logo_image:
+                logo_h = 80
+                logo_w = 100
+                y -= logo_h
+                logo_view = NSImageView.alloc().initWithFrame_(
+                    NSMakeRect((width - logo_w) / 2, y, logo_w, logo_h)
+                )
+                logo_view.setImage_(logo_image)
+                logo_view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
+                self.progress_view.addSubview_(logo_view)
+                y -= 4
+
+        # -- Title --
+        y -= 20
+        title = _label(
+            NSMakeRect(20, y, width - 40, 20),
+            "[ SETTING UP YOUR ONION SERVICE ]",
+            font=_monaco(13), color=_HEADING_PURPLE,
+            align=NSCenterTextAlignment,
+        )
+        self.progress_view.addSubview_(title)
+
+        y -= 12  # spacing
 
         # -- Step checklist --
         self.step_labels = []
         for i, step_text in enumerate(STEPS):
-            y -= 20
+            y -= 18
             mark = _MARK_PENDING
             text = f"  {mark}  {step_text}"
             lbl = _label(
-                NSMakeRect(40, y, width - 80, 18),
+                NSMakeRect(40, y, width - 80, 16),
                 text,
-                font=_monaco(12), color=_TEXT_DIM,
+                font=_monaco(11), color=_TEXT_DIM,
             )
-            content.addSubview_(lbl)
+            self.progress_view.addSubview_(lbl)
             self.step_labels.append(lbl)
 
-        y -= 16  # spacing
+        y -= 12  # spacing
 
         # -- Progress bar --
         y -= 20
@@ -207,7 +362,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.progress_bar.setMaxValue_(100)
         self.progress_bar.setDoubleValue_(0)
         self.progress_bar.setIndeterminate_(False)
-        content.addSubview_(self.progress_bar)
+        self.progress_view.addSubview_(self.progress_bar)
 
         self.percent_label = _label(
             NSMakeRect(width - 72, y, 50, 18),
@@ -215,32 +370,33 @@ class SetupProgressWindow(AppKit.NSObject):
             font=_monaco(11), color=_TEXT_DIM,
             align=NSLeftTextAlignment,
         )
-        content.addSubview_(self.percent_label)
+        self.progress_view.addSubview_(self.percent_label)
 
-        y -= 8  # spacing
+        y -= 6  # spacing
 
         # -- Status line --
-        y -= 18
+        y -= 16
         self.status_label = _label(
-            NSMakeRect(40, y, width - 80, 16),
+            NSMakeRect(40, y, width - 80, 14),
             "Initializing...",
             font=_monaco(10), color=_HEADING_PURPLE,
             align=NSCenterTextAlignment,
         )
-        content.addSubview_(self.status_label)
+        self.progress_view.addSubview_(self.status_label)
 
-        y -= 12  # spacing
+        y -= 8  # spacing
 
         # -- Log tail area --
-        y -= 120
+        log_h = max(80, y - 50)
+        y -= log_h
         log_scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(40, y, width - 80, 120)
+            NSMakeRect(40, y, width - 80, log_h)
         )
         log_scroll.setHasVerticalScroller_(True)
         log_scroll.setBorderType_(AppKit.NSBezelBorder)
 
         self.log_text_view = NSTextView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, width - 80 - 15, 120)
+            NSMakeRect(0, 0, width - 80 - 15, log_h)
         )
         self.log_text_view.setEditable_(False)
         self.log_text_view.setSelectable_(True)
@@ -248,15 +404,14 @@ class SetupProgressWindow(AppKit.NSObject):
         self.log_text_view.setTextColor_(_HEADING_PURPLE)
         self.log_text_view.setBackgroundColor_(_LOG_BG)
         self.log_text_view.setString_("Waiting for log entries...")
-        # Auto-scroll: allow vertical resize
         self.log_text_view.setVerticallyResizable_(True)
         self.log_text_view.setHorizontallyResizable_(False)
         self.log_text_view.textContainer().setWidthTracksTextView_(True)
 
         log_scroll.setDocumentView_(self.log_text_view)
-        content.addSubview_(log_scroll)
+        self.progress_view.addSubview_(log_scroll)
 
-        y -= 16  # spacing
+        y -= 8  # spacing
 
         # -- Buttons --
         y -= 32
@@ -265,16 +420,42 @@ class SetupProgressWindow(AppKit.NSObject):
         view_log_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         view_log_btn.setTarget_(self)
         view_log_btn.setAction_(objc.selector(self.viewLogClicked_, signature=b'v@:@'))
-        content.addSubview_(view_log_btn)
+        self.progress_view.addSubview_(view_log_btn)
 
         dismiss_btn = NSButton.alloc().initWithFrame_(NSMakeRect(width - 170, y, 130, 32))
         dismiss_btn.setTitle_("Dismiss")
         dismiss_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         dismiss_btn.setTarget_(self)
         dismiss_btn.setAction_(objc.selector(self.dismissClicked_, signature=b'v@:@'))
-        content.addSubview_(dismiss_btn)
+        self.progress_view.addSubview_(dismiss_btn)
 
     # -- button handlers ----------------------------------------------------
+
+    def setupClicked_(self, sender):
+        """User clicked Set Up — save credentials and switch to progress view."""
+        # Read field values
+        if self._title_field:
+            self.site_title = self._title_field.stringValue() or "My OnionPress Site"
+        if self._user_field:
+            self.admin_user = self._user_field.stringValue() or "admin"
+        if self._pass_field:
+            self.admin_pass = self._pass_field.stringValue() or ""
+
+        if not self.admin_pass:
+            # Generate a random password if none provided
+            import secrets
+            self.admin_pass = secrets.token_urlsafe(12)
+
+        # Switch to progress view
+        self._showing_welcome = False
+        if self.welcome_view:
+            self.welcome_view.setHidden_(True)
+        if self.progress_view:
+            self.progress_view.setHidden_(False)
+
+        # Fire callback to start setup
+        if self._on_setup_callback:
+            threading.Thread(target=self._on_setup_callback, daemon=True).start()
 
     def viewLogClicked_(self, sender):
         try:
@@ -294,10 +475,42 @@ class SetupProgressWindow(AppKit.NSObject):
 
     # -- public API ---------------------------------------------------------
 
+    def set_on_setup(self, callback):
+        """Set callback for when user clicks Set Up. Called in a background thread."""
+        self._on_setup_callback = callback
+
     def show(self):
         def _show():
             if not self.window:
                 self.create_window()
+            self.window.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
+        _on_main(_show)
+
+    def show_welcome(self):
+        """Show the welcome/credentials phase."""
+        def _show():
+            if not self.window:
+                self.create_window()
+            self._showing_welcome = True
+            if self.welcome_view:
+                self.welcome_view.setHidden_(False)
+            if self.progress_view:
+                self.progress_view.setHidden_(True)
+            self.window.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
+        _on_main(_show)
+
+    def show_progress(self):
+        """Switch to the progress phase (skip welcome)."""
+        def _show():
+            if not self.window:
+                self.create_window()
+            self._showing_welcome = False
+            if self.welcome_view:
+                self.welcome_view.setHidden_(True)
+            if self.progress_view:
+                self.progress_view.setHidden_(False)
             self.window.makeKeyAndOrderFront_(None)
             NSApp.activateIgnoringOtherApps_(True)
         _on_main(_show)
@@ -405,19 +618,16 @@ class SetupProgressWindow(AppKit.NSObject):
     # -- compatibility stubs ------------------------------------------------
 
     def set_modem_active(self, active):
-        pass  # No modem visualizer in safe version
+        pass
 
     def set_tor_final_hop_connected(self):
-        pass  # No Tor hop animation in safe version
+        pass
 
     def transition_to_progress(self):
-        pass  # No welcome/progress split — always shows progress
+        self.show_progress()
 
     def set_callbacks(self, on_continue=None, on_cancel=None):
-        pass  # No welcome screen callbacks needed
-
-    def show_welcome(self):
-        self.show()  # Just show the progress view
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -446,13 +656,13 @@ def get_setup_window():
 
 def show_setup_progress():
     window = get_setup_window()
-    window.show()
+    window.show_progress()
     return window
 
 def show_welcome_screen(on_continue=None, on_cancel=None):
-    """Compatibility — just shows the progress window."""
+    """Show the welcome screen with credential fields."""
     window = get_setup_window()
-    window.show()
+    window.show_welcome()
     return window
 
 def hide_setup_progress():
@@ -477,9 +687,11 @@ if __name__ == "__main__":
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
 
     win = get_setup_window()
-    win.show()
 
-    def demo():
+    def on_setup():
+        print(f"Title: {win.site_title}")
+        print(f"User: {win.admin_user}")
+        print(f"Pass: {win.admin_pass}")
         time.sleep(1)
         for i in range(len(STEPS)):
             win.set_step(i)
@@ -491,5 +703,7 @@ if __name__ == "__main__":
         win.close()
         AppKit.NSApp.terminate_(None)
 
-    threading.Thread(target=demo, daemon=True).start()
+    win.set_on_setup(on_setup)
+    win.show_welcome()
+
     app.run()

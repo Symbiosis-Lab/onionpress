@@ -1115,12 +1115,14 @@ class OnionPressApp(rumps.App):
             self.log("UPDATE_ON_LAUNCH enabled - checking for Docker image updates...")
             self.update_docker_images(show_notifications=False)
 
-        # Show setup window now (NSApp is ready) if first run
+        # First run: show welcome screen, wait for user to click "Set Up",
+        # then start_service runs in the callback
         if self._is_first_run and setup_window:
             self.dismiss_launch_splash()
-            sw = setup_window.show_setup_progress()
-            sw.set_step(0)
-            sw.set_status("Starting up...")
+            sw = setup_window.get_setup_window()
+            sw.set_on_setup(lambda: self._first_run_after_welcome())
+            setup_window.show_welcome_screen()
+            return  # Don't call start_service — the callback will
 
         self.start_service(None)
 
@@ -2610,6 +2612,54 @@ class OnionPressApp(rumps.App):
 
         threading.Thread(target=start, daemon=True).start()
 
+    def _first_run_after_welcome(self):
+        """Called after user fills in credentials and clicks Set Up.
+        Runs on a background thread (from setup_window callback)."""
+        self.start_service(None)
+
+    def _wp_core_install(self, sw):
+        """Run wp core install with credentials from the setup window."""
+        if not sw or not sw.admin_pass:
+            return
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            # Get the onion address for --url
+            addr_result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor", "cat",
+                 "/var/lib/tor/hidden_service/wordpress/hostname"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=10
+            )
+            onion_addr = addr_result.stdout.strip() or "localhost"
+
+            self.log(f"Running wp core install (title={sw.site_title}, user={sw.admin_user})")
+            if sw:
+                sw.set_status("Configuring WordPress...")
+                sw.add_log(f"Installing WordPress as '{sw.admin_user}'...")
+
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "core", "install",
+                 f"--url=http://{onion_addr}",
+                 f"--title={sw.site_title}",
+                 f"--admin_user={sw.admin_user}",
+                 f"--admin_password={sw.admin_pass}",
+                 "--admin_email=admin@localhost",
+                 "--allow-root", "--skip-email"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=60
+            )
+            if result.returncode == 0:
+                self.log("WordPress installed successfully via wp core install")
+                if sw:
+                    sw.add_log("WordPress configured successfully")
+            else:
+                self.log(f"wp core install failed: {result.stderr[-200:]}")
+                if sw:
+                    sw.add_log("WordPress setup may need manual configuration")
+        except Exception as e:
+            self.log(f"wp core install error: {e}")
+
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.
 
@@ -2773,9 +2823,13 @@ class OnionPressApp(rumps.App):
                     step4_done = True
                     self.log("WordPress responding")
                     if sw:
+                        sw.add_log("WordPress responding")
+                    # Install WordPress with credentials from setup window
+                    if sw and sw.admin_pass:
+                        self._wp_core_install(sw)
+                    if sw:
                         sw.complete_step(4)
                         sw.set_progress(5 / 8)
-                        sw.add_log("WordPress responding")
                         sw.set_status("Publishing onion address to Tor network (may take 5-10 min)...")
 
             # Between steps 4 and 5, feed bootstrap % into setup window
