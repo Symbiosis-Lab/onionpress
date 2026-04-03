@@ -163,11 +163,19 @@ class BackupProgressWindow:
                     alert.setIcon_(icon)
         response = alert.runModal()
         if response == AppKit.NSAlertFirstButtonReturn:
-            # Restart: relaunch the app
+            # Restart: relaunch the outer OnionPress.app
+            # bundlePath() is MenubarApp inside OnionPress.app/Contents/Resources/MenubarApp
+            # Walk up to find the outer .app bundle
             import subprocess
-            app_path = os.path.join(bundle.bundlePath(), "..", "..")
-            app_path = os.path.normpath(app_path)
-            subprocess.Popen(["open", "-n", app_path])
+            path = bundle.bundlePath()
+            while path and path != "/":
+                if path.endswith(".app") and not path.endswith("MenubarApp"):
+                    break
+                path = os.path.dirname(path)
+            if not path or path == "/":
+                # Fallback: try /Applications/OnionPress.app
+                path = "/Applications/OnionPress.app"
+            subprocess.Popen(["open", path])
             import rumps
             rumps.quit_application()
 
