@@ -262,11 +262,24 @@ class SetupProgressWindow(AppKit.NSObject):
             "Password",
             font=_monaco(12), color=_HEADING_PURPLE,
         ))
-        self._pass_field = _input_field(
-            NSMakeRect(field_x, y - 2, field_w, 24),
-            placeholder="Choose a password",
-        )
+        pass_frame = NSMakeRect(field_x, y - 2, field_w - 36, 24)
+        # Visible field (shown by default)
+        self._pass_field = _input_field(pass_frame, placeholder="Choose a password")
         self.welcome_view.addSubview_(self._pass_field)
+        # Secure field (hidden by default)
+        self._pass_field_secure = _input_field(pass_frame, placeholder="Choose a password", secure=True)
+        self._pass_field_secure.setHidden_(True)
+        self.welcome_view.addSubview_(self._pass_field_secure)
+        self._pass_visible = True
+        # Eye toggle button
+        eye_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(field_x + field_w - 32, y - 1, 30, 22)
+        )
+        eye_btn.setTitle_("\U0001F441")  # 👁
+        eye_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        eye_btn.setTarget_(self)
+        eye_btn.setAction_(objc.selector(self.togglePasswordVisibility_, signature=b'v@:@'))
+        self.welcome_view.addSubview_(eye_btn)
 
         # Password hint
         y -= 20
@@ -430,6 +443,25 @@ class SetupProgressWindow(AppKit.NSObject):
 
     # -- button handlers ----------------------------------------------------
 
+    def togglePasswordVisibility_(self, sender):
+        """Toggle between visible and secure password fields."""
+        if self._pass_visible:
+            # Switch to secure: copy text, hide visible, show secure
+            pw = self._pass_field.stringValue()
+            self._pass_field_secure.setStringValue_(pw)
+            self._pass_field.setHidden_(True)
+            self._pass_field_secure.setHidden_(False)
+            self._pass_field_secure.becomeFirstResponder()
+            self._pass_visible = False
+        else:
+            # Switch to visible: copy text, hide secure, show visible
+            pw = self._pass_field_secure.stringValue()
+            self._pass_field.setStringValue_(pw)
+            self._pass_field_secure.setHidden_(True)
+            self._pass_field.setHidden_(False)
+            self._pass_field.becomeFirstResponder()
+            self._pass_visible = True
+
     def setupClicked_(self, sender):
         """User clicked Set Up — save credentials and switch to progress view."""
         # Read field values
@@ -437,8 +469,11 @@ class SetupProgressWindow(AppKit.NSObject):
             self.site_title = self._title_field.stringValue() or "My OnionPress Site"
         if self._user_field:
             self.admin_user = self._user_field.stringValue() or "admin"
-        if self._pass_field:
+        # Read from whichever password field is visible
+        if self._pass_visible:
             self.admin_pass = self._pass_field.stringValue() or ""
+        else:
+            self.admin_pass = self._pass_field_secure.stringValue() or ""
 
         if not self.admin_pass:
             # Generate a random password if none provided
