@@ -1673,17 +1673,21 @@ class OnionPressApp(rumps.App):
                             ).start()
                     elif wp_installed is False and not self._setup_page_opened:
                         # WordPress container responded but WP not installed.
-                        # Require 5 consecutive "not installed" results before opening
-                        # the setup page — the DB may still be warming up.
-                        self._wp_not_installed_count += 1
-                        if self._wp_not_installed_count >= 5:
-                            self._wp_installed = False
-                            self._setup_page_opened = True
-                            self.log("WordPress not installed — opening setup page")
-                            # Dismiss dialogs before opening browser
-                            self.dismiss_setup_dialog()
-                            self.dismiss_launch_splash()
-                            subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
+                        # On first run, wp core install handles this — don't open browser.
+                        if self._is_first_run:
+                            pass
+                        else:
+                            # Require 5 consecutive "not installed" results before opening
+                            # the setup page — the DB may still be warming up.
+                            self._wp_not_installed_count += 1
+                            if self._wp_not_installed_count >= 5:
+                                self._wp_installed = False
+                                self._setup_page_opened = True
+                                self.log("WordPress not installed — opening setup page")
+                                # Dismiss dialogs before opening browser
+                                self.dismiss_setup_dialog()
+                                self.dismiss_launch_splash()
+                                subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
                     else:
                         # Reset counter on None (container not ready) or True
                         self._wp_not_installed_count = 0
@@ -2648,7 +2652,7 @@ class OnionPressApp(rumps.App):
                  f"--title={sw.site_title}",
                  f"--admin_user={sw.admin_user}",
                  f"--admin_password={sw.admin_pass}",
-                 "--admin_email=admin@localhost",
+                 "--admin_email=admin@onionpress.local",
                  "--allow-root", "--skip-email"],
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=60
@@ -2657,6 +2661,17 @@ class OnionPressApp(rumps.App):
                 self.log("WordPress installed successfully via wp core install")
                 if sw:
                     sw.add_log("WordPress configured successfully")
+                    sw.set_status("Installing plugins...")
+                    sw.add_log("Installing plugins and themes...")
+                # Re-run launcher start to install mu-plugins, multisite, etc.
+                subprocess.run(
+                    [self.launcher_script, "start"],
+                    capture_output=True, text=True, encoding='utf-8',
+                    errors='replace', timeout=120
+                )
+                self.log("Plugins and mu-plugins installed")
+                if sw:
+                    sw.add_log("Plugins installed")
             else:
                 self.log(f"wp core install failed: {result.stderr[-200:]}")
                 if sw:
@@ -3809,8 +3824,11 @@ License: AGPL v3"""
                 subprocess.run([colima_bin, "stop", "-f"], capture_output=True, timeout=60, env=env)
                 self.log("Uninstall: Deleting Colima VM...")
                 subprocess.run([colima_bin, "delete", "-f"], capture_output=True, timeout=60, env=env)
+                # Wait for Colima to fully shut down before killing orphans
+                time.sleep(3)
                 # Kill any orphaned colima/lima processes as a fallback
                 subprocess.run(["pkill", "-f", f"{self.colima_home}"], capture_output=True, timeout=10)
+                time.sleep(2)
                 # Note: Docker volumes lived inside the Colima VM and are deleted with it
 
                 # Remove login item LaunchAgent
