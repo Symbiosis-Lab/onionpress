@@ -3813,8 +3813,11 @@ License: AGPL v3"""
                 subprocess.run([colima_bin, "stop", "-f"], capture_output=True, timeout=60, env=env)
                 self.log("Uninstall: Deleting Colima VM...")
                 subprocess.run([colima_bin, "delete", "-f"], capture_output=True, timeout=60, env=env)
+                # Wait for Colima to fully shut down before killing orphans
+                time.sleep(3)
                 # Kill any orphaned colima/lima processes as a fallback
                 subprocess.run(["pkill", "-f", f"{self.colima_home}"], capture_output=True, timeout=10)
+                time.sleep(2)
                 # Note: Docker volumes lived inside the Colima VM and are deleted with it
 
                 # Remove login item LaunchAgent
