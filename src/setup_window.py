@@ -114,6 +114,21 @@ STEPS = [
     "Opening tor-enabled browser",
 ]
 
+def _default_site_title():
+    """Generate default site title from macOS user's initials."""
+    try:
+        import subprocess
+        result = subprocess.run(['id', '-F'], capture_output=True, text=True, timeout=5)
+        full_name = result.stdout.strip()
+        if full_name:
+            initials = ''.join(w[0].upper() for w in full_name.split() if w)
+            if initials:
+                return f"{initials} OnionPress"
+    except Exception:
+        pass
+    return "My OnionPress Site"
+
+
 _MARK_DONE    = "\u2713"   # ✓
 _MARK_ACTIVE  = "\u27F3"  # ⟳
 _MARK_PENDING = "\u00B7"  # ·
@@ -141,7 +156,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.current_step = -1
         self._log_file_path = os.path.expanduser("~/.onionpress/onionpress.log")
         # Credentials from welcome phase
-        self.site_title = "My OnionPress Site"
+        self.site_title = _default_site_title()
         self.admin_user = "admin"
         self.admin_pass = ""
         self._title_field = None
@@ -236,9 +251,9 @@ class SetupProgressWindow(AppKit.NSObject):
         ))
         self._title_field = _input_field(
             NSMakeRect(field_x, y - 2, field_w, 24),
-            placeholder="My OnionPress Site",
+            placeholder=_default_site_title(),
         )
-        self._title_field.setStringValue_("My OnionPress Site")
+        self._title_field.setStringValue_(_default_site_title())
         self.welcome_view.addSubview_(self._title_field)
 
         # Username
@@ -466,7 +481,7 @@ class SetupProgressWindow(AppKit.NSObject):
         """User clicked Set Up — save credentials and switch to progress view."""
         # Read field values
         if self._title_field:
-            self.site_title = self._title_field.stringValue() or "My OnionPress Site"
+            self.site_title = self._title_field.stringValue() or _default_site_title()
         if self._user_field:
             self.admin_user = self._user_field.stringValue() or "admin"
         # Read from whichever password field is visible
