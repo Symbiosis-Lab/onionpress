@@ -279,8 +279,12 @@ class SetupProgressWindow(AppKit.NSObject):
         try:
             log_path = os.path.expanduser("~/.onionpress/onionpress.log")
             if os.path.exists(log_path):
-                import subprocess
-                subprocess.Popen(["open", "-a", "Console", log_path])
+                try:
+                    from onionpress.ui_helpers import LogViewerWindow
+                    LogViewerWindow.show_for_file(log_path, "OnionPress Log")
+                except ImportError:
+                    import subprocess
+                    subprocess.Popen(["open", "-a", "Console", log_path])
         except Exception:
             pass
 
