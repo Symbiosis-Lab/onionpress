@@ -2312,7 +2312,11 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            url = f"http://{self.onion_address}"
+            # First run: open to new post page so user can start blogging
+            if self._is_first_run:
+                url = f"http://{self.onion_address}/wp-admin/post-new.php"
+            else:
+                url = f"http://{self.onion_address}"
 
             if op_browser.is_tor_browser_installed():
                 self.log(f"Auto-opening Tor Browser: {url}")
