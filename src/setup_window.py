@@ -94,6 +94,7 @@ STEPS = [
     "Starting WordPress + Tor",
     "Checking reachability",
     "Starting heartbeat",
+    "Opening tor-enabled browser",
 ]
 
 _MARK_DONE    = "\u2713"   # ✓

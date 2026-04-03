@@ -144,9 +144,30 @@ class OnionPressApp(rumps.App):
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None, template=False)
 
+        # Detect first-run early so we can show the right window
+        self._is_first_run = False
+        secrets_file = os.path.join(self.app_support, "secrets")
+        if not os.path.exists(secrets_file):
+            self._is_first_run = True
+        else:
+            # Check FORCE_SETUP_WINDOW in config (cheap file read)
+            config_file = os.path.join(self.app_support, "config")
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, 'r', encoding='utf-8', errors='replace') as f:
+                        for line in f:
+                            if line.strip() == "FORCE_SETUP_WINDOW=yes":
+                                self._is_first_run = True
+                                break
+                except Exception:
+                    pass
+
         # Show launch splash IMMEDIATELY before any I/O
+        # (setup window is shown later from auto_start when NSApp is ready)
         self.launch_splash = None
-        self.show_launch_splash()
+        self.launch_splash_time_field = None
+        if not self._is_first_run:
+            self.show_launch_splash()
 
         # Now load icon files (this does I/O but splash is already showing)
         self.icon_running = os.path.join(self.resources_dir, "menubar-icon-running.png")
@@ -1088,6 +1109,12 @@ class OnionPressApp(rumps.App):
             self.log("UPDATE_ON_LAUNCH enabled - checking for Docker image updates...")
             self.update_docker_images(show_notifications=False)
 
+        # Show setup window now (NSApp is ready) if first run
+        if self._is_first_run and setup_window:
+            sw = setup_window.show_setup_progress()
+            sw.set_step(0)
+            sw.set_status("Starting up...")
+
         self.start_service(None)
 
 
@@ -1446,7 +1473,7 @@ class OnionPressApp(rumps.App):
                         # Dismiss setup dialog if it's showing
                         self.dismiss_setup_dialog()
 
-                        # Advance setup window: reachability + heartbeat, then close
+                        # Advance setup window: reachability + heartbeat + browser, then close
                         if setup_window and setup_window._setup_window is not None:
                             sw = setup_window._setup_window
                             if sw.window:
@@ -1456,12 +1483,8 @@ class OnionPressApp(rumps.App):
                                 sw.set_status("Starting heartbeat...")
                                 sw.add_log("Starting heartbeat...")
                                 sw.complete_step(6)
-                                sw.show_completion(self.onion_address)
-                                # Auto-close after 10 seconds (give user time to read address)
-                                def _close_setup():
-                                    time.sleep(10)
-                                    setup_window.close_setup_progress()
-                                threading.Thread(target=_close_setup, daemon=True).start()
+                                sw.set_status("Opening tor-enabled browser...")
+                                sw.add_log("Opening tor-enabled browser...")
 
                         # Auto-open browser on first ready (runs in background
                         # so the monitoring loop can continue and start the proxy)
@@ -1469,6 +1492,18 @@ class OnionPressApp(rumps.App):
                             self.auto_opened_browser = True
                             self.log(f"DEBUG: Spawning auto_open_browser thread, onion_address={self.onion_address!r}")
                             threading.Thread(target=self.auto_open_browser, daemon=True).start()
+
+                        # Complete browser step and show completion in setup window
+                        if setup_window and setup_window._setup_window is not None:
+                            sw = setup_window._setup_window
+                            if sw.window:
+                                sw.complete_step(7)
+                                sw.show_completion(self.onion_address)
+                                # Auto-close after 10 seconds (give user time to read address)
+                                def _close_setup():
+                                    time.sleep(10)
+                                    setup_window.close_setup_progress()
+                                threading.Thread(target=_close_setup, daemon=True).start()
 
                         # Force menu update (changes icon to purple)
                         self.update_menu()
@@ -2506,14 +2541,12 @@ class OnionPressApp(rumps.App):
             force_setup = self._read_config_value("FORCE_SETUP_WINDOW") == "yes"
             first_run = not os.path.exists(secrets_file) or force_setup
 
-            # First run: show setup window and run setup
+            # First run: setup window is already showing (from __init__), just run setup
             if first_run:
                 self.log("First run detected - starting installation")
-                # Replace splash with setup progress window
-                self.dismiss_launch_splash()
+                self.dismiss_launch_splash()  # In case splash was shown instead
                 if setup_window:
-                    sw = setup_window.show_setup_progress()
-                    sw.set_step(0)
+                    sw = setup_window.get_setup_window()
                     sw.add_log("First-time setup starting...")
                 threading.Thread(target=self._run_first_time_setup, daemon=True).start()
                 return
@@ -2579,7 +2612,7 @@ class OnionPressApp(rumps.App):
                 sw.add_log(f"ERROR: {msg}")
             return
         if sw:
-            sw.set_progress(1 / 7)
+            sw.set_progress(1 / 8)
             sw.complete_step(0)
             sw.add_log("System check passed")
 
@@ -2649,7 +2682,7 @@ class OnionPressApp(rumps.App):
                         if result.returncode == 0:
                             step1_done = True
                             if sw:
-                                sw.set_progress(2 / 7)
+                                sw.set_progress(2 / 8)
                                 sw.complete_step(1)
                                 sw.add_log("Container runtime ready")
                                 sw.set_status("Downloading container images...")
@@ -2672,7 +2705,7 @@ class OnionPressApp(rumps.App):
                             self.log(f"Image downloaded: {name}")
                             if sw:
                                 sw.set_progress(
-                                    (2 + done / total_images) / 7,
+                                    (2 + done / total_images) / 8,
                                     f"Downloading images ({done}/{total_images})"
                                 )
                                 sw.add_log(f"Image downloaded: {name}")
@@ -2700,7 +2733,7 @@ class OnionPressApp(rumps.App):
                         step3_done = True
                         if sw:
                             sw.complete_step(3)
-                            sw.set_progress(4 / 7)
+                            sw.set_progress(4 / 8)
                             sw.add_log(f"Address: {addr[:30]}...")
                             sw.set_status("Starting WordPress + Tor...")
                 except Exception:
@@ -2713,7 +2746,7 @@ class OnionPressApp(rumps.App):
                     self.log("WordPress responding")
                     if sw:
                         sw.complete_step(4)
-                        sw.set_progress(5 / 7)
+                        sw.set_progress(5 / 8)
                         sw.add_log("WordPress responding")
                         sw.set_status("Waiting for Tor reachability...")
 
@@ -2741,7 +2774,7 @@ class OnionPressApp(rumps.App):
                 sw.complete_step(3)
             if not step4_done:
                 sw.complete_step(4)
-            sw.set_progress(5 / 7)
+            sw.set_progress(5 / 8)
             sw.set_status("Waiting for Tor reachability...")
 
         # Send USR2 to arm onionheaven's HSFETCH timer for cold start
