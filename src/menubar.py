@@ -2690,9 +2690,7 @@ class OnionPressApp(rumps.App):
             if step2_done and not step3_done:
                 try:
                     result = subprocess.run(
-                        [docker_bin, "compose", "-f",
-                         os.path.join(self.resources_dir, "docker", "docker-compose.yml"),
-                         "exec", "-T", "tor", "cat",
+                        [docker_bin, "exec", "onionpress-tor", "cat",
                          "/var/lib/tor/hidden_service/wordpress/hostname"],
                         capture_output=True, text=True, encoding='utf-8',
                         errors='replace', timeout=10
@@ -2702,7 +2700,7 @@ class OnionPressApp(rumps.App):
                         step3_done = True
                         if sw:
                             sw.complete_step(3)
-                            sw.set_progress(3 / 7)
+                            sw.set_progress(4 / 7)
                             sw.add_log(f"Address: {addr[:30]}...")
                             sw.set_status("Starting WordPress + Tor...")
                 except Exception:
@@ -2718,6 +2716,17 @@ class OnionPressApp(rumps.App):
                         sw.set_progress(5 / 7)
                         sw.add_log("WordPress responding")
                         sw.set_status("Waiting for Tor reachability...")
+
+            # Between steps 4 and 5, feed bootstrap % into setup window
+            # so it doesn't look frozen during descriptor propagation
+            if step4_done and sw and sw.window:
+                pct = self._parse_bootstrap_percentage()
+                elapsed = int(time.time() - setup_start)
+                mins, secs = divmod(elapsed, 60)
+                if pct < 100:
+                    sw.set_status(f"Tor bootstrap: {pct}% ({mins}m {secs:02d}s)")
+                else:
+                    sw.set_status(f"Waiting for Tor reachability... {mins}m {secs:02d}s")
 
             time.sleep(3)
 
