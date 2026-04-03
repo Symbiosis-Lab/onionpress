@@ -142,6 +142,35 @@ class BackupProgressWindow:
                     alert.setIcon_(icon)
         alert.runModal()
 
+    def finish_with_restart(self, message):
+        """Close progress window, show alert with Restart Now button."""
+        if self._window:
+            self._window.orderOut_(None)
+            self._window = None
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("Done")
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("Restart Now")
+        alert.addButtonWithTitle_("Later")
+        # Set app icon
+        import os
+        bundle = AppKit.NSBundle.mainBundle()
+        if bundle and bundle.resourcePath():
+            icon_path = os.path.join(bundle.resourcePath(), "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
+        response = alert.runModal()
+        if response == AppKit.NSAlertFirstButtonReturn:
+            # Restart: relaunch the app
+            import subprocess
+            app_path = os.path.join(bundle.bundlePath(), "..", "..")
+            app_path = os.path.normpath(app_path)
+            subprocess.Popen(["open", "-n", app_path])
+            import rumps
+            rumps.quit_application()
+
 
 class LogViewerActions(AppKit.NSObject):
     """Singleton handling custom log viewer menu actions."""

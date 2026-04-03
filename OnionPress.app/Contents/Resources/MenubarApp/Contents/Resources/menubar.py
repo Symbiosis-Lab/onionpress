@@ -1018,10 +1018,14 @@ class OnionPressApp(rumps.App):
 
         # Wait for Colima to be ready (important for first-time setup)
         self.log("Waiting for container runtime to be ready...")
-        self.update_splash_status("Waiting for container runtime...")
+        if self._is_first_run:
+            msg = "Starting containers (est. 3 min)..."
+        else:
+            msg = "Waiting for container runtime..."
+        self.update_splash_status(msg)
         if self._is_first_run and setup_window and setup_window._setup_window:
-            setup_window._setup_window.set_status("Waiting for container runtime...")
-            setup_window._setup_window.add_log("Waiting for container runtime...")
+            setup_window._setup_window.set_status(msg)
+            setup_window._setup_window.add_log(msg)
         docker_bin = os.path.join(self.bin_dir, "docker")
         colima_initialized = os.path.join(self.colima_home, ".initialized")
 
@@ -1111,12 +1115,14 @@ class OnionPressApp(rumps.App):
             self.log("UPDATE_ON_LAUNCH enabled - checking for Docker image updates...")
             self.update_docker_images(show_notifications=False)
 
-        # Show setup window now (NSApp is ready) if first run
+        # First run: show welcome screen, wait for user to click "Set Up",
+        # then start_service runs in the callback
         if self._is_first_run and setup_window:
             self.dismiss_launch_splash()
-            sw = setup_window.show_setup_progress()
-            sw.set_step(0)
-            sw.set_status("Starting up...")
+            sw = setup_window.get_setup_window()
+            sw.set_on_setup(lambda: self._first_run_after_welcome())
+            setup_window.show_welcome_screen()
+            return  # Don't call start_service — the callback will
 
         self.start_service(None)
 
@@ -1260,8 +1266,11 @@ class OnionPressApp(rumps.App):
                     elif http_code.startswith("000"):
                         # Decode curl exit code for debugging
                         _curl_reasons = {
+                            "1": "protocol error (descriptor not yet available)",
+                            "6": "DNS resolution failed",
                             "7": "connection refused",
                             "28": "timeout (30s)",
+                            "35": "TLS handshake failed",
                             "52": "empty reply",
                             "56": "connection reset",
                             "97": "SOCKS handshake failed (descriptor not yet available)",
@@ -1628,11 +1637,17 @@ class OnionPressApp(rumps.App):
                         self.start_caffeinate()
                         self.update_menu()
 
-                # OnionHeaven: start heartbeat as soon as Tor is internally ready.
-                # Don't wait for purple — the heartbeat IS the reclaim mechanism.
-                # If OnionHeaven has taken over our address, the heartbeat's /online
-                # will release it. The heartbeat loop retries every 60s on failure.
-                if (self._tor_internally_ready and not self.is_onionheaven
+                # OnionHeaven: start heartbeat as soon as Tor is bootstrapped.
+                # Don't wait for internal readiness or purple — the heartbeat IS
+                # the reclaim mechanism. If OnionHeaven has taken over our address,
+                # the heartbeat's /online will release it. Without this, fresh
+                # installs get stuck: 302 takeover → internal check fails →
+                # _tor_internally_ready never set → heartbeat never fires.
+                # Use bootstrap percentage instead (100% = Tor can make circuits).
+                tor_bootstrapped = self._last_bootstrap_pct >= 100
+                if (tor_bootstrapped and self.onion_address
+                        and self.onion_address not in ["Starting...", "Not running", "Generating address..."]
+                        and not self.is_onionheaven
                         and not self._onionheaven_registration_succeeded
                         and not self._onionheaven_registration_in_flight):
                     self._onionheaven_registration_in_flight = True
@@ -1823,7 +1838,7 @@ class OnionPressApp(rumps.App):
                 self.menu["Stop"].set_callback(None)
                 self.menu["Restart"].set_callback(None)
                 self.menu["Backup..."].set_callback(None)
-                self.menu["Restore..."].set_callback(None)
+                self.menu["Restore..."].set_callback(self.restore)
                 # Stopped: disable browser items
                 self.browser_menu_item.set_callback(None)
                 self.local_site_item.title = ""
@@ -2297,7 +2312,11 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            url = f"http://{self.onion_address}"
+            # First run: open to login page, redirect to homepage (admin bar visible)
+            if self._is_first_run:
+                url = f"http://{self.onion_address}/wp-login.php?redirect_to=/"
+            else:
+                url = f"http://{self.onion_address}"
 
             if op_browser.is_tor_browser_installed():
                 self.log(f"Auto-opening Tor Browser: {url}")
@@ -2597,6 +2616,54 @@ class OnionPressApp(rumps.App):
 
         threading.Thread(target=start, daemon=True).start()
 
+    def _first_run_after_welcome(self):
+        """Called after user fills in credentials and clicks Set Up.
+        Runs on a background thread (from setup_window callback)."""
+        self.start_service(None)
+
+    def _wp_core_install(self, sw):
+        """Run wp core install with credentials from the setup window."""
+        if not sw or not sw.admin_pass:
+            return
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            # Get the onion address for --url
+            addr_result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor", "cat",
+                 "/var/lib/tor/hidden_service/wordpress/hostname"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=10
+            )
+            onion_addr = addr_result.stdout.strip() or "localhost"
+
+            self.log(f"Running wp core install (title={sw.site_title}, user={sw.admin_user})")
+            if sw:
+                sw.set_status("Configuring WordPress...")
+                sw.add_log(f"Installing WordPress as '{sw.admin_user}'...")
+
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "core", "install",
+                 f"--url=http://{onion_addr}",
+                 f"--title={sw.site_title}",
+                 f"--admin_user={sw.admin_user}",
+                 f"--admin_password={sw.admin_pass}",
+                 "--admin_email=admin@localhost",
+                 "--allow-root", "--skip-email"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=60
+            )
+            if result.returncode == 0:
+                self.log("WordPress installed successfully via wp core install")
+                if sw:
+                    sw.add_log("WordPress configured successfully")
+            else:
+                self.log(f"wp core install failed: {result.stderr[-200:]}")
+                if sw:
+                    sw.add_log("WordPress setup may need manual configuration")
+        except Exception as e:
+            self.log(f"wp core install error: {e}")
+
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.
 
@@ -2645,8 +2712,10 @@ class OnionPressApp(rumps.App):
                     capture_output=True, text=True, encoding='utf-8', errors='replace'
                 )
                 if result.returncode != 0:
-                    launcher_failed[0] = True
-                    self.log(f"Launcher failed (rc={result.returncode}): {result.stderr[-200:]}")
+                    # Don't treat as fatal — the launcher may return non-zero for
+                    # benign reasons (port offset log message hitting system `log`).
+                    # The milestone polling loop will detect real failures via timeout.
+                    self.log(f"Launcher exited with rc={result.returncode} (may be benign)")
             except Exception as e:
                 launcher_failed[0] = True
                 self.log(f"Error in _run_first_time_setup: {e}")
@@ -2758,10 +2827,14 @@ class OnionPressApp(rumps.App):
                     step4_done = True
                     self.log("WordPress responding")
                     if sw:
+                        sw.add_log("WordPress responding")
+                    # Install WordPress with credentials from setup window
+                    if sw and sw.admin_pass:
+                        self._wp_core_install(sw)
+                    if sw:
                         sw.complete_step(4)
                         sw.set_progress(5 / 8)
-                        sw.add_log("WordPress responding")
-                        sw.set_status("Waiting for Tor reachability...")
+                        sw.set_status("Publishing onion address to Tor network (may take 5-10 min)...")
 
             # Between steps 4 and 5, feed bootstrap % into setup window
             # so it doesn't look frozen during descriptor propagation
@@ -2772,7 +2845,7 @@ class OnionPressApp(rumps.App):
                 if pct < 100:
                     sw.set_status(f"Tor bootstrap: {pct}% ({mins}m {secs:02d}s)")
                 else:
-                    sw.set_status(f"Waiting for Tor reachability... {mins}m {secs:02d}s")
+                    sw.set_status(f"Publishing onion address to Tor network (may take 5-10 min)... {mins}m {secs:02d}s")
 
             time.sleep(3)
 
@@ -2788,7 +2861,7 @@ class OnionPressApp(rumps.App):
             if not step4_done:
                 sw.complete_step(4)
             sw.set_progress(5 / 8)
-            sw.set_status("Waiting for Tor reachability...")
+            sw.set_status("Publishing onion address to Tor network (may take 5-10 min)...")
 
         # Send USR2 to arm onionheaven's HSFETCH timer for cold start
         for container in ["onionpress-tor", "onionheaven"]:
@@ -3182,10 +3255,8 @@ class OnionPressApp(rumps.App):
                     else:
                         notes.append(f"OnionHeaven detected — VM memory: {cur_mem} GB.")
 
-                notes.append("\nPlease quit and relaunch OnionPress for the restore to take full effect.")
-
                 summary = "Site restored successfully.\n\n" + "\n".join(notes)
-                _main_thread(lambda: pw.finish(summary))
+                _main_thread(lambda: pw.finish_with_restart(summary))
             except Exception as e:
                 self.log(f"Restore failed: {e}")
                 _main_thread(lambda: pw.finish(f"Restore failed: {e}"))
