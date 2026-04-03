@@ -163,22 +163,10 @@ class OnionPressApp(rumps.App):
             except Exception:
                 pass
 
-        # Show window IMMEDIATELY before any I/O
+        # Always show splash first — setup window replaces it from auto_start()
         self.launch_splash = None
         self.launch_splash_time_field = None
-        if self._is_first_run and setup_window:
-            # First run: show setup window directly (same thread as splash)
-            try:
-                sw = setup_window.get_setup_window()
-                sw.create_window()
-                sw.window.makeKeyAndOrderFront_(None)
-                sw.set_step(0)
-                sw.set_status("Starting up...")
-            except Exception:
-                # Fallback to splash if setup window fails
-                self.show_launch_splash()
-        else:
-            self.show_launch_splash()
+        self.show_launch_splash()
 
         # Now load icon files (this does I/O but splash is already showing)
         self.icon_running = os.path.join(self.resources_dir, "menubar-icon-running.png")
@@ -1125,6 +1113,7 @@ class OnionPressApp(rumps.App):
 
         # Show setup window now (NSApp is ready) if first run
         if self._is_first_run and setup_window:
+            self.dismiss_launch_splash()
             sw = setup_window.show_setup_progress()
             sw.set_step(0)
             sw.set_status("Starting up...")
