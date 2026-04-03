@@ -177,7 +177,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.44"
+        self.version = "2.4.45"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -3254,6 +3254,20 @@ class OnionPressApp(rumps.App):
 
                 restored_addr = metadata.get('onion_address', addr)
 
+                # Restart containers to pick up restored keys
+                log_and_update("Restarting with restored address...")
+                try:
+                    import_flag = os.path.join(self.app_support, ".import-key-pending")
+                    with open(import_flag, 'w') as f:
+                        f.write("1")
+                    subprocess.run(
+                        [self.launcher_script, "restart"],
+                        capture_output=True, text=True, encoding='utf-8',
+                        errors='replace', timeout=120)
+                    self.log(f"Restarted with restored address: {restored_addr}")
+                except Exception as e:
+                    self.log(f"Warning: could not auto-restart: {e}")
+
                 # Build summary of what was restored and what will happen
                 notes = [f"Onion address: {restored_addr}"]
 
@@ -3271,7 +3285,7 @@ class OnionPressApp(rumps.App):
                         notes.append(f"OnionHeaven detected — VM memory: {cur_mem} GB.")
 
                 summary = "Site restored successfully.\n\n" + "\n".join(notes)
-                _main_thread(lambda: pw.finish_with_restart(summary))
+                _main_thread(lambda: pw.finish(summary))
             except Exception as e:
                 self.log(f"Restore failed: {e}")
                 _main_thread(lambda: pw.finish(f"Restore failed: {e}"))
@@ -4547,7 +4561,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.44 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.45 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
