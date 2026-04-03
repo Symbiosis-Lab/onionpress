@@ -224,7 +224,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.status_label = _label(
             NSMakeRect(40, y, width - 80, 16),
             "Initializing...",
-            font=_monaco(10), color=_TEXT_DIM,
+            font=_monaco(10), color=_HEADING_PURPLE,
             align=NSCenterTextAlignment,
         )
         content.addSubview_(self.status_label)
