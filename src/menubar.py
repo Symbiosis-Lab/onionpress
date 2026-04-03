@@ -144,29 +144,40 @@ class OnionPressApp(rumps.App):
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None, template=False)
 
-        # Detect first-run early so we can show the right window
+        # Detect first-run early so we can show the right window.
+        # Use .setup_complete marker (written by Python after setup finishes)
+        # instead of secrets (which the launcher recreates before Python starts).
         self._is_first_run = False
-        secrets_file = os.path.join(self.app_support, "secrets")
-        if not os.path.exists(secrets_file):
+        setup_marker = os.path.join(self.app_support, ".setup_complete")
+        if not os.path.exists(setup_marker):
             self._is_first_run = True
-        else:
-            # Check FORCE_SETUP_WINDOW in config (cheap file read)
-            config_file = os.path.join(self.app_support, "config")
-            if os.path.exists(config_file):
-                try:
-                    with open(config_file, 'r', encoding='utf-8', errors='replace') as f:
-                        for line in f:
-                            if line.strip() == "FORCE_SETUP_WINDOW=yes":
-                                self._is_first_run = True
-                                break
-                except Exception:
-                    pass
+        # Check FORCE_SETUP_WINDOW in config
+        config_file = os.path.join(self.app_support, "config")
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r', encoding='utf-8', errors='replace') as f:
+                    for line in f:
+                        if line.strip() == "FORCE_SETUP_WINDOW=yes":
+                            self._is_first_run = True
+                            break
+            except Exception:
+                pass
 
-        # Show launch splash IMMEDIATELY before any I/O
-        # (setup window is shown later from auto_start when NSApp is ready)
+        # Show window IMMEDIATELY before any I/O
         self.launch_splash = None
         self.launch_splash_time_field = None
-        if not self._is_first_run:
+        if self._is_first_run and setup_window:
+            # First run: show setup window directly (same thread as splash)
+            try:
+                sw = setup_window.get_setup_window()
+                sw.create_window()
+                sw.window.makeKeyAndOrderFront_(None)
+                sw.set_step(0)
+                sw.set_status("Starting up...")
+            except Exception:
+                # Fallback to splash if setup window fails
+                self.show_launch_splash()
+        else:
             self.show_launch_splash()
 
         # Now load icon files (this does I/O but splash is already showing)
@@ -1020,6 +1031,9 @@ class OnionPressApp(rumps.App):
         # Wait for Colima to be ready (important for first-time setup)
         self.log("Waiting for container runtime to be ready...")
         self.update_splash_status("Waiting for container runtime...")
+        if self._is_first_run and setup_window and setup_window._setup_window:
+            setup_window._setup_window.set_status("Waiting for container runtime...")
+            setup_window._setup_window.add_log("Waiting for container runtime...")
         docker_bin = os.path.join(self.bin_dir, "docker")
         colima_initialized = os.path.join(self.colima_home, ".initialized")
 
@@ -1467,6 +1481,15 @@ class OnionPressApp(rumps.App):
                         self.log(f"✓ System fully operational (launched in {elapsed}s)")
                         self.last_status_logged = current_status
 
+                        # Write setup_complete marker (first-run detection)
+                        try:
+                            setup_marker = os.path.join(self.app_support, ".setup_complete")
+                            if not os.path.exists(setup_marker):
+                                with open(setup_marker, 'w') as f:
+                                    f.write("1")
+                        except OSError:
+                            pass
+
                         # Re-read Cloudflare Tunnel config (may have changed since launch)
                         self.cloudflare_tunnel_enabled = bool(self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
 
@@ -1534,7 +1557,10 @@ class OnionPressApp(rumps.App):
                         if pct > self._last_bootstrap_pct:
                             self._last_bootstrap_pct = pct
                             self._bootstrap_stall_count = 0
-                            self.update_splash_status(f"Tor bootstrap: {pct}%")
+                            if pct >= 100:
+                                self.update_splash_status("Waiting for onion service to become reachable...")
+                            else:
+                                self.update_splash_status(f"Tor bootstrap: {pct}%")
                         else:
                             self._bootstrap_stall_count += 1
                         if self._yellow_since is None:
@@ -2536,10 +2562,8 @@ class OnionPressApp(rumps.App):
         self.menu["Starting..."].title = "Status: Starting..."
 
         def start():
-            # Check if this is first run (secrets file doesn't exist yet)
-            secrets_file = os.path.join(self.app_support, "secrets")
-            force_setup = self._read_config_value("FORCE_SETUP_WINDOW") == "yes"
-            first_run = not os.path.exists(secrets_file) or force_setup
+            # Check if this is first run (uses same marker as __init__)
+            first_run = self._is_first_run
 
             # First run: setup window is already showing (from __init__), just run setup
             if first_run:

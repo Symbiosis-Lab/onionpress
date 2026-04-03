@@ -156,6 +156,7 @@ TORRC_EOF
 
         # Start onionheaven heartbeat monitor in background (log to shared volume)
         HEARTBEAT_LOG="/var/lib/onionpress/onionheaven/heartbeat.log"
+        mkdir -p "$(dirname "$HEARTBEAT_LOG")"
         python3 /onionheaven-heartbeat.py 2>>"$HEARTBEAT_LOG" &
         HEARTBEAT_PID=$!
         sleep 1

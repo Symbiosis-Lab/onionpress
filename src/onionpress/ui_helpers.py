@@ -131,6 +131,15 @@ class BackupProgressWindow:
         alert.setMessageText_("Done")
         alert.setInformativeText_(message)
         alert.addButtonWithTitle_("OK")
+        # Set app icon
+        import os
+        bundle = AppKit.NSBundle.mainBundle()
+        if bundle and bundle.resourcePath():
+            icon_path = os.path.join(bundle.resourcePath(), "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
         alert.runModal()
 
 
