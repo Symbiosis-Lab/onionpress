@@ -2312,9 +2312,9 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            # First run: open to new post page so user can start blogging
+            # First run: open to login page, redirect to homepage (admin bar visible)
             if self._is_first_run:
-                url = f"http://{self.onion_address}/wp-admin/post-new.php"
+                url = f"http://{self.onion_address}/wp-login.php?redirect_to=/"
             else:
                 url = f"http://{self.onion_address}"
 
