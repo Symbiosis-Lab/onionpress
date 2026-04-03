@@ -2652,7 +2652,7 @@ class OnionPressApp(rumps.App):
                  f"--title={sw.site_title}",
                  f"--admin_user={sw.admin_user}",
                  f"--admin_password={sw.admin_pass}",
-                 "--admin_email=admin@localhost",
+                 "--admin_email=admin@onionpress.local",
                  "--allow-root", "--skip-email"],
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=60
