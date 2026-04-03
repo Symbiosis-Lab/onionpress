@@ -30,7 +30,7 @@ CONTROL_PORT = 9051
 COOKIE_PATH = "/var/lib/tor/control_auth_cookie"
 
 # Rate limits (seconds)
-DROPGUARDS_COOLDOWN = 30
+DROPGUARDS_COOLDOWN = 300
 DORMANT_COOLDOWN = 120       # 2 min after DROPGUARDS → try DORMANT/ACTIVE
 HALT_COOLDOWN = 300  # 5 minutes — last resort
 

@@ -36,6 +36,11 @@ export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 # Log file
 LOG_FILE="$DATA_DIR/launcher.log"
 
+# Rotate launcher.log at startup (keep last 1000 lines if over 5000)
+if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt 5000 ]; then
+    tail -1000 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+fi
+
 # Function to log messages
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
