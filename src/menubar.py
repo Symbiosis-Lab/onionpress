@@ -1019,7 +1019,7 @@ class OnionPressApp(rumps.App):
         # Wait for Colima to be ready (important for first-time setup)
         self.log("Waiting for container runtime to be ready...")
         if self._is_first_run:
-            msg = "First-time setup: starting container runtime (this may take a few minutes)..."
+            msg = "Starting containers (est. 3 min)..."
         else:
             msg = "Waiting for container runtime..."
         self.update_splash_status(msg)
@@ -1836,7 +1836,7 @@ class OnionPressApp(rumps.App):
                 self.menu["Stop"].set_callback(None)
                 self.menu["Restart"].set_callback(None)
                 self.menu["Backup..."].set_callback(None)
-                self.menu["Restore..."].set_callback(None)
+                self.menu["Restore..."].set_callback(self.restore)
                 # Stopped: disable browser items
                 self.browser_menu_item.set_callback(None)
                 self.local_site_item.title = ""
@@ -3197,10 +3197,8 @@ class OnionPressApp(rumps.App):
                     else:
                         notes.append(f"OnionHeaven detected — VM memory: {cur_mem} GB.")
 
-                notes.append("\nPlease quit and relaunch OnionPress for the restore to take full effect.")
-
                 summary = "Site restored successfully.\n\n" + "\n".join(notes)
-                _main_thread(lambda: pw.finish(summary))
+                _main_thread(lambda: pw.finish_with_restart(summary))
             except Exception as e:
                 self.log(f"Restore failed: {e}")
                 _main_thread(lambda: pw.finish(f"Restore failed: {e}"))

@@ -2436,10 +2436,24 @@ main() {
             setup_db_passwords
             local restore_pass="${2:-}"
             local restore_path="${3:-}"
-            if [ -z "$restore_pass" ] || [ -z "$restore_path" ]; then
-                echo "Usage: $0 restore <password> <backup_file.zip>"
+            if [ -z "$restore_path" ] && [ -n "$restore_pass" ]; then
+                # Only one arg: treat as path, prompt for password
+                restore_path="$restore_pass"
+                restore_pass=""
+            fi
+            if [ -z "$restore_path" ]; then
+                echo "Usage: $0 restore [password] <backup_file.zip>"
                 echo "Restores from an OnionPress backup. Containers must be running."
+                echo "If password is omitted, you will be prompted."
                 exit 1
+            fi
+            if [ -z "$restore_pass" ]; then
+                read -r -s -p "Backup password: " restore_pass
+                echo ""
+                if [ -z "$restore_pass" ]; then
+                    echo "ERROR: Password is required."
+                    exit 1
+                fi
             fi
             restore_backup "$restore_pass" "$restore_path"
             echo "Restarting containers..."
