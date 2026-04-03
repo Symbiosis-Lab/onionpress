@@ -1283,18 +1283,20 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
-    # Copy sidebar icon (used by onionpress-settings.php)
-    if [ -f "$plugins_dir/onionpress-sidebar-icon.png" ]; then
-        if docker cp "$plugins_dir/onionpress-sidebar-icon.png" \
-            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-sidebar-icon.png >> "$LOG_FILE" 2>&1; then
-            docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-sidebar-icon.png >> "$LOG_FILE" 2>&1 \
-                || log "WARNING: Failed to chown onionpress-sidebar-icon.png"
-            log "✓ onionpress-sidebar-icon.png installed"
-        else
-            log "WARNING: Failed to copy onionpress-sidebar-icon.png"
+    # Copy icon assets (used by onionpress-settings.php and onionpress-login-fix.php)
+    for icon_file in onionpress-sidebar-icon.png onionpress-follow-icon.png; do
+        if [ -f "$plugins_dir/$icon_file" ]; then
+            if docker cp "$plugins_dir/$icon_file" \
+                onionpress-wordpress:/var/www/html/wp-content/mu-plugins/$icon_file >> "$LOG_FILE" 2>&1; then
+                docker exec onionpress-wordpress chown www-data:www-data \
+                    /var/www/html/wp-content/mu-plugins/$icon_file >> "$LOG_FILE" 2>&1 \
+                    || log "WARNING: Failed to chown $icon_file"
+                log "✓ $icon_file installed"
+            else
+                log "WARNING: Failed to copy $icon_file"
+            fi
         fi
-    fi
+    done
 
     # Copy offline-publish mu-plugin
     if [ -f "$plugins_dir/onionpress-offline-publish.php" ]; then
