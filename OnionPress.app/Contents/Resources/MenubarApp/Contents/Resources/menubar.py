@@ -28,6 +28,10 @@ import backup_manager
 import onion_proxy
 import install_native_messaging
 import onionheaven
+try:
+    import setup_window
+except ImportError:
+    setup_window = None
 from onionpress.platform import resolve_paths
 from onionpress.docker import Docker
 from onionpress.health import HealthChecker
@@ -36,6 +40,7 @@ from onionpress.ui_helpers import (
     HelpButtonTarget as _HelpButtonTarget,
     parse_version,
     main_thread as _main_thread,
+    set_main_thread_logger as _set_main_thread_logger,
     BackupProgressWindow as _BackupProgressWindow,
     LogViewerActions as _LogViewerActions,
     LogViewerWindow as _LogViewerWindow,
@@ -152,7 +157,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.43"
+        self.version = "2.4.44"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -189,6 +194,10 @@ class OnionPressApp(rumps.App):
 
         # Do slow I/O operations in background after icon appears
         def background_init():
+            # Hook up the UI crash logger so main_thread() exceptions
+            # get written to the onionpress log (and uploaded via analytics)
+            _set_main_thread_logger(self.log)
+
             # Session separator and debug info via rotating log
             self.log("=" * 60)
             self.log("=== New session starting ===")
@@ -458,7 +467,14 @@ class OnionPressApp(rumps.App):
                     self.log(f"Error dismissing launch splash: {e}")
 
         # Dismiss on main thread
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(dismiss)
+        _main_thread(dismiss)
+
+    def update_splash_status(self, message):
+        """Update the launch splash status text from any thread."""
+        def _update():
+            if self.launch_splash_time_field:
+                self.launch_splash_time_field.setStringValue_(message)
+        _main_thread(_update)
 
     def openLogFile_(self, sender):
         """Action handler for View Log button — open in built-in log viewer"""
@@ -711,7 +727,7 @@ class OnionPressApp(rumps.App):
             def run_on_main():
                 result_container[0] = show_dialog()
 
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(run_on_main)
+            _main_thread(run_on_main)
 
             # Wait for result (with timeout)
             max_wait = 300  # 5 minutes
@@ -982,6 +998,7 @@ class OnionPressApp(rumps.App):
 
         # Wait for Colima to be ready (important for first-time setup)
         self.log("Waiting for container runtime to be ready...")
+        self.update_splash_status("Waiting for container runtime...")
         docker_bin = os.path.join(self.bin_dir, "docker")
         colima_initialized = os.path.join(self.colima_home, ".initialized")
 
@@ -1000,6 +1017,7 @@ class OnionPressApp(rumps.App):
                     )
                     if result.returncode == 0:
                         self.log("Container runtime is ready")
+                        self.update_splash_status("Container runtime ready")
                         break
                 except Exception:
                     pass
@@ -1039,7 +1057,7 @@ class OnionPressApp(rumps.App):
                 self.log(f"Port conflict detected: ports {ports_str} already in use by another process")
                 self._port_conflict = True
                 # Must dispatch to main thread — rumps.alert() requires it
-                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                _main_thread(
                     lambda: rumps.alert(
                         title="OnionPress Cannot Start",
                         message=f"Port(s) {ports_str} already in use.\n\n"
@@ -1428,6 +1446,23 @@ class OnionPressApp(rumps.App):
                         # Dismiss setup dialog if it's showing
                         self.dismiss_setup_dialog()
 
+                        # Advance setup window: reachability + heartbeat, then close
+                        if setup_window and setup_window._setup_window is not None:
+                            sw = setup_window._setup_window
+                            if sw.window:
+                                sw.set_step(5)
+                                sw.add_log("Onion service reachable through Tor")
+                                sw.complete_step(5)
+                                sw.set_status("Starting heartbeat...")
+                                sw.add_log("Starting heartbeat...")
+                                sw.complete_step(6)
+                                sw.show_completion(self.onion_address)
+                                # Auto-close after 10 seconds (give user time to read address)
+                                def _close_setup():
+                                    time.sleep(10)
+                                    setup_window.close_setup_progress()
+                                threading.Thread(target=_close_setup, daemon=True).start()
+
                         # Auto-open browser on first ready (runs in background
                         # so the monitoring loop can continue and start the proxy)
                         if not self.auto_opened_browser:
@@ -1464,6 +1499,7 @@ class OnionPressApp(rumps.App):
                         if pct > self._last_bootstrap_pct:
                             self._last_bootstrap_pct = pct
                             self._bootstrap_stall_count = 0
+                            self.update_splash_status(f"Tor bootstrap: {pct}%")
                         else:
                             self._bootstrap_stall_count += 1
                         if self._yellow_since is None:
@@ -1744,7 +1780,7 @@ class OnionPressApp(rumps.App):
                 self.local_site_item.set_callback(None)
 
         # Execute on main thread
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(do_update)
+        _main_thread(do_update)
 
     def read_healthcheck_address(self):
         """Read the healthcheck .onion address from the tor container."""
@@ -2465,25 +2501,20 @@ class OnionPressApp(rumps.App):
         self.menu["Starting..."].title = "Status: Starting..."
 
         def start():
-            # Check if this is first run (no docker images yet)
-            first_run = False
-            try:
-                result = subprocess.run(
-                    ["docker", "images", "--format", "{{.Repository}}"],
-                    capture_output=True,
-                    text=True, encoding='utf-8', errors='replace',
-                    timeout=5
-                )
-                images = result.stdout.strip().split('\n')
-                # First run if we don't have wordpress/mysql/tor images
-                if not any('wordpress' in img for img in images):
-                    first_run = True
-            except Exception:
-                pass
+            # Check if this is first run (secrets file doesn't exist yet)
+            secrets_file = os.path.join(self.app_support, "secrets")
+            force_setup = self._read_config_value("FORCE_SETUP_WINDOW") == "yes"
+            first_run = not os.path.exists(secrets_file) or force_setup
 
-            # First run: launch splash is already showing — just run setup
+            # First run: show setup window and run setup
             if first_run:
                 self.log("First run detected - starting installation")
+                # Replace splash with setup progress window
+                self.dismiss_launch_splash()
+                if setup_window:
+                    sw = setup_window.show_setup_progress()
+                    sw.set_step(0)
+                    sw.add_log("First-time setup starting...")
                 threading.Thread(target=self._run_first_time_setup, daemon=True).start()
                 return
 
@@ -2494,9 +2525,11 @@ class OnionPressApp(rumps.App):
                 return
 
             # Start the service normally
+            self.update_splash_status("Starting containers...")
             subprocess.run([self.launcher_script, "start"])
 
             # Poll until WordPress is responding (replaces fixed sleep)
+            self.update_splash_status("Waiting for WordPress...")
             max_wait = 60
             waited = 0
             while waited < max_wait:
@@ -2519,25 +2552,197 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=start, daemon=True).start()
 
     def _run_first_time_setup(self):
-        """Run first-time setup: launcher start, pull images, then wait for ready."""
-        try:
-            self.log("Starting Colima VM and containers...")
-            subprocess.run([self.launcher_script, "start"])
-        except Exception as e:
-            self.log(f"Error in _run_first_time_setup: {e}")
+        """Run first-time setup: launcher start with concurrent progress monitoring.
 
-        # Monitor image downloads (logs progress to onionpress.log)
-        self.monitor_image_downloads()
+        The launcher 'start' command does everything (start Colima, pull images,
+        generate vanity address, docker compose up, wait for services).  We run
+        it in a background thread and poll for milestones concurrently so the
+        setup window shows real-time progress instead of a single long wait.
+        """
+        sw = setup_window.get_setup_window() if setup_window else None
 
-        # Poll until WordPress is responding
-        max_wait = 60
-        waited = 0
-        while waited < max_wait:
-            if self.check_wordpress_health(log_result=False):
-                self.log(f"WordPress responding after {waited}s")
+        # Step 0: System check — verify bundled binaries exist
+        if sw:
+            sw.set_step(0)
+            sw.set_status("Checking system requirements...")
+            sw.add_log("Checking system requirements...")
+        self.log("Checking system requirements...")
+        missing = []
+        for binary in ["docker", "colima", "limactl"]:
+            if not os.path.exists(os.path.join(self.bin_dir, binary)):
+                missing.append(binary)
+        if missing:
+            msg = f"Missing binaries: {', '.join(missing)}"
+            self.log(f"System check failed: {msg}")
+            if sw:
+                sw.set_status(msg)
+                sw.add_log(f"ERROR: {msg}")
+            return
+        if sw:
+            sw.set_progress(1 / 7)
+            sw.complete_step(0)
+            sw.add_log("System check passed")
+
+        # Launch the launcher script in the background — it does steps 1-4
+        if sw:
+            sw.set_status("Starting container runtime...")
+            sw.add_log("Starting Colima VM...")
+        self.log("Starting Colima VM and containers...")
+
+        launcher_done = threading.Event()
+        launcher_failed = [False]
+
+        def run_launcher():
+            try:
+                result = subprocess.run(
+                    [self.launcher_script, "start"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace'
+                )
+                if result.returncode != 0:
+                    launcher_failed[0] = True
+                    self.log(f"Launcher failed (rc={result.returncode}): {result.stderr[-200:]}")
+            except Exception as e:
+                launcher_failed[0] = True
+                self.log(f"Error in _run_first_time_setup: {e}")
+            finally:
+                launcher_done.set()
+
+        threading.Thread(target=run_launcher, daemon=True).start()
+
+        # Poll for milestones while the launcher runs
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        step1_done = False   # Container runtime
+        step2_done = False   # Images downloaded
+        step3_done = False   # .onion address generated
+        step4_done = False   # WordPress responding
+        images_found = {'wordpress': False, 'mariadb': False, 'tor': False}
+        total_images = len(images_found)
+        setup_start = time.time()
+        setup_timeout = 600  # 10 minute max
+
+        while not launcher_done.is_set() or not step4_done:
+            # Check for timeout
+            if time.time() - setup_start > setup_timeout:
+                if sw:
+                    sw.set_status("Setup timed out — check log for details")
+                    sw.add_log("ERROR: Setup timed out after 10 minutes")
+                self.log("First-time setup timed out after 10 minutes")
                 break
-            time.sleep(2)
-            waited += 2
+
+            # Check for launcher failure
+            if launcher_failed[0]:
+                if sw:
+                    sw.set_status("Setup failed — check log for details")
+                    sw.add_log("ERROR: Launcher script failed")
+                self.log("First-time setup failed")
+                break
+
+            # Step 1: Container runtime ready?
+            if not step1_done:
+                colima_initialized = os.path.join(self.colima_home, ".initialized")
+                if os.path.exists(colima_initialized):
+                    try:
+                        result = subprocess.run(
+                            [docker_bin, "info"],
+                            capture_output=True, timeout=5, env=os.environ.copy()
+                        )
+                        if result.returncode == 0:
+                            step1_done = True
+                            if sw:
+                                sw.set_progress(2 / 7)
+                                sw.complete_step(1)
+                                sw.add_log("Container runtime ready")
+                                sw.set_status("Downloading container images...")
+                    except Exception:
+                        pass
+
+            # Step 2: Docker images downloaded?
+            if step1_done and not step2_done:
+                try:
+                    result = subprocess.run(
+                        [docker_bin, "images", "--format", "{{.Repository}}"],
+                        capture_output=True, text=True, encoding='utf-8',
+                        errors='replace', timeout=5
+                    )
+                    current_images = result.stdout.strip().split('\n')
+                    for name in images_found:
+                        if not images_found[name] and any(name in img for img in current_images):
+                            images_found[name] = True
+                            done = sum(images_found.values())
+                            self.log(f"Image downloaded: {name}")
+                            if sw:
+                                sw.set_progress(
+                                    (2 + done / total_images) / 7,
+                                    f"Downloading images ({done}/{total_images})"
+                                )
+                                sw.add_log(f"Image downloaded: {name}")
+                    if all(images_found.values()):
+                        step2_done = True
+                        self.log("All images downloaded")
+                        if sw:
+                            sw.complete_step(2)
+                            sw.add_log("All images downloaded")
+                            sw.set_status("Generating .onion address...")
+                except Exception:
+                    pass
+
+            # Step 3: .onion address generated?
+            if step2_done and not step3_done:
+                try:
+                    result = subprocess.run(
+                        [docker_bin, "exec", "onionpress-tor", "cat",
+                         "/var/lib/tor/hidden_service/wordpress/hostname"],
+                        capture_output=True, text=True, encoding='utf-8',
+                        errors='replace', timeout=10
+                    )
+                    addr = result.stdout.strip()
+                    if addr and '.onion' in addr:
+                        step3_done = True
+                        if sw:
+                            sw.complete_step(3)
+                            sw.set_progress(4 / 7)
+                            sw.add_log(f"Address: {addr[:30]}...")
+                            sw.set_status("Starting WordPress + Tor...")
+                except Exception:
+                    pass
+
+            # Step 4: WordPress responding?
+            if step3_done and not step4_done:
+                if self.check_wordpress_health(log_result=False):
+                    step4_done = True
+                    self.log("WordPress responding")
+                    if sw:
+                        sw.complete_step(4)
+                        sw.set_progress(5 / 7)
+                        sw.add_log("WordPress responding")
+                        sw.set_status("Waiting for Tor reachability...")
+
+            # Between steps 4 and 5, feed bootstrap % into setup window
+            # so it doesn't look frozen during descriptor propagation
+            if step4_done and sw and sw.window:
+                pct = self._parse_bootstrap_percentage()
+                elapsed = int(time.time() - setup_start)
+                mins, secs = divmod(elapsed, 60)
+                if pct < 100:
+                    sw.set_status(f"Tor bootstrap: {pct}% ({mins}m {secs:02d}s)")
+                else:
+                    sw.set_status(f"Waiting for Tor reachability... {mins}m {secs:02d}s")
+
+            time.sleep(3)
+
+        # If launcher succeeded but we missed some steps (e.g. fast cached restart),
+        # mark them complete
+        if not launcher_failed[0] and sw:
+            if not step1_done:
+                sw.complete_step(1)
+            if not step2_done:
+                sw.complete_step(2)
+            if not step3_done:
+                sw.complete_step(3)
+            if not step4_done:
+                sw.complete_step(4)
+            sw.set_progress(5 / 7)
+            sw.set_status("Waiting for Tor reachability...")
 
         # Send USR2 to arm onionheaven's HSFETCH timer for cold start
         for container in ["onionpress-tor", "onionheaven"]:
@@ -3263,7 +3468,7 @@ class OnionPressApp(rumps.App):
                     self.setup_alert = None
 
             self.setup_dialog_showing = True
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(create_and_show)
+            _main_thread(create_and_show)
             self.log("Setup dialog shown (native NSAlert)")
         except Exception as e:
             self.log(f"Error showing setup dialog: {e}")
@@ -3381,7 +3586,7 @@ License: AGPL v3"""
         if AppKit.NSThread.isMainThread():
             show_dialog()
         else:
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(show_dialog)
+            _main_thread(show_dialog)
 
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
@@ -4207,7 +4412,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.43 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.44 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
