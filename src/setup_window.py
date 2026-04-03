@@ -663,6 +663,9 @@ class SetupProgressWindow(AppKit.NSObject):
         self.add_log("All systems operational")
         if onion_address:
             self.add_log(f"Address: {onion_address}")
+        self.add_log("")
+        self.add_log("Tip: Click the OnionPress icon in your")
+        self.add_log("menu bar to manage your site.")
 
     # -- compatibility stubs ------------------------------------------------
 
