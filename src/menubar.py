@@ -1018,10 +1018,14 @@ class OnionPressApp(rumps.App):
 
         # Wait for Colima to be ready (important for first-time setup)
         self.log("Waiting for container runtime to be ready...")
-        self.update_splash_status("Waiting for container runtime...")
+        if self._is_first_run:
+            msg = "First-time setup: starting container runtime (this may take a few minutes)..."
+        else:
+            msg = "Waiting for container runtime..."
+        self.update_splash_status(msg)
         if self._is_first_run and setup_window and setup_window._setup_window:
-            setup_window._setup_window.set_status("Waiting for container runtime...")
-            setup_window._setup_window.add_log("Waiting for container runtime...")
+            setup_window._setup_window.set_status(msg)
+            setup_window._setup_window.add_log(msg)
         docker_bin = os.path.join(self.bin_dir, "docker")
         colima_initialized = os.path.join(self.colima_home, ".initialized")
 
@@ -1260,8 +1264,11 @@ class OnionPressApp(rumps.App):
                     elif http_code.startswith("000"):
                         # Decode curl exit code for debugging
                         _curl_reasons = {
+                            "1": "protocol error (descriptor not yet available)",
+                            "6": "DNS resolution failed",
                             "7": "connection refused",
                             "28": "timeout (30s)",
+                            "35": "TLS handshake failed",
                             "52": "empty reply",
                             "56": "connection reset",
                             "97": "SOCKS handshake failed (descriptor not yet available)",
@@ -1628,11 +1635,17 @@ class OnionPressApp(rumps.App):
                         self.start_caffeinate()
                         self.update_menu()
 
-                # OnionHeaven: start heartbeat as soon as Tor is internally ready.
-                # Don't wait for purple — the heartbeat IS the reclaim mechanism.
-                # If OnionHeaven has taken over our address, the heartbeat's /online
-                # will release it. The heartbeat loop retries every 60s on failure.
-                if (self._tor_internally_ready and not self.is_onionheaven
+                # OnionHeaven: start heartbeat as soon as Tor is bootstrapped.
+                # Don't wait for internal readiness or purple — the heartbeat IS
+                # the reclaim mechanism. If OnionHeaven has taken over our address,
+                # the heartbeat's /online will release it. Without this, fresh
+                # installs get stuck: 302 takeover → internal check fails →
+                # _tor_internally_ready never set → heartbeat never fires.
+                # Use bootstrap percentage instead (100% = Tor can make circuits).
+                tor_bootstrapped = self._last_bootstrap_pct >= 100
+                if (tor_bootstrapped and self.onion_address
+                        and self.onion_address not in ["Starting...", "Not running", "Generating address..."]
+                        and not self.is_onionheaven
                         and not self._onionheaven_registration_succeeded
                         and not self._onionheaven_registration_in_flight):
                     self._onionheaven_registration_in_flight = True
@@ -2763,7 +2776,7 @@ class OnionPressApp(rumps.App):
                         sw.complete_step(4)
                         sw.set_progress(5 / 8)
                         sw.add_log("WordPress responding")
-                        sw.set_status("Waiting for Tor reachability...")
+                        sw.set_status("Publishing onion address to Tor network (may take 5-10 min)...")
 
             # Between steps 4 and 5, feed bootstrap % into setup window
             # so it doesn't look frozen during descriptor propagation
@@ -2774,7 +2787,7 @@ class OnionPressApp(rumps.App):
                 if pct < 100:
                     sw.set_status(f"Tor bootstrap: {pct}% ({mins}m {secs:02d}s)")
                 else:
-                    sw.set_status(f"Waiting for Tor reachability... {mins}m {secs:02d}s")
+                    sw.set_status(f"Publishing onion address to Tor network (may take 5-10 min)... {mins}m {secs:02d}s")
 
             time.sleep(3)
 
@@ -2790,7 +2803,7 @@ class OnionPressApp(rumps.App):
             if not step4_done:
                 sw.complete_step(4)
             sw.set_progress(5 / 8)
-            sw.set_status("Waiting for Tor reachability...")
+            sw.set_status("Publishing onion address to Tor network (may take 5-10 min)...")
 
         # Send USR2 to arm onionheaven's HSFETCH timer for cold start
         for container in ["onionpress-tor", "onionheaven"]:
