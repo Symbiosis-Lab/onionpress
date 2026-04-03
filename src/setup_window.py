@@ -265,7 +265,6 @@ class SetupProgressWindow(AppKit.NSObject):
         self._pass_field = _input_field(
             NSMakeRect(field_x, y - 2, field_w, 24),
             placeholder="Choose a password",
-            secure=True,
         )
         self.welcome_view.addSubview_(self._pass_field)
 

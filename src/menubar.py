@@ -1673,17 +1673,21 @@ class OnionPressApp(rumps.App):
                             ).start()
                     elif wp_installed is False and not self._setup_page_opened:
                         # WordPress container responded but WP not installed.
-                        # Require 5 consecutive "not installed" results before opening
-                        # the setup page — the DB may still be warming up.
-                        self._wp_not_installed_count += 1
-                        if self._wp_not_installed_count >= 5:
-                            self._wp_installed = False
-                            self._setup_page_opened = True
-                            self.log("WordPress not installed — opening setup page")
-                            # Dismiss dialogs before opening browser
-                            self.dismiss_setup_dialog()
-                            self.dismiss_launch_splash()
-                            subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
+                        # On first run, wp core install handles this — don't open browser.
+                        if self._is_first_run:
+                            pass
+                        else:
+                            # Require 5 consecutive "not installed" results before opening
+                            # the setup page — the DB may still be warming up.
+                            self._wp_not_installed_count += 1
+                            if self._wp_not_installed_count >= 5:
+                                self._wp_installed = False
+                                self._setup_page_opened = True
+                                self.log("WordPress not installed — opening setup page")
+                                # Dismiss dialogs before opening browser
+                                self.dismiss_setup_dialog()
+                                self.dismiss_launch_splash()
+                                subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
                     else:
                         # Reset counter on None (container not ready) or True
                         self._wp_not_installed_count = 0
