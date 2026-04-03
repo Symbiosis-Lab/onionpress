@@ -2266,10 +2266,11 @@ main() {
             # but are harmless (sleeping poll loops). The exit trap kills our own
             # children, and the PID lock prevents double-starting.
 
-            # Detect container runtime
+            # Detect container runtime (install if needed on first run)
             if ! RUNTIME=$(detect_container_runtime); then
-                install_docker
-                exit $?
+                install_docker || exit $?
+                # Re-detect after install
+                RUNTIME=$(detect_container_runtime) || { log "ERROR: Container runtime still not available after install"; exit 1; }
             fi
 
             log "Detected container runtime: $RUNTIME"

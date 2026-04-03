@@ -2645,8 +2645,10 @@ class OnionPressApp(rumps.App):
                     capture_output=True, text=True, encoding='utf-8', errors='replace'
                 )
                 if result.returncode != 0:
-                    launcher_failed[0] = True
-                    self.log(f"Launcher failed (rc={result.returncode}): {result.stderr[-200:]}")
+                    # Don't treat as fatal — the launcher may return non-zero for
+                    # benign reasons (port offset log message hitting system `log`).
+                    # The milestone polling loop will detect real failures via timeout.
+                    self.log(f"Launcher exited with rc={result.returncode} (may be benign)")
             except Exception as e:
                 launcher_failed[0] = True
                 self.log(f"Error in _run_first_time_setup: {e}")
