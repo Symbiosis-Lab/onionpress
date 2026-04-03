@@ -1457,9 +1457,9 @@ class OnionPressApp(rumps.App):
                                 sw.add_log("Starting heartbeat...")
                                 sw.complete_step(6)
                                 sw.show_completion(self.onion_address)
-                                # Auto-close after 5 seconds
+                                # Auto-close after 10 seconds (give user time to read address)
                                 def _close_setup():
-                                    time.sleep(5)
+                                    time.sleep(10)
                                     setup_window.close_setup_progress()
                                 threading.Thread(target=_close_setup, daemon=True).start()
 
@@ -2561,12 +2561,23 @@ class OnionPressApp(rumps.App):
         """
         sw = setup_window.get_setup_window() if setup_window else None
 
-        # Step 0: System check (immediate)
+        # Step 0: System check — verify bundled binaries exist
         if sw:
             sw.set_step(0)
             sw.set_status("Checking system requirements...")
             sw.add_log("Checking system requirements...")
         self.log("Checking system requirements...")
+        missing = []
+        for binary in ["docker", "colima", "limactl"]:
+            if not os.path.exists(os.path.join(self.bin_dir, binary)):
+                missing.append(binary)
+        if missing:
+            msg = f"Missing binaries: {', '.join(missing)}"
+            self.log(f"System check failed: {msg}")
+            if sw:
+                sw.set_status(msg)
+                sw.add_log(f"ERROR: {msg}")
+            return
         if sw:
             sw.set_progress(1 / 7)
             sw.complete_step(0)
@@ -2606,8 +2617,18 @@ class OnionPressApp(rumps.App):
         step4_done = False   # WordPress responding
         images_found = {'wordpress': False, 'mariadb': False, 'tor': False}
         total_images = len(images_found)
+        setup_start = time.time()
+        setup_timeout = 600  # 10 minute max
 
         while not launcher_done.is_set() or not step4_done:
+            # Check for timeout
+            if time.time() - setup_start > setup_timeout:
+                if sw:
+                    sw.set_status("Setup timed out — check log for details")
+                    sw.add_log("ERROR: Setup timed out after 10 minutes")
+                self.log("First-time setup timed out after 10 minutes")
+                break
+
             # Check for launcher failure
             if launcher_failed[0]:
                 if sw:
