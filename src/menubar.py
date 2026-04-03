@@ -2661,6 +2661,17 @@ class OnionPressApp(rumps.App):
                 self.log("WordPress installed successfully via wp core install")
                 if sw:
                     sw.add_log("WordPress configured successfully")
+                    sw.set_status("Installing plugins...")
+                    sw.add_log("Installing plugins and themes...")
+                # Re-run launcher start to install mu-plugins, multisite, etc.
+                subprocess.run(
+                    [self.launcher_script, "start"],
+                    capture_output=True, text=True, encoding='utf-8',
+                    errors='replace', timeout=120
+                )
+                self.log("Plugins and mu-plugins installed")
+                if sw:
+                    sw.add_log("Plugins installed")
             else:
                 self.log(f"wp core install failed: {result.stderr[-200:]}")
                 if sw:
