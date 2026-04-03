@@ -3254,35 +3254,19 @@ class OnionPressApp(rumps.App):
 
                 restored_addr = metadata.get('onion_address', addr)
 
-                # Switch Tor to restored keys immediately (don't wait for restart)
-                log_and_update("Switching to restored onion address...")
+                # Restart containers to pick up restored keys
+                log_and_update("Restarting with restored address...")
                 try:
-                    docker_bin = os.path.join(self.bin_dir, "docker")
-                    compose_file = os.path.join(self.parent_resources_dir, "docker", "docker-compose.yml")
-                    env = os.environ.copy()
-                    # Stop tor
-                    subprocess.run(
-                        [docker_bin, "compose", "-f", compose_file, "stop", "tor"],
-                        capture_output=True, timeout=30, env=env)
-                    subprocess.run(
-                        [docker_bin, "compose", "-f", compose_file, "rm", "-f", "tor"],
-                        capture_output=True, timeout=15, env=env)
-                    # Remove old tor volumes so restored keys are picked up
-                    for vol in ["onionpress-tor-keys", "onionpress-tor-state"]:
-                        subprocess.run(
-                            [docker_bin, "volume", "rm", vol],
-                            capture_output=True, timeout=10, env=env)
-                    # Flag key import and restart tor
                     import_flag = os.path.join(self.app_support, ".import-key-pending")
                     with open(import_flag, 'w') as f:
                         f.write("1")
                     subprocess.run(
-                        [self.launcher_script, "start"],
+                        [self.launcher_script, "restart"],
                         capture_output=True, text=True, encoding='utf-8',
                         errors='replace', timeout=120)
-                    self.log(f"Tor switched to restored address: {restored_addr}")
+                    self.log(f"Restarted with restored address: {restored_addr}")
                 except Exception as e:
-                    self.log(f"Warning: could not auto-switch Tor keys: {e}")
+                    self.log(f"Warning: could not auto-restart: {e}")
 
                 # Build summary of what was restored and what will happen
                 notes = [f"Onion address: {restored_addr}"]
