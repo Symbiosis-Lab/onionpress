@@ -2159,9 +2159,39 @@ class OnionPressApp(rumps.App):
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
+    def _generate_login_url(self, base_url):
+        """Generate a one-time auto-login URL for the admin user.
+
+        Creates a random token, stores it as a WordPress transient (2-min TTL)
+        via wp eval, and returns base_url with ?op_login=TOKEN appended.
+        Falls back to the plain URL if token generation fails.
+        """
+        try:
+            import secrets as _secrets
+            token = _secrets.token_urlsafe(32)
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "eval",
+                 f"set_transient('op_login_{token}', 1, 120);",
+                 "--allow-root"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=10
+            )
+            if result.returncode == 0:
+                sep = '&' if '?' in base_url else '?'
+                url = f"{base_url}{sep}op_login={token}"
+                self.log("Generated auto-login URL")
+                return url
+            else:
+                self.log(f"Auto-login token failed: {result.stderr[-200:]}")
+        except Exception as e:
+            self.log(f"Auto-login token error: {e}")
+        return base_url
+
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
-        url = self.local_url
+        url = self._generate_login_url(self.local_url)
         subprocess.run(["open", url])
         self.log(f"Opened local site: {url}")
 
@@ -2234,7 +2264,7 @@ class OnionPressApp(rumps.App):
     def open_tor_browser(self, _):
         """Open the onion address in the best available browser."""
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            url = f"http://{self.onion_address}"
+            url = self._generate_login_url(f"http://{self.onion_address}/")
             if not op_browser.open_onion_url(url, self.app_support, self.log):
                 self.show_browser_install_dialog()
         else:
@@ -2316,11 +2346,7 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            # First run: open to login page, redirect to homepage (admin bar visible)
-            if self._is_first_run:
-                url = f"http://{self.onion_address}/wp-login.php?redirect_to=/"
-            else:
-                url = f"http://{self.onion_address}"
+            url = self._generate_login_url(f"http://{self.onion_address}/")
 
             if op_browser.is_tor_browser_installed():
                 self.log(f"Auto-opening Tor Browser: {url}")
