@@ -657,10 +657,26 @@ def run():
             # Check for USR2 (wake) signal
             if _signal_wake:
                 _signal_wake = False
-                log("Received USR2 (wake) — re-adding onion services")
                 state.sleeping = False
                 state.last_recovery_time = time.time()
                 state.hs_desc_uploaded_since_recovery = False
+
+                # Wait for Tor to have live circuits before ADD_ONION.
+                # After sleep, Tor may report bootstrapped=True (stale) but
+                # circuit-established=0 if the network isn't up yet.  ADD_ONION
+                # without circuits silently fails to upload descriptors.
+                log("Received USR2 (wake) — waiting for circuits before ADD_ONION...")
+                waited = 0
+                while waited < 120:
+                    resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
+                    if "circuit-established=1" in resp:
+                        log(f"Circuits established after {waited}s — proceeding with ADD_ONION")
+                        break
+                    time.sleep(5)
+                    waited += 5
+                else:
+                    log(f"WARNING: No circuits after {waited}s — attempting ADD_ONION anyway")
+
                 if state.services:
                     n, collisions = add_all_services(cmd_sock, state.services)
                     if collisions > 0:
@@ -685,9 +701,13 @@ def run():
 
                 # If services not yet added (e.g. after reconnect), add them now
                 # But NOT while sleeping — DEL_ONION was intentional
+                # And only once circuits are established — ADD_ONION without
+                # circuits silently fails to upload descriptors.
                 if state.services and not state.services_active and not state.sleeping:
-                    n, _c = add_all_services(cmd_sock, state.services)
-                    state.services_active = (n + _c) > 0
+                    resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
+                    if "circuit-established=1" in resp:
+                        n, _c = add_all_services(cmd_sock, state.services)
+                        state.services_active = (n + _c) > 0
 
                 continue
             except (ConnectionResetError, BrokenPipeError, OSError):
