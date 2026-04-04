@@ -309,7 +309,7 @@ def process_releases(conn):
         if ok:
             # Clear pending and assignment flags
             conn.execute(
-                "UPDATE registry SET release_pending = NULL, takeover_container = NULL "
+                "UPDATE registry SET release_pending = NULL "
                 "WHERE content_address = ? AND healthcheck_address = ?",
                 (ca, ha)
             )
@@ -372,7 +372,7 @@ def process_audits(conn):
         if ok:
             conn.execute(
                 "UPDATE registry SET status = 'online', last_released = ?, "
-                "takeover_container = NULL, takeover_pending = NULL, release_pending = NULL "
+                "takeover_pending = NULL, release_pending = NULL "
                 "WHERE content_address = ? AND healthcheck_address = ?",
                 (now_str, ca, ha)
             )

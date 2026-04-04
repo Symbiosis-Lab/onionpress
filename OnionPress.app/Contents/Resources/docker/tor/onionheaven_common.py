@@ -517,6 +517,7 @@ def _pick_worker(conn):
         return None
 
 
+
 def _ensure_capacity(conn):
     """If all bootstrapped workers are at max_services and fewer than 2
     containers are currently building, kick off 2 more.
@@ -885,9 +886,21 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
         log(f"Skipping takeover for {content_address} — last_healthy not yet stale")
         return
 
-    # All guards pass — execute takeover on a worker
+    # All guards pass — execute takeover on a worker.
+    # Prefer the worker this address was previously on (stored in
+    # takeover_container even after release) to avoid orphaned ADD_ONION
+    # services when takeover/release cycles bounce between workers.
     if is_farm_mode():
-        worker = _pick_worker(conn)
+        preferred = row["takeover_container"] if row.get("takeover_container") else None
+        if preferred:
+            # Verify the preferred worker is still bootstrapped
+            ok = conn.execute(
+                "SELECT 1 FROM takeover_containers WHERE container_name = ? AND bootstrapped = 1",
+                (preferred,)
+            ).fetchone()
+            worker = preferred if ok else _pick_worker(conn)
+        else:
+            worker = _pick_worker(conn)
         if worker:
             success = _exec_takeover(worker, content_address)
             if success:
@@ -970,10 +983,12 @@ def release_function(conn, content_address, healthcheck_address):
     takeover_container = row["takeover_container"] if "takeover_container" in row.keys() else None
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Mark this row as online — release_function owns this status change
+    # Mark this row as online — release_function owns this status change.
+    # Keep takeover_container so the next takeover reuses the same worker,
+    # preventing orphaned ADD_ONION services on other workers.
     conn.execute(
         "UPDATE registry SET status = 'online', last_released = ?, "
-        "takeover_container = NULL, takeover_pending = NULL, release_pending = NULL, "
+        "takeover_pending = NULL, release_pending = NULL, "
         "audit_pending = NULL, audit_result = NULL, audit_at = NULL "
         "WHERE content_address = ? AND healthcheck_address = ?",
         (now, content_address, healthcheck_address)
@@ -981,7 +996,7 @@ def release_function(conn, content_address, healthcheck_address):
     db_commit_with_retry(conn)
     log(f"Released {content_address} (was on {takeover_container or 'none'})")
 
-    # Execute DEL_ONION on the worker and decrement assigned_count
+    # Execute DEL_ONION on the tracked worker and decrement assigned_count
     if takeover_container:
         success = _exec_release(takeover_container, content_address)
         if success:
@@ -991,11 +1006,25 @@ def release_function(conn, content_address, healthcheck_address):
                 (takeover_container,)
             )
             db_commit_with_retry(conn)
-        return
 
-    # Legacy fallback — only inside takeover worker containers
-    if os.environ.get("TAKEOVER_WORKER") == "1":
-        _release_local(content_address)
+    # Safety sweep: DEL_ONION from ALL other takeover containers.
+    # A takeover can be queued on multiple workers (e.g. during rapid
+    # takeover/release cycles), but the DB only tracks one takeover_container.
+    # Without this sweep, orphaned services on other workers keep publishing
+    # stale descriptors indefinitely.
+    all_workers = conn.execute(
+        "SELECT container_name FROM takeover_containers"
+    ).fetchall()
+    for w in all_workers:
+        wname = w["container_name"] if isinstance(w, dict) else w[0]
+        if wname == takeover_container:
+            continue  # already handled above
+        _exec_release(wname, content_address)
+
+    if not takeover_container:
+        # Legacy fallback — only inside takeover worker containers
+        if os.environ.get("TAKEOVER_WORKER") == "1":
+            _release_local(content_address)
 
 
 def _release_local(content_address, no_sighup=False):
