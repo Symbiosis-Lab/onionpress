@@ -33,16 +33,30 @@ export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 
-# Log file
-LOG_FILE="$DATA_DIR/launcher.log"
+# Log file — daily rotation matching RotatingLog format (launcher-YYYY-MM-DD-001.log)
+LOGS_DIR="$DATA_DIR/logs"
+mkdir -p "$LOGS_DIR"
+_log_date=$(date -u '+%Y-%m-%d')
+_log_seq=1
+while [ -f "$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log" ] && \
+      [ "$(wc -c < "$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log")" -gt 5242880 ]; do
+    _log_seq=$((_log_seq + 1))
+done
+LOG_FILE="$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log"
 
-# Rotate launcher.log at startup (keep last 1000 lines if over 5000)
-if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt 5000 ]; then
-    tail -1000 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
-fi
+# Backward compat symlink
+ln -sf "$LOG_FILE" "$DATA_DIR/launcher.log"
 
 # Function to log messages
 log() {
+    # Roll to new file if date changed
+    _now_date=$(date -u '+%Y-%m-%d')
+    if [ "$_now_date" != "$_log_date" ]; then
+        _log_date="$_now_date"
+        _log_seq=1
+        LOG_FILE="$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log"
+        ln -sf "$LOG_FILE" "$DATA_DIR/launcher.log"
+    fi
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
