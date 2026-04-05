@@ -53,6 +53,15 @@ CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "")
 # Logging
 # ---------------------------------------------------------------------------
 
+import collections
+import threading
+
+# Per-address log ring buffer — last 20 entries per address
+_addr_logs = {}
+_addr_logs_lock = threading.Lock()
+_ADDR_LOG_MAX = 10
+
+
 def log(msg):
     """Log to stderr with timestamp (captured by docker logs).
 
@@ -63,6 +72,26 @@ def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sys.stderr.write(f"[{ts}] OnionHeaven: {msg}\n")
     sys.stderr.flush()
+
+
+def addr_log(address, msg):
+    """Log a message and store it in the per-address ring buffer.
+
+    Shows up in docker logs AND in /status/<address> responses.
+    """
+    log(msg)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{ts}] {msg}"
+    with _addr_logs_lock:
+        if address not in _addr_logs:
+            _addr_logs[address] = collections.deque(maxlen=_ADDR_LOG_MAX)
+        _addr_logs[address].append(entry)
+
+
+def get_addr_logs(address):
+    """Return recent log entries for an address."""
+    with _addr_logs_lock:
+        return list(_addr_logs.get(address, []))
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +733,7 @@ def _exec_takeover(container_name, content_address):
                 resp = json.loads(result.stdout.strip())
                 status = resp.get("status", "")
                 if status in ("queued", "already_queued", "already_active", "in_flight"):
-                    log(f"Takeover queued: {content_address} on {container_name} ({status})")
+                    addr_log(content_address, f"Takeover queued: {content_address} on {container_name} ({status})")
                     return True
                 elif "error" in resp:
                     log(f"Takeover queue failed for {content_address} on {container_name}: "
@@ -732,7 +761,7 @@ def _exec_release(container_name, content_address):
 
     Returns True on success, False on failure.
     """
-    log(f"Releasing {content_address} via {container_name}")
+    addr_log(content_address, f"Releasing {content_address} via {container_name}")
     try:
         result = subprocess.run(
             ["docker", "exec", container_name,
@@ -740,7 +769,7 @@ def _exec_release(container_name, content_address):
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
-            log(f"Release complete: {content_address} on {container_name}")
+            addr_log(content_address, f"Release complete: {content_address} on {container_name}")
             return True
         else:
             log(f"Release failed for {content_address} on {container_name}: "
@@ -921,7 +950,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
         else:
             # No bootstrapped workers — spawn 2 if not already building
             _ensure_capacity(conn)
-            log(f"Takeover deferred for {content_address} — no bootstrapped workers yet")
+            addr_log(content_address, f"Takeover deferred for {content_address} — no bootstrapped workers yet")
             return
 
     # Legacy fallback — only safe inside takeover worker containers.
@@ -994,7 +1023,7 @@ def release_function(conn, content_address, healthcheck_address):
         (now, content_address, healthcheck_address)
     )
     db_commit_with_retry(conn)
-    log(f"Released {content_address} (was on {takeover_container or 'none'})")
+    addr_log(content_address, f"Released {content_address} (was on {takeover_container or 'none'})")
 
     # Execute DEL_ONION on the tracked worker and decrement assigned_count
     if takeover_container:
