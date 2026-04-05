@@ -19,8 +19,6 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-SERVER_VERSION = "2.4.42"
-
 MAX_REQUEST_BODY = 1_048_576  # 1 MB — reject larger POST bodies to prevent memory exhaustion
 
 import base64
@@ -40,6 +38,8 @@ from onionheaven_common import (
     takeover_function, release_function, flush_sighup_tor,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR,
 )
+
+SERVER_VERSION = os.environ.get("ONIONPRESS_VERSION", "unknown")
 
 # ---------------------------------------------------------------------------
 # Configuration

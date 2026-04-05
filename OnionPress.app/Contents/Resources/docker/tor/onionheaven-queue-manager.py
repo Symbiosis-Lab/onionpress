@@ -119,6 +119,16 @@ class TorCommandConn:
         success = "250 OK" in resp
         return success, resp.strip()
 
+    def has_onion(self, content_address):
+        """Check if Tor still has this onion service (detached or current)."""
+        service_id = content_address.replace(".onion", "")
+        for kind in ("onions/detached", "onions/current"):
+            self._send(f"GETINFO {kind}")
+            resp = self._read_response()
+            if service_id in resp:
+                return True
+        return False
+
     def close(self):
         if self.sock:
             try:
@@ -335,6 +345,19 @@ class QueueManager:
             else:
                 return {"status": "release_warning", "address": content_address,
                         "detail": resp}
+
+        # Not in our in-memory state — check if Tor still has it (orphan
+        # from a previous process lifetime with Flags=Detach)
+        if self.cmd.has_onion(content_address):
+            log(f"Found orphaned detached service for {content_address}, removing")
+            success, resp = self.cmd.del_onion(content_address)
+            self.evt.clear(content_address)
+            if success:
+                return {"status": "released", "address": content_address}
+            else:
+                return {"status": "release_warning", "address": content_address,
+                        "detail": resp}
+
         return {"status": "not_found", "address": content_address}
 
     def _process_queue(self):
