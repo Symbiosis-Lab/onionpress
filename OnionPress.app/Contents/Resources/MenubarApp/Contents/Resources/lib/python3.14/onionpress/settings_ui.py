@@ -591,6 +591,11 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
             if remove_login:
                 remove_login()
 
+    # Trigger immediate analytics upload when sharing is turned on
+    if "SHARE_ANALYTICS_WITH_ONIONHOME" in changes and new_values["SHARE_ANALYTICS_WITH_ONIONHOME"] == "yes":
+        from onionpress.analytics_sharing import trigger_upload
+        trigger_upload()
+
     log_func(f"Settings updated: {', '.join(changes)}")
     saved = AppKit.NSAlert.alloc().init()
     saved.setMessageText_("Settings Saved")

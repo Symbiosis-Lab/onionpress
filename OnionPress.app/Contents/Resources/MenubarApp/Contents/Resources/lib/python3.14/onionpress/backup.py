@@ -17,6 +17,7 @@ import zipfile
 from datetime import datetime, timezone
 
 import key_manager
+from onionpress.config import DEFAULTS, read_config, write_value
 
 
 # Multisite constants that WordPress needs in wp-config.php for a network install.
@@ -164,7 +165,19 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             if os.path.exists(unlocked_file):
                 os.unlink(unlocked_file)
 
-        # 5. Write metadata
+        # 5. Save non-default config values
+        data_dir = os.path.expanduser('~/.onionpress')
+        config_path = os.path.join(data_dir, 'config')
+        if os.path.exists(config_path):
+            current = read_config(config_path)
+            overrides = {k: v for k, v in current.items()
+                         if k in DEFAULTS and v != DEFAULTS[k]}
+            if overrides:
+                with open(os.path.join(staging, 'config-overrides.json'), 'w') as f:
+                    json.dump(overrides, f, indent=2)
+                log_func(f"Backup: saved {len(overrides)} config override(s)")
+
+        # 7. Write metadata
         metadata = {
             'onion_address': onion_address,
             'backup_date': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -175,7 +188,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
-        # 6. Create password-protected zip using macOS system zip
+        # 8. Create password-protected zip using macOS system zip
         log_func("Backup: creating encrypted zip archive...")
         # Remove target if it already exists (zip would append otherwise)
         if os.path.exists(output_path):
@@ -390,6 +403,19 @@ def restore_from_backup(zip_path, password, log_func):
         # constants when the container is recreated. Without these, wp core
         # is-installed --network fails and ensure_multisite skips conversion.
         _ensure_multisite_constants(log_func)
+
+        # 6. Restore config overrides (non-default user preferences)
+        overrides_path = os.path.join(staging, 'config-overrides.json')
+        if not os.path.exists(overrides_path):
+            overrides_path = os.path.join(staging, '.', 'config-overrides.json')
+        if os.path.exists(overrides_path):
+            with open(overrides_path, 'r') as f:
+                overrides = json.load(f)
+            data_dir = os.path.expanduser('~/.onionpress')
+            config_path = os.path.join(data_dir, 'config')
+            for key, value in overrides.items():
+                write_value(config_path, key, value)
+            log_func(f"Restore: applied {len(overrides)} config override(s)")
 
         log_func("Restore: files restored successfully")
         return metadata
