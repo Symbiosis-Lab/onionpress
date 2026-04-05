@@ -61,6 +61,17 @@ class OnionPressApp(rumps.App):
         os.makedirs(self.app_support, exist_ok=True)
         if os.path.exists(self.pid_file):
             try:
+                # If PID file is older than system boot, it's from a previous
+                # boot session — definitely stale (PID may have been recycled)
+                import subprocess as _sp
+                _boot = _sp.run(['sysctl', '-n', 'kern.boottime'],
+                                capture_output=True, text=True, timeout=5)
+                # Format: "{ sec = 1717000000, usec = 0 } Sun ..."
+                _boot_sec = int(_boot.stdout.split('sec = ')[1].split(',')[0])
+                _pid_mtime = os.path.getmtime(self.pid_file)
+                if _pid_mtime < _boot_sec:
+                    raise ProcessLookupError("PID file from previous boot")
+
                 with open(self.pid_file) as f:
                     old_pid = int(f.read().strip())
                 # Check if that PID is still alive
@@ -313,7 +324,6 @@ class OnionPressApp(rumps.App):
         self.proxy_thread = None  # Thread running the proxy server
         self._wp_installed = None  # None = unknown, True/False = checked
         self._wp_not_installed_count = 0  # Consecutive "not installed" results
-        self._setup_page_opened = False  # Track if we've opened the setup page
         self._port_conflict = False  # True if ports are in use by another instance
         self._ports_checked = False  # True after port conflict check completes
         self._has_internet = True          # Host-level internet connectivity
@@ -1671,26 +1681,9 @@ class OnionPressApp(rumps.App):
                                 target=lambda: subprocess.run([self.launcher_script, "start-tor"]),
                                 daemon=True
                             ).start()
-                    elif wp_installed is False and not self._setup_page_opened:
-                        # WordPress container responded but WP not installed.
-                        # On first run, wp core install handles this — don't open browser.
-                        if self._is_first_run:
-                            pass
-                        else:
-                            # Require 5 consecutive "not installed" results before opening
-                            # the setup page — the DB may still be warming up.
-                            self._wp_not_installed_count += 1
-                            if self._wp_not_installed_count >= 5:
-                                self._wp_installed = False
-                                self._setup_page_opened = True
-                                self.log("WordPress not installed — opening setup page")
-                                # Dismiss dialogs before opening browser
-                                self.dismiss_setup_dialog()
-                                self.dismiss_launch_splash()
-                                subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
                     else:
-                        # Reset counter on None (container not ready) or True
-                        self._wp_not_installed_count = 0
+                        # wp_installed is False or None — DB still warming up, keep waiting
+                        pass
             else:
                 # Log when stopping
                 if self.is_running or self.is_ready:
@@ -1707,7 +1700,6 @@ class OnionPressApp(rumps.App):
                 self.auto_opened_browser = False  # Reset for next start
                 self._wp_installed = None  # Reset for next start
                 self._wp_not_installed_count = 0
-                self._setup_page_opened = False
                 self._was_ready = False
                 self._last_bootstrap_pct = 0
                 self._bootstrap_stall_count = 0
