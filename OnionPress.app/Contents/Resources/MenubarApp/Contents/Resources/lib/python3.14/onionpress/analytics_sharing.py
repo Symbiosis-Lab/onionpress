@@ -142,9 +142,20 @@ def _do_upload_cycle(app, include_active=False):
                     except OSError:
                         pass
 
-    # Also include launcher.log (not a rotating log, just a flat file)
+    # Include launcher rotating logs (written by shell script, not RotatingLog)
+    import glob as _glob_launcher
+    for p in sorted(_glob_launcher.glob(os.path.join(logs_dir, "launcher-*.log"))):
+        name = os.path.basename(p)
+        try:
+            size = os.path.getsize(p)
+            if size > 0 and not any(f["name"] == name for f in all_files):
+                all_files.append({"name": name, "size": size, "path": p})
+        except OSError:
+            pass
+
+    # Backward compat: also include launcher.log if it's a real file (not symlink)
     launcher_log = os.path.join(getattr(app, "app_support", ""), "launcher.log")
-    if os.path.exists(launcher_log):
+    if os.path.exists(launcher_log) and not os.path.islink(launcher_log):
         try:
             size = os.path.getsize(launcher_log)
             if size > 0:

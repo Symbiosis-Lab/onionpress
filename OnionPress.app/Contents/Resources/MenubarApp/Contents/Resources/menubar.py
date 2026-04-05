@@ -177,7 +177,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.45"
+        self.version = "2.4.46"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -2649,6 +2649,13 @@ class OnionPressApp(rumps.App):
     def _first_run_after_welcome(self):
         """Called after user fills in credentials and clicks Set Up.
         Runs on a background thread (from setup_window callback)."""
+        sw = setup_window.get_setup_window() if setup_window else None
+        if sw and hasattr(sw, 'share_analytics'):
+            self.write_config_value("SHARE_ANALYTICS_WITH_ONIONHOME", sw.share_analytics)
+            self.log(f"Analytics sharing set to {sw.share_analytics} from welcome screen")
+            if sw.share_analytics == "yes":
+                from onionpress.analytics_sharing import trigger_upload
+                trigger_upload()
         self.start_service(None)
 
     def _wp_core_install(self, sw):
@@ -4120,6 +4127,19 @@ License: AGPL v3"""
                 timeout=5,
             )
 
+            # Apply side effects for changed settings
+            if "PREVENT_SLEEP" in updates:
+                self.stop_caffeinate()
+                self.start_caffeinate()
+            if "LAUNCH_ON_LOGIN" in updates:
+                if updates["LAUNCH_ON_LOGIN"] == "yes":
+                    self.add_login_item()
+                else:
+                    self.remove_login_item()
+            if updates.get("SHARE_ANALYTICS_WITH_ONIONHOME") == "yes":
+                from onionpress.analytics_sharing import trigger_upload
+                trigger_upload()
+
             self.cloudflare_tunnel_enabled = bool(self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
 
         except json.JSONDecodeError:
@@ -4587,7 +4607,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.45 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.46 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
