@@ -304,7 +304,26 @@ class SetupProgressWindow(AppKit.NSObject):
             font=NSFont.systemFontOfSize_(10), color=_TEXT_DIM,
         ))
 
-        y -= 40  # spacing
+        y -= 30
+
+        # -- Share analytics checkbox --
+        self._analytics_check = NSButton.alloc().initWithFrame_(
+            NSMakeRect(field_x, y, field_w, 18)
+        )
+        self._analytics_check.setButtonType_(AppKit.NSButtonTypeSwitch)
+        self._analytics_check.setTitle_("Share diagnostic logs with OnionHome")
+        self._analytics_check.setFont_(NSFont.systemFontOfSize_(11))
+        self._analytics_check.setState_(AppKit.NSControlStateValueOn)
+        self.welcome_view.addSubview_(self._analytics_check)
+
+        y -= 16
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(field_x + 18, y, field_w - 18, 14),
+            "Helps the OnionPress project diagnose issues.",
+            font=NSFont.systemFontOfSize_(10), color=_TEXT_DIM,
+        ))
+
+        y -= 30  # spacing
 
         # -- Set Up button --
         setup_btn = NSButton.alloc().initWithFrame_(
@@ -494,6 +513,12 @@ class SetupProgressWindow(AppKit.NSObject):
             # Generate a random password if none provided
             import secrets
             self.admin_pass = secrets.token_urlsafe(12)
+
+        # Save analytics preference
+        if self._analytics_check.state() == AppKit.NSControlStateValueOn:
+            self.share_analytics = "yes"
+        else:
+            self.share_analytics = "no"
 
         # Switch to progress view
         self._showing_welcome = False

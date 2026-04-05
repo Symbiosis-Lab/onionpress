@@ -388,8 +388,8 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
 
         save_btn = alert.addButtonWithTitle_("Save")
         cancel_btn = alert.addButtonWithTitle_("Cancel")
-        cancel_btn.setKeyEquivalent_("\r")
-        save_btn.setKeyEquivalent_("")
+        save_btn.setKeyEquivalent_("\r")
+        cancel_btn.setKeyEquivalent_("\033")  # Escape
 
         alert.window().setInitialFirstResponder_(prefix_field)
 
@@ -591,7 +591,13 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
             if remove_login:
                 remove_login()
 
-    log_func(f"Settings updated: {', '.join(changes)}")
+    # Trigger immediate analytics upload when sharing is turned on
+    if "SHARE_ANALYTICS_WITH_ONIONHOME" in changes and new_values["SHARE_ANALYTICS_WITH_ONIONHOME"] == "yes":
+        from onionpress.analytics_sharing import trigger_upload
+        trigger_upload()
+
+    change_details = [f"{k}={new_values[k]}" for k in changes]
+    log_func(f"Settings updated: {', '.join(change_details)}")
     saved = AppKit.NSAlert.alloc().init()
     saved.setMessageText_("Settings Saved")
     if set(changes) & _NEEDS_RESTART:

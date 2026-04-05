@@ -22,6 +22,14 @@ _LOG_NAME_RE = re.compile(
 )
 
 
+_upload_now = threading.Event()
+
+
+def trigger_upload():
+    """Wake the sharing loop to upload immediately."""
+    _upload_now.set()
+
+
 def start_analytics_sharing(app):
     """Start the analytics sharing daemon thread.
 
@@ -51,16 +59,17 @@ def _sharing_loop(app):
             # Already uploaded today — sleep until tomorrow's window
             target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
             target += timedelta(days=1)
-            time.sleep((target - now).total_seconds())
+            _upload_now.wait((target - now).total_seconds())
         elif now.hour >= upload_hour:
-            # Missed or hit our window today — wait 30 minutes so the
-            # instance isn't busy right after startup, and flaky
-            # wake/sleep cycles don't spam OnionHome
-            time.sleep(1800)
+            # Missed or hit our window today — wait 60 seconds so the
+            # instance isn't busy right after startup
+            _upload_now.wait(60)
         else:
             # Haven't hit our window yet today — sleep until it
             target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
-            time.sleep((target - now).total_seconds())
+            _upload_now.wait((target - now).total_seconds())
+
+        _upload_now.clear()
 
         if getattr(app, "_sleeping", False):
             continue
@@ -133,9 +142,20 @@ def _do_upload_cycle(app, include_active=False):
                     except OSError:
                         pass
 
-    # Also include launcher.log (not a rotating log, just a flat file)
+    # Include launcher rotating logs (written by shell script, not RotatingLog)
+    import glob as _glob_launcher
+    for p in sorted(_glob_launcher.glob(os.path.join(logs_dir, "launcher-*.log"))):
+        name = os.path.basename(p)
+        try:
+            size = os.path.getsize(p)
+            if size > 0 and not any(f["name"] == name for f in all_files):
+                all_files.append({"name": name, "size": size, "path": p})
+        except OSError:
+            pass
+
+    # Backward compat: also include launcher.log if it's a real file (not symlink)
     launcher_log = os.path.join(getattr(app, "app_support", ""), "launcher.log")
-    if os.path.exists(launcher_log):
+    if os.path.exists(launcher_log) and not os.path.islink(launcher_log):
         try:
             size = os.path.getsize(launcher_log)
             if size > 0:
