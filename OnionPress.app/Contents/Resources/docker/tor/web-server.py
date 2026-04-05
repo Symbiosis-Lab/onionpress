@@ -472,11 +472,15 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 entries.append(entry)
             conn.close()
 
+            from onionheaven_common import get_addr_logs
+            recent_logs = get_addr_logs(address)
+
             self._send_json(200, {
                 "lookup_type": lookup_type,
                 "address": address,
                 "entries": entries,
                 "count": len(entries),
+                "recent_logs": recent_logs,
                 "server_time": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
         except Exception as e:
@@ -734,10 +738,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                  wp_healthy_val, now if wp_healthy_val is not None else None))
             db_commit_with_retry(conn)
             # release_function checks if taken-over and handles status change + DEL_ONION
+            from onionheaven_common import addr_log
+            status_before = existing[0] if existing else None
+            addr_log(content_address, f"/online received from {content_address} (status={status_before}, version={version})")
             release_function(conn, content_address, healthcheck_address)
             if not existing:
                 created = True
-                log(f"New registry entry for {content_address} / {healthcheck_address}")
+                addr_log(content_address, f"New registry entry for {content_address} / {healthcheck_address}")
         else:
             # No healthcheck_address — update all rows for this content_address
             existing = conn.execute(
