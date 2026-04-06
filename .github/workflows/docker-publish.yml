@@ -47,13 +47,22 @@ jobs:
     # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Docker config (avoid macOS Keychain)
+      - name: Log in to registry (write auth directly, skip credential helpers)
         run: |
-          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker" >> "$GITHUB_ENV"
-          mkdir -p "${{ runner.temp }}/.docker"
-          echo '{"credsStore":""}' > "${{ runner.temp }}/.docker/config.json"
-      - name: Log in to registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          export DOCKER_CONFIG="${{ runner.temp }}/.docker"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          mkdir -p "$DOCKER_CONFIG"
+          TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
+          cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
+          {
+            "auths": {
+              "${{ env.REGISTRY }}": {
+                "auth": "$TOKEN"
+              }
+            },
+            "credsStore": ""
+          }
+          ENDCFG
       - name: Set up buildx
         run: docker buildx create --name arm64builder --use 2>/dev/null || docker buildx use arm64builder
       - name: Build and push (arm64)
@@ -125,13 +134,22 @@ jobs:
     # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Docker config (avoid macOS Keychain)
+      - name: Log in to registry (write auth directly, skip credential helpers)
         run: |
-          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker" >> "$GITHUB_ENV"
-          mkdir -p "${{ runner.temp }}/.docker"
-          echo '{"credsStore":""}' > "${{ runner.temp }}/.docker/config.json"
-      - name: Log in to registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          export DOCKER_CONFIG="${{ runner.temp }}/.docker"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          mkdir -p "$DOCKER_CONFIG"
+          TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
+          cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
+          {
+            "auths": {
+              "${{ env.REGISTRY }}": {
+                "auth": "$TOKEN"
+              }
+            },
+            "credsStore": ""
+          }
+          ENDCFG
       - name: Set up buildx
         run: docker buildx create --name arm64builder --use 2>/dev/null || docker buildx use arm64builder
       - name: Build and push (arm64)
@@ -203,13 +221,22 @@ jobs:
     # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Docker config (avoid macOS Keychain)
+      - name: Log in to registry (write auth directly, skip credential helpers)
         run: |
-          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker" >> "$GITHUB_ENV"
-          mkdir -p "${{ runner.temp }}/.docker"
-          echo '{"credsStore":""}' > "${{ runner.temp }}/.docker/config.json"
-      - name: Log in to registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          export DOCKER_CONFIG="${{ runner.temp }}/.docker"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          mkdir -p "$DOCKER_CONFIG"
+          TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
+          cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
+          {
+            "auths": {
+              "${{ env.REGISTRY }}": {
+                "auth": "$TOKEN"
+              }
+            },
+            "credsStore": ""
+          }
+          ENDCFG
       - name: Set up buildx
         run: docker buildx create --name arm64builder --use 2>/dev/null || docker buildx use arm64builder
       - name: Build and push (arm64)
