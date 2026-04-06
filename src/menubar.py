@@ -4599,7 +4599,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.46 RUNNING")
+        self.log(f"QUIT BUTTON CLICKED - v{self.version} RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
