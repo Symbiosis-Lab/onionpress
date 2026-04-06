@@ -479,8 +479,19 @@ def db_ensure_schema(conn):
             max_services    INTEGER DEFAULT 50,
             bootstrapped    INTEGER DEFAULT 0,
             assigned_count  INTEGER DEFAULT 0,
+            active_services INTEGER DEFAULT 0,
+            last_heartbeat  TEXT,
+            status          TEXT DEFAULT 'active',
             created_at      TEXT
         )""")
+    else:
+        # Add columns expected by takeover-worker (dropped in eafa80c refactor)
+        if "active_services" not in tc_cols:
+            conn.execute("ALTER TABLE takeover_containers ADD COLUMN active_services INTEGER DEFAULT 0")
+        if "last_heartbeat" not in tc_cols:
+            conn.execute("ALTER TABLE takeover_containers ADD COLUMN last_heartbeat TEXT")
+        if "status" not in tc_cols:
+            conn.execute("ALTER TABLE takeover_containers ADD COLUMN status TEXT DEFAULT 'active'")
 
     db_commit_with_retry(conn)
 
