@@ -47,6 +47,11 @@ jobs:
     # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker config (avoid macOS Keychain)
+        run: |
+          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker" >> "$GITHUB_ENV"
+          mkdir -p "${{ runner.temp }}/.docker"
+          echo '{"credsStore":""}' > "${{ runner.temp }}/.docker/config.json"
       - name: Log in to registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       - name: Set up buildx
@@ -120,6 +125,11 @@ jobs:
     # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker config (avoid macOS Keychain)
+        run: |
+          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker" >> "$GITHUB_ENV"
+          mkdir -p "${{ runner.temp }}/.docker"
+          echo '{"credsStore":""}' > "${{ runner.temp }}/.docker/config.json"
       - name: Log in to registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       - name: Set up buildx
@@ -193,6 +203,11 @@ jobs:
     # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker config (avoid macOS Keychain)
+        run: |
+          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker" >> "$GITHUB_ENV"
+          mkdir -p "${{ runner.temp }}/.docker"
+          echo '{"credsStore":""}' > "${{ runner.temp }}/.docker/config.json"
       - name: Log in to registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
       - name: Set up buildx
