@@ -52,6 +52,8 @@ jobs:
           export DOCKER_CONFIG="${{ runner.temp }}/.docker"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
           mkdir -p "$DOCKER_CONFIG"
+          # Symlink cli-plugins so buildx is discoverable under custom DOCKER_CONFIG
+          ln -sfn "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
           TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
           cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
           {
@@ -139,6 +141,8 @@ jobs:
           export DOCKER_CONFIG="${{ runner.temp }}/.docker"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
           mkdir -p "$DOCKER_CONFIG"
+          # Symlink cli-plugins so buildx is discoverable under custom DOCKER_CONFIG
+          ln -sfn "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
           TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
           cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
           {
@@ -226,6 +230,8 @@ jobs:
           export DOCKER_CONFIG="${{ runner.temp }}/.docker"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
           mkdir -p "$DOCKER_CONFIG"
+          # Symlink cli-plugins so buildx is discoverable under custom DOCKER_CONFIG
+          ln -sfn "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
           TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
           cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
           {
