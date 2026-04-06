@@ -188,7 +188,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.46"
+        self.version = "2.4.47"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1654,7 +1654,7 @@ class OnionPressApp(rumps.App):
                 # installs get stuck: 302 takeover → internal check fails →
                 # _tor_internally_ready never set → heartbeat never fires.
                 # Use bootstrap percentage instead (100% = Tor can make circuits).
-                tor_bootstrapped = self._last_bootstrap_pct >= 100
+                tor_bootstrapped = self._last_bootstrap_pct >= 100 or self.is_ready
                 if (tor_bootstrapped and self.onion_address
                         and self.onion_address not in ["Starting...", "Not running", "Generating address..."]
                         and not self.is_onionheaven
@@ -2095,8 +2095,15 @@ class OnionPressApp(rumps.App):
         self._sleeping = False
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
-        # Reset OnionHeaven check so /online fires when Tor reconnects
+        # Reset OnionHeaven so /online fires when Tor reconnects.
+        # The heartbeat thread from before sleep may have died (exception during
+        # container restart) or _last_bootstrap_pct may not reach 100 if Tor
+        # goes straight to ready — reset registration so a new thread starts.
         self._onionheaven_checked = False
+        self._onionheaven_registration_succeeded = False
+        self._onionheaven_heartbeat_succeeded = False
+        self._onionheaven_registration_in_flight = False
+        self._heartbeat_loop_running = False  # Allow new heartbeat loop after wake
         self._wordpress_confirmed = False  # Re-verify WordPress once after wake
         if self.is_ready:
             self.is_ready = False
