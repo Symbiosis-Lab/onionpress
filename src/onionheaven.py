@@ -222,6 +222,13 @@ def _heartbeat_loop(app):
     Sends the same /online payload but adds wordpress_healthy status.
     Keeps running until the app quits (daemon thread).
     """
+    # Prevent duplicate heartbeat loops (multiple registration threads
+    # can race into this function after wake/restart)
+    if getattr(app, '_heartbeat_loop_running', False):
+        app.log("OnionHeaven: heartbeat loop already running, skipping duplicate")
+        return
+    app._heartbeat_loop_running = True
+
     # Random jitter on first heartbeat to prevent thundering herd
     # after OnionHeaven restart
     jitter = random.uniform(0, 15)
