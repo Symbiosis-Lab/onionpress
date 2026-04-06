@@ -1,9 +1,17 @@
 """
 py2app setup script for OnionPress menubar application
 """
+import re
 import sys
 import os
 from setuptools import setup
+
+# Read version from src/menubar.py (the canonical source)
+_version_match = re.search(
+    r'self\.version\s*=\s*"([^"]+)"',
+    open(os.path.join(os.path.dirname(__file__), 'src', 'menubar.py')).read(),
+)
+VERSION = _version_match.group(1) if _version_match else 'unknown'
 
 # Default build directories if not specified on command line
 # (avoid conflicts with build/ scripts directory)
@@ -34,8 +42,8 @@ OPTIONS = {
         'CFBundleName': 'OnionPress',
         'CFBundleDisplayName': 'OnionPress',
         'CFBundleIdentifier': 'press.onion.app',
-        'CFBundleVersion': '2.4.46',
-        'CFBundleShortVersionString': '2.4.46',
+        'CFBundleVersion': VERSION,
+        'CFBundleShortVersionString': VERSION,
         'LSUIElement': True,  # Run as menu bar app (no dock icon)
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
