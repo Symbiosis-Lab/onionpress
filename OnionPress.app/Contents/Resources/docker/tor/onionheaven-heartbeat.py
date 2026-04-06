@@ -105,7 +105,7 @@ def startup_reconciliation(conn):
     # But first: if the content_address has an online sibling, the takeover
     # is stale (instance re-registered with a new healthcheck) — unregister instead.
     taken_over = conn.execute(
-        "SELECT content_address, healthcheck_address FROM registry "
+        "SELECT content_address, healthcheck_address, audit_result FROM registry "
         "WHERE status = 'taken-over' AND unregistered_at IS NULL"
     ).fetchall()
 
@@ -113,6 +113,7 @@ def startup_reconciliation(conn):
     if taken_over:
         for row in taken_over:
             ca, ha = row[0], row[1]
+            audit_result = row[2]
             sibling_online = conn.execute(
                 "SELECT 1 FROM registry WHERE content_address = ? AND status = 'online' "
                 "AND unregistered_at IS NULL LIMIT 1",
@@ -121,6 +122,9 @@ def startup_reconciliation(conn):
             if sibling_online:
                 log(f"  startup: {ca} has online sibling — unregistering stale takeover for {ha}")
                 unregister_entry(conn, ca, ha, reason="superseded-by-new-healthcheck")
+            elif audit_result == "false_positive":
+                log(f"  startup: {ca} audit was false_positive — releasing instead of re-taking-over")
+                release_function(conn, ca, ha)
             else:
                 if ca not in re_takeover_addrs:
                     re_takeover_addrs.append(ca)
@@ -412,9 +416,16 @@ def main():
                         except (ValueError, TypeError):
                             pass
 
-                    # Queue audit on the takeover worker (no curl here)
+                    # Act on audit results / queue new audits
                     audit_result = entry.get("audit_result")
-                    if not audit_result and not entry.get("audit_pending"):
+                    if audit_result == "false_positive":
+                        # Site is alive — release the takeover
+                        # (release_function clears audit_result so future
+                        # takeovers get a fresh audit)
+                        log(f"Releasing false-positive takeover for {ca} (healthcheck {ha} is alive)")
+                        release_function(conn, ca, ha)
+                        continue
+                    elif not audit_result and not entry.get("audit_pending"):
                         if 10 < since_takeover <= 300:
                             conn.execute(
                                 "UPDATE registry SET audit_pending = ? "
