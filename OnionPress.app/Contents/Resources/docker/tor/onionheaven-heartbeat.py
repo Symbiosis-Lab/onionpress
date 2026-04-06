@@ -20,6 +20,7 @@ All operations are local:
 """
 
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -27,11 +28,11 @@ from datetime import datetime, timedelta, timezone
 
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    takeover_function, release_function, unregister_entry, flush_sighup_tor,
-    is_farm_mode, check_worker_bootstrap, cleanup_dead_workers,
+    takeover_function, release_function, unregister_entry,
+    check_worker_bootstrap, cleanup_dead_workers,
     _init_worker_index, _ensure_capacity, _pick_worker, _exec_takeover,
     _check_arti_key_errors,
-    PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, TOR_MANAGER,
+    PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE,
 )
 
 def wall_sleep(seconds):
@@ -126,61 +127,51 @@ def startup_reconciliation(conn):
         db_commit_with_retry(conn)
 
     if re_takeover_addrs:
-        if is_farm_mode():
-            # Clear old assignments — workers may have been restarted too.
-            # Re-execute takeovers directly on available workers.
-            conn.execute(
-                "UPDATE registry SET takeover_container = NULL "
-                "WHERE status = 'taken-over' AND unregistered_at IS NULL"
-            )
-            # Reset assigned_count since we cleared all assignments
-            conn.execute("UPDATE takeover_containers SET assigned_count = 0")
-            db_commit_with_retry(conn)
+        # Clear old assignments — workers may have been restarted too.
+        # Re-execute takeovers on available workers.
+        conn.execute(
+            "UPDATE registry SET takeover_container = NULL "
+            "WHERE status = 'taken-over' AND unregistered_at IS NULL"
+        )
+        # Reset assigned_count since we cleared all assignments
+        conn.execute("UPDATE takeover_containers SET assigned_count = 0")
+        db_commit_with_retry(conn)
 
-            # Wait for workers to bootstrap before re-assigning
-            log(f"startup reconciliation: {len(re_takeover_addrs)} takeover(s) need re-execution, waiting for workers...")
-            for _ in range(12):  # wait up to 60s for workers
-                check_worker_bootstrap(conn)
-                worker = _pick_worker(conn)
-                if worker:
-                    break
-                time.sleep(5)
+        # Wait for workers to bootstrap before re-assigning
+        log(f"startup reconciliation: {len(re_takeover_addrs)} takeover(s) need re-execution, waiting for workers...")
+        for _ in range(12):  # wait up to 60s for workers
+            check_worker_bootstrap(conn)
+            worker = _pick_worker(conn)
+            if worker:
+                break
+            time.sleep(5)
 
-            if _pick_worker(conn):
-                for addr in re_takeover_addrs:
-                    # Find the registry row for this address
-                    row = conn.execute(
-                        "SELECT healthcheck_address FROM registry "
-                        "WHERE content_address = ? AND status = 'taken-over' "
-                        "AND unregistered_at IS NULL LIMIT 1",
-                        (addr,)
-                    ).fetchone()
-                    if row:
-                        worker = _pick_worker(conn)
-                        if worker and _exec_takeover(worker, addr):
-                            conn.execute(
-                                "UPDATE registry SET takeover_container = ? "
-                                "WHERE content_address = ? AND healthcheck_address = ?",
-                                (worker, addr, row["healthcheck_address"])
-                            )
-                            conn.execute(
-                                "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
-                                "WHERE container_name = ?",
-                                (worker,)
-                            )
-                db_commit_with_retry(conn)
-                log(f"startup reconciliation: re-executed {len(re_takeover_addrs)} takeover(s) on workers")
-            else:
-                log(f"startup reconciliation: no workers available — {len(re_takeover_addrs)} takeover(s) will be assigned when workers bootstrap")
-        else:
-            log(f"startup reconciliation: re-executing {len(re_takeover_addrs)} takeover(s) locally")
+        if _pick_worker(conn):
             for addr in re_takeover_addrs:
-                try:
-                    subprocess.run([TOR_MANAGER, "takeover", "--no-sighup", addr],
-                                   capture_output=True, text=True, timeout=30)
-                    log(f"  re-took-over {addr}")
-                except Exception as e:
-                    log(f"  failed to re-takeover {addr}: {e}")
+                # Find the registry row for this address
+                row = conn.execute(
+                    "SELECT healthcheck_address FROM registry "
+                    "WHERE content_address = ? AND status = 'taken-over' "
+                    "AND unregistered_at IS NULL LIMIT 1",
+                    (addr,)
+                ).fetchone()
+                if row:
+                    worker = _pick_worker(conn)
+                    if worker and _exec_takeover(worker, addr):
+                        conn.execute(
+                            "UPDATE registry SET takeover_container = ? "
+                            "WHERE content_address = ? AND healthcheck_address = ?",
+                            (worker, addr, row["healthcheck_address"])
+                        )
+                        conn.execute(
+                            "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
+                            "WHERE container_name = ?",
+                            (worker,)
+                        )
+            db_commit_with_retry(conn)
+            log(f"startup reconciliation: re-executed {len(re_takeover_addrs)} takeover(s) on workers")
+        else:
+            log(f"startup reconciliation: no workers available — {len(re_takeover_addrs)} takeover(s) will be assigned when workers bootstrap")
 
     # Clean up duplicate online rows for the same content_address.
     # Keep the one with the newest last_healthy, unregister the rest.
@@ -253,61 +244,60 @@ def main():
             conn = db_connect()
 
             # Check worker bootstrap status and clean up dead workers
-            if is_farm_mode():
-                check_worker_bootstrap(conn)
-                cleanup_dead_workers(conn)
+            check_worker_bootstrap(conn)
+            cleanup_dead_workers(conn)
 
-                # Re-sync worker index if takeover_containers is empty
-                # (e.g. after a reset-onionheaven cleared the table)
-                try:
-                    tc_count = conn.execute(
-                        "SELECT COUNT(*) FROM takeover_containers"
+            # Re-sync worker index if takeover_containers is empty
+            # (e.g. after a reset-onionheaven cleared the table)
+            try:
+                tc_count = conn.execute(
+                    "SELECT COUNT(*) FROM takeover_containers"
+                ).fetchone()[0]
+                if tc_count == 0:
+                    _init_worker_index(conn)
+            except sqlite3.OperationalError:
+                pass
+
+            # Check for assigned_count drift
+            try:
+                workers = conn.execute(
+                    "SELECT container_name, assigned_count FROM takeover_containers"
+                ).fetchall()
+                for w in workers:
+                    actual = conn.execute(
+                        "SELECT COUNT(*) FROM registry WHERE status='taken-over' "
+                        "AND takeover_container = ? AND unregistered_at IS NULL",
+                        (w["container_name"],)
                     ).fetchone()[0]
-                    if tc_count == 0:
-                        _init_worker_index(conn)
-                except sqlite3.OperationalError:
-                    pass
+                    if actual != w["assigned_count"]:
+                        log(f"WARNING: assigned_count drift on {w['container_name']}: "
+                            f"DB says {w['assigned_count']}, actual {actual}")
+            except sqlite3.OperationalError:
+                pass
 
-                # Check for assigned_count drift
-                try:
-                    workers = conn.execute(
-                        "SELECT container_name, assigned_count FROM takeover_containers"
+            # Reconcile: compare what Tor actually serves vs what DB expects.
+            # Log-only for now — helps diagnose silent service drops.
+            try:
+                for w in (workers if workers else []):
+                    name = w["container_name"]
+                    tor_onions = _get_tor_detached(name)
+                    if tor_onions is None:
+                        continue
+                    db_rows = conn.execute(
+                        "SELECT content_address FROM registry "
+                        "WHERE takeover_container = ? AND status = 'taken-over' "
+                        "AND unregistered_at IS NULL",
+                        (name,)
                     ).fetchall()
-                    for w in workers:
-                        actual = conn.execute(
-                            "SELECT COUNT(*) FROM registry WHERE status='taken-over' "
-                            "AND takeover_container = ? AND unregistered_at IS NULL",
-                            (w["container_name"],)
-                        ).fetchone()[0]
-                        if actual != w["assigned_count"]:
-                            log(f"WARNING: assigned_count drift on {w['container_name']}: "
-                                f"DB says {w['assigned_count']}, actual {actual}")
-                except sqlite3.OperationalError:
-                    pass
-
-                # Reconcile: compare what Tor actually serves vs what DB expects.
-                # Log-only for now — helps diagnose silent service drops.
-                try:
-                    for w in (workers if workers else []):
-                        name = w["container_name"]
-                        tor_onions = _get_tor_detached(name)
-                        if tor_onions is None:
-                            continue
-                        db_rows = conn.execute(
-                            "SELECT content_address FROM registry "
-                            "WHERE takeover_container = ? AND status = 'taken-over' "
-                            "AND unregistered_at IS NULL",
-                            (name,)
-                        ).fetchall()
-                        db_addrs = set(r["content_address"] for r in db_rows)
-                        dropped = db_addrs - tor_onions
-                        extra = tor_onions - db_addrs
-                        if dropped or extra:
-                            log(f"RECONCILE: {name} — "
-                                f"Tor has {len(tor_onions)}, DB expects {len(db_addrs)}, "
-                                f"dropped={len(dropped)}, extra={len(extra)}")
-                except Exception as e:
-                    log(f"RECONCILE error: {e}")
+                    db_addrs = set(r["content_address"] for r in db_rows)
+                    dropped = db_addrs - tor_onions
+                    extra = tor_onions - db_addrs
+                    if dropped or extra:
+                        log(f"RECONCILE: {name} — "
+                            f"Tor has {len(tor_onions)}, DB expects {len(db_addrs)}, "
+                            f"dropped={len(dropped)}, extra={len(extra)}")
+            except Exception as e:
+                log(f"RECONCILE error: {e}")
 
             # Get list of active entry keys (content_address + healthcheck_address).
             # We only fetch the keys here — each entry is re-queried fresh before
@@ -381,8 +371,8 @@ def main():
                         takeover_function(conn, ca, ha, force=False)
 
                 elif entry["status"] == "taken-over":
-                    # Unassigned taken-over entry — execute takeover directly.
-                    if not entry.get("takeover_container") and is_farm_mode():
+                    # Unassigned taken-over entry — assign to a worker.
+                    if not entry.get("takeover_container"):
                         worker = _pick_worker(conn)
                         if worker and _exec_takeover(worker, ca):
                             conn.execute(
@@ -447,10 +437,6 @@ def main():
                         unregister_entry(conn, ca, ha, reason="stale-stress-test-cleanup")
 
                 db_commit_with_retry(conn)
-
-            # Flush pending SIGHUPs (only relevant for non-farm local Tor)
-            if not is_farm_mode():
-                flush_sighup_tor()
 
             elapsed = (datetime.now(timezone.utc) - pass_start).total_seconds()
             parts = [f"{len(entry_keys)} entries"]

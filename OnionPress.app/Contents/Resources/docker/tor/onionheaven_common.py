@@ -640,54 +640,108 @@ def _spawn_worker(conn):
         _next_worker_index -= 1
 
 
-def check_worker_bootstrap(conn):
-    """Check if any not-yet-bootstrapped workers are now ready.
+def _check_worker_process(container_name):
+    """Check if the takeover-worker Python process is alive inside the container.
 
-    Called each heartbeat cycle. Checks Tor bootstrap status via docker exec.
+    Returns True if the process is running, False otherwise.
+    Checks for the specific takeover-worker script, not just any python3.
     """
     try:
+        result = subprocess.run(
+            ["docker", "exec", container_name, "sh", "-c",
+             "ps aux | grep '[o]nionheaven-takeover-worker\\.py' | grep -v grep"],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except Exception:
+        return False
+
+
+def check_worker_bootstrap(conn):
+    """Check worker health — bootstrap status and process liveness.
+
+    Called each heartbeat cycle. For unbootstrapped workers: checks Tor
+    bootstrap and queue manager. For all workers: verifies the takeover-worker
+    process is alive and warns loudly if not.
+    """
+    now = datetime.now(timezone.utc)
+    now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
         rows = conn.execute(
-            "SELECT container_name FROM takeover_containers WHERE bootstrapped = 0"
+            "SELECT container_name, bootstrapped, created_at, last_heartbeat FROM takeover_containers"
         ).fetchall()
     except sqlite3.OperationalError:
         return
 
     for row in rows:
         name = row["container_name"]
-        try:
-            # Use cookie auth — control port requires it
-            result = subprocess.run(
-                ["docker", "exec", name, "sh", "-c",
-                 "COOKIE=$(xxd -p -c 64 /var/lib/tor/control_auth_cookie 2>/dev/null) && "
-                 "printf 'AUTHENTICATE %s\\r\\nGETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n' "
-                 "\"$COOKIE\" | nc -q 1 127.0.0.1 9051 2>/dev/null || true"],
-                capture_output=True, text=True, timeout=10
-            )
-            if "PROGRESS=100" in result.stdout:
-                # Also verify queue manager is accepting commands
-                qm_result = subprocess.run(
-                    ["docker", "exec", name,
-                     "python3", "/onionheaven-queue-manager.py", "status"],
+        bootstrapped = row["bootstrapped"]
+        created_at = row["created_at"]
+
+        # --- Check unbootstrapped workers ---
+        if not bootstrapped:
+            # Warn if stuck unbootstrapped for >2 minutes
+            if created_at:
+                try:
+                    ct = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    age = (now - ct).total_seconds()
+                    if age > 120:
+                        log(f"WARNING: worker {name} has been unbootstrapped for {int(age)}s — "
+                            f"check container logs: docker logs {name}")
+                except (ValueError, TypeError):
+                    pass
+
+            try:
+                result = subprocess.run(
+                    ["docker", "exec", name, "sh", "-c",
+                     "COOKIE=$(xxd -p -c 64 /var/lib/tor/control_auth_cookie 2>/dev/null) && "
+                     "printf 'AUTHENTICATE %s\\r\\nGETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n' "
+                     "\"$COOKIE\" | nc -q 1 127.0.0.1 9051 2>/dev/null || true"],
                     capture_output=True, text=True, timeout=10
                 )
-                if qm_result.returncode != 0 or not qm_result.stdout.strip():
-                    continue  # queue manager not ready yet, retry next cycle
-                try:
-                    qm_status = json.loads(qm_result.stdout.strip())
-                    if "error" in qm_status:
-                        continue  # queue manager returned an error
-                except (json.JSONDecodeError, ValueError):
-                    continue  # invalid response
+                if "PROGRESS=100" in result.stdout:
+                    # Also verify queue manager is accepting commands
+                    qm_result = subprocess.run(
+                        ["docker", "exec", name,
+                         "python3", "/onionheaven-queue-manager.py", "status"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if qm_result.returncode != 0 or not qm_result.stdout.strip():
+                        continue
+                    try:
+                        qm_status = json.loads(qm_result.stdout.strip())
+                        if "error" in qm_status:
+                            continue
+                    except (json.JSONDecodeError, ValueError):
+                        continue
 
-                conn.execute(
-                    "UPDATE takeover_containers SET bootstrapped = 1 "
-                    "WHERE container_name = ?",
-                    (name,)
-                )
-                db_commit_with_retry(conn)
-                log(f"Takeover worker {name} is bootstrapped and ready (Tor + queue manager)")
-        except Exception:
-            pass  # container may not be running yet, retry next cycle
+                    conn.execute(
+                        "UPDATE takeover_containers SET bootstrapped = 1 "
+                        "WHERE container_name = ?",
+                        (name,)
+                    )
+                    db_commit_with_retry(conn)
+                    log(f"Takeover worker {name} is bootstrapped and ready (Tor + queue manager)")
+            except Exception:
+                pass
+            continue
+
+        # --- Check bootstrapped workers: is the worker process alive? ---
+        if not _check_worker_process(name):
+            log(f"ERROR: worker {name} container is running but takeover-worker process is DEAD — "
+                f"takeovers/audits will not be processed. Check logs: docker logs {name}")
+            # Check if it has been dead for a while (no heartbeat update)
+            last_hb = row["last_heartbeat"]
+            if last_hb:
+                try:
+                    lh = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+                    dead_for = (now - lh).total_seconds()
+                    if dead_for > 300:
+                        log(f"ERROR: worker {name} has had no heartbeat for {int(dead_for)}s — "
+                            f"consider restarting: docker restart {name}")
+                except (ValueError, TypeError):
+                    pass
 
 
 def cleanup_dead_workers(conn):
