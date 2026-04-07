@@ -2923,6 +2923,7 @@ class OnionPressApp(rumps.App):
         self._stopping = True  # Prevent health monitor from auto-restarting
         self._run_generation += 1  # Cancel any pending SIGHUP threads
         self.menu["Starting..."].title = "Status: Stopping..."
+        self.menu["Stop"].set_callback(None)  # Disable immediately to prevent double-click
 
         def stop():
             # Notify OnionHeaven before stopping services
