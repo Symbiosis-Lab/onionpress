@@ -37,6 +37,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // User double-clicked the app while running — signal the MenubarApp
         let reopenFile = dataDir + "/.reopen"
         FileManager.default.createFile(atPath: reopenFile, contents: nil)
+        // Post a distributed notification so the MenubarApp can respond immediately
+        // instead of waiting for its next 30-second poll cycle
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("press.onion.app.reopen"),
+            object: nil)
         return false
     }
 
