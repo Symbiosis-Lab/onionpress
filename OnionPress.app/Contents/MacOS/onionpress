@@ -22,6 +22,7 @@ RESOURCES_DIR="$APP_DIR/Resources"
 DOCKER_DIR="$RESOURCES_DIR/docker"
 SCRIPTS_DIR="$RESOURCES_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
+DOCUMENTS_DIR="$HOME/Documents/onionpress"
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
@@ -33,8 +34,10 @@ _BUNDLED_PYTHON_BIN="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
 _BUNDLED_PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
 bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" "$_BUNDLED_PYTHON_BIN" "$@"; }
 
-# Ensure data directory exists
+# Ensure data and documents directories exist
 mkdir -p "$DATA_DIR"
+mkdir -p "$DOCUMENTS_DIR/backups"
+mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
 
 # Per-user lock file to prevent the same user from double-starting.
 # Only checked for 'start' — other commands (status, get, launch, etc.) are safe.
@@ -433,6 +436,7 @@ detect_container_runtime() {
                     "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                     "$BIN_DIR/colima" start \
                         --mount "$DATA_DIR/shared:w" \
+                        --mount "$DOCUMENTS_DIR:w" \
                         --cpu "$_cfg_cpu" \
                         --memory "$_cfg_mem" \
                         >> "$LOG_FILE" 2>&1
@@ -460,6 +464,7 @@ detect_container_runtime() {
 
                 "$BIN_DIR/colima" start \
                     --mount "$DATA_DIR/shared:w" \
+                    --mount "$DOCUMENTS_DIR:w" \
                     --cpu "$_restart_cpu" \
                     --memory "$_restart_mem" \
                     >> "$LOG_FILE" 2>&1
@@ -1013,6 +1018,7 @@ install_docker() {
             --vm-type vz \
             --mount-type virtiofs \
             --mount "$DATA_DIR/shared:w" \
+            --mount "$DOCUMENTS_DIR:w" \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \
@@ -1024,6 +1030,7 @@ install_docker() {
             --vm-type qemu \
             --mount-type sshfs \
             --mount "$DATA_DIR/shared:w" \
+            --mount "$DOCUMENTS_DIR:w" \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \

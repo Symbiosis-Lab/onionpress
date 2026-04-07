@@ -60,6 +60,7 @@ class FakeDockerTestCase(unittest.TestCase):
         from onionpress.platform import OnionPressPaths
         return OnionPressPaths(
             data_dir=self.data_dir,
+            documents_dir=os.path.join(self.data_dir, "documents"),
             config_file=os.path.join(self.data_dir, "config"),
             secrets_file=os.path.join(self.data_dir, "secrets"),
             log_file=os.path.join(self.data_dir, "onionpress.log"),

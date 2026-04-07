@@ -18,11 +18,14 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
 MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
 DATA_DIR="$HOME/.onionpress"
+DOCUMENTS_DIR="$HOME/Documents/onionpress"
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
-# Ensure data directory exists
+# Ensure data and documents directories exist
 mkdir -p "$DATA_DIR"
+mkdir -p "$DOCUMENTS_DIR/backups"
+mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
 
 # Set up bundled binaries in PATH
 export PATH="$BIN_DIR:$PATH"
@@ -137,6 +140,7 @@ initialize_colima() {
                 --vm-type vz \
                 --mount-type virtiofs \
                 --mount "$DATA_DIR/shared:w" \
+                --mount "$DOCUMENTS_DIR:w" \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
                 --arch "$VM_ARCH" \
@@ -148,6 +152,7 @@ initialize_colima() {
                 --vm-type qemu \
                 --mount-type sshfs \
                 --mount "$DATA_DIR/shared:w" \
+                --mount "$DOCUMENTS_DIR:w" \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
                 --arch "$VM_ARCH" \
@@ -184,6 +189,7 @@ initialize_colima() {
         log "Starting Colima VM..."
         "$BIN_DIR/colima" start \
             --mount "$DATA_DIR/shared:w" \
+            --mount "$DOCUMENTS_DIR:w" \
             --memory "$vm_mem" \
             >> "$LOG_FILE" 2>&1
     fi
