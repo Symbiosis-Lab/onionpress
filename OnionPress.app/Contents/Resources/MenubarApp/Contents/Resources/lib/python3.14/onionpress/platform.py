@@ -88,10 +88,30 @@ def detect_timezone() -> str:
     return "UTC"
 
 
+def default_documents_dir() -> str:
+    """Return the user-visible documents directory for backups and Creations.
+
+    Both platforms: ~/Documents/onionpress/
+    Linux: uses xdg-user-dir DOCUMENTS if available (handles localisation).
+    """
+    if detect_os() == OS.LINUX:
+        try:
+            result = subprocess.run(
+                ["xdg-user-dir", "DOCUMENTS"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return os.path.join(result.stdout.strip(), "onionpress")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    return os.path.join(os.path.expanduser("~"), "Documents", "onionpress")
+
+
 @dataclass(frozen=True)
 class OnionPressPaths:
     """All OnionPress filesystem paths, computed once."""
     data_dir: str
+    documents_dir: str
     config_file: str
     secrets_file: str
     log_file: str
@@ -106,15 +126,19 @@ class OnionPressPaths:
     app_bundle: str  # root of OnionPress.app (or repo root if unbundled)
 
 
-def resolve_paths(data_dir: str = None, app_bundle: str = None) -> OnionPressPaths:
+def resolve_paths(data_dir: str = None, documents_dir: str = None,
+                   app_bundle: str = None) -> OnionPressPaths:
     """Compute all OnionPress paths from data_dir and app_bundle root.
 
     Args:
         data_dir: Override for ~/.onionpress/. Defaults to ~/.onionpress/.
+        documents_dir: Override for ~/Documents/onionpress/. Defaults to platform default.
         app_bundle: Path to OnionPress.app. If None, attempts find_app_bundle().
     """
     if data_dir is None:
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    if documents_dir is None:
+        documents_dir = default_documents_dir()
     if app_bundle is None:
         app_bundle = find_app_bundle() or ""
 
@@ -138,6 +162,7 @@ def resolve_paths(data_dir: str = None, app_bundle: str = None) -> OnionPressPat
 
     return OnionPressPaths(
         data_dir=data_dir,
+        documents_dir=documents_dir,
         config_file=os.path.join(data_dir, "config"),
         secrets_file=os.path.join(data_dir, "secrets"),
         log_file=os.path.join(data_dir, "onionpress.log"),

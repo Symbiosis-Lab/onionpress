@@ -188,7 +188,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.46"
+        self.version = "2.4.49"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -271,6 +271,9 @@ class OnionPressApp(rumps.App):
             # Log version information at startup
             self.log_version_info()
 
+            # Multi-user: ensure app bundle is group-writable so either user can update
+            self._fix_app_bundle_permissions()
+
             # Update browser menu title after checking filesystem
             self.update_browser_menu_title()
 
@@ -298,11 +301,13 @@ class OnionPressApp(rumps.App):
 
         # State — load cached onion address from previous run if available
         cached_addr_file = os.path.join(self.app_support, "onion_address")
+        self._had_cached_address = False  # True if a previous session's address was found
         try:
             with open(cached_addr_file) as f:
                 cached = f.read().strip()
             if cached and cached.endswith('.onion'):
                 self.onion_address = cached
+                self._had_cached_address = True
             else:
                 self.onion_address = "Starting..."
         except (OSError, IOError):
@@ -315,7 +320,9 @@ class OnionPressApp(rumps.App):
         self.web_log_process = None  # Background process for web logs
         self.web_log_file_handle = None  # File handle for web log capture
         self.last_status_logged = None  # Track last logged status to avoid spam
-        self.auto_opened_browser = False  # Track if we've auto-opened browser this session
+        # Only auto-open browser on first-ever run; on restarts the user
+        # already knows their address so opening the browser is unwanted.
+        self.auto_opened_browser = self._had_cached_address
         self.setup_dialog_showing = False  # Track if setup dialog is currently showing
         self.setup_alert = None  # Reference to NSAlert for programmatic dismissal
         self.monitoring_tor_install = False  # Track if we're monitoring for Tor Browser installation
@@ -393,6 +400,9 @@ class OnionPressApp(rumps.App):
 
         # Listen for system wake to immediately mark Tor as reconnecting
         self.register_wake_notification()
+
+        # Listen for reopen notification from Swift launcher wrapper
+        self._register_reopen_notification()
 
         # Start status checker
         self.start_status_checker()
@@ -1654,7 +1664,7 @@ class OnionPressApp(rumps.App):
                 # installs get stuck: 302 takeover → internal check fails →
                 # _tor_internally_ready never set → heartbeat never fires.
                 # Use bootstrap percentage instead (100% = Tor can make circuits).
-                tor_bootstrapped = self._last_bootstrap_pct >= 100
+                tor_bootstrapped = self._last_bootstrap_pct >= 100 or self.is_ready
                 if (tor_bootstrapped and self.onion_address
                         and self.onion_address not in ["Starting...", "Not running", "Generating address..."]
                         and not self.is_onionheaven
@@ -1697,7 +1707,7 @@ class OnionPressApp(rumps.App):
                 if not self.onion_address or self.onion_address in ["Starting...", "Generating address..."]:
                     self.onion_address = "Not running"
                 self.is_ready = False
-                self.auto_opened_browser = False  # Reset for next start
+                # Don't reset auto_opened_browser — browser is already open
                 self._wp_installed = None  # Reset for next start
                 self._wp_not_installed_count = 0
                 self._was_ready = False
@@ -2011,6 +2021,20 @@ class OnionPressApp(rumps.App):
             _safe_callback("terminate", self._handle_terminate))
         self.log("Registered for system sleep/wake/terminate notifications")
 
+    def _register_reopen_notification(self):
+        """Listen for distributed notification from Swift launcher wrapper.
+
+        This fires immediately when the user double-clicks the app,
+        instead of waiting for the next 30-second check_status poll.
+        """
+        dnc = AppKit.NSDistributedNotificationCenter.defaultCenter()
+        dnc.addObserverForName_object_queue_usingBlock_(
+            "press.onion.app.reopen",
+            None,
+            AppKit.NSOperationQueue.mainQueue(),
+            lambda _: self.handle_reopen())
+        self.log("Registered for reopen distributed notification")
+
     def _signal_watchdog(self, container, sig):
         """Send a Unix signal to the tor-watchdog process inside a container."""
         # [t]or-watchdog bracket trick prevents pgrep from matching the sh -c command itself
@@ -2095,8 +2119,15 @@ class OnionPressApp(rumps.App):
         self._sleeping = False
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
-        # Reset OnionHeaven check so /online fires when Tor reconnects
+        # Reset OnionHeaven so /online fires when Tor reconnects.
+        # The heartbeat thread from before sleep may have died (exception during
+        # container restart) or _last_bootstrap_pct may not reach 100 if Tor
+        # goes straight to ready — reset registration so a new thread starts.
         self._onionheaven_checked = False
+        self._onionheaven_registration_succeeded = False
+        self._onionheaven_heartbeat_succeeded = False
+        self._onionheaven_registration_in_flight = False
+        self._heartbeat_loop_running = False  # Allow new heartbeat loop after wake
         self._wordpress_confirmed = False  # Re-verify WordPress once after wake
         if self.is_ready:
             self.is_ready = False
@@ -2476,6 +2507,7 @@ class OnionPressApp(rumps.App):
             return True
 
         # Try to get current hostname from tor-keys volume
+        current_hostname = None
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
@@ -2488,8 +2520,19 @@ class OnionPressApp(rumps.App):
             )
             current_hostname = result.stdout.strip()
         except Exception as e:
-            self.log(f"Could not read current hostname (likely first run): {e}")
-            return True  # No existing volume, proceed normally
+            self.log(f"Could not read hostname from volume: {e}")
+
+        # Fall back to cached onion address file (survives restarts)
+        if not current_hostname or not current_hostname.endswith(".onion"):
+            cached_addr_file = os.path.join(self.app_support, "onion_address")
+            try:
+                with open(cached_addr_file) as f:
+                    cached = f.read().strip()
+                if cached and cached.endswith('.onion'):
+                    current_hostname = cached
+                    self.log(f"Using cached onion address for prefix check: {current_hostname}")
+            except (OSError, IOError):
+                pass
 
         if not current_hostname or not current_hostname.endswith(".onion"):
             self.log("No existing onion address found, proceeding with first run")
@@ -2916,6 +2959,7 @@ class OnionPressApp(rumps.App):
         self._stopping = True  # Prevent health monitor from auto-restarting
         self._run_generation += 1  # Cancel any pending SIGHUP threads
         self.menu["Starting..."].title = "Status: Stopping..."
+        self.menu["Stop"].set_callback(None)  # Disable immediately to prevent double-click
 
         def stop():
             # Notify OnionHeaven before stopping services
@@ -3341,6 +3385,49 @@ class OnionPressApp(rumps.App):
             self.log(f"Error updating Docker images: {e}")
             return False
 
+    def _fix_app_bundle_permissions(self):
+        """Make app bundle group-writable so any admin user can update it.
+
+        On multi-user Macs, /Applications/OnionPress.app is owned by whoever
+        installed it.  The other user can't replace the bundle on update.
+        Fix: set group to 'admin' and add group-write, which is safe because
+        only admin-group users can write, and all interactive macOS users are
+        typically in admin.
+        """
+        try:
+            app_path = os.path.dirname(self.contents_dir)  # /Applications/OnionPress.app
+            if not app_path.startswith("/Applications"):
+                return  # Only fix apps in /Applications
+
+            import stat
+            st = os.stat(app_path)
+            # Check if group-writable already
+            if st.st_mode & stat.S_IWGRP:
+                return
+
+            import grp
+            try:
+                admin_gid = grp.getgrnam("admin").gr_gid
+            except KeyError:
+                return  # No admin group (unusual)
+
+            # Only attempt if we own the app bundle
+            if st.st_uid != os.getuid():
+                return
+
+            self.log("Multi-user: fixing app bundle permissions (adding group-write for admin)")
+            subprocess.run(
+                ["chmod", "-R", "g+w", app_path],
+                capture_output=True, timeout=30
+            )
+            subprocess.run(
+                ["chgrp", "-R", "admin", app_path],
+                capture_output=True, timeout=30
+            )
+            self.log("Multi-user: app bundle permissions updated")
+        except Exception as e:
+            self.log(f"Multi-user: could not fix app bundle permissions: {e}")
+
     @rumps.clicked("Check for Updates...")
     def check_for_updates(self, _):
         """Check GitHub for newer versions and update Docker images"""
@@ -3530,6 +3617,36 @@ class OnionPressApp(rumps.App):
             )
             if response == 0:  # Restart Now
                 self._relaunch_app(install_path)
+
+        except PermissionError as e:
+            self.log(f"Auto-update failed (permission denied): {e}")
+            import traceback
+            self.log(traceback.format_exc())
+
+            # Clean up mount if still mounted
+            subprocess.run(
+                ["hdiutil", "detach", mount_point, "-quiet", "-force"],
+                capture_output=True, timeout=15
+            )
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            # Determine who owns the app bundle
+            owner_hint = ""
+            try:
+                import pwd
+                st = os.stat(install_path)
+                owner_name = pwd.getpwuid(st.st_uid).pw_name
+                owner_hint = f"\n\nThe app is owned by the \"{owner_name}\" account. "
+                if owner_name != os.environ.get("USER", ""):
+                    owner_hint += f"Either update from that account, or run this in Terminal:\n\nsudo chown -R $(whoami):admin \"{install_path}\" && chmod -R g+w \"{install_path}\""
+            except Exception:
+                pass
+
+            self.show_native_alert(
+                "Update Failed — Permission Denied",
+                f"OnionPress v{latest_version} was downloaded but could not be installed because another user account owns the app bundle.{owner_hint}",
+                style="warning"
+            )
 
         except Exception as e:
             self.log(f"Auto-update failed: {e}")
@@ -4599,7 +4716,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.46 RUNNING")
+        self.log(f"QUIT BUTTON CLICKED - v{self.version} RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
