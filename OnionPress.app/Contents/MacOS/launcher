@@ -203,8 +203,6 @@ if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&
     echo "============================================================" >> "$LOG_FILE"
     # Signal the running instance to open browser
     touch "$DATA_DIR/.reopen"
-    # Activate the existing app so macOS doesn't show "not responding" dialog
-    osascript -e 'tell application "OnionPress" to activate' 2>/dev/null || true
     exit 0
 fi
 
