@@ -394,6 +394,9 @@ class OnionPressApp(rumps.App):
         # Listen for system wake to immediately mark Tor as reconnecting
         self.register_wake_notification()
 
+        # Listen for reopen notification from Swift launcher wrapper
+        self._register_reopen_notification()
+
         # Start status checker
         self.start_status_checker()
 
@@ -2010,6 +2013,20 @@ class OnionPressApp(rumps.App):
             None,  # Deliver on posting thread (main thread)
             _safe_callback("terminate", self._handle_terminate))
         self.log("Registered for system sleep/wake/terminate notifications")
+
+    def _register_reopen_notification(self):
+        """Listen for distributed notification from Swift launcher wrapper.
+
+        This fires immediately when the user double-clicks the app,
+        instead of waiting for the next 30-second check_status poll.
+        """
+        dnc = AppKit.NSDistributedNotificationCenter.defaultCenter()
+        dnc.addObserverForName_object_queue_usingBlock_(
+            "press.onion.app.reopen",
+            None,
+            AppKit.NSOperationQueue.mainQueue(),
+            lambda _: self.handle_reopen())
+        self.log("Registered for reopen distributed notification")
 
     def _signal_watchdog(self, container, sig):
         """Send a Unix signal to the tor-watchdog process inside a container."""
