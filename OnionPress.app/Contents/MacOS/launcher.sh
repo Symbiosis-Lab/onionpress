@@ -1,0 +1,242 @@
+#!/bin/bash
+
+# onionpress launcher - Initializes Colima and starts standalone menu bar app
+
+set -e
+
+# Ensure we run natively on Apple Silicon (not under Rosetta).
+# macOS LaunchServices may start shell-script app executables under Rosetta
+# if it cached a previous version that contained x86_64-only binaries.
+# Universal binaries inherit the parent's architecture, so we must re-exec.
+if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1" && [ "$(uname -m)" = "x86_64" ]; then
+    exec arch -arm64 "$0" "$@"
+fi
+
+# Get directories
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+APP_DIR="$(dirname "$SCRIPT_DIR")"
+RESOURCES_DIR="$APP_DIR/Resources"
+MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
+DATA_DIR="$HOME/.onionpress"
+DOCUMENTS_DIR="$HOME/Documents/onionpress"
+BIN_DIR="$RESOURCES_DIR/bin"
+COLIMA_HOME="$DATA_DIR/colima"
+
+# Ensure data and documents directories exist
+mkdir -p "$DATA_DIR"
+mkdir -p "$DOCUMENTS_DIR/backups"
+mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+
+# Set up bundled binaries in PATH
+export PATH="$BIN_DIR:$PATH"
+
+# Configure Colima environment
+export COLIMA_HOME="$COLIMA_HOME"
+export LIMA_HOME="$COLIMA_HOME/_lima"
+export LIMA_INSTANCE="onionpress"
+export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+
+# Log file — daily rotation matching RotatingLog format (launcher-YYYY-MM-DD-001.log)
+LOGS_DIR="$DATA_DIR/logs"
+mkdir -p "$LOGS_DIR"
+_log_date=$(date -u '+%Y-%m-%d')
+_log_seq=1
+while [ -f "$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log" ] && \
+      [ "$(wc -c < "$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log")" -gt 5242880 ]; do
+    _log_seq=$((_log_seq + 1))
+done
+LOG_FILE="$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log"
+
+# Backward compat symlink
+ln -sf "$LOG_FILE" "$DATA_DIR/launcher.log"
+
+# Function to log messages
+log() {
+    # Roll to new file if date changed
+    _now_date=$(date -u '+%Y-%m-%d')
+    if [ "$_now_date" != "$_log_date" ]; then
+        _log_date="$_now_date"
+        _log_seq=1
+        LOG_FILE="$LOGS_DIR/launcher-${_log_date}-$(printf '%03d' $_log_seq).log"
+        ln -sf "$LOG_FILE" "$DATA_DIR/launcher.log"
+    fi
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+log "Starting onionpress launcher..."
+
+# Detect architecture (use sysctl to get actual hardware, not process architecture)
+# This is important because shell scripts may run under Rosetta on Apple Silicon
+if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
+    HOST_ARCH="arm64"
+    VM_ARCH="aarch64"
+    log "Detected Apple Silicon (ARM64)"
+elif [ "$(uname -m)" = "x86_64" ]; then
+    HOST_ARCH="x86_64"
+    VM_ARCH="x86_64"
+    log "Detected Intel (x86_64)"
+else
+    HOST_ARCH=$(uname -m)
+    log "ERROR: Unsupported architecture: $HOST_ARCH"
+    echo "ERROR: Unsupported architecture: $HOST_ARCH" >&2
+    exit 1
+fi
+
+# Check if standalone menubar app exists
+if [ ! -f "$MENUBAR_APP/Contents/MacOS/OnionPress" ]; then
+    log "ERROR: Standalone menubar app not found at $MENUBAR_APP/Contents/MacOS/OnionPress"
+    echo "ERROR: Application bundle is corrupted. Please reinstall OnionPress." >&2
+    exit 1
+fi
+
+# Check if this is first-time initialization
+FIRST_RUN=false
+if [ ! -f "$COLIMA_HOME/.initialized" ]; then
+    FIRST_RUN=true
+    log "First-time initialization detected"
+fi
+
+# Initialize Colima on first run
+initialize_colima() {
+    if [ ! -f "$COLIMA_HOME/.initialized" ]; then
+        log "Initializing Colima container runtime..."
+
+        # Check macOS version >= 13
+        MACOS_VERSION=$(sw_vers -productVersion | cut -d '.' -f 1)
+        if [ "$MACOS_VERSION" -lt 13 ]; then
+            log "ERROR: macOS 13+ required"
+            echo "ERROR: onionpress requires macOS 13 (Ventura) or later." >&2
+            echo "Your macOS version: $(sw_vers -productVersion)" >&2
+            echo "The bundled container runtime uses Apple's virtualization framework which requires macOS 13+." >&2
+            exit 1
+        fi
+
+        # Initialize Colima
+        # Read VM memory from config (default: 1 GB)
+        VM_MEMORY=1
+        if [ -f "$DATA_DIR/config" ]; then
+            config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ ! -z "$config_mem" ]; then
+                VM_MEMORY="$config_mem"
+            fi
+        fi
+        # Pre-check: if onionheaven key is imported, start with 5GB to avoid a restart
+        local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
+            log "OnionHeaven key detected in launcher — starting VM with 5GB"
+            VM_MEMORY=5
+            # Persist to config so subsequent starts also use 5GB
+            if [ -f "$DATA_DIR/config" ] && grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
+                sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
+            else
+                echo "VM_MEMORY=5" >> "$DATA_DIR/config"
+            fi
+        fi
+        # Create minimal shared directory to avoid Downloads folder permission prompt
+        mkdir -p "$DATA_DIR/shared"
+        if [ "$HOST_ARCH" = "arm64" ]; then
+            # Apple Silicon: use VZ backend (Virtualization.framework)
+            "$BIN_DIR/colima" start \
+                --vm-type vz \
+                --mount-type virtiofs \
+                --mount "$DATA_DIR/shared:w" \
+                --mount "$DOCUMENTS_DIR:w" \
+                --cpu 2 \
+                --memory "$VM_MEMORY" \
+                --arch "$VM_ARCH" \
+                --vz-rosetta=false \
+                >> "$LOG_FILE" 2>&1
+        else
+            # Intel: use QEMU backend
+            "$BIN_DIR/colima" start \
+                --vm-type qemu \
+                --mount-type sshfs \
+                --mount "$DATA_DIR/shared:w" \
+                --mount "$DOCUMENTS_DIR:w" \
+                --cpu 2 \
+                --memory "$VM_MEMORY" \
+                --arch "$VM_ARCH" \
+                >> "$LOG_FILE" 2>&1
+        fi
+
+        if [ $? -eq 0 ]; then
+            touch "$COLIMA_HOME/.initialized"
+            log "Colima initialized successfully"
+        else
+            log "ERROR: Colima init failed"
+            echo "ERROR: Failed to initialize container runtime." >&2
+            echo "Check the logs for details: $LOG_FILE" >&2
+            exit 1
+        fi
+    fi
+
+    # Ensure Colima is running
+    if ! "$BIN_DIR/colima" status >/dev/null 2>&1; then
+        # Read VM memory from config (default: 1 GB)
+        local vm_mem=1
+        if [ -f "$DATA_DIR/config" ]; then
+            local cfg_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ ! -z "$cfg_mem" ]; then
+                vm_mem="$cfg_mem"
+            fi
+        fi
+        # Pre-check: if onionheaven key exists, ensure 5GB
+        local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$vm_mem" -lt 5 ]; then
+            log "OnionHeaven key detected in launcher — starting VM with 5GB"
+            vm_mem=5
+        fi
+        log "Starting Colima VM..."
+        "$BIN_DIR/colima" start \
+            --mount "$DATA_DIR/shared:w" \
+            --mount "$DOCUMENTS_DIR:w" \
+            --memory "$vm_mem" \
+            >> "$LOG_FILE" 2>&1
+    fi
+}
+
+# Check if menubar app is already running
+if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
+    echo "" >> "$LOG_FILE"
+    echo "============================================================" >> "$LOG_FILE"
+    log "=== Launcher restarted (app already running) ==="
+    echo "============================================================" >> "$LOG_FILE"
+    # Signal the running instance to open browser
+    touch "$DATA_DIR/.reopen"
+    exit 0
+fi
+
+# Launch menubar app immediately so icon appears fast (gray = starting)
+log "Launching menu bar application..."
+export PYTHONDONTWRITEBYTECODE=1
+arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/OnionPress" >> "$LOG_FILE" 2>&1 &
+MENUBAR_PID=$!
+log "Menu bar app launched (PID: $MENUBAR_PID)"
+
+# Run initialization (menubar is now visible with gray icon during this)
+initialize_colima
+
+# Create symlink for Docker socket if needed
+# Colima forwards the socket to ~/.colima/default/docker.sock
+# but we configure DOCKER_HOST to use ~/.onionpress/colima/default/docker.sock
+# Create symlink to bridge this gap
+SOCKET_DIR="$COLIMA_HOME/default"
+SOCKET_PATH="$SOCKET_DIR/docker.sock"
+COLIMA_SOCKET="$HOME/.colima/default/docker.sock"
+
+if [ -S "$COLIMA_SOCKET" ]; then
+    if [ ! -e "$SOCKET_PATH" ] || [ ! -S "$SOCKET_PATH" ]; then
+        log "Creating Docker socket symlink..."
+        mkdir -p "$SOCKET_DIR"
+        ln -sf "$COLIMA_SOCKET" "$SOCKET_PATH"
+        log "Docker socket symlink created: $SOCKET_PATH -> $COLIMA_SOCKET"
+    fi
+fi
+
+log "Setup complete"
+
+# Stay alive so macOS can send us Apple Event quit (osascript -e 'quit app').
+# Forward SIGTERM to the MenubarApp so it runs its full cleanup.
+trap 'kill -TERM $MENUBAR_PID 2>/dev/null; wait $MENUBAR_PID 2>/dev/null' TERM INT HUP
+wait $MENUBAR_PID 2>/dev/null
+log "MenubarApp exited, launcher done"
