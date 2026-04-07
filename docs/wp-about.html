@@ -1,0 +1,219 @@
+<!-- wp:html -->
+<style>
+.op-page * { margin: 0; padding: 0; box-sizing: border-box; }
+.op-page {
+    background-color: #C0C0C0;
+    color: #000;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    line-height: 1.6;
+}
+.op-header {
+    background: linear-gradient(135deg, #B896D6 0%, #7B5FA3 100%);
+    color: #fff;
+    border-bottom: 5px solid #000;
+    padding: 30px 20px;
+    text-align: center;
+    box-shadow: 0 5px 0 #FFB3D9;
+}
+.op-logo-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    margin-bottom: 15px;
+}
+.op-tagline {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    color: #fff;
+    text-shadow: 2px 2px 0px #000;
+    font-weight: bold;
+}
+.op-nav {
+    background: #000;
+    padding: 15px;
+    text-align: center;
+    border-bottom: 3px solid #B896D6;
+    box-shadow: 0 3px 0 #FFB3D9;
+}
+.op-nav a {
+    color: #E8D9C5;
+    text-decoration: none;
+    padding: 10px 15px;
+    display: inline-block;
+    border: 2px solid transparent;
+    font-weight: bold;
+    text-transform: uppercase;
+    font-size: 14px;
+    font-family: 'Courier New', monospace;
+}
+.op-nav a:hover, .op-nav a.active {
+    background: #7B5FA3;
+    color: #fff;
+    border: 2px solid #FFA500;
+}
+.op-container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+}
+.op-page-title {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 36px;
+    color: #7B5FA3;
+    text-transform: uppercase;
+    margin: 30px 0 20px 0;
+    text-align: center;
+}
+.op-page h2 {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 24px;
+    color: #7B5FA3;
+    border-left: 8px solid #FFA500;
+    padding-left: 20px;
+    margin: 40px 0 15px 0;
+    text-transform: uppercase;
+}
+.op-content-block {
+    border: 3px solid #000;
+    background: #fff;
+    padding: 25px;
+    margin: 20px 0;
+    box-shadow: 5px 5px 0px rgba(0,0,0,0.2);
+    font-size: 15px;
+    line-height: 1.8;
+}
+.op-content-block a {
+    color: #7B5FA3;
+    font-weight: bold;
+}
+.op-content-block p {
+    margin-bottom: 15px;
+}
+.op-content-block p:last-child {
+    margin-bottom: 0;
+}
+.op-highlight-box {
+    border: 3px solid #000;
+    background: #FFFFE0;
+    padding: 25px;
+    margin: 30px 0;
+    box-shadow: 5px 5px 0px rgba(0,0,0,0.2);
+    text-align: center;
+}
+.op-highlight-box blockquote {
+    font-size: 20px;
+    font-style: italic;
+    color: #7B5FA3;
+    margin: 15px 0;
+    line-height: 1.6;
+}
+.op-highlight-box cite {
+    font-size: 14px;
+    color: #555;
+}
+.op-highlight-box cite a {
+    color: #7B5FA3;
+    font-weight: bold;
+}
+.op-footer {
+    background: #000;
+    color: #E8D9C5;
+    border-top: 5px solid #B896D6;
+    padding: 40px 20px;
+    text-align: center;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 14px;
+    margin-top: 60px;
+}
+.op-footer a { color: #FFA500; text-decoration: underline; }
+.op-footer a:hover { color: #FFB3D9; }
+
+@media (max-width: 768px) {
+    .op-logo-row { flex-direction: column; gap: 10px; }
+}
+</style>
+
+<div class="op-page">
+
+<div class="op-header">
+    <div class="op-logo-row">
+        <img src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
+        <img src="/wp-content/uploads/2026/02/logo.png" alt="OnionPress" style="max-width: 280px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0,0,0,0.3));">
+        <img src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
+    </div>
+    <div class="op-tagline">Your Decentralized Social Blog Site</div>
+</div>
+
+<div class="op-nav">
+    <a href="/">Home</a>
+    <a href="/faq/">FAQ</a>
+    <a href="/about/" class="active">About</a>
+</div>
+
+<div class="op-container">
+    <div class="op-page-title">About OnionPress</div>
+
+    <h2>The Mission</h2>
+    <div class="op-content-block">
+        <p>OnionPress exists because we believe everyone should be able to publish on the web without asking permission from a platform, a hosting company, or a government.</p>
+        <p>Your computer becomes a web server. Your blog gets a permanent address on the Tor network that no one can take away. The Wayback Machine archives everything so your words survive even when your laptop is closed. WordPress gives you the full power of the world's most popular publishing platform.</p>
+        <p>No monthly fees. No terms of service. No algorithm deciding who sees your writing. Just you, your words, and the open web.</p>
+    </div>
+
+    <h2>Locking the Web Open</h2>
+    <div class="op-highlight-box">
+        <blockquote>
+            "I want a web that is more like what we had at the beginning -- decentralized, under the control of individual users."
+        </blockquote>
+        <cite>-- Brewster Kahle, <a href="http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/">"Locking the Web Open"</a>, 2015</cite>
+    </div>
+    <div class="op-content-block">
+        <p>OnionPress is part of a larger vision for a decentralized web -- one where individuals own their platforms, their data, and their addresses. The early web was like this: anyone could run a server, anyone could publish. Over time, the web centralized into a handful of platforms that control what billions of people can say and see.</p>
+        <p>We're building tools to reverse that. OnionPress is one of those tools.</p>
+    </div>
+
+    <h2>Built With</h2>
+    <div class="op-content-block">
+        <p><strong>WordPress</strong> -- The world's most popular content management system, powering over 40% of websites. Full themes, plugins, and a familiar dashboard.</p>
+        <p><strong>Tor</strong> -- The privacy network that protects millions of users. OnionPress uses Tor's onion service feature for permanent, uncensorable addresses. <a href="https://www.torproject.org/">torproject.org</a></p>
+        <p><strong>Wayback Machine</strong> -- The Internet Archive's web archive, preserving the web since 1996. OnionPress sites are automatically archived and replayed when offline. <a href="https://web.archive.org/">web.archive.org</a></p>
+        <p><strong>Docker</strong> -- Containerization keeps everything sandboxed and secure on your machine.</p>
+    </div>
+
+    <h2>Open Source</h2>
+    <div class="op-content-block">
+        <p>OnionPress is free and open source under the <strong>AGPL 3</strong> license. You can read every line of code, modify it, and share it.</p>
+        <p>Source code: <a href="https://github.com/brewsterkahle/onionpress">github.com/brewsterkahle/onionpress</a></p>
+        <p>This website's content is licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</p>
+    </div>
+
+    <h2>Support the Ecosystem</h2>
+    <div class="op-content-block">
+        <p>OnionPress is built on the shoulders of open source projects and public services. Consider supporting them:</p>
+        <p><a href="https://donate.torproject.org/">Donate to the Tor Project</a> -- They maintain the privacy network that makes OnionPress possible.</p>
+        <p><a href="https://archive.org/donate/">Donate to the Internet Archive</a> -- They run the Wayback Machine that keeps your site always available.</p>
+        <p><a href="https://wordpressfoundation.org/donate/">Donate to WordPress Foundation</a> -- They maintain the publishing platform at the heart of OnionPress.</p>
+    </div>
+</div>
+
+<div class="op-footer">
+    <div style="margin-bottom: 15px;">
+        <strong style="font-size: 18px; color: #B896D6;">Your Decentralized Social Blog Site</strong>
+    </div>
+    <div style="margin-bottom: 15px;">
+        Free and Open Source (AGPL 3)
+    </div>
+    <div style="margin-bottom: 15px;">
+        <a href="https://github.com/brewsterkahle/onionpress#readme">How it Works</a> |
+        <a href="http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/">Locking the Web Open</a> |
+        <a href="https://donate.torproject.org/">Donate</a>
+    </div>
+    <div style="margin-top: 15px; font-size: 12px;">
+        <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>
+    </div>
+</div>
+
+</div>
+<!-- /wp:html -->
