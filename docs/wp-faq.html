@@ -1,0 +1,228 @@
+<!-- wp:html -->
+<style>
+.op-page * { margin: 0; padding: 0; box-sizing: border-box; }
+.op-page {
+    background-color: #C0C0C0;
+    color: #000;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    line-height: 1.6;
+}
+.op-header {
+    background: linear-gradient(135deg, #B896D6 0%, #7B5FA3 100%);
+    color: #fff;
+    border-bottom: 5px solid #000;
+    padding: 30px 20px;
+    text-align: center;
+    box-shadow: 0 5px 0 #FFB3D9;
+}
+.op-logo-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    margin-bottom: 15px;
+}
+.op-tagline {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    color: #fff;
+    text-shadow: 2px 2px 0px #000;
+    font-weight: bold;
+}
+.op-nav {
+    background: #000;
+    padding: 15px;
+    text-align: center;
+    border-bottom: 3px solid #B896D6;
+    box-shadow: 0 3px 0 #FFB3D9;
+}
+.op-nav a {
+    color: #E8D9C5;
+    text-decoration: none;
+    padding: 10px 15px;
+    display: inline-block;
+    border: 2px solid transparent;
+    font-weight: bold;
+    text-transform: uppercase;
+    font-size: 14px;
+    font-family: 'Courier New', monospace;
+}
+.op-nav a:hover, .op-nav a.active {
+    background: #7B5FA3;
+    color: #fff;
+    border: 2px solid #FFA500;
+}
+.op-container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+}
+.op-page-title {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 36px;
+    color: #7B5FA3;
+    text-transform: uppercase;
+    margin: 30px 0 20px 0;
+    text-align: center;
+}
+.op-faq-item {
+    border: 3px solid #000;
+    background: #fff;
+    margin: 20px 0;
+    box-shadow: 5px 5px 0px rgba(0,0,0,0.2);
+}
+.op-faq-q {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 18px;
+    color: #fff;
+    background: #7B5FA3;
+    padding: 15px 20px;
+    text-transform: uppercase;
+}
+.op-faq-a {
+    padding: 20px;
+    font-size: 15px;
+    line-height: 1.8;
+}
+.op-faq-a a {
+    color: #7B5FA3;
+    font-weight: bold;
+}
+.op-footer {
+    background: #000;
+    color: #E8D9C5;
+    border-top: 5px solid #B896D6;
+    padding: 40px 20px;
+    text-align: center;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 14px;
+    margin-top: 60px;
+}
+.op-footer a { color: #FFA500; text-decoration: underline; }
+.op-footer a:hover { color: #FFB3D9; }
+
+@media (max-width: 768px) {
+    .op-logo-row { flex-direction: column; gap: 10px; }
+}
+</style>
+
+<div class="op-page">
+
+<div class="op-header">
+    <div class="op-logo-row">
+        <img src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
+        <img src="/wp-content/uploads/2026/02/logo.png" alt="OnionPress" style="max-width: 280px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0,0,0,0.3));">
+        <img src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
+    </div>
+    <div class="op-tagline">Your Decentralized Social Blog Site</div>
+</div>
+
+<div class="op-nav">
+    <a href="/">Home</a>
+    <a href="/faq/" class="active">FAQ</a>
+    <a href="/about/">About</a>
+</div>
+
+<div class="op-container">
+    <div class="op-page-title">Frequently Asked Questions</div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">What is OnionPress?</div>
+        <div class="op-faq-a">
+            OnionPress turns your Mac or Linux computer into a web server running WordPress, accessible via the Tor network. Your site gets its own permanent .onion address that no one can take away from you. It's backed up automatically by the Internet Archive's Wayback Machine.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">What is Tor?</div>
+        <div class="op-faq-a">
+            Tor is a privacy network used by millions of people worldwide. It encrypts your traffic and routes it through multiple relays so no one can trace it back to you. OnionPress uses Tor's "onion service" feature to make your blog reachable without exposing your IP address or location. Learn more at <a href="https://www.torproject.org/">torproject.org</a>.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Is it safe?</div>
+        <div class="op-faq-a">
+            Yes. OnionPress runs inside isolated Docker containers on your computer. Your site's private key is generated locally and never leaves your machine. Database passwords are randomly generated per install. The Tor network protects your IP address from being discovered. All containers are sandboxed with minimal access to your files.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Do I need to be technical?</div>
+        <div class="op-faq-a">
+            No. OnionPress installs like any Mac app -- download the DMG, drag to Applications, and launch. There are a few security prompts to work through on first launch (macOS wants to make sure you trust the app), but we guide you step-by-step. After that, you're writing in WordPress, which is the same interface used by 40% of the web.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">What are the system requirements?</div>
+        <div class="op-faq-a">
+            <strong>Mac:</strong> macOS 13 (Ventura) or later, Apple Silicon or Intel, 4 GB RAM, 2 GB free disk space.<br>
+            <strong>Linux:</strong> Docker and Docker Compose installed. Any modern x86_64 or ARM64 distribution.<br>
+            No special network configuration needed -- Tor works through firewalls, NATs, and campus Wi-Fi.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Who can see my site?</div>
+        <div class="op-faq-a">
+            Anyone with a Tor-enabled browser: Tor Browser (Windows/Mac/Linux), Brave Browser (has built-in Tor), Onion Browser (iPhone/iPad), or Tor Browser for Android. You share your .onion address with whoever you want. When you're offline, the Wayback Machine serves an archived copy.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">What happens when my computer is off?</div>
+        <div class="op-faq-a">
+            Your site is automatically archived by the Internet Archive's Wayback Machine. When your computer is off or asleep, visitors are redirected to the archived version. When you come back online, they see the live version again. Your site is always available.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Can I move my site to a different computer?</div>
+        <div class="op-faq-a">
+            Yes. OnionPress includes backup and restore. Your .onion address (private key) travels with your backup, so your address stays the same on the new machine.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Does it cost anything?</div>
+        <div class="op-faq-a">
+            No. OnionPress is free and open source (AGPL 3). No hosting fees, no subscriptions, no ads. You run it on your own computer, so there are no ongoing costs. The Tor network and Wayback Machine archiving are free public services.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">What's a .onion address?</div>
+        <div class="op-faq-a">
+            A .onion address is a permanent address on the Tor network, like <code>abc123...xyz.onion</code>. It's generated from a cryptographic key that only you have. No domain registrar, no DNS, no one can take it from you or redirect it. It's your address for as long as you want it.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Can I use my own domain name instead?</div>
+        <div class="op-faq-a">
+            OnionPress gives you a .onion address, which works on the Tor network. You can't use a regular domain name (.com, .org) directly, but you can set up a clearnet-to-onion proxy if you want both. The .onion address is the core of what makes OnionPress decentralized and uncensorable.
+        </div>
+    </div>
+</div>
+
+<div class="op-footer">
+    <div style="margin-bottom: 15px;">
+        <strong style="font-size: 18px; color: #B896D6;">Your Decentralized Social Blog Site</strong>
+    </div>
+    <div style="margin-bottom: 15px;">
+        Free and Open Source (AGPL 3)
+    </div>
+    <div style="margin-bottom: 15px;">
+        <a href="https://github.com/brewsterkahle/onionpress#readme">How it Works</a> |
+        <a href="http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/">Locking the Web Open</a> |
+        <a href="https://donate.torproject.org/">Donate</a>
+    </div>
+    <div style="margin-top: 15px; font-size: 12px;">
+        <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>
+    </div>
+</div>
+
+</div>
+<!-- /wp:html -->

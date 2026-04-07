@@ -1,0 +1,811 @@
+<!-- wp:html -->
+<style>
+/* OnionPress Round 2 Homepage Styles */
+.op-page * { margin: 0; padding: 0; box-sizing: border-box; }
+.op-page {
+    background-color: #C0C0C0;
+    color: #000;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    line-height: 1.6;
+}
+
+/* Header */
+.op-header {
+    background: linear-gradient(135deg, #B896D6 0%, #7B5FA3 100%);
+    color: #fff;
+    border-bottom: 5px solid #000;
+    padding: 30px 20px;
+    text-align: center;
+    box-shadow: 0 5px 0 #FFB3D9;
+}
+.op-logo-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    margin-bottom: 15px;
+}
+.op-tagline {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    color: #fff;
+    text-shadow: 2px 2px 0px #000;
+    font-weight: bold;
+}
+
+/* Nav */
+.op-nav {
+    background: #000;
+    padding: 15px;
+    text-align: center;
+    border-bottom: 3px solid #B896D6;
+    box-shadow: 0 3px 0 #FFB3D9;
+}
+.op-nav a {
+    color: #E8D9C5;
+    text-decoration: none;
+    padding: 10px 15px;
+    display: inline-block;
+    border: 2px solid transparent;
+    font-weight: bold;
+    text-transform: uppercase;
+    font-size: 14px;
+    font-family: 'Courier New', monospace;
+}
+.op-nav a:hover, .op-nav a.active {
+    background: #7B5FA3;
+    color: #fff;
+    border: 2px solid #FFA500;
+}
+
+/* Container */
+.op-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+/* Hero */
+.op-hero {
+    background: linear-gradient(135deg, #FF69B4 0%, #B896D6 50%, #00CED1 100%);
+    color: #fff;
+    border: 5px solid #000;
+    padding: 60px 40px;
+    text-align: center;
+    margin: 30px 0;
+    box-shadow: 10px 10px 0px rgba(0,0,0,0.3);
+    position: relative;
+}
+.op-hero::after {
+    content: '';
+    position: absolute;
+    bottom: -8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 60%;
+    height: 8px;
+    background: linear-gradient(90deg, #FF69B4 0%, #FFB3D9 20%, #FFA500 40%, #FFD700 60%, #90EE90 80%, #00CED1 100%);
+    border-radius: 4px;
+}
+.op-hero-subtitle {
+    font-size: 20px;
+    font-weight: bold;
+    margin: 20px auto;
+    text-shadow: 2px 2px 0px #000;
+    max-width: 700px;
+    line-height: 1.5;
+}
+
+/* Buttons */
+.op-btn {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 16px;
+    background: #FFA500;
+    color: #fff;
+    border: 3px solid #000;
+    padding: 15px 30px;
+    text-transform: uppercase;
+    cursor: pointer;
+    box-shadow: 5px 5px 0px #000;
+    text-decoration: none;
+    display: inline-block;
+    margin: 10px;
+    transition: all 0.2s;
+    -webkit-text-stroke: 1px #000;
+}
+.op-btn:hover {
+    background: #FFB3D9;
+    color: #fff;
+    box-shadow: 3px 3px 0px #000;
+    transform: translate(2px, 2px);
+}
+.op-btn-secondary {
+    background: #B896D6;
+}
+.op-btn-secondary:hover {
+    background: #7B5FA3;
+}
+.op-btn-small {
+    font-size: 13px;
+    padding: 10px 20px;
+}
+@keyframes op-spin-heart {
+    0% { transform: rotateY(0deg); }
+    40% { transform: rotateY(360deg); }
+    100% { transform: rotateY(360deg); }
+}
+.op-spinning-heart {
+    display: inline-block;
+    animation: op-spin-heart 2.5s infinite;
+}
+
+/* Section headings */
+.op-page h2 {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 32px;
+    color: #7B5FA3;
+    border-left: 8px solid #FFA500;
+    padding-left: 20px;
+    margin: 40px 0 20px 0;
+    text-transform: uppercase;
+}
+.op-page h2.op-centered {
+    border-left: none;
+    padding-left: 0;
+    text-align: center;
+}
+.op-onion-bullet {
+    width: 32px;
+    height: 32px;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 12px;
+}
+
+/* Three Pillars */
+.op-pillars {
+    margin: 50px 0;
+    text-align: center;
+}
+.op-pillars-grid {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: 0;
+    align-items: stretch;
+    margin: 20px 0;
+}
+.op-pillar-card {
+    border: 3px solid #000;
+    padding: 30px 20px;
+    background: #fff;
+    text-align: center;
+    box-shadow: 5px 5px 0px rgba(0,0,0,0.2);
+}
+.op-pillar-card h3 {
+    font-family: Impact, 'Arial Black', sans-serif;
+    color: #7B5FA3;
+    font-size: 22px;
+    margin-bottom: 15px;
+    text-transform: uppercase;
+}
+.op-pillar-icon {
+    font-size: 48px;
+    margin-bottom: 15px;
+}
+.op-pillar-icon img {
+    height: 48px;
+}
+.op-pillar-card p {
+    font-size: 15px;
+    line-height: 1.5;
+}
+.op-pillar-tagline {
+    font-weight: bold;
+    color: #7B5FA3;
+    margin-top: 15px;
+    font-size: 16px;
+}
+.op-pillar-plus {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 48px;
+    color: #7B5FA3;
+    padding: 0 15px;
+}
+
+/* Use Cases Grid */
+.op-usecases-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    margin: 20px 0 40px 0;
+}
+
+/* Browser Window Mockups */
+.op-browser {
+    border: 2px solid #333;
+    border-radius: 6px 6px 0 0;
+    overflow: hidden;
+    box-shadow: 5px 5px 0px rgba(0,0,0,0.2);
+    background: #fff;
+}
+.op-browser-titlebar {
+    background: linear-gradient(180deg, #e8e8e8 0%, #c0c0c0 100%);
+    border-bottom: 1px solid #999;
+    padding: 6px 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.op-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.2); }
+.op-dot-r { background: #ff5f57; }
+.op-dot-y { background: #febc2e; }
+.op-dot-g { background: #28c840; }
+.op-browser-url {
+    flex: 1;
+    background: #fff;
+    border: 1px solid #999;
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    color: #666;
+    margin-left: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.op-browser-content {
+    height: 200px;
+    overflow: hidden;
+    position: relative;
+    font-family: Georgia, 'Times New Roman', serif;
+}
+.op-usecase-label {
+    text-align: center;
+    padding: 12px 10px 0;
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 16px;
+    color: #7B5FA3;
+    text-transform: uppercase;
+}
+.op-usecase-desc {
+    text-align: center;
+    font-size: 13px;
+    color: #555;
+    padding: 4px 10px 10px;
+    line-height: 1.4;
+}
+
+/* Individual mockup styles */
+.op-mock-blog { background: #fefefe; padding: 15px; }
+.op-mock-blog .mh { font-size: 18px; font-weight: bold; color: #2c3e50; margin-bottom: 8px; }
+.op-mock-blog .md { font-size: 10px; color: #999; margin-bottom: 10px; }
+.op-mock-blog .mt { font-size: 12px; color: #444; line-height: 1.6; }
+
+.op-mock-zine { background: #1a1a2e; color: #e94560; padding: 15px; font-family: 'Courier New', monospace; }
+.op-mock-zine .mh { font-size: 22px; font-weight: bold; text-transform: uppercase; letter-spacing: 3px; border-bottom: 2px solid #e94560; padding-bottom: 8px; margin-bottom: 10px; }
+.op-mock-zine .mt { font-size: 11px; color: #eee; line-height: 1.7; }
+.op-mock-zine .mtag { display: inline-block; border: 1px solid #e94560; padding: 2px 8px; font-size: 9px; margin: 8px 4px 0 0; text-transform: uppercase; color: #e94560; }
+
+.op-mock-portfolio { background: #f5f0eb; padding: 0; }
+.op-mock-gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; height: 140px; }
+.op-mock-photo { border-radius: 2px; }
+.op-mock-caption { padding: 8px 15px; font-size: 13px; color: #555; font-style: italic; text-align: center; }
+
+.op-mock-family { background: #fff8f0; padding: 15px; }
+.op-mock-family .mh { font-size: 16px; font-weight: bold; color: #8B4513; text-align: center; margin-bottom: 10px; }
+.op-mock-post { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+.op-mock-post .mpt { font-size: 12px; font-weight: bold; color: #8B4513; margin-bottom: 4px; }
+.op-mock-post .mpp { font-size: 11px; color: #666; line-height: 1.5; }
+
+.op-mock-classroom { background: #1e3a5f; color: #fff; padding: 15px; font-family: 'Courier New', monospace; }
+.op-mock-classroom .mb { font-size: 10px; color: #aaa; margin-bottom: 6px; }
+.op-mock-classroom .mh { font-size: 15px; font-weight: bold; color: #7ec8e3; margin-bottom: 12px; }
+.op-mock-assign { background: rgba(255,255,255,0.1); border-left: 3px solid #7ec8e3; padding: 8px 10px; margin-bottom: 6px; font-size: 11px; }
+.op-mock-due { color: #f0c040; font-size: 10px; }
+
+.op-mock-group { background: #f0f7ee; padding: 15px; }
+.op-mock-group .mh { font-size: 16px; font-weight: bold; color: #2d6a4f; margin-bottom: 4px; }
+.op-mock-group .ms { font-size: 11px; color: #888; margin-bottom: 12px; font-style: italic; }
+.op-mock-item { border-bottom: 1px solid #d8e8d4; padding: 6px 0; font-size: 12px; color: #333; }
+.op-mock-item .mid { font-size: 10px; color: #888; }
+
+/* Browsers Section */
+.op-browsers-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 20px;
+    margin: 20px 0 40px 0;
+}
+.op-browser-card {
+    border: 3px solid #000;
+    padding: 25px 15px;
+    background: #fff;
+    text-align: center;
+    box-shadow: 5px 5px 0px rgba(0,0,0,0.2);
+}
+.op-browser-card .bicon { font-size: 48px; margin-bottom: 10px; }
+.op-browser-card h3 {
+    font-family: Impact, 'Arial Black', sans-serif;
+    color: #7B5FA3;
+    font-size: 16px;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+}
+.op-browser-card .bplat { font-size: 13px; color: #555; line-height: 1.4; }
+.op-browser-card a { display: inline-block; margin-top: 10px; color: #7B5FA3; font-size: 13px; font-weight: bold; }
+
+/* Get Started */
+.op-get-started {
+    border: 3px solid #000;
+    padding: 30px;
+    margin: 40px 0;
+    background: #FFFFE0;
+}
+.op-get-started h2 {
+    border: none;
+    margin-top: 0;
+}
+.op-get-started ol {
+    font-size: 18px;
+    line-height: 2;
+    padding-left: 20px;
+}
+.op-get-started a {
+    color: #7B5FA3;
+}
+
+/* Hit Counter */
+.op-hit-counter { display: inline-flex; gap: 2px; background: #000; padding: 15px 20px; border: 3px solid #B896D6; border-radius: 8px; box-shadow: inset 0 0 20px rgba(0,0,0,0.5), 0 5px 15px rgba(0,0,0,0.3); margin-bottom: 10px; }
+.op-counter-digit { display: inline-block; width: 40px; height: 60px; background: linear-gradient(180deg, #1a1a1a, #0a0a0a); border: 2px solid #444; border-radius: 4px; overflow: hidden; box-shadow: inset 0 2px 4px rgba(255,255,255,0.1), inset 0 -2px 4px rgba(0,0,0,0.5); }
+.op-digit-inner { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; font-size: 36px; font-weight: bold; color: #FFB3D9; text-shadow: 0 0 10px #FFB3D9, 0 0 20px #FFB3D9; font-family: 'Courier New', monospace; }
+.op-digit-inner:empty { opacity: 0; }
+.op-counter-digit.spinning .op-digit-inner { animation: op-digitSpin 0.6s ease-in-out; }
+@keyframes op-digitSpin {
+    0% { transform: translateY(0) rotateX(0deg); opacity: 1; }
+    50% { transform: translateY(-30px) rotateX(90deg); opacity: 0.5; }
+    51% { transform: translateY(30px) rotateX(-90deg); opacity: 0.5; }
+    100% { transform: translateY(0) rotateX(0deg); opacity: 1; }
+}
+.op-counter-label { margin-top: 8px; font-size: 14px; color: #666; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+
+/* Footer */
+.op-footer {
+    background: #000;
+    color: #E8D9C5;
+    border-top: 5px solid #B896D6;
+    padding: 40px 20px;
+    text-align: center;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 14px;
+    margin-top: 60px;
+}
+.op-footer a { color: #FFA500; text-decoration: underline; }
+.op-footer a:hover { color: #FFB3D9; }
+
+/* Responsive */
+@media (max-width: 768px) {
+    .op-hero-subtitle { font-size: 16px; }
+    .op-pillars-grid { grid-template-columns: 1fr; gap: 15px; }
+    .op-pillar-plus { font-size: 36px; padding: 5px 0; }
+    .op-usecases-grid { grid-template-columns: 1fr; }
+    .op-browsers-grid { grid-template-columns: repeat(2, 1fr); }
+    .op-logo-row { flex-direction: column; gap: 10px; }
+    .op-btn { font-size: 14px; padding: 12px 20px; }
+}
+</style>
+
+<div class="op-page">
+
+<!-- Header -->
+<div class="op-header">
+    <div class="op-logo-row">
+        <img src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
+        <img src="/wp-content/uploads/2026/02/logo.png" alt="OnionPress" style="max-width: 280px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0,0,0,0.3));">
+        <img src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
+    </div>
+    <div class="op-tagline">Your Decentralized Social Blog Site</div>
+</div>
+
+<!-- Nav -->
+<div class="op-nav">
+    <a href="/" class="active">Home</a>
+    <a href="/faq/">FAQ</a>
+    <a href="/about/">About</a>
+</div>
+
+<!-- Main Content -->
+<div class="op-container">
+
+    <!-- Hero -->
+    <div class="op-hero">
+        <div class="op-hero-subtitle">
+            Turn your computer into a blog with its own permanent address.
+            No hosting company. No monthly bill. No one can take it down but you.
+        </div>
+        <div style="margin: 25px 0 10px 0;">
+            <a href="https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg" class="op-btn"><span class="op-spinning-heart">💜</span> Download for Mac <span class="op-spinning-heart">💜</span></a>
+            <a href="https://github.com/brewsterkahle/onionpress/releases" class="op-btn">🐧 Download for Linux</a>
+        </div>
+        <div>
+            <a href="https://addons.mozilla.org/addon/onionpress/" class="op-btn op-btn-secondary op-btn-small">🦊 Firefox Extension</a>
+        </div>
+    </div>
+
+    <!-- WordPress + Tor + Wayback Machine -->
+    <div class="op-pillars">
+        <h2 class="op-centered">
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" class="op-onion-bullet" alt="">
+            Built on Three Pillars
+        </h2>
+        <div class="op-pillars-grid">
+            <div class="op-pillar-card">
+                <div class="op-pillar-icon">📝</div>
+                <h3>WordPress</h3>
+                <p>Full blogging platform. Any theme. Any plugin. A familiar dashboard you already know how to use.</p>
+                <div class="op-pillar-tagline">You write.</div>
+            </div>
+            <div class="op-pillar-plus">+</div>
+            <div class="op-pillar-card">
+                <div class="op-pillar-icon">🧅</div>
+                <h3>Tor</h3>
+                <p>Your own permanent .onion address. Private. Uncensorable. Works through any firewall or NAT.</p>
+                <div class="op-pillar-tagline">Tor delivers.</div>
+            </div>
+            <div class="op-pillar-plus">+</div>
+            <div class="op-pillar-card">
+                <div class="op-pillar-icon">🏛️</div>
+                <h3>Wayback Machine</h3>
+                <p>Backed up and served by the Internet Archive when you're offline. Your site is always available.</p>
+                <div class="op-pillar-tagline">Wayback remembers.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- What Will You Build? -->
+    <div style="margin: 50px 0;">
+        <h2>
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" class="op-onion-bullet" alt="">
+            What Will You Build?
+        </h2>
+        <div class="op-usecases-grid">
+            <!-- Personal Blog -->
+            <div>
+                <div class="op-browser">
+                    <div class="op-browser-titlebar">
+                        <span class="op-dot op-dot-r"></span>
+                        <span class="op-dot op-dot-y"></span>
+                        <span class="op-dot op-dot-g"></span>
+                        <span class="op-browser-url">🧅 j4k7x2m...qd.onion</span>
+                    </div>
+                    <div class="op-browser-content op-mock-blog">
+                        <div class="mh">Walking Through Rain</div>
+                        <div class="md">April 3, 2026 &middot; 4 min read</div>
+                        <div class="mt">
+                            There's something about the way rain sounds on a tin roof that makes you want to write. I've been thinking about impermanence lately -- how the web used to feel like a place you could just <em>be</em>, without performing for an algorithm...<br><br>
+                            I started this blog because I wanted a corner of the internet that's mine. No likes, no followers count, no engagement metrics. Just words.
+                        </div>
+                    </div>
+                </div>
+                <div class="op-usecase-label">Personal Blog</div>
+                <div class="op-usecase-desc">Share your thoughts freely. No algorithms deciding who sees your writing.</div>
+            </div>
+
+            <!-- Community Zine -->
+            <div>
+                <div class="op-browser">
+                    <div class="op-browser-titlebar">
+                        <span class="op-dot op-dot-r"></span>
+                        <span class="op-dot op-dot-y"></span>
+                        <span class="op-dot op-dot-g"></span>
+                        <span class="op-browser-url">🧅 r9v3b8n...yd.onion</span>
+                    </div>
+                    <div class="op-browser-content op-mock-zine">
+                        <div class="mh">SIGNAL // NOISE</div>
+                        <div class="mt">
+                            <strong>ISSUE #14</strong> -- DIGITAL AUTONOMY<br><br>
+                            Your phone is not your friend. It's a tracking device you pay $1000 for the privilege of carrying. This issue: building communication channels that don't report back to Mountain View...
+                        </div>
+                        <div>
+                            <span class="mtag">privacy</span>
+                            <span class="mtag">diy tech</span>
+                            <span class="mtag">issue 14</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="op-usecase-label">Community Zine</div>
+                <div class="op-usecase-desc">Publish with your crew. No platform rules, no content moderation surprises.</div>
+            </div>
+
+            <!-- Photo Portfolio -->
+            <div>
+                <div class="op-browser">
+                    <div class="op-browser-titlebar">
+                        <span class="op-dot op-dot-r"></span>
+                        <span class="op-dot op-dot-y"></span>
+                        <span class="op-dot op-dot-g"></span>
+                        <span class="op-browser-url">🧅 m5w2k9p...hd.onion</span>
+                    </div>
+                    <div class="op-browser-content op-mock-portfolio">
+                        <div class="op-mock-gallery">
+                            <div class="op-mock-photo" style="background: linear-gradient(135deg, #667eea, #764ba2);"></div>
+                            <div class="op-mock-photo" style="background: linear-gradient(135deg, #f093fb, #f5576c);"></div>
+                            <div class="op-mock-photo" style="background: linear-gradient(135deg, #4facfe, #00f2fe);"></div>
+                            <div class="op-mock-photo" style="background: linear-gradient(135deg, #43e97b, #38f9d7);"></div>
+                            <div class="op-mock-photo" style="background: linear-gradient(135deg, #fa709a, #fee140);"></div>
+                            <div class="op-mock-photo" style="background: linear-gradient(135deg, #a18cd1, #fbc2eb);"></div>
+                        </div>
+                        <div class="op-mock-caption">Analog Series -- Spring 2026 -- 35mm</div>
+                    </div>
+                </div>
+                <div class="op-usecase-label">Photo Portfolio</div>
+                <div class="op-usecase-desc">Share your art without a middleman taking a cut or controlling your reach.</div>
+            </div>
+
+            <!-- Family Updates -->
+            <div>
+                <div class="op-browser">
+                    <div class="op-browser-titlebar">
+                        <span class="op-dot op-dot-r"></span>
+                        <span class="op-dot op-dot-y"></span>
+                        <span class="op-dot op-dot-g"></span>
+                        <span class="op-browser-url">🧅 t6h8c3f...nd.onion</span>
+                    </div>
+                    <div class="op-browser-content op-mock-family">
+                        <div class="mh">The Garcias</div>
+                        <div class="op-mock-post">
+                            <div class="mpt">Mia's First Steps!</div>
+                            <div class="mpp">She did it! Three wobbly steps from the couch to the coffee table. Abuela cried. Dad got it on video (finally).</div>
+                        </div>
+                        <div class="op-mock-post">
+                            <div class="mpt">Easter Weekend Plans</div>
+                            <div class="mpp">Everyone's coming to Tia Rosa's this year. Bring a dish and your appetite. Kids' egg hunt at 10am sharp.</div>
+                        </div>
+                        <div class="op-mock-post">
+                            <div class="mpt">Recipe: Abuela's Arroz con Pollo</div>
+                            <div class="mpp">She finally let me write it down. The secret is...</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="op-usecase-label">Family Updates</div>
+                <div class="op-usecase-desc">Keep family in the loop privately. No social media account required to read.</div>
+            </div>
+
+            <!-- Classroom Site -->
+            <div>
+                <div class="op-browser">
+                    <div class="op-browser-titlebar">
+                        <span class="op-dot op-dot-r"></span>
+                        <span class="op-dot op-dot-y"></span>
+                        <span class="op-dot op-dot-g"></span>
+                        <span class="op-browser-url">🧅 b2n7x4q...kd.onion</span>
+                    </div>
+                    <div class="op-browser-content op-mock-classroom">
+                        <div class="mb">CS 101 &gt; Spring 2026 &gt; Assignments</div>
+                        <div class="mh">Web Publishing Lab</div>
+                        <div class="op-mock-assign">
+                            <strong>Lab 5: Build Your Own Blog</strong><br>
+                            Set up OnionPress on the lab machine. Write and publish a 500-word post on any topic.<br>
+                            <span class="op-mock-due">Due: April 11, 2026</span>
+                        </div>
+                        <div class="op-mock-assign">
+                            <strong>Lab 4: How DNS Works</strong><br>
+                            Compare .com resolution with .onion addressing. Diagram both paths.<br>
+                            <span class="op-mock-due">Completed</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="op-usecase-label">Classroom Site</div>
+                <div class="op-usecase-desc">Students learn web publishing hands-on. Run a real server, not a simulation.</div>
+            </div>
+
+            <!-- Local Group -->
+            <div>
+                <div class="op-browser">
+                    <div class="op-browser-titlebar">
+                        <span class="op-dot op-dot-r"></span>
+                        <span class="op-dot op-dot-y"></span>
+                        <span class="op-dot op-dot-g"></span>
+                        <span class="op-browser-url">🧅 w4p9v6d...zd.onion</span>
+                    </div>
+                    <div class="op-browser-content op-mock-group">
+                        <div class="mh">Sunnyside Neighbors</div>
+                        <div class="ms">Community updates for the Sunnyside neighborhood</div>
+                        <div class="op-mock-item">
+                            <strong>Park cleanup this Saturday 9am</strong><br>
+                            Bring gloves. Donuts provided.<br>
+                            <span class="mid">April 4, 2026</span>
+                        </div>
+                        <div class="op-mock-item">
+                            <strong>Lost cat -- orange tabby, answers to "Byte"</strong><br>
+                            Last seen near Elm &amp; 3rd. Very friendly.<br>
+                            <span class="mid">April 2, 2026</span>
+                        </div>
+                        <div class="op-mock-item">
+                            <strong>Potluck at the community center April 12</strong><br>
+                            <span class="mid">March 30, 2026</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="op-usecase-label">Local Group</div>
+                <div class="op-usecase-desc">Neighborhood newsletter no one can shut down. Your community, your platform.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- View On Any Tor Browser -->
+    <div style="margin: 50px 0;">
+        <h2>
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" class="op-onion-bullet" alt="">
+            Viewable on Any Tor-Enabled Browser
+        </h2>
+        <div class="op-browsers-grid">
+            <div class="op-browser-card">
+                <div class="bicon">🧅</div>
+                <h3>Tor Browser</h3>
+                <div class="bplat">Windows, Mac, Linux</div>
+                <div class="bplat"><strong>The gold standard</strong></div>
+                <a href="https://www.torproject.org/download/">torproject.org</a>
+            </div>
+            <div class="op-browser-card">
+                <div class="bicon">🦁</div>
+                <h3>Brave Browser</h3>
+                <div class="bplat">Windows, Mac, Linux, Android</div>
+                <div class="bplat"><strong>Built-in Tor window</strong></div>
+                <a href="https://brave.com/">brave.com</a>
+            </div>
+            <div class="op-browser-card">
+                <div class="bicon">🧅</div>
+                <h3>Onion Browser</h3>
+                <div class="bplat">iPhone &amp; iPad</div>
+                <div class="bplat"><strong>Recommended for iOS</strong></div>
+                <a href="https://apps.apple.com/app/onion-browser/id519296448">App Store</a>
+            </div>
+            <div class="op-browser-card">
+                <div class="bicon">🤖</div>
+                <h3>Tor for Android</h3>
+                <div class="bplat">Android</div>
+                <div class="bplat"><strong>Official Tor app</strong></div>
+                <a href="https://play.google.com/store/apps/details?id=org.torproject.torbrowser">Google Play</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Get Started -->
+    <div class="op-get-started">
+        <h2>
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" class="op-onion-bullet" alt="" style="width:20px;height:20px;">
+            Get Started in 3 Steps
+        </h2>
+        <ol>
+            <li><strong>Download</strong> OnionPress for Mac or Linux</li>
+            <li><strong>Install</strong> and launch<br>
+                <small style="font-size: 14px;">(Work through the <a href="https://github.com/brewsterkahle/onionpress#requirements">security prompts</a> - we'll guide you step-by-step)</small>
+            </li>
+            <li><strong>Start blogging!</strong> Share your .onion address with friends</li>
+        </ol>
+        <div style="text-align: center; margin-top: 30px;">
+            <a href="https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg" class="op-btn"><span class="op-spinning-heart">💜</span> Download for Mac <span class="op-spinning-heart">💜</span></a>
+            <a href="https://github.com/brewsterkahle/onionpress/releases" class="op-btn">🐧 Download for Linux</a>
+        </div>
+    </div>
+
+    <!-- Hit Counter -->
+    <div id="op-hit-counter-container" style="text-align: center; margin: 60px 0;">
+        <div class="op-hit-counter">
+            <span class="op-counter-digit" data-digit=""><span class="op-digit-inner"></span></span>
+            <span class="op-counter-digit" data-digit=""><span class="op-digit-inner"></span></span>
+            <span class="op-counter-digit" data-digit=""><span class="op-digit-inner"></span></span>
+            <span class="op-counter-digit" data-digit=""><span class="op-digit-inner"></span></span>
+            <span class="op-counter-digit" data-digit=""><span class="op-digit-inner"></span></span>
+            <span class="op-counter-digit" data-digit=""><span class="op-digit-inner"></span></span>
+        </div>
+        <div class="op-counter-label">
+            <span style="font-size: 18px;">👁️</span>
+            <span>VISITORS</span>
+        </div>
+    </div>
+</div>
+
+<!-- Footer -->
+<div class="op-footer">
+    <div style="margin-bottom: 15px;">
+        <strong style="font-size: 18px; color: #B896D6;">Your Decentralized Social Blog Site</strong>
+    </div>
+    <div style="margin-bottom: 15px;">
+        Free and Open Source (AGPL 3)
+    </div>
+    <div style="margin-bottom: 15px;">
+        <a href="https://github.com/brewsterkahle/onionpress#readme">How it Works</a> |
+        <a href="http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/">Locking the Web Open</a> |
+        <a href="https://donate.torproject.org/">Donate</a>
+    </div>
+    <div style="margin-top: 15px; font-size: 12px;">
+        <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>
+    </div>
+</div>
+
+</div>
+
+<script>
+(function() {
+    var counterAPI = '/wp-content/plugins/onionpress-hit-counter/standalone-counter.php';
+    var hasIncremented = false;
+    var currentCount = 0;
+    var pollingInterval = null;
+
+    function updateDisplay(formattedCount, animate) {
+        var digits = formattedCount.split('');
+        var digitElements = document.querySelectorAll('.op-counter-digit');
+        digitElements.forEach(function(elem, index) {
+            var cd = elem.getAttribute('data-digit');
+            var nd = digits[index];
+            if (cd !== nd) {
+                var inner = elem.querySelector('.op-digit-inner');
+                if (animate && cd !== '') {
+                    elem.classList.add('spinning');
+                    setTimeout(function() {
+                        inner.textContent = nd;
+                        elem.setAttribute('data-digit', nd);
+                        elem.classList.remove('spinning');
+                    }, 300);
+                } else {
+                    inner.textContent = nd;
+                    elem.setAttribute('data-digit', nd);
+                }
+            }
+        });
+    }
+
+    function init() {
+        fetch(counterAPI + '?action=get')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.success) {
+                updateDisplay(d.formatted, false);
+                currentCount = d.count;
+                setTimeout(increment, 100);
+            }
+        })
+        .catch(function() { increment(); });
+    }
+
+    function increment() {
+        if (hasIncremented) return;
+        fetch(counterAPI + '?action=increment', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.success) {
+                updateDisplay(d.formatted, true);
+                currentCount = d.count;
+                hasIncremented = true;
+                if (!pollingInterval) pollingInterval = setInterval(poll, 2000);
+            }
+        })
+        .catch(function() {});
+    }
+
+    function poll() {
+        fetch(counterAPI + '?action=get')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.success && d.count > currentCount) {
+                updateDisplay(d.formatted, true);
+                currentCount = d.count;
+            }
+        })
+        .catch(function() {});
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+</script>
+<!-- /wp:html -->
