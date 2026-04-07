@@ -12,12 +12,15 @@ DOCKER_DIR="$INSTALL_DIR/docker"
 PLUGINS_DIR="$INSTALL_DIR/plugins"
 SCRIPTS_DIR="$INSTALL_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
+DOCUMENTS_DIR="$(xdg-user-dir DOCUMENTS 2>/dev/null || echo "$HOME/Documents")/onionpress"
 
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
-# Ensure data directory exists
+# Ensure data and documents directories exist
 mkdir -p "$DATA_DIR"
+mkdir -p "$DOCUMENTS_DIR/backups"
+mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
 
 # Log file with rotation (keep 3 x 5MB files)
 LOG_FILE="$DATA_DIR/onionpress.log"
