@@ -89,7 +89,8 @@ OnionPress uses:
 - **[Colima](https://github.com/abiosoft/colima)** — Container runtime for macOS (bundled)
 
 All data is stored in:
-- `~/.onionpress/` — Application data, logs, config
+- `~/.onionpress/` — Application state, logs, config
+- `~/Documents/onionpress/` — Backups and My Creations
 - Docker volumes for WordPress content, database, and Tor keys
 
 ## Building from Source
