@@ -9,6 +9,7 @@ ExecStart=/usr/bin/python3 /opt/onionpress/scripts/onionpress-heartbeat.py
 Restart=always
 RestartSec=30
 TimeoutStopSec=30
+Environment=XDG_RUNTIME_DIR=/run/user/%U
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

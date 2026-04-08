@@ -4,19 +4,27 @@
 # Usage: curl -sSL https://raw.githubusercontent.com/brewsterkahle/onionpress/main/linux/install.sh | bash
 #
 # Or clone the repo and run: bash linux/install.sh
+#
+# Installs Docker in rootless mode for security — container compromise
+# cannot escalate to host root.
 
 set -e
 
 INSTALL_DIR="/opt/onionpress"
 REPO_URL="https://github.com/brewsterkahle/onionpress"
 
-# Resolve real user's home dir (not /root when run via sudo)
+# Resolve real user (not root when run via sudo)
 if [ -n "$SUDO_USER" ]; then
+    REAL_USER="$SUDO_USER"
     REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    REAL_UID=$(id -u "$SUDO_USER")
 else
+    REAL_USER="$(whoami)"
     REAL_HOME="$HOME"
+    REAL_UID=$(id -u)
 fi
 DATA_DIR="$REAL_HOME/.onionpress"
+USER_SYSTEMD_DIR="$REAL_HOME/.config/systemd/user"
 
 echo ""
 echo "  OnionPress Installer for Linux"
@@ -54,24 +62,66 @@ else
     SUDO=""
 fi
 
-# ─── Install Docker ──────────────────────────────────────────────────
+# ─── Install Docker (rootless) ──────────────────────────────────────
 
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    echo "  Docker: already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
-else
-    echo "  Installing Docker..."
-    curl -sSL https://get.docker.com | $SUDO sh
-    # Add current user to docker group
-    if [ -n "$SUDO_USER" ]; then
-        $SUDO usermod -aG docker "$SUDO_USER"
-    elif [ "$EUID" -ne 0 ]; then
-        $SUDO usermod -aG docker "$(whoami)"
+# Helper to run a command as the real user (not root)
+run_as_user() {
+    if [ "$REAL_USER" = "$(whoami)" ]; then
+        "$@"
+    else
+        sudo -u "$REAL_USER" "$@"
     fi
-    echo "  Docker installed"
+}
+
+if run_as_user docker info >/dev/null 2>&1; then
+    echo "  Docker: already installed ($(run_as_user docker --version | cut -d' ' -f3 | tr -d ','))"
+else
+    echo "  Installing Docker (rootless mode)..."
+
+    # Install prerequisites for rootless Docker
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq uidmap dbus-user-session curl ca-certificates
+
+    # Install Docker engine packages (needed for rootless setup tool)
+    if ! command -v dockerd >/dev/null 2>&1; then
+        # Add Docker's official GPG key and repository
+        $SUDO install -m 0755 -d /etc/apt/keyrings
+        $SUDO curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg \
+            -o /etc/apt/keyrings/docker.asc
+        $SUDO chmod a+r /etc/apt/keyrings/docker.asc
+
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+          https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
+          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+          $SUDO tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+        $SUDO apt-get update -qq
+        $SUDO apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-ce-rootless-extras
+    fi
+
+    # Disable the system-wide Docker daemon — we use rootless instead
+    $SUDO systemctl disable --now docker.service docker.socket 2>/dev/null || true
+
+    # Enable lingering so the user's systemd services run at boot without login
+    $SUDO loginctl enable-linger "$REAL_USER"
+
+    # Set up rootless Docker as the real user
+    # XDG_RUNTIME_DIR must be set for the setup tool
+    run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        dockerd-rootless-setuptool.sh install
+
+    # Start the user's rootless Docker daemon
+    run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        systemctl --user start docker.service
+    run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        systemctl --user enable docker.service
+
+    echo "  Docker installed (rootless mode)"
 fi
 
 # Check docker compose plugin
-if docker compose version >/dev/null 2>&1; then
+if run_as_user docker compose version >/dev/null 2>&1; then
     echo "  Docker Compose: available"
 else
     echo "  Installing Docker Compose plugin..."
@@ -103,11 +153,31 @@ fi
 
 # ─── Stop existing services (if reinstalling) ────────────────────────
 
-if $SUDO systemctl is-active --quiet onionpress 2>/dev/null; then
+# Stop user services (rootless)
+if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user is-active --quiet onionpress 2>/dev/null; then
     echo "  Stopping existing OnionPress service..."
+    run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        systemctl --user stop onionpress-heartbeat 2>/dev/null || true
+    run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        systemctl --user stop onionpress-watcher.timer 2>/dev/null || true
+    run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        systemctl --user stop onionpress 2>/dev/null || true
+fi
+
+# Also stop old system-level services from previous installs
+if $SUDO systemctl is-active --quiet onionpress 2>/dev/null; then
+    echo "  Stopping old system-level OnionPress service..."
     $SUDO systemctl stop onionpress-heartbeat 2>/dev/null || true
     $SUDO systemctl stop onionpress-watcher.timer 2>/dev/null || true
     $SUDO systemctl stop onionpress 2>/dev/null || true
+    $SUDO systemctl disable onionpress onionpress-heartbeat onionpress-watcher.timer 2>/dev/null || true
+    $SUDO rm -f /etc/systemd/system/onionpress.service \
+                /etc/systemd/system/onionpress-heartbeat.service \
+                /etc/systemd/system/onionpress-watcher.service \
+                /etc/systemd/system/onionpress-watcher.timer
+    $SUDO systemctl daemon-reload
+    echo "  Migrated from system services to user services"
 fi
 
 # ─── Install OnionPress files ────────────────────────────────────────
@@ -196,11 +266,12 @@ echo "  Setting up data directory..."
 
 # Use install -d -o to create dirs owned by the real user, not root
 if [ -n "$SUDO_USER" ]; then
-    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DATA_DIR"
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" -m 700 "$DATA_DIR"
     install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DATA_DIR/shared"
     install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DATA_DIR/shared/vanity-keys"
 else
     mkdir -p "$DATA_DIR"
+    chmod 700 "$DATA_DIR"
     mkdir -p "$DATA_DIR/shared/vanity-keys"
 fi
 
@@ -241,42 +312,42 @@ if [ -n "$SUDO_USER" ]; then
     chown -R "$SUDO_USER:$SUDO_USER" "$DATA_DIR"
 fi
 
-# ─── Install systemd service ─────────────────────────────────────────
+# ─── Install systemd user services ──────────────────────────────────
 
 echo ""
-echo "  Installing systemd service..."
+echo "  Installing systemd user services..."
 
-$SUDO cp "$REPO_DIR/linux/onionpress.service" /etc/systemd/system/onionpress.service
-
-# Set the service to run as the real user (not root) so $HOME resolves correctly
-REAL_USER="${SUDO_USER:-$(whoami)}"
-if [ "$REAL_USER" != "root" ]; then
-    # Insert User= and HOME= after the [Service] line
-    $SUDO sed -i "/^\[Service\]/a User=$REAL_USER\nEnvironment=HOME=$REAL_HOME" \
-        /etc/systemd/system/onionpress.service
-    echo "  Service will run as user: $REAL_USER"
+# Create user systemd directory
+if [ -n "$SUDO_USER" ]; then
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$USER_SYSTEMD_DIR"
+else
+    mkdir -p "$USER_SYSTEMD_DIR"
 fi
 
-# Install heartbeat client service
-$SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.service" /etc/systemd/system/onionpress-heartbeat.service
-if [ "$REAL_USER" != "root" ]; then
-    $SUDO sed -i "/^\[Service\]/a User=$REAL_USER\nEnvironment=HOME=$REAL_HOME" \
-        /etc/systemd/system/onionpress-heartbeat.service
+# Copy service files to user systemd directory
+cp "$REPO_DIR/linux/onionpress.service" "$USER_SYSTEMD_DIR/onionpress.service"
+cp "$REPO_DIR/linux/onionpress-heartbeat.service" "$USER_SYSTEMD_DIR/onionpress-heartbeat.service"
+cp "$REPO_DIR/linux/onionpress-watcher.service" "$USER_SYSTEMD_DIR/onionpress-watcher.service"
+cp "$REPO_DIR/linux/onionpress-watcher.timer" "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
+
+# Ensure owned by user
+if [ -n "$SUDO_USER" ]; then
+    chown "$SUDO_USER:$SUDO_USER" "$USER_SYSTEMD_DIR"/onionpress*
 fi
 
-# Install watcher service (triggered by handle-action)
-$SUDO cp "$REPO_DIR/linux/onionpress-watcher.service" /etc/systemd/system/onionpress-watcher.service
-$SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" /etc/systemd/system/onionpress-watcher.timer
-if [ "$REAL_USER" != "root" ]; then
-    $SUDO sed -i "/^\[Service\]/a User=$REAL_USER" \
-        /etc/systemd/system/onionpress-watcher.service
-fi
+# Enable lingering (ensures user services start at boot, even without login)
+$SUDO loginctl enable-linger "$REAL_USER"
 
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable onionpress
-$SUDO systemctl enable --now onionpress-watcher.timer
-$SUDO systemctl enable onionpress-heartbeat
-echo "  Systemd services installed and enabled (starts on boot)"
+# Reload and enable user services
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user daemon-reload
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user enable onionpress
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user enable --now onionpress-watcher.timer
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user enable onionpress-heartbeat
+echo "  Systemd user services installed and enabled (starts on boot)"
 
 # ─── Start OnionPress ─────────────────────────────────────────────────
 
@@ -287,10 +358,12 @@ echo ""
 
 # Use restart (not start) so a stale service from a previous install is replaced.
 # If the service isn't running, restart acts like start.
-$SUDO systemctl restart onionpress
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user restart onionpress
 
 # Start heartbeat client (will wait for containers to be ready)
-$SUDO systemctl restart onionpress-heartbeat
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user restart onionpress-heartbeat
 
 # Wait for the service to finish starting
 echo "  Waiting for services..."
@@ -311,11 +384,12 @@ done
 
 if [ "$wp_ready" != "true" ]; then
     echo "  WARNING: WordPress did not respond within 3 minutes."
-    echo "  It may still be starting. Check: sudo journalctl -u onionpress -f"
+    echo "  It may still be starting. Check: journalctl --user -u onionpress -f"
 fi
 
 # Check if it started successfully
-if $SUDO systemctl is-active --quiet onionpress; then
+if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user is-active --quiet onionpress; then
     # Try to get the onion address
     onion_addr=$("$INSTALL_DIR/onionpress" address 2>/dev/null) || true
 
@@ -343,16 +417,16 @@ if $SUDO systemctl is-active --quiet onionpress; then
     echo "    onionpress address      - Show .onion address"
     echo "    onionpress logs         - Stream container logs"
     echo "    onionpress write-status - Update status page data"
-    echo "    sudo systemctl restart onionpress - Restart"
-    echo "    sudo systemctl stop onionpress    - Stop"
+    echo "    systemctl --user restart onionpress - Restart"
+    echo "    systemctl --user stop onionpress    - Stop"
     echo ""
     echo "  Log file: $DATA_DIR/onionpress.log"
     echo ""
 else
     echo ""
     echo "  WARNING: OnionPress may still be starting."
-    echo "  Check status with: sudo systemctl status onionpress"
-    echo "  Check logs with:   journalctl -u onionpress"
+    echo "  Check status with: systemctl --user status onionpress"
+    echo "  Check logs with:   journalctl --user -u onionpress"
     echo "  Or:                cat $DATA_DIR/onionpress.log"
     echo ""
 fi

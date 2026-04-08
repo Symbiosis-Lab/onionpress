@@ -11,6 +11,7 @@ ExecStop=/opt/onionpress/onionpress stop
 TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
+Environment=XDG_RUNTIME_DIR=/run/user/%U
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

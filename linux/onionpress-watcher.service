@@ -7,3 +7,4 @@ Type=oneshot
 ExecStart=/opt/onionpress/onionpress handle-action
 StandardOutput=journal
 StandardError=journal
+Environment=XDG_RUNTIME_DIR=/run/user/%U
