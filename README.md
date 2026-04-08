@@ -1,47 +1,65 @@
 <div align="center">
-  <img src="logo.png" alt="onionpress logo" width="400">
+  <img src="logo.png" alt="OnionPress logo" width="400">
 
-  **[Product Page](https://brewsterkahle.github.io/onionpress/)**
+  **Your Decentralized Social Blog Site**
+
+  **[Website](https://onionpress.org)** · **[Download](https://github.com/brewsterkahle/onionpress/releases/latest)**
 </div>
 
 # OnionPress
 
-**Run your own website from your Mac. Just Works. Free, forever.**
+**Run your own website from your computer. Just Works. Free, forever.**
 
-onionpress is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible even when you are on a private network.
+OnionPress turns your Mac or Linux computer into a web server running WordPress, accessible via the Tor network. Your site gets its own permanent .onion address that no one can take away from you. It's backed up automatically by the Internet Archive's Wayback Machine.
 
-⚠️ This is **not** a securely-anonymous publishing tool-- it is a fun and easy-to-use wordpress that works on your own network
+**WordPress + Tor + Wayback Machine.** You write. Tor delivers. Wayback remembers.
 
 ## Features
 
-- 💻 **Easy and Free Self-Hosted**: Run your own web server without monthly hosting fees or technical complexity
-- 🧅 **Tor Onion Service**: Your WordPress site is automatically configured as a Tor onion service (requires website visitors to use Tor or Brave browsers)
-- 🔐 **End-to-End Encrypted**: Built-in encryption without needing HTTPS certificates or SSL setup
-- 🌐 **No DNS Registration Needed**: Your .onion address works immediately - no domain registration, no DNS configuration
-- 🏠 **Works Behind Firewalls**: Runs on home, school, or work networks even behind firewalls or NAT - no port forwarding required
-- ✨ **Custom Onion Address Prefixes**: All installations generate addresses starting with "op2" for easy identification
-- 📚 **Internet Archive Integration**: Automatically submits posts to be archived and installs the [Wayback Machine Link Fixer](https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/) plugin to submit links from posts to be archived.   Registers the onionpress's .onion address so that when onionpress is offline, the URL requests are fulfilled by the Wayback Machine.
-- 🐳 **Cyber Security from hacking**: Uses Docker containers inside a VM for easy management and isolation
-- 📱 **Menu Bar App**: Simple menu bar interface to control your site
-- 🚀 **One-Click Install**: Download the DMG, drag to Applications, and launch
-- 🌐 **Tor-Only Access**: Your site is only accessible through Tor (e.g. Tor and Brave Browsers)
+- 📝 **Full WordPress**: Any theme, any plugin, a dashboard you already know
+- 🧅 **Permanent .onion Address**: Your own address on the Tor network — no domain registrar, no DNS, uncensorable
+- 🏛️ **Wayback Machine Integration**: Automatically archived and served when you're offline
+- 🏠 **Works Behind Firewalls**: Home, school, work — Tor punches through NAT and firewalls
+- 🔐 **Private by Default**: No analytics, no tracking, no ads. End-to-end encrypted without certificates
+- 🐳 **Sandboxed**: Docker containers inside a VM for isolation and security
+- 📱 **Mac Menu Bar App**: Purple onion icon with one-click controls
+- 🐧 **Linux Support**: CLI + systemd for servers and Raspberry Pi
 
 ## Requirements
 
-- macOS 13.0 (Ventura) or later
+- **Mac**: macOS 13.0 (Ventura) or later
+- **Linux**: Docker and Docker Compose
 - Internet connection
 
 ## Installation
 
-1. Download the latest `onionpress.dmg` from the [releases page](https://github.com/brewsterkahle/onionpress/releases)
+### Mac
+
+1. Download [`onionpress.dmg`](https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg) from the [releases page](https://github.com/brewsterkahle/onionpress/releases)
 2. Open the DMG and drag `OnionPress.app` to your Applications folder
 3. Launch OnionPress from Applications
 4. On first launch:
-   - The app will generate your onion address (starting with "op2") - takes < 1 second
-   - The app will initialize its bundled container runtime (Colima) - takes ~2-3 minutes
+   - The app will generate your onion address (starting with "op2") — takes < 1 second
+   - The app will initialize its bundled container runtime (Colima) — takes ~2-3 minutes
    - It will download WordPress, MariaDB, and Tor container images (~1GB)
-   - Total 1-time setup: 3-5 minutes depending on your internet connection
-   - Launching the site is about a minute.
+   - Total one-time setup: 3-5 minutes depending on your internet connection
+
+### Linux
+
+One command installs everything:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/brewsterkahle/onionpress/main/linux/install.sh | bash
+```
+
+Or download the [`.deb` package](https://github.com/brewsterkahle/onionpress/releases/latest):
+
+```bash
+sudo apt-get install ./onionpress_*.deb
+sudo systemctl start onionpress
+```
+
+After install: `onionpress status`, `onionpress address`, `onionpress logs`.
 
 ### macOS Security Warning
 
@@ -204,31 +222,38 @@ These plugins are optimized for the Tor network's slower speeds and privacy-focu
 For testing purposes, your WordPress site is also available at:
 - http://localhost:8080 (only accessible from your Mac)
 
+## Viewing Your Site
+
+Your site is viewable on any Tor-enabled browser:
+
+- **[Tor Browser](https://www.torproject.org/download/)** — Windows, Mac, Linux (the gold standard)
+- **[Brave Browser](https://brave.com/)** — Windows, Mac, Linux, Android (built-in Tor window)
+- **[Onion Browser](https://apps.apple.com/app/onion-browser/id519296448)** — iPhone & iPad
+- **[Tor Browser for Android](https://play.google.com/store/apps/details?id=org.torproject.torbrowser)** — Android
+
 ## Architecture
 
-onionpress uses:
-- **WordPress**: Latest official WordPress container
-- **MariaDB**: Latest MariaDB for the database
-- **Tor**: Onion service container that exposes WordPress as a .onion site
-- **mkp224o**: Onion address prefix generator (generates addresses with custom prefixes)
-- **Colima**: Bundled container runtime using Apple's virtualization framework
-- **Lima**: VM management layer (bundled)
-- **Docker CLI**: Container management tools (bundled)
+OnionPress uses:
+- **[WordPress](https://wordpress.org/)** — Content management system
+- **[Tor](https://www.torproject.org/)** — Onion service for permanent .onion addresses
+- **[MariaDB](https://mariadb.org/)** — Database
+- **[Wayback Machine](https://web.archive.org/)** — Automatic archiving and offline replay
+- **[Docker](https://www.docker.com/)** — Container isolation
+- **[Colima](https://github.com/abiosoft/colima)** — Container runtime for macOS (bundled)
 
 All data is stored in:
-- `~/.onionpress/` - Application data, logs, config, and Colima VM
-- Docker volumes for WordPress, database, and Tor keys
+- `~/.onionpress/` — Application data, logs, config
+- Docker volumes for WordPress content, database, and Tor keys
 
 ## Building from Source
 
-To build the DMG installer:
-
 ```bash
-cd onionpress
-./build/build-dmg.sh
-```
+# Mac DMG
+bash build/build-dmg-simple.sh
 
-This will create `onionpress.dmg` in the `build/` directory.
+# Linux .deb and AppImage
+bash build/build-linux.sh
+```
 
 ## Troubleshooting
 
@@ -272,16 +297,10 @@ AGPL 3 License - See LICENSE file for details
 
 ## Credits
 
-A Decentralized Web project
+A [Decentralized Web](http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/) project.
 
-Built with:
-- [WordPress](https://wordpress.org/) - Open source content management system
-- [Tor Project](https://www.torproject.org/) - Anonymous communication network
-- [Colima](https://github.com/abiosoft/colima) - Container runtime for macOS
-- [Lima](https://github.com/lima-vm/lima) - Linux virtual machines for macOS
-- [mkp224o](https://github.com/cathugger/mkp224o) - Onion address prefix generator
-- [rumps](https://github.com/jaredks/rumps) - Python library for macOS menu bar apps
+Free and Open Source (AGPL 3). [Donate to the Tor Project](https://donate.torproject.org/) · [Donate to the Internet Archive](https://archive.org/donate/)
 
 ## Support
 
-For issues, questions, or contributions, please visit the GitHub repository.
+For issues, questions, or contributions, visit the [GitHub repository](https://github.com/brewsterkahle/onionpress) or the [product page](https://onionpress.org).

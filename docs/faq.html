@@ -130,6 +130,34 @@
             font-weight: bold;
         }
 
+        .faq-answer code {
+            display: block;
+            background: #1a1a2e;
+            border: 2px solid #333;
+            padding: 15px 20px;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            color: #43e97b;
+            border-radius: 4px;
+            word-break: break-all;
+            cursor: pointer;
+        }
+
+        .faq-answer code:hover {
+            border-color: #43e97b;
+        }
+
+        .faq-answer code.inline {
+            display: inline;
+            background: #eee;
+            border: 1px solid #ccc;
+            padding: 2px 6px;
+            margin: 0;
+            color: #333;
+            cursor: default;
+        }
+
         .site-footer {
             background: var(--retro-black);
             color: var(--onion-cream);
@@ -210,6 +238,22 @@
             <div class="faq-question">Do I need to be technical?</div>
             <div class="faq-answer">
                 No. OnionPress installs like any Mac app -- download the DMG, drag to Applications, and launch. There are a few security prompts to work through on first launch (macOS wants to make sure you trust the app), but we guide you step-by-step. After that, you're writing in WordPress, which is the same interface used by 40% of the web.
+            </div>
+        </div>
+
+        <div id="install-linux" class="faq-item">
+            <div class="faq-question">How do I install OnionPress on Linux?</div>
+            <div class="faq-answer">
+                One command does everything -- installs Docker if needed, downloads OnionPress, and starts your site:
+                <code onclick="navigator.clipboard.writeText(this.innerText.trim());this.style.borderColor='#43e97b'">curl -sSL https://raw.githubusercontent.com/brewsterkahle/onionpress/main/linux/install.sh | bash</code>
+                Works on Ubuntu, Debian, Raspberry Pi (ARM64), and most Linux distributions. After install, manage your site with:
+                <br><br>
+                <code class="inline">onionpress status</code> -- check if it's running<br>
+                <code class="inline">onionpress address</code> -- show your .onion address<br>
+                <code class="inline">onionpress logs</code> -- stream container logs<br>
+                <code class="inline">sudo systemctl restart onionpress</code> -- restart<br>
+                <br>
+                You can also download <code class="inline">.deb</code> packages from <a href="https://github.com/brewsterkahle/onionpress/releases/latest">GitHub Releases</a>.
             </div>
         </div>
 
