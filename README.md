@@ -99,7 +99,8 @@ bash build/build-linux.sh
 
 ## Uninstalling
 
-Click **Uninstall** from the menu bar app. It will remove all data and quit.
+- **Mac**: Click **Uninstall** from the menu bar app. It will remove all data and quit.
+- **Linux**: Run `onionpress uninstall`
 
 ## License
 
