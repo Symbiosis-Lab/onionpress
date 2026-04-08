@@ -80,13 +80,7 @@ Your site is viewable on any Tor-enabled browser:
 
 ## Architecture
 
-OnionPress uses:
-- **[WordPress](https://wordpress.org/)** — Content management system
-- **[Tor](https://www.torproject.org/)** — Onion service for permanent .onion addresses
-- **[MariaDB](https://mariadb.org/)** — Database
-- **[Wayback Machine](https://web.archive.org/)** — Automatic archiving and offline replay
-- **[Docker](https://www.docker.com/)** — Container isolation
-- **[Colima](https://github.com/abiosoft/colima)** — Container runtime for macOS (bundled)
+OnionPress is built on [WordPress](https://wordpress.org/), [Tor](https://www.torproject.org/), and the Internet Archive's [Wayback Machine](https://web.archive.org/).
 
 All data is stored in:
 - `~/.onionpress/` — Application state, logs, config
