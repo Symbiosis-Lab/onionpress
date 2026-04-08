@@ -58,27 +58,7 @@ After install: `onionpress status`, `onionpress address`, `onionpress logs`.
 
 ### macOS Security Warning
 
-Since this app is not code-signed with an Apple Developer certificate, macOS on first launch. This is normal for open-source software.
-
-**Method 1 - System Settings (Recommended):**
-1. Open the app when in your Applications folder - you'll see a security warning.  Hit Done.
-2. Open **System Settings** → **Privacy & Security**
-3. Scroll down and click **"Open Anyway"** next to the OnionPress warning
-4. Click **"Open Anyway"** in the confirmation dialog, and enter your computer's password
-
-**Method 2 - Right-Click:**
-1. Right-click (or Control-click) on the OnionPress app in you Application folder
-2. Select **"Open"**
-3. Click **"Open"** in the dialog
-
-**Method 3 - Terminal (Advanced):**
-
-If you're comfortable with the terminal, you can remove the quarantine flag:
-```bash
-# After moving to Applications folder
-xattr -cr /Applications/OnionPress.app
-```
-This removes macOS's quarantine attribute and allows the app to launch without warnings.
+On first launch, macOS will show a security warning (normal for open-source software). Go to **System Settings → Privacy & Security**, scroll down, and click **"Open Anyway"**.
 
 ## Usage
 
