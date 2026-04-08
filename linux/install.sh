@@ -109,8 +109,11 @@ else
         $SUDO apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-ce-rootless-extras
     fi
 
-    # Disable the system-wide Docker daemon — we use rootless instead
+    # Disable the system-wide (rootful) Docker daemon — we use rootless instead
     $SUDO systemctl disable --now docker.service docker.socket 2>/dev/null || true
+    # Remove the socket file if it lingers after stopping (the rootless setup
+    # tool refuses to proceed while /var/run/docker.sock exists)
+    $SUDO rm -f /var/run/docker.sock
 
     # Enable lingering so the user's systemd services run at boot without login
     $SUDO loginctl enable-linger "$REAL_USER"
@@ -118,7 +121,7 @@ else
     # Set up rootless Docker as the real user
     # XDG_RUNTIME_DIR must be set for the setup tool
     run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-        dockerd-rootless-setuptool.sh install
+        dockerd-rootless-setuptool.sh install --force
 
     # Start the user's rootless Docker daemon
     run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
