@@ -97,27 +97,6 @@ bash build/build-dmg-simple.sh
 bash build/build-linux.sh
 ```
 
-## Troubleshooting
-
-### "macOS version too old"
-OnionPress requires macOS 13 (Ventura) or later for Apple's native virtualization framework.
-
-### Containers won't start
-Check the logs via the menu bar app or run:
-```bash
-tail -f ~/.onionpress/onionpress.log
-tail -f ~/.onionpress/colima/colima.log
-```
-
-### Onion address not generating
-Wait 30-60 seconds for Tor to generate your onion address. Check logs if it takes longer.
-
-## Security Notes
-
-- Change the default WordPress admin password immediately after installation
-- Your site is only accessible via Tor by default (port 8080 is localhost-only for testing)
-- Keep WordPress and plugins updated regularly
-
 ## Uninstalling
 
 1. Click Uninstall from the menu bar app 
