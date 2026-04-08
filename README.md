@@ -99,18 +99,7 @@ bash build/build-linux.sh
 
 ## Uninstalling
 
-1. Click Uninstall from the menu bar app 
-2. Quit OnionPress
-3. Move `OnionPress.app` to Trash
-   or
-1. Quit OnionPress
-2. Move `OnionPress.app` to Trash
-3. Remove data directory: `rm -rf ~/.onionpress`
-4. Remove Docker volumes:
-   ```bash
-   docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
-   ```
-5. Reboot
+Click **Uninstall** from the menu bar app. It will remove all data and quit.
 
 ## License
 
