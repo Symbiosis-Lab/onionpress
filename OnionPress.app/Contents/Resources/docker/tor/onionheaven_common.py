@@ -985,7 +985,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     # takeover_container even after release) to avoid orphaned ADD_ONION
     # services when takeover/release cycles bounce between workers.
     if is_farm_mode():
-        preferred = row["takeover_container"] if row.get("takeover_container") else None
+        preferred = row["takeover_container"] if row["takeover_container"] else None
         if preferred:
             # Verify the preferred worker is still bootstrapped
             ok = conn.execute(

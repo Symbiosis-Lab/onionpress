@@ -355,7 +355,7 @@ def main():
                         # OnionHeaven peers get a longer grace period before takeover.
                         # They run OnionHeaven themselves, so restarts take longer and
                         # a premature takeover would redirect their hosted sites.
-                        if entry.get("is_onionheaven"):
+                        if entry["is_onionheaven"]:
                             if entry["last_healthy"]:
                                 try:
                                     lh = datetime.fromisoformat(
@@ -376,7 +376,7 @@ def main():
 
                 elif entry["status"] == "taken-over":
                     # Unassigned taken-over entry — assign to a worker.
-                    if not entry.get("takeover_container"):
+                    if not entry["takeover_container"]:
                         worker = _pick_worker(conn)
                         if worker and _exec_takeover(worker, ca):
                             conn.execute(
@@ -405,7 +405,7 @@ def main():
                         continue
 
                     # Compute since_takeover for audit queueing and auto-cleanup
-                    last_taken_over = entry.get("last_taken_over")
+                    last_taken_over = entry["last_taken_over"]
                     since_takeover = 0
                     if last_taken_over:
                         try:
@@ -417,7 +417,7 @@ def main():
                             pass
 
                     # Act on audit results / queue new audits
-                    audit_result = entry.get("audit_result")
+                    audit_result = entry["audit_result"]
                     if audit_result == "false_positive":
                         # Site is alive — release the takeover
                         # (release_function clears audit_result so future
@@ -425,7 +425,7 @@ def main():
                         log(f"Releasing false-positive takeover for {ca} (healthcheck {ha} is alive)")
                         release_function(conn, ca, ha)
                         continue
-                    elif not audit_result and not entry.get("audit_pending"):
+                    elif not audit_result and not entry["audit_pending"]:
                         if 10 < since_takeover <= 300:
                             conn.execute(
                                 "UPDATE registry SET audit_pending = ? "
@@ -441,7 +441,7 @@ def main():
 
                     # Auto-cleanup: unregister stress-test entries taken-over for >2 hours
                     # Real users will re-register when they come back online; stress tests won't.
-                    version = entry.get("version", "")
+                    version = entry["version"] or ""
                     if version and version.startswith("stress-test") and since_takeover > 7200:
                         stale_cleanup_count += 1
                         log(f"Auto-cleanup stale stress-test entry: {ca} (taken-over {since_takeover/3600:.1f}h ago)")
