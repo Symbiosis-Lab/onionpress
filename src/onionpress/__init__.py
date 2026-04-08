@@ -1,3 +1,3 @@
 """OnionPress — shared Python package for CLI and menubar."""
 
-__version__ = "2.4.49"
+__version__ = "2.4.50"
