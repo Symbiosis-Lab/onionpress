@@ -1,7 +1,7 @@
 [Unit]
 Description=OnionPress heartbeat client
 After=onionpress.service
-Requires=onionpress.service
+Wants=onionpress.service
 
 [Service]
 Type=simple
