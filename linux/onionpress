@@ -56,6 +56,13 @@ export ONIONPRESS_VERSION
 export TZ="$(cat /etc/timezone 2>/dev/null || echo UTC)"
 export PYTHONDONTWRITEBYTECODE=1
 
+# Rootless Docker: point CLI and compose at the user's rootless daemon socket
+_rootless_sock="/run/user/$(id -u)/docker.sock"
+if [ -S "$_rootless_sock" ]; then
+    export DOCKER_HOST="unix://$_rootless_sock"
+    export DOCKER_SOCK="$_rootless_sock"
+fi
+
 # Default ports (no multi-user offset on Linux — single-purpose server)
 export ONIONPRESS_PORT_OFFSET=0
 export ONIONPRESS_WP_PORT=8080
