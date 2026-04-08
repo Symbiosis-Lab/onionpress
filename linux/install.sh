@@ -73,8 +73,17 @@ run_as_user() {
     fi
 }
 
-if run_as_user docker info >/dev/null 2>&1; then
-    echo "  Docker: already installed ($(run_as_user docker --version | cut -d' ' -f3 | tr -d ','))"
+# Check if rootless Docker is already set up for this user
+_rootless_sock="/run/user/$REAL_UID/docker.sock"
+_docker_is_rootless=false
+if [ -S "$_rootless_sock" ]; then
+    if run_as_user env DOCKER_HOST="unix://$_rootless_sock" docker info >/dev/null 2>&1; then
+        _docker_is_rootless=true
+    fi
+fi
+
+if [ "$_docker_is_rootless" = "true" ]; then
+    echo "  Docker: already installed, rootless ($(run_as_user docker --version | cut -d' ' -f3 | tr -d ','))"
 else
     echo "  Installing Docker (rootless mode)..."
 

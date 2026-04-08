@@ -1,7 +1,8 @@
 [Unit]
 Description=OnionPress - WordPress over Tor Onion Service
+# Soft dependency: rootless docker.service may already be running
+Wants=docker.service
 After=docker.service
-Requires=docker.service
 
 [Service]
 Type=notify
