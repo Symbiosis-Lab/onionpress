@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.png" alt="OnionPress logo" width="400">
+  <img src="assets/branding/logo.png" alt="OnionPress logo" width="400">
 
   **Your Decentralized Social Blog Site**
 
