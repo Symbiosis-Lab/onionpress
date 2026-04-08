@@ -35,14 +35,9 @@ OnionPress turns your Mac or Linux computer into a web server running WordPress,
 
 ### Mac
 
-1. Download [`onionpress.dmg`](https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg) from the [releases page](https://github.com/brewsterkahle/onionpress/releases)
-2. Open the DMG and drag `OnionPress.app` to your Applications folder
-3. Launch OnionPress from Applications
-4. On first launch:
-   - The app will generate your onion address (starting with "op2") — takes < 1 second
-   - The app will initialize its bundled container runtime (Colima) — takes ~2-3 minutes
-   - It will download WordPress, MariaDB, and Tor container images (~1GB)
-   - Total one-time setup: 3-5 minutes depending on your internet connection
+1. Download [`onionpress.dmg`](https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg)
+2. Drag `OnionPress.app` to Applications and launch
+3. First launch takes 3-5 minutes (one-time setup)
 
 ### Linux
 
