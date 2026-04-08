@@ -227,6 +227,12 @@ if [ -f "$REPO_DIR/linux/onionpress-heartbeat.py" ]; then
     $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
 fi
 
+# Copy systemd service files into install dir (so they survive temp dir cleanup)
+$SUDO cp "$REPO_DIR/linux/onionpress.service" "$INSTALL_DIR/"
+$SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.service" "$INSTALL_DIR/"
+$SUDO cp "$REPO_DIR/linux/onionpress-watcher.service" "$INSTALL_DIR/"
+$SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" "$INSTALL_DIR/"
+
 # Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
 # users access from another device). The main compose file uses 127.0.0.1.
 $SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
@@ -324,11 +330,11 @@ else
     mkdir -p "$USER_SYSTEMD_DIR"
 fi
 
-# Copy service files to user systemd directory
-cp "$REPO_DIR/linux/onionpress.service" "$USER_SYSTEMD_DIR/onionpress.service"
-cp "$REPO_DIR/linux/onionpress-heartbeat.service" "$USER_SYSTEMD_DIR/onionpress-heartbeat.service"
-cp "$REPO_DIR/linux/onionpress-watcher.service" "$USER_SYSTEMD_DIR/onionpress-watcher.service"
-cp "$REPO_DIR/linux/onionpress-watcher.timer" "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
+# Copy service files to user systemd directory (from install dir, not repo — repo may be cleaned up)
+cp "$INSTALL_DIR/onionpress.service" "$USER_SYSTEMD_DIR/onionpress.service"
+cp "$INSTALL_DIR/onionpress-heartbeat.service" "$USER_SYSTEMD_DIR/onionpress-heartbeat.service"
+cp "$INSTALL_DIR/onionpress-watcher.service" "$USER_SYSTEMD_DIR/onionpress-watcher.service"
+cp "$INSTALL_DIR/onionpress-watcher.timer" "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
 
 # Ensure owned by user
 if [ -n "$SUDO_USER" ]; then
