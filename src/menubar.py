@@ -1785,16 +1785,14 @@ class OnionPressApp(rumps.App):
             with self._wayback_queue_lock:
                 wq_count = len(self._wayback_queue)
             if wq_count > 0:
-                self._wayback_queue_item.title = f"Pending Wayback Saves ({wq_count})"
                 if not self._wayback_queue_in_menu:
+                    self._wayback_queue_item.title = "Pending Wayback Saves"
                     self.menu.insert_after("Copy Onion Address", self._wayback_queue_item)
                     self._wayback_queue_in_menu = True
             else:
                 if self._wayback_queue_in_menu:
-                    # Remove using the current title (which may have changed)
-                    for key in list(self.menu.keys()):
-                        if isinstance(key, str) and key.startswith("Pending Wayback Saves"):
-                            del self.menu[key]
+                    if "Pending Wayback Saves" in self.menu:
+                        del self.menu["Pending Wayback Saves"]
                     self._wayback_queue_in_menu = False
 
             if state == "available":
