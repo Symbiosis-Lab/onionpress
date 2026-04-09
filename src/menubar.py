@@ -362,6 +362,7 @@ class OnionPressApp(rumps.App):
         self._wayback_queue_lock = threading.Lock()
         self._wayback_last_drain = 0
         self._wayback_queue_item = rumps.MenuItem("", callback=None)
+        self._wayback_queue_in_menu = False
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -1785,13 +1786,16 @@ class OnionPressApp(rumps.App):
                 wq_count = len(self._wayback_queue)
             if wq_count > 0:
                 self._wayback_queue_item.title = f"Pending Wayback Saves ({wq_count})"
-                if self._wayback_queue_item.title not in self.menu:
+                if not self._wayback_queue_in_menu:
                     self.menu.insert_after("Copy Onion Address", self._wayback_queue_item)
+                    self._wayback_queue_in_menu = True
             else:
-                # Remove any existing queue item (title may have changed)
-                for key in list(self.menu.keys()):
-                    if isinstance(key, str) and key.startswith("Pending Wayback Saves"):
-                        del self.menu[key]
+                if self._wayback_queue_in_menu:
+                    # Remove using the current title (which may have changed)
+                    for key in list(self.menu.keys()):
+                        if isinstance(key, str) and key.startswith("Pending Wayback Saves"):
+                            del self.menu[key]
+                    self._wayback_queue_in_menu = False
 
             if state == "available":
                 self.icon = self.icon_running
