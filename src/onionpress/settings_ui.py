@@ -110,7 +110,10 @@ SETTINGS_HELP = {
         "2. Go to Zero Trust > Networks > Tunnels > Create a tunnel\n"
         "3. Set the tunnel service to http://wordpress:80\n"
         "4. Copy the tunnel token and paste it below\n"
-        "5. Restart OnionPress"
+        "5. Restart OnionPress\n\n"
+        "IMPORTANT: Do NOT install cloudflared on your Mac (e.g. via "
+        "Homebrew). OnionPress runs cloudflared automatically inside "
+        "Docker. A host-level install causes intermittent 502 errors."
     ),
 }
 

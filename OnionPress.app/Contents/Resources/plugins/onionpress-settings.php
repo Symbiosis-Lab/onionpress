@@ -745,7 +745,7 @@ function onionpress_settings_fields() {
         ),
         'CLOUDFLARE_TUNNEL_TOKEN' => array(
             'label'       => 'Cloudflare Tunnel Token',
-            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. Privacy note: this reveals your IP to Cloudflare.',
+            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared on your Mac — OnionPress runs it automatically inside Docker.',
             'type'        => 'text',
             'placeholder' => '',
         ),

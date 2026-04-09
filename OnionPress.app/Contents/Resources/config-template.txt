@@ -114,6 +114,12 @@ VM_MEMORY=1
 # 4. Copy the tunnel token and paste it below
 # 5. Restart OnionPress
 # Your .onion address continues to work alongside the clearnet domain.
+#
+# IMPORTANT: Do NOT install cloudflared on your Mac (e.g. via Homebrew or
+# "cloudflared service install"). OnionPress runs cloudflared automatically
+# inside Docker. A host-level install causes intermittent 502 errors because
+# Cloudflare load-balances between connectors, and the host one cannot reach
+# the Docker-internal WordPress container.
 CLOUDFLARE_TUNNEL_TOKEN=
 
 # Register with OnionHeaven

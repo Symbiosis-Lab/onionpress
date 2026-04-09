@@ -295,6 +295,8 @@ class OnionPressApp(rumps.App):
             if cf_token:
                 self.cloudflare_tunnel_enabled = True
                 self.log("Cloudflare Tunnel configured")
+                # Detect host-level cloudflared that would conflict with container
+                self._check_host_cloudflared()
 
         # Start background initialization
         threading.Thread(target=background_init, daemon=True).start()
@@ -1378,6 +1380,37 @@ class OnionPressApp(rumps.App):
         if self._yellow_since and (time.time() - self._yellow_since) > 300:
             return "stuck"
         return "starting"
+
+    def _check_host_cloudflared(self):
+        """Warn if a host-level cloudflared is running outside Docker.
+
+        When OnionPress runs cloudflared inside a container, a second
+        host-level cloudflared (e.g. installed via Homebrew) using the
+        same tunnel token causes intermittent 502 errors — the host
+        connector can't resolve the Docker-internal 'wordpress' hostname.
+        """
+        try:
+            result = subprocess.run(
+                ["pgrep", "-u", "root", "-f", "cloudflared.*tunnel.*run"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                self.log("WARNING: Host-level cloudflared detected — this causes intermittent 502 errors")
+                _main_thread(lambda: self.show_native_alert(
+                    "Host cloudflared Conflicts with OnionPress",
+                    "A system-level cloudflared service is running on this Mac "
+                    "(likely installed via Homebrew).\n\n"
+                    "OnionPress runs its own cloudflared inside Docker. Having both "
+                    "causes intermittent 502 errors — about half of visitors will "
+                    "see an error page.\n\n"
+                    "To fix, run in Terminal:\n"
+                    "  sudo cloudflared service uninstall\n"
+                    "  brew uninstall cloudflared\n\n"
+                    "Then restart OnionPress.",
+                    style="warning"
+                ))
+        except Exception as e:
+            self.log(f"Host cloudflared check failed: {e}")
 
     def _read_config_value(self, key, default=""):
         """Read a value from ~/.onionpress/config."""

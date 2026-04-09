@@ -206,6 +206,13 @@
             <p>After creating the tunnel, Cloudflare shows an install/run command like:</p>
             <pre>cloudflared service install eyJhIGxvbmcgand0Li4u</pre>
             <p>The long string at the end is your <strong>tunnel token</strong>. Copy just that token (not the whole command).</p>
+            <div class="warning-box">
+                <strong>Do NOT run that install command on your Mac.</strong>
+                OnionPress runs cloudflared automatically inside Docker. Installing it
+                on your Mac (e.g. via Homebrew or <code>cloudflared service install</code>)
+                creates a second connector that causes intermittent 502 errors for your visitors.
+                Just copy the token and paste it into OnionPress Settings.
+            </div>
         </div>
 
         <div class="step-box">
