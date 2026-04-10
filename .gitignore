@@ -29,22 +29,13 @@ env/
 # Logs
 *.log
 
-# Bundled binaries (downloaded during build)
-onionpress.app/Contents/Resources/bin/
-onionpress.app/Contents/Resources/share/
-
 # Build artifacts
 build/onionpress.dmg
 py2app_build/
 py2app_dist/
 
-# Build artifacts inside OnionPress.app
-OnionPress.app/Contents/Resources/MenubarApp/
-OnionPress.app/Contents/Resources/bin/
-OnionPress.app/Contents/Resources/share/
-OnionPress.app/Contents/Resources/scripts/*.py
-OnionPress.app/Contents/_CodeSignature/
-OnionPress.app/Contents/MacOS/launcher
+# Assembled .app bundle (built from app/ source directory)
+OnionPress.app/
 
 # Firefox extension testing copy
 extension-firefox/

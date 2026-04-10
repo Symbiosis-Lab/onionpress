@@ -32,10 +32,10 @@ sed -i '' "s/self\.version = \"[^\"]*\"/self.version = \"$NEW_VERSION\"/" \
     "$PROJECT_DIR/src/menubar.py"
 echo "  Updated src/menubar.py"
 
-# 2. OnionPress.app/Contents/Info.plist (canonical source #2)
+# 2. app/Info.plist (canonical source #2)
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $NEW_VERSION" \
-    "$PROJECT_DIR/OnionPress.app/Contents/Info.plist"
-echo "  Updated OnionPress.app/Contents/Info.plist"
+    "$PROJECT_DIR/app/Info.plist"
+echo "  Updated app/Info.plist"
 
 # 3. src/onionpress/__init__.py (derived)
 sed -i '' "s/__version__ = \"[^\"]*\"/__version__ = \"$NEW_VERSION\"/" \
@@ -54,7 +54,7 @@ fi
 echo ""
 echo "Verification:"
 MENUBAR_VER=$(grep 'self\.version *= *"' "$PROJECT_DIR/src/menubar.py" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-PLIST_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PROJECT_DIR/OnionPress.app/Contents/Info.plist")
+PLIST_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PROJECT_DIR/app/Info.plist")
 INIT_VER=$(grep '__version__' "$PROJECT_DIR/src/onionpress/__init__.py" | sed 's/.*"\(.*\)".*/\1/')
 
 ALL_MATCH=true

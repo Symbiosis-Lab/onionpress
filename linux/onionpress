@@ -2340,7 +2340,7 @@ main() {
 
             # Re-install files
             log "Installing updated files..."
-            local resources_dir="$repo_dir/OnionPress.app/Contents/Resources"
+            local resources_dir="$repo_dir/app/Resources"
             sudo cp "$repo_dir/linux/onionpress" "$INSTALL_DIR/onionpress"
             sudo chmod +x "$INSTALL_DIR/onionpress"
             sudo cp -r "$resources_dir/docker" "$INSTALL_DIR/docker"

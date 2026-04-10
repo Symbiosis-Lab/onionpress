@@ -17,11 +17,57 @@ DMG_PATH="$BUILD_DIR/$DMG_NAME"
 echo "Project directory: $PROJECT_DIR"
 echo "App path: $APP_PATH"
 
-# Check if app bundle exists
-if [ ! -d "$APP_PATH" ]; then
-    echo "ERROR: OnionPress.app not found at $APP_PATH"
-    exit 1
-fi
+# Assemble OnionPress.app from app/ source directory
+echo "Assembling OnionPress.app from app/ source..."
+rm -rf "$APP_PATH"
+mkdir -p "$APP_PATH/Contents/MacOS"
+mkdir -p "$APP_PATH/Contents/Resources"
+
+cp "$PROJECT_DIR/app/Info.plist" "$APP_PATH/Contents/"
+cp "$PROJECT_DIR/app/MacOS/onionpress" "$APP_PATH/Contents/MacOS/"
+cp "$PROJECT_DIR/app/MacOS/launcher.sh" "$APP_PATH/Contents/MacOS/"
+cp "$PROJECT_DIR/app/MacOS/torcurl" "$APP_PATH/Contents/MacOS/"
+cp "$PROJECT_DIR/app/MacOS/onionpress-cli" "$APP_PATH/Contents/MacOS/"
+chmod +x "$APP_PATH/Contents/MacOS/onionpress" "$APP_PATH/Contents/MacOS/launcher.sh" \
+         "$APP_PATH/Contents/MacOS/torcurl" "$APP_PATH/Contents/MacOS/onionpress-cli"
+
+# Compile Swift launcher from source
+echo "  Compiling launcher from launcher-wrapper.swift..."
+swiftc -O \
+    -target arm64-apple-macos13 \
+    "$PROJECT_DIR/app/MacOS/launcher-wrapper.swift" \
+    -o "$APP_PATH/Contents/MacOS/launcher-arm64"
+swiftc -O \
+    -target x86_64-apple-macos13 \
+    "$PROJECT_DIR/app/MacOS/launcher-wrapper.swift" \
+    -o "$APP_PATH/Contents/MacOS/launcher-x86_64"
+lipo -create \
+    "$APP_PATH/Contents/MacOS/launcher-arm64" \
+    "$APP_PATH/Contents/MacOS/launcher-x86_64" \
+    -output "$APP_PATH/Contents/MacOS/launcher"
+rm "$APP_PATH/Contents/MacOS/launcher-arm64" "$APP_PATH/Contents/MacOS/launcher-x86_64"
+echo "  launcher compiled"
+
+cp -R "$PROJECT_DIR/app/Resources/docker" "$APP_PATH/Contents/Resources/docker"
+cp -R "$PROJECT_DIR/app/Resources/plugins" "$APP_PATH/Contents/Resources/plugins"
+cp -R "$PROJECT_DIR/app/Resources/scripts" "$APP_PATH/Contents/Resources/scripts"
+cp "$PROJECT_DIR/app/Resources/"*.png "$APP_PATH/Contents/Resources/"
+cp "$PROJECT_DIR/app/Resources/AppIcon.icns" "$APP_PATH/Contents/Resources/"
+cp "$PROJECT_DIR/app/Resources/config-template.txt" "$APP_PATH/Contents/Resources/"
+cp "$PROJECT_DIR/app/Resources/settings.html" "$APP_PATH/Contents/Resources/"
+cp "$PROJECT_DIR/app/Resources/logo.png" "$APP_PATH/Contents/Resources/"
+
+# Copy src/ scripts that the launcher needs at runtime
+mkdir -p "$APP_PATH/Contents/Resources/scripts"
+cp "$PROJECT_DIR/src/menubar.py" "$APP_PATH/Contents/Resources/scripts/"
+cp "$PROJECT_DIR/src/onion_proxy.py" "$APP_PATH/Contents/Resources/scripts/"
+cp "$PROJECT_DIR/src/key_manager.py" "$APP_PATH/Contents/Resources/scripts/"
+cp "$PROJECT_DIR/src/backup_manager.py" "$APP_PATH/Contents/Resources/scripts/"
+cp "$PROJECT_DIR/src/setup_window.py" "$APP_PATH/Contents/Resources/scripts/"
+cp "$PROJECT_DIR/src/onionheaven.py" "$APP_PATH/Contents/Resources/scripts/"
+cp "$PROJECT_DIR/src/install_native_messaging.py" "$APP_PATH/Contents/Resources/scripts/"
+
+echo "OnionPress.app assembled from app/ source"
 
 # Download and bundle Colima dependencies
 echo "Downloading container runtime binaries..."
