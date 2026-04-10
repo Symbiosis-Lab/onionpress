@@ -4,8 +4,8 @@ OnionPress Setup Progress Window — safe implementation.
 
 Uses only standard AppKit controls (NSTextField, NSProgressIndicator,
 NSButton, NSScrollView/NSTextView).  No custom drawRect_, no CGColor
-layer styling, no NSTimer animations.  Retro feel comes from Monaco
-font + purple/orange/cream colour scheme.
+layer styling, no NSTimer animations.  Clean native macOS appearance
+with system fonts and standard colors.
 
 Two phases:
   1. Welcome — collects Site Title, Username, Password then starts setup
@@ -27,21 +27,18 @@ import os
 
 
 # ---------------------------------------------------------------------------
-# Colour palette  (cream panels, purple headings, orange accents)
+# Standard macOS colors
 # ---------------------------------------------------------------------------
 
-_LIGHT_BG        = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.90, 0.90, 0.91, 1.0)
-_CREAM           = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.98, 0.97, 0.92, 1.0)
-_HEADING_PURPLE  = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.45, 0.25, 0.50, 1.0)
-_ACCENT_ORANGE   = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.85, 0.55, 0.20, 1.0)
-_TEXT_DARK        = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.15, 0.15, 0.18, 1.0)
-_TEXT_DIM         = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.40, 0.40, 0.45, 1.0)
-_GREEN           = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.00, 0.50, 0.20, 1.0)
-_LOG_BG          = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.96, 0.95, 0.90, 1.0)
+_TEXT_SECONDARY   = NSColor.secondaryLabelColor()
+_GREEN            = NSColor.systemGreenColor()
 
 
-def _monaco(size):
-    return NSFont.fontWithName_size_("Monaco", size) or NSFont.monospacedSystemFontOfSize_weight_(size, 0.0)
+def _bold(size):
+    return NSFont.boldSystemFontOfSize_(size)
+
+def _sys(size):
+    return NSFont.systemFontOfSize_(size)
 
 
 def _label(frame, text, font=None, color=None, align=NSLeftTextAlignment, wrap=False):
@@ -162,6 +159,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self._title_field = None
         self._user_field = None
         self._pass_field = None
+        self.language = "en_US"
         self._on_setup_callback = None  # Called when user clicks "Set Up"
         self._showing_welcome = True
         return self
@@ -169,7 +167,7 @@ class SetupProgressWindow(AppKit.NSObject):
     # -- window creation ----------------------------------------------------
 
     def create_window(self):
-        width, height = 480, 620
+        width, height = 480, 580
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, width, height),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
@@ -177,7 +175,6 @@ class SetupProgressWindow(AppKit.NSObject):
             False,
         )
         self.window.setTitle_("OnionPress Setup")
-        self.window.setBackgroundColor_(_LIGHT_BG)
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setReleasedWhenClosed_(False)
@@ -204,8 +201,8 @@ class SetupProgressWindow(AppKit.NSObject):
         if logo_path:
             logo_image = NSImage.alloc().initWithContentsOfFile_(logo_path)
             if logo_image:
-                logo_h = 100
-                logo_w = 120
+                logo_h = 140
+                logo_w = 168
                 y -= logo_h
                 logo_view = NSImageView.alloc().initWithFrame_(
                     NSMakeRect((width - logo_w) / 2, y, logo_w, logo_h)
@@ -216,11 +213,11 @@ class SetupProgressWindow(AppKit.NSObject):
                 y -= 8
 
         # -- Title --
-        y -= 24
+        y -= 28
         title = _label(
-            NSMakeRect(20, y, width - 40, 24),
-            "Welcome to OnionPress!",
-            font=_monaco(16), color=_HEADING_PURPLE,
+            NSMakeRect(20, y, width - 40, 28),
+            "Welcome to OnionPress",
+            font=_bold(18), color=NSColor.labelColor(),
             align=NSCenterTextAlignment,
         )
         self.welcome_view.addSubview_(title)
@@ -228,9 +225,9 @@ class SetupProgressWindow(AppKit.NSObject):
         # -- Subtitle --
         y -= 20
         subtitle = _label(
-            NSMakeRect(20, y, width - 40, 16),
+            NSMakeRect(20, y, width - 40, 18),
             "Set up your site and admin account",
-            font=_monaco(11), color=_TEXT_DIM,
+            font=_sys(13), color=_TEXT_SECONDARY,
             align=NSCenterTextAlignment,
         )
         self.welcome_view.addSubview_(subtitle)
@@ -247,7 +244,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.welcome_view.addSubview_(_label(
             NSMakeRect(label_x, y, 130, 20),
             "Site Title",
-            font=_monaco(12), color=_HEADING_PURPLE,
+            font=_bold(13), color=NSColor.labelColor(),
         ))
         self._title_field = _input_field(
             NSMakeRect(field_x, y - 2, field_w, 24),
@@ -261,7 +258,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.welcome_view.addSubview_(_label(
             NSMakeRect(label_x, y, 130, 20),
             "Username",
-            font=_monaco(12), color=_HEADING_PURPLE,
+            font=_bold(13), color=NSColor.labelColor(),
         ))
         self._user_field = _input_field(
             NSMakeRect(field_x, y - 2, field_w, 24),
@@ -275,9 +272,10 @@ class SetupProgressWindow(AppKit.NSObject):
         self.welcome_view.addSubview_(_label(
             NSMakeRect(label_x, y, 130, 20),
             "Password",
-            font=_monaco(12), color=_HEADING_PURPLE,
+            font=_bold(13), color=NSColor.labelColor(),
         ))
-        pass_frame = NSMakeRect(field_x, y - 2, field_w - 36, 24)
+        eye_w = 36
+        pass_frame = NSMakeRect(field_x, y - 2, field_w - eye_w - 6, 24)
         # Visible field (shown by default)
         self._pass_field = _input_field(pass_frame, placeholder="Choose a password")
         self.welcome_view.addSubview_(self._pass_field)
@@ -288,10 +286,12 @@ class SetupProgressWindow(AppKit.NSObject):
         self._pass_visible = True
         # Eye toggle button
         eye_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(field_x + field_w - 32, y - 1, 30, 22)
+            NSMakeRect(field_x + field_w - eye_w, y - 2, eye_w, 24)
         )
-        eye_btn.setTitle_("\U0001F441")  # 👁
+        eye_btn.setTitle_("")
+        eye_btn.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_("eye.fill", "Show password"))
         eye_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        eye_btn.setImagePosition_(AppKit.NSImageOnly)
         eye_btn.setTarget_(self)
         eye_btn.setAction_(objc.selector(self.togglePasswordVisibility_, signature=b'v@:@'))
         self.welcome_view.addSubview_(eye_btn)
@@ -301,7 +301,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.welcome_view.addSubview_(_label(
             NSMakeRect(field_x, y, field_w, 16),
             "Save this password somewhere safe.",
-            font=NSFont.systemFontOfSize_(10), color=_TEXT_DIM,
+            font=_sys(10), color=_TEXT_SECONDARY,
         ))
 
         y -= 30
@@ -312,38 +312,81 @@ class SetupProgressWindow(AppKit.NSObject):
         )
         self._analytics_check.setButtonType_(AppKit.NSButtonTypeSwitch)
         self._analytics_check.setTitle_("Share diagnostic logs with OnionHome")
-        self._analytics_check.setFont_(NSFont.systemFontOfSize_(11))
-        self._analytics_check.setState_(AppKit.NSControlStateValueOn)
+        self._analytics_check.setFont_(_sys(12))
+        self._analytics_check.setState_(AppKit.NSControlStateValueOff)
         self.welcome_view.addSubview_(self._analytics_check)
 
         y -= 16
         self.welcome_view.addSubview_(_label(
             NSMakeRect(field_x + 18, y, field_w - 18, 14),
             "Helps the OnionPress project diagnose issues.",
-            font=NSFont.systemFontOfSize_(10), color=_TEXT_DIM,
+            font=_sys(10), color=_TEXT_SECONDARY,
         ))
 
-        y -= 30  # spacing
+        y -= 30
 
-        # -- Set Up button --
-        setup_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect((width - 200) / 2, y, 200, 40)
+        # -- Language selector --
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(label_x, y, 130, 20),
+            "Language",
+            font=_bold(13), color=NSColor.labelColor(),
+        ))
+        self._language_popup = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(field_x, y - 2, field_w, 24), False
         )
-        setup_btn.setTitle_("Set Up OnionPress")
+        self._language_popup.setFont_(_sys(13))
+        _languages = [
+            ("English", "en_US"),
+            ("Fran\u00e7ais", "fr_FR"),
+            ("Espa\u00f1ol", "es_ES"),
+            ("Deutsch", "de_DE"),
+            ("Nederlands", "nl_NL"),
+            ("Portugu\u00eas", "pt_BR"),
+            ("\u65e5\u672c\u8a9e", "ja"),
+            ("\u4e2d\u6587", "zh_CN"),
+            ("\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "ar"),
+        ]
+        self._language_codes = [code for _, code in _languages]
+        for name, _ in _languages:
+            self._language_popup.addItemWithTitle_(name)
+        self.welcome_view.addSubview_(self._language_popup)
+
+        y -= 50  # spacing
+
+        # -- Setup button --
+        btn_w = 220
+        setup_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect((width - btn_w) / 2, y, btn_w, 32)
+        )
+        setup_btn.setTitle_("Setup OnionPress")
         setup_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
-        setup_btn.setFont_(_monaco(13))
+        setup_btn.setFont_(_bold(14))
         setup_btn.setTarget_(self)
         setup_btn.setAction_(objc.selector(self.setupClicked_, signature=b'v@:@'))
-        setup_btn.setKeyEquivalent_("\r")  # Enter key
+        setup_btn.setKeyEquivalent_("\r")
+        # Force blue appearance even when window is not key
+        setup_btn.setWantsLayer_(True)
+        blue = NSColor.systemBlueColor()
+        setup_btn.layer().setBackgroundColor_(blue.CGColor())
+        setup_btn.layer().setCornerRadius_(7)
+        # White text via attributed title
+        attrs = {
+            AppKit.NSFontAttributeName: _bold(14),
+            AppKit.NSForegroundColorAttributeName: NSColor.whiteColor(),
+        }
+        attr_title = AppKit.NSAttributedString.alloc().initWithString_attributes_(
+            "Setup OnionPress", attrs
+        )
+        setup_btn.setAttributedTitle_(attr_title)
         self.welcome_view.addSubview_(setup_btn)
 
-        y -= 30
+        y -= 20
 
         # -- Estimated time --
         self.welcome_view.addSubview_(_label(
             NSMakeRect(20, y, width - 40, 16),
-            ">> Setup takes about 3-5 minutes",
-            font=_monaco(10), color=_ACCENT_ORANGE,
+            "Setup takes about 3\u20135 minutes",
+            font=_sys(11), color=_TEXT_SECONDARY,
             align=NSCenterTextAlignment,
         ))
 
@@ -371,11 +414,11 @@ class SetupProgressWindow(AppKit.NSObject):
                 y -= 4
 
         # -- Title --
-        y -= 20
+        y -= 24
         title = _label(
-            NSMakeRect(20, y, width - 40, 20),
-            "[ SETTING UP YOUR ONION SERVICE ]",
-            font=_monaco(13), color=_HEADING_PURPLE,
+            NSMakeRect(20, y, width - 40, 24),
+            "Setting Up Your Onion Service",
+            font=_bold(15), color=NSColor.labelColor(),
             align=NSCenterTextAlignment,
         )
         self.progress_view.addSubview_(title)
@@ -391,7 +434,7 @@ class SetupProgressWindow(AppKit.NSObject):
             lbl = _label(
                 NSMakeRect(40, y, width - 80, 16),
                 text,
-                font=_monaco(11), color=_TEXT_DIM,
+                font=_sys(12), color=_TEXT_SECONDARY,
             )
             self.progress_view.addSubview_(lbl)
             self.step_labels.append(lbl)
@@ -413,7 +456,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.percent_label = _label(
             NSMakeRect(width - 72, y, 50, 18),
             "0%",
-            font=_monaco(11), color=_TEXT_DIM,
+            font=_sys(12), color=_TEXT_SECONDARY,
             align=NSLeftTextAlignment,
         )
         self.progress_view.addSubview_(self.percent_label)
@@ -425,7 +468,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self.status_label = _label(
             NSMakeRect(40, y, width - 80, 14),
             "Initializing...",
-            font=_monaco(10), color=_HEADING_PURPLE,
+            font=_sys(11), color=NSColor.labelColor(),
             align=NSCenterTextAlignment,
         )
         self.progress_view.addSubview_(self.status_label)
@@ -446,9 +489,9 @@ class SetupProgressWindow(AppKit.NSObject):
         )
         self.log_text_view.setEditable_(False)
         self.log_text_view.setSelectable_(True)
-        self.log_text_view.setFont_(_monaco(9))
-        self.log_text_view.setTextColor_(_HEADING_PURPLE)
-        self.log_text_view.setBackgroundColor_(_LOG_BG)
+        self.log_text_view.setFont_(NSFont.monospacedSystemFontOfSize_weight_(10, 0.0))
+        self.log_text_view.setTextColor_(NSColor.labelColor())
+        self.log_text_view.setBackgroundColor_(NSColor.textBackgroundColor())
         self.log_text_view.setString_("Waiting for log entries...")
         self.log_text_view.setVerticallyResizable_(True)
         self.log_text_view.setHorizontallyResizable_(False)
@@ -509,16 +552,37 @@ class SetupProgressWindow(AppKit.NSObject):
         else:
             self.admin_pass = self._pass_field_secure.stringValue() or ""
 
+        # Validate required fields
+        missing = False
+        if not self.admin_user:
+            red_placeholder = AppKit.NSAttributedString.alloc().initWithString_attributes_(
+                "Choose a username", {
+                    AppKit.NSForegroundColorAttributeName: NSColor.systemRedColor(),
+                    AppKit.NSFontAttributeName: _sys(13),
+                })
+            self._user_field.setPlaceholderAttributedString_(red_placeholder)
+            missing = True
         if not self.admin_pass:
-            # Generate a random password if none provided
-            import secrets
-            self.admin_pass = secrets.token_urlsafe(12)
+            red_placeholder = AppKit.NSAttributedString.alloc().initWithString_attributes_(
+                "Choose a password", {
+                    AppKit.NSForegroundColorAttributeName: NSColor.systemRedColor(),
+                    AppKit.NSFontAttributeName: _sys(13),
+                })
+            active_field = self._pass_field if self._pass_visible else self._pass_field_secure
+            active_field.setPlaceholderAttributedString_(red_placeholder)
+            missing = True
+        if missing:
+            return
 
         # Save analytics preference
         if self._analytics_check.state() == AppKit.NSControlStateValueOn:
             self.share_analytics = "yes"
         else:
             self.share_analytics = "no"
+
+        # Save language choice
+        lang_idx = self._language_popup.indexOfSelectedItem()
+        self.language = self._language_codes[lang_idx] if lang_idx >= 0 else "en_US"
 
         # Switch to progress view
         self._showing_welcome = False
@@ -613,10 +677,10 @@ class SetupProgressWindow(AppKit.NSObject):
                     lbl.setTextColor_(_GREEN)
                 elif i == step_index:
                     lbl.setStringValue_(f"  {_MARK_ACTIVE}  {step_text}")
-                    lbl.setTextColor_(_HEADING_PURPLE)
+                    lbl.setTextColor_(NSColor.labelColor())
                 else:
                     lbl.setStringValue_(f"  {_MARK_PENDING}  {step_text}")
-                    lbl.setTextColor_(_TEXT_DIM)
+                    lbl.setTextColor_(_TEXT_SECONDARY)
         _on_main(_update)
 
     def complete_step(self, step_index):

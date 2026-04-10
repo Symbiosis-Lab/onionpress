@@ -599,6 +599,11 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         from onionpress.analytics_sharing import trigger_upload
         trigger_upload()
 
+    # Sync config to Docker volume so WordPress settings page sees the update immediately
+    sync_to_volume = callbacks.get('sync_to_volume')
+    if sync_to_volume:
+        sync_to_volume()
+
     change_details = [f"{k}={new_values[k]}" for k in changes]
     log_func(f"Settings updated: {', '.join(change_details)}")
     saved = AppKit.NSAlert.alloc().init()
