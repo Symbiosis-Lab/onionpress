@@ -1,7 +1,6 @@
 services:
   tor:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
-    build: ./tor
     container_name: onionpress-tor
     logging:
       driver: json-file
@@ -32,7 +31,6 @@ services:
 
   wordpress:
     image: ghcr.io/brewsterkahle/onionpress-wordpress:latest
-    build: ./wordpress
     container_name: onionpress-wordpress
     logging:
       driver: json-file
@@ -93,7 +91,6 @@ services:
 
   onionheaven:
     image: ${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}
-    build: ./tor
     container_name: onionheaven
     logging:
       driver: json-file
