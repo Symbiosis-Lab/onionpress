@@ -335,14 +335,16 @@ def _send_heartbeat(app, wordpress_healthy=True):
     ]
 
     had_success = getattr(app, '_onionheaven_heartbeat_succeeded', False)
-    app.log("OnionHeaven: heartbeat sending /online...")
+    if not had_success:
+        app.log("OnionHeaven: heartbeat sending /online...")
     rc, output = _run_docker_rc(app, curl_args, timeout=45)
     ok = (rc == 0)
     if ok and output:
         try:
             json.loads(output)  # validate JSON
-            hub = ONIONHEAVEN_ADDRESS[:12]
-            app.log(f"OnionHeaven: heartbeat /online {hub}...onion OK")
+            if not had_success:
+                hub = ONIONHEAVEN_ADDRESS[:12]
+                app.log(f"OnionHeaven: heartbeat /online {hub}...onion OK")
         except (json.JSONDecodeError, KeyError):
             app.log(f"OnionHeaven: heartbeat /online FAILED — bad JSON rc={rc}")
     else:
