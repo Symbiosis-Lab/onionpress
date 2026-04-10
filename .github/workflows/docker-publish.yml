@@ -1,6 +1,8 @@
 name: Build and publish Docker images
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -10,6 +12,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # Version tag: from release event (strip leading 'v') or manual input
+  IMAGE_VERSION: ${{ github.event.release.tag_name && format('{0}', github.event.release.tag_name) || inputs.version }}
 
 jobs:
   # --- Tor image: amd64 on GitHub, arm64 on self-hosted, then merge ---
@@ -95,8 +99,10 @@ jobs:
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64 \
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64
 
-          if [ -n "${{ inputs.version }}" ]; then
-            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:${{ inputs.version }} \
+          VERSION="${{ env.IMAGE_VERSION }}"
+          VERSION="${VERSION#v}"  # strip leading v
+          if [ -n "$VERSION" ]; then
+            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:$VERSION \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64 \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64
           fi
@@ -184,8 +190,10 @@ jobs:
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64 \
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64
 
-          if [ -n "${{ inputs.version }}" ]; then
-            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:${{ inputs.version }} \
+          VERSION="${{ env.IMAGE_VERSION }}"
+          VERSION="${VERSION#v}"  # strip leading v
+          if [ -n "$VERSION" ]; then
+            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:$VERSION \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64 \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64
           fi
