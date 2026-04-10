@@ -35,7 +35,7 @@ jobs:
       - name: Build and push (amd64)
         uses: docker/build-push-action@v6
         with:
-          context: OnionPress.app/Contents/Resources/docker/tor
+          context: app/Resources/docker/tor
           platforms: linux/amd64
           push: true
           tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64
@@ -77,7 +77,7 @@ jobs:
             --platform linux/arm64 \
             --push \
             -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64 \
-            OnionPress.app/Contents/Resources/docker/tor
+            app/Resources/docker/tor
 
   merge-tor:
     name: Merge Tor manifests
@@ -126,7 +126,7 @@ jobs:
       - name: Build and push (amd64)
         uses: docker/build-push-action@v6
         with:
-          context: OnionPress.app/Contents/Resources/docker/wordpress
+          context: app/Resources/docker/wordpress
           platforms: linux/amd64
           push: true
           tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64
@@ -168,7 +168,7 @@ jobs:
             --platform linux/arm64 \
             --push \
             -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64 \
-            OnionPress.app/Contents/Resources/docker/wordpress
+            app/Resources/docker/wordpress
 
   merge-wp:
     name: Merge WordPress manifests
