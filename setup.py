@@ -23,10 +23,10 @@ if '--bdist-base' not in ' '.join(sys.argv):
 APP = ['src/menubar.py']
 DATA_FILES = [
     ('', [
-        'OnionPress.app/Contents/Resources/app-icon.png',
-        'OnionPress.app/Contents/Resources/menubar-icon-stopped.png',
-        'OnionPress.app/Contents/Resources/menubar-icon-starting.png',
-        'OnionPress.app/Contents/Resources/menubar-icon-running.png',
+        'app/Resources/app-icon.png',
+        'app/Resources/menubar-icon-stopped.png',
+        'app/Resources/menubar-icon-starting.png',
+        'app/Resources/menubar-icon-running.png',
         'src/onion-forward.php',
     ]),
     ('assets/branding', [
@@ -37,7 +37,7 @@ DATA_FILES = [
 
 OPTIONS = {
     'argv_emulation': False,
-    'iconfile': 'OnionPress.app/Contents/Resources/AppIcon.icns',
+    'iconfile': 'app/Resources/AppIcon.icns',
     'plist': {
         'CFBundleName': 'OnionPress',
         'CFBundleDisplayName': 'OnionPress',

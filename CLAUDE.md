@@ -13,10 +13,18 @@
 
 ## Key Architecture
 - macOS menubar app (py2app built from `src/menubar.py`)
-- Launcher shell script at `OnionPress.app/Contents/MacOS/onionpress`
+- Launcher shell script at `app/MacOS/onionpress` (assembled into `OnionPress.app/Contents/MacOS/` at build time)
 - Docker containers (tor, wordpress, mariadb) run inside Colima VM
 - Logs at `~/.onionpress/onionpress.log` and `~/.onionpress/launcher.log`
 - User-visible content at `~/Documents/onionpress/` (backups, Creations)
+
+## Repo Layout
+- `src/` — Python source (menubar.py, onion_proxy.py, etc.)
+- `app/` — macOS .app bundle source (assembled into `OnionPress.app/` at build time)
+  - `app/Info.plist` — canonical version source #2
+  - `app/MacOS/` — launcher scripts, Swift wrapper source
+  - `app/Resources/` — docker configs, plugins, icons, templates
+- `OnionPress.app/` — **gitignored build output**, assembled by `build/build-dmg-simple.sh`
 
 ## Why py2app
 - Modern Macs do NOT ship a usable Python — `/usr/bin/python3` is just a shim that prompts to install Xcode CLI Tools
@@ -27,7 +35,7 @@
 ## Build & Release Process
 - MenubarApp built with py2app via `setup.py` (extracted from `build/build-dmg-simple.sh` lines 228-276)
 - Must copy `key_manager.py`, `backup_manager.py`, and `setup_window.py` to venv site-packages before build
-- **After editing ANY of these `src/` files, you MUST rebuild the MenubarApp** and replace `OnionPress.app/Contents/Resources/MenubarApp/`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app.
+- **After editing ANY of these `src/` files, you MUST rebuild the MenubarApp** via `build/rebuild-menubar.sh`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app.
 - **py2app entry point**: `MenubarApp/Contents/Resources/menubar.py` is the ONLY copy that matters at runtime — py2app `exec()`s it from `__boot__.py`. The copies in `lib/python3.14/` and `scripts/` are unused build artifacts. When hot-patching the installed app without a full rebuild, only update `Contents/Resources/menubar.py` (and its `__pycache__/` pyc).
   - `src/menubar.py` — main app (entry point)
   - `src/onion_proxy.py` — HTTP proxy, setup form, Wayback Machine login
@@ -38,7 +46,7 @@
   - `src/install_native_messaging.py` — browser extension support
   - `setup.py` — py2app config (if you add a new local module, add it to `includes` AND the build script's `cp` lines)
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
-- **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `OnionPress.app/Contents/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
+- **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Security
@@ -66,7 +74,7 @@
 - **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes
 - **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP
 - **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
-- **`git add -f OnionPress.app/`** after a build will pick up large downloaded binaries (docker, limactl, docker-compose) — always stage specific paths instead
+- `OnionPress.app/` is gitignored — it is assembled at build time from `app/` source. Never commit build output.
 
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed

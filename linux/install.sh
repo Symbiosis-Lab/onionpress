@@ -214,8 +214,8 @@ else
 fi
 
 # Verify source directory exists
-if [ ! -d "$REPO_DIR/OnionPress.app/Contents/Resources/docker" ]; then
-    echo "ERROR: Docker resources not found at $REPO_DIR/OnionPress.app/Contents/Resources/docker"
+if [ ! -d "$REPO_DIR/app/Resources/docker" ]; then
+    echo "ERROR: Docker resources not found at $REPO_DIR/app/Resources/docker"
     echo "       Make sure you're running from the full OnionPress repo."
     exit 1
 fi
@@ -224,11 +224,11 @@ fi
 $SUDO cp "$REPO_DIR/linux/onionpress" "$INSTALL_DIR/onionpress"
 $SUDO chmod +x "$INSTALL_DIR/onionpress"
 
-$SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/docker" "$INSTALL_DIR/docker"
-$SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/plugins" "$INSTALL_DIR/plugins"
+$SUDO cp -r "$REPO_DIR/app/Resources/docker" "$INSTALL_DIR/docker"
+$SUDO cp -r "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
 
-if [ -d "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" ]; then
-    $SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" "$INSTALL_DIR/scripts"
+if [ -d "$REPO_DIR/app/Resources/scripts" ]; then
+    $SUDO cp -r "$REPO_DIR/app/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
 
 # Copy shared scripts
@@ -254,7 +254,7 @@ $SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS
 VERSION="unknown"
 if [ -f "$REPO_DIR/VERSION" ]; then
     VERSION=$(cat "$REPO_DIR/VERSION")
-elif [ -f "$REPO_DIR/OnionPress.app/Contents/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
+elif [ -f "$REPO_DIR/app/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
     VERSION=$(python3 -c "
 import xml.etree.ElementTree as ET, sys
 try:
@@ -266,7 +266,7 @@ try:
             break
 except:
     print('unknown')
-" "$REPO_DIR/OnionPress.app/Contents/Info.plist" 2>/dev/null || echo "unknown")
+" "$REPO_DIR/app/Info.plist" 2>/dev/null || echo "unknown")
 fi
 echo "$VERSION" | $SUDO tee "$INSTALL_DIR/VERSION" > /dev/null
 

@@ -20,39 +20,29 @@ build-simple:
 	./build/build-dmg-simple.sh
 
 test:
-	@echo "Testing app bundle..."
+	@echo "Testing source layout..."
 	@echo "Checking structure..."
-	@test -d OnionPress.app/Contents/MacOS || (echo "ERROR: MacOS directory missing" && exit 1)
-	@test -f OnionPress.app/Contents/MacOS/launcher || (echo "ERROR: launcher missing" && exit 1)
-	@test -f OnionPress.app/Contents/MacOS/onionpress || (echo "ERROR: onionpress script missing" && exit 1)
-	@test -f OnionPress.app/Contents/Info.plist || (echo "ERROR: Info.plist missing" && exit 1)
-	@test -f OnionPress.app/Contents/Resources/docker/docker-compose.yml || (echo "ERROR: docker-compose.yml missing" && exit 1)
-	@test -f OnionPress.app/Contents/Resources/scripts/menubar.py || (echo "ERROR: menubar.py missing" && exit 1)
-	@test -f OnionPress.app/Contents/Resources/scripts/key_manager.py || (echo "ERROR: key_manager.py missing" && exit 1)
+	@test -d app/MacOS || (echo "ERROR: app/MacOS directory missing" && exit 1)
+	@test -f app/MacOS/launcher-wrapper.swift || (echo "ERROR: launcher-wrapper.swift missing" && exit 1)
+	@test -f app/MacOS/onionpress || (echo "ERROR: onionpress script missing" && exit 1)
+	@test -f app/Info.plist || (echo "ERROR: Info.plist missing" && exit 1)
+	@test -f app/Resources/docker/docker-compose.yml || (echo "ERROR: docker-compose.yml missing" && exit 1)
+	@test -f src/menubar.py || (echo "ERROR: src/menubar.py missing" && exit 1)
+	@test -f src/key_manager.py || (echo "ERROR: src/key_manager.py missing" && exit 1)
 	@echo "All required source files present"
 	@echo ""
-	@echo "Checking MenubarApp bundle..."
-	@if [ -d OnionPress.app/Contents/Resources/MenubarApp ]; then \
-		test -f OnionPress.app/Contents/Resources/MenubarApp/Contents/MacOS/menubar || \
-			(echo "ERROR: MenubarApp executable missing" && exit 1); \
-		echo "MenubarApp bundle present"; \
-	else \
-		echo "NOTE: MenubarApp not yet built (run make build-simple)"; \
-	fi
-	@echo ""
 	@echo "Checking permissions..."
-	@test -x OnionPress.app/Contents/MacOS/launcher || (echo "ERROR: launcher not executable" && exit 1)
-	@test -x OnionPress.app/Contents/MacOS/onionpress || (echo "ERROR: onionpress not executable" && exit 1)
+	@test -x app/MacOS/onionpress || (echo "ERROR: onionpress not executable" && exit 1)
 	@echo "Permissions correct"
 	@echo ""
-	@echo "App bundle structure is valid!"
-	@echo "To run locally: open OnionPress.app"
+	@echo "Source layout is valid!"
+	@echo "To build: make build-simple"
 
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf build/*.dmg
 	rm -rf build/temp.dmg
-	rm -rf OnionPress.app/Contents/Resources/MenubarApp
+	rm -rf OnionPress.app
 	@echo "Build artifacts cleaned"
 
 install:

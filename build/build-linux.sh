@@ -41,11 +41,11 @@ collect_files() {
     chmod +x "$dest/onionpress"
 
     # Docker Compose files
-    cp -r "$PROJECT_DIR/OnionPress.app/Contents/Resources/docker" "$dest/docker"
+    cp -r "$PROJECT_DIR/app/Resources/docker" "$dest/docker"
 
     # Plugins
-    if [ -d "$PROJECT_DIR/OnionPress.app/Contents/Resources/plugins" ]; then
-        cp -r "$PROJECT_DIR/OnionPress.app/Contents/Resources/plugins" "$dest/plugins"
+    if [ -d "$PROJECT_DIR/app/Resources/plugins" ]; then
+        cp -r "$PROJECT_DIR/app/Resources/plugins" "$dest/plugins"
     fi
 
     # Scripts
@@ -335,8 +335,8 @@ Terminal=true
 EOF
 
 # Icon (required by AppImage spec — use the app icon if available, else create a placeholder)
-if [ -f "$PROJECT_DIR/OnionPress.app/Contents/Resources/app-icon-source.png" ]; then
-    cp "$PROJECT_DIR/OnionPress.app/Contents/Resources/app-icon-source.png" "$APPDIR/onionpress.png"
+if [ -f "$PROJECT_DIR/app/Resources/app-icon-source.png" ]; then
+    cp "$PROJECT_DIR/app/Resources/app-icon-source.png" "$APPDIR/onionpress.png"
 elif [ -f "$PROJECT_DIR/docs/favicon.png" ]; then
     cp "$PROJECT_DIR/docs/favicon.png" "$APPDIR/onionpress.png"
 else

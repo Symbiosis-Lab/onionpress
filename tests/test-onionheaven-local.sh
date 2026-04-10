@@ -226,7 +226,7 @@ else
     # onionheaven is always-on (part of core stack since v2.4.37).
     # Recreate it to ensure it runs the latest image, then clean test data.
     log "Recreating onionheaven container with latest image..."
-    COMPOSE_DIR="$PROJECT_DIR/OnionPress.app/Contents/Resources/docker"
+    COMPOSE_DIR="$PROJECT_DIR/app/Resources/docker"
     SECRETS_FILE="$HOME/.onionpress/secrets"
     if [ -f "$COMPOSE_DIR/docker-compose.yml" ]; then
         # Source database secrets so compose doesn't warn about missing vars
