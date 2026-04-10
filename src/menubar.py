@@ -3138,6 +3138,7 @@ class OnionPressApp(rumps.App):
                 'restart_caffeinate': _restart_caffeinate,
                 'add_login_item': self.add_login_item,
                 'remove_login_item': self.remove_login_item,
+                'sync_to_volume': self.write_status_to_volume,
             },
         )
 
