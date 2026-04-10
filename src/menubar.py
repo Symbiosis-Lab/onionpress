@@ -354,6 +354,7 @@ class OnionPressApp(rumps.App):
         self._onionheaven_registration_succeeded = False  # Whether registration succeeded
         self._onionheaven_heartbeat_succeeded = False     # Suppresses repeat heartbeat logs
         self._onionheaven_registration_in_flight = False  # Whether registration thread is running
+        self._heartbeat_generation = 0                     # Incremented on wake; stale loops exit
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
         self._quitting = False                 # True once quit cleanup has started
         self._stopping = False                 # True while Stop button is in progress
@@ -2163,6 +2164,7 @@ class OnionPressApp(rumps.App):
         self._onionheaven_heartbeat_succeeded = False
         self._onionheaven_registration_in_flight = False
         self._heartbeat_loop_running = False  # Allow new heartbeat loop after wake
+        self._heartbeat_generation += 1       # Stale heartbeat loops will exit
         self._wordpress_confirmed = False  # Re-verify WordPress once after wake
         if self.is_ready:
             self.is_ready = False
