@@ -38,12 +38,13 @@ build/onionpress.dmg
 py2app_build/
 py2app_dist/
 
-# MenubarApp bundle (built from src/ during build)
+# Build artifacts inside OnionPress.app
 OnionPress.app/Contents/Resources/MenubarApp/
-
-# Bundled binaries (OnionPress.app version)
 OnionPress.app/Contents/Resources/bin/
 OnionPress.app/Contents/Resources/share/
+OnionPress.app/Contents/Resources/scripts/*.py
+OnionPress.app/Contents/_CodeSignature/
+OnionPress.app/Contents/MacOS/launcher
 
 # Firefox extension testing copy
 extension-firefox/
