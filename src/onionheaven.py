@@ -228,14 +228,20 @@ def _heartbeat_loop(app):
         app.log("OnionHeaven: heartbeat loop already running, skipping duplicate")
         return
     app._heartbeat_loop_running = True
+    my_generation = getattr(app, '_heartbeat_generation', 0)
 
     # Random jitter on first heartbeat to prevent thundering herd
     # after OnionHeaven restart
     jitter = random.uniform(0, 15)
-    app.log(f"OnionHeaven: heartbeat loop starting (first beat in {jitter:.0f}s)")
+    app.log(f"OnionHeaven: heartbeat loop starting (gen={my_generation}, first beat in {jitter:.0f}s)")
     time.sleep(jitter)
 
     while True:
+        # Exit if a newer heartbeat loop has been started (after wake)
+        if getattr(app, '_heartbeat_generation', 0) != my_generation:
+            app.log(f"OnionHeaven: heartbeat loop gen={my_generation} exiting (superseded)")
+            return
+
         try:
             # Don't send /online while sleeping — let the hub detect us as
             # offline and take over. Power Nap keeps the app running but
