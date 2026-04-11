@@ -37,6 +37,7 @@ cp "$SCRIPTS_DIR/backup_manager.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/setup_window.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/onion_auth.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/onionheaven.py" "$SITE_PACKAGES/"
+cp "$SCRIPTS_DIR/updater.py" "$SITE_PACKAGES/"
 cp -r "$SCRIPTS_DIR/onionpress" "$SITE_PACKAGES/"
 
 echo "=== Building with py2app..."

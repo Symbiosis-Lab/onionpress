@@ -57,7 +57,7 @@ OPTIONS = {
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
     'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'backup_manager',
-                 'onion_proxy', 'install_native_messaging', 'onionheaven', 'onion_auth',
+                 'onion_proxy', 'install_native_messaging', 'onionheaven', 'onion_auth', 'updater',
                  'onionpress', 'onionpress.backup', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
                  'onionpress.tor', 'onionpress.colima',

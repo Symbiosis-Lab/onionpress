@@ -28,6 +28,7 @@ import backup_manager
 import onion_proxy
 import install_native_messaging
 import onionheaven
+import updater
 try:
     import setup_window
 except ImportError:
@@ -3472,43 +3473,75 @@ class OnionPressApp(rumps.App):
     @rumps.clicked("Check for Updates...")
     def check_for_updates(self, _):
         """Check GitHub for newer versions and update Docker images"""
-        # Check for app updates
         app_update_available = False
         try:
-            # Fetch latest release from GitHub using curl to avoid permission prompts
-            # --cacert needed because py2app bundle can't find CA certs (curl exit 77)
-            url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
-            result = subprocess.run(
-                ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",
-                 "-H", "User-Agent: onionpress", "--max-time", "10", url],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=15
-            )
+            update_info = updater.check_for_update(self.version, log=self.log)
 
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                latest_version = data.get('tag_name', '').lstrip('v')
-                current_version = self.version
-                self.log(f"Update check: current={current_version}, latest={latest_version}")
+            if update_info:
+                release_data, latest_version = update_info
+                app_update_available = True
 
-                if latest_version and parse_version(latest_version) > parse_version(current_version):
-                    app_update_available = True
-                    response = self.show_native_alert(
-                        "App Update Available",
-                        f"A new version of OnionPress is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nInstall will download and replace the app, then restart.",
-                        buttons=["Install Update", "Later"],
-                        cancel_button=1
+                # Multi-user check: are other users running OnionPress?
+                others = updater.detect_other_instances()
+                if others:
+                    our_offset = int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0"))
+                    other_users = ", ".join(
+                        f"{o['user']}" for o in others
                     )
-                    if response == 0:  # Install Update clicked
-                        threading.Thread(
-                            target=self._install_update,
-                            args=(data, latest_version),
-                            daemon=True
-                        ).start()
-                        return  # Skip Docker update check — we're about to restart
-            else:
-                self.log(f"Update check curl failed: exit={result.returncode} stderr={result.stderr.strip()}")
+
+                    if our_offset != 0:
+                        # We're not the primary user — tell them to switch
+                        primary_user = others[0]["user"]
+                        self.show_native_alert(
+                            "Update Available",
+                            f"OnionPress v{latest_version} is available.\n\n"
+                            f"To keep port assignments stable, please install "
+                            f"the update from the primary account "
+                            f"(\"{primary_user}\", port 8080).\n\n"
+                            f"1. Quit OnionPress from this account first\n"
+                            f"2. Log in as {primary_user}\n"
+                            f"3. Click Check for Updates from their OnionPress menubar",
+                        )
+                        return
+                    else:
+                        # We're primary but others are still running
+                        active_offsets = updater.detect_active_offsets()
+                        user_lines = []
+                        for o in others:
+                            # Find the offset that isn't ours (0)
+                            other_offsets = [off for off in active_offsets if off != 0]
+                            port = 8080 + (other_offsets[0] if other_offsets else 10000)
+                            user_lines.append(f"  \u2022 {o['user']} (port {port})")
+                        user_list = "\n".join(user_lines)
+
+                        self.show_native_alert(
+                            "Update Available \u2014 Other Users Running",
+                            f"OnionPress v{latest_version} is available.\n\n"
+                            f"Other users are also running OnionPress:\n"
+                            f"{user_list}\n\n"
+                            f"To update safely:\n"
+                            f"1. Ask each user to Quit OnionPress from their menubar\n"
+                            f"2. Come back here and click Check for Updates again\n"
+                            f"3. After the update, each user can relaunch OnionPress\n\n"
+                            f"Their onion sites will be briefly offline during the update.",
+                        )
+                        return
+
+                # Single user (or primary and others have quit) — proceed
+                response = self.show_native_alert(
+                    "App Update Available",
+                    f"A new version of OnionPress is available!\n\nCurrent: v{self.version}\nLatest: v{latest_version}\n\nInstall will download and replace the app, then restart.",
+                    buttons=["Install Update", "Later"],
+                    cancel_button=1
+                )
+                if response == 0:  # Install Update clicked
+                    threading.Thread(
+                        target=self._install_update,
+                        args=(release_data, latest_version),
+                        daemon=True
+                    ).start()
+                    return  # Skip Docker update check — we're about to restart
+
         except Exception as e:
             self.log(f"Update check failed: {e}")
             import traceback
@@ -3522,133 +3555,18 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=self._check_docker_updates_async, args=(app_update_available,), daemon=True).start()
 
     def _install_update(self, release_data, latest_version):
-        """Download DMG, extract app, replace currently running app bundle, prompt restart"""
-        import tempfile
-        import shutil
+        """Download DMG, replace app bundle, prompt restart."""
+        install_path = os.path.dirname(self.contents_dir)
 
-        # Find the DMG asset in the release
-        dmg_url = None
-        for asset in release_data.get('assets', []):
-            if asset['name'].endswith('.dmg'):
-                dmg_url = asset['browser_download_url']
-                break
-
-        if not dmg_url:
-            self.log("Update failed: no .dmg asset found in release")
-            self.show_native_alert(
-                "Update Failed",
-                "No DMG file found in the release.\n\nPlease update manually from:\nhttps://github.com/brewsterkahle/onionpress/releases",
-                style="warning"
-            )
-            return
-
-        self.log(f"Auto-update: downloading {dmg_url}")
-
-        # Show downloading notification
-        rumps.notification(
-            title="OnionPress",
-            subtitle="Downloading Update...",
-            message=f"Downloading v{latest_version}. This may take a minute.",
-            sound=False
-        )
-
-        tmp_dir = tempfile.mkdtemp(prefix="onionpress-update-")
-        dmg_path = os.path.join(tmp_dir, "onionpress.dmg")
-        mount_point = os.path.join(tmp_dir, "dmg-mount")
+        def _notify(title, subtitle, message):
+            rumps.notification(title=title, subtitle=subtitle,
+                              message=message, sound=False)
 
         try:
-            # Download the DMG
-            result = subprocess.run(
-                ["curl", "-L", "-s", "--cacert", "/etc/ssl/cert.pem",
-                 "-H", "User-Agent: onionpress", "--max-time", "300",
-                 "-o", dmg_path, dmg_url],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=360
+            updater.download_and_install(
+                release_data, latest_version, install_path,
+                log=self.log, notify=_notify,
             )
-            if result.returncode != 0:
-                raise RuntimeError(f"Download failed (curl exit {result.returncode}): {result.stderr.strip()}")
-
-            dmg_size = os.path.getsize(dmg_path)
-            self.log(f"Auto-update: downloaded {dmg_size / 1024 / 1024:.1f} MB")
-
-            if dmg_size < 1_000_000:  # Sanity check — DMG should be >> 1MB
-                raise RuntimeError(f"Downloaded file too small ({dmg_size} bytes), likely not a valid DMG")
-
-            # Mount the DMG
-            os.makedirs(mount_point, exist_ok=True)
-            result = subprocess.run(
-                ["hdiutil", "attach", dmg_path, "-mountpoint", mount_point, "-nobrowse", "-quiet"],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=30
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to mount DMG: {result.stderr.strip()}")
-
-            self.log(f"Auto-update: DMG mounted at {mount_point}")
-
-            # Find OnionPress.app inside the DMG
-            source_app = os.path.join(mount_point, "OnionPress.app")
-            if not os.path.isdir(source_app):
-                # Some DMGs have the app in a subdirectory
-                for item in os.listdir(mount_point):
-                    candidate = os.path.join(mount_point, item, "OnionPress.app")
-                    if os.path.isdir(candidate):
-                        source_app = candidate
-                        break
-                else:
-                    raise RuntimeError(f"OnionPress.app not found in DMG. Contents: {os.listdir(mount_point)}")
-
-            # Determine install location — replace wherever we're currently running from
-            install_path = os.path.dirname(self.contents_dir)
-
-            self.log(f"Auto-update: replacing {install_path}")
-
-            # Back up the current app (in case something goes wrong)
-            backup_path = install_path + ".bak"
-            if os.path.exists(backup_path):
-                shutil.rmtree(backup_path)
-
-            # Move current app to backup, copy new app in
-            os.rename(install_path, backup_path)
-            try:
-                # Use cp -R to preserve permissions and structure
-                result = subprocess.run(
-                    ["cp", "-R", source_app, install_path],
-                    capture_output=True,
-                    text=True, encoding='utf-8', errors='replace',
-                    timeout=120
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"Copy failed: {result.stderr.strip()}")
-            except Exception:
-                # Restore from backup if copy failed
-                self.log("Auto-update: copy failed, restoring backup")
-                if os.path.exists(install_path):
-                    shutil.rmtree(install_path)
-                os.rename(backup_path, install_path)
-                raise
-
-            # Remove Gatekeeper quarantine flag so macOS doesn't block the downloaded app
-            subprocess.run(
-                ["xattr", "-dr", "com.apple.quarantine", install_path],
-                capture_output=True, timeout=10
-            )
-
-            # Remove backup
-            shutil.rmtree(backup_path, ignore_errors=True)
-
-            self.log(f"Auto-update: installed v{latest_version} successfully")
-
-            # Unmount DMG
-            subprocess.run(
-                ["hdiutil", "detach", mount_point, "-quiet"],
-                capture_output=True, timeout=15
-            )
-
-            # Clean up temp dir
-            shutil.rmtree(tmp_dir, ignore_errors=True)
 
             # Prompt user to restart
             response = self.show_native_alert(
@@ -3664,13 +3582,6 @@ class OnionPressApp(rumps.App):
             import traceback
             self.log(traceback.format_exc())
 
-            # Clean up mount if still mounted
-            subprocess.run(
-                ["hdiutil", "detach", mount_point, "-quiet", "-force"],
-                capture_output=True, timeout=15
-            )
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
             # Determine who owns the app bundle
             owner_hint = ""
             try:
@@ -3684,7 +3595,7 @@ class OnionPressApp(rumps.App):
                 pass
 
             self.show_native_alert(
-                "Update Failed — Permission Denied",
+                "Update Failed \u2014 Permission Denied",
                 f"OnionPress v{latest_version} was downloaded but could not be installed because another user account owns the app bundle.{owner_hint}",
                 style="warning"
             )
@@ -3693,13 +3604,6 @@ class OnionPressApp(rumps.App):
             self.log(f"Auto-update failed: {e}")
             import traceback
             self.log(traceback.format_exc())
-
-            # Clean up mount if still mounted
-            subprocess.run(
-                ["hdiutil", "detach", mount_point, "-quiet", "-force"],
-                capture_output=True, timeout=15
-            )
-            shutil.rmtree(tmp_dir, ignore_errors=True)
 
             self.show_native_alert(
                 "Update Failed",

@@ -1,0 +1,267 @@
+"""
+OnionPress updater — checks for new releases and installs them.
+
+Multi-user aware: detects other OnionPress instances on the same Mac
+and guides the user through a safe coordinated update.
+"""
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+
+def _parse_version(version_str):
+    """Parse a version string like '2.10.3' into a tuple of ints."""
+    try:
+        return tuple(int(x) for x in version_str.split("."))
+    except (ValueError, AttributeError):
+        return (0,)
+
+# ---------------------------------------------------------------------------
+# Instance discovery
+# ---------------------------------------------------------------------------
+
+def detect_other_instances():
+    """Find other users' OnionPress MenubarApp processes.
+
+    Uses ``ps aux`` which shows processes for all users without needing
+    elevated privileges.
+
+    Returns a list of dicts: ``[{"user": "internetarchive", "pid": 1458}]``
+    Only includes instances belonging to *other* users (not the caller).
+    """
+    current_user = os.environ.get("USER", "")
+    current_pid = os.getpid()
+    others = []
+
+    try:
+        result = subprocess.run(
+            ["ps", "aux"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if "MenubarApp" not in line or "OnionPress" not in line:
+                continue
+            parts = line.split(None, 10)
+            if len(parts) < 2:
+                continue
+            user = parts[0]
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            if user == current_user and pid == current_pid:
+                continue
+            if user == current_user:
+                continue  # same user, different helper process
+            others.append({"user": user, "pid": pid})
+    except Exception:
+        pass
+
+    return others
+
+
+def detect_active_offsets():
+    """Return a list of port offsets currently in use.
+
+    Tries to bind 8080, 18080, 28080, ... up to 5 slots.
+    Returns offsets where the port is already taken, e.g. ``[0, 10000]``.
+    """
+    active = []
+    for offset in (0, 10000, 20000, 30000, 40000):
+        port = 8080 + offset
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                active.append(offset)
+            finally:
+                s.close()
+        except OSError:
+            pass
+    return active
+
+
+def _primary_user(others):
+    """Return the username that owns port-offset 0, or None."""
+    for inst in others:
+        # We can't directly check which offset another user has, but the
+        # primary user is the one on offset 0.  Since we know our own offset,
+        # if we're not offset-0 then one of the others must be.
+        return inst["user"]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# GitHub release check
+# ---------------------------------------------------------------------------
+
+def check_for_update(current_version, log=None):
+    """Check GitHub for a newer OnionPress release.
+
+    Returns ``(release_data, latest_version)`` if an update is available,
+    or ``None`` if already up to date (or on error).
+    """
+    url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",
+             "-H", "User-Agent: onionpress", "--max-time", "10", url],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=15,
+        )
+        if result.returncode != 0:
+            if log:
+                log(f"Update check curl failed: exit={result.returncode} "
+                    f"stderr={result.stderr.strip()}")
+            return None
+
+        data = json.loads(result.stdout)
+        latest_version = data.get("tag_name", "").lstrip("v")
+        if log:
+            log(f"Update check: current={current_version}, latest={latest_version}")
+
+        if latest_version and _parse_version(latest_version) > _parse_version(current_version):
+            return (data, latest_version)
+
+    except Exception as e:
+        if log:
+            log(f"Update check failed: {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Download & install
+# ---------------------------------------------------------------------------
+
+def download_and_install(release_data, latest_version, install_path,
+                         log=None, notify=None):
+    """Download the DMG from *release_data*, replace the app at *install_path*.
+
+    *log* — callable(str) for logging.
+    *notify* — callable(title, subtitle, message) for macOS notifications.
+
+    Raises on failure.  Returns the installed version string on success.
+    """
+
+    # Find the DMG asset
+    dmg_url = None
+    for asset in release_data.get("assets", []):
+        if asset["name"].endswith(".dmg"):
+            dmg_url = asset["browser_download_url"]
+            break
+
+    if not dmg_url:
+        raise RuntimeError("No .dmg asset found in the release")
+
+    if log:
+        log(f"Auto-update: downloading {dmg_url}")
+    if notify:
+        notify("OnionPress", "Downloading Update...",
+               f"Downloading v{latest_version}. This may take a minute.")
+
+    tmp_dir = tempfile.mkdtemp(prefix="onionpress-update-")
+    dmg_path = os.path.join(tmp_dir, "onionpress.dmg")
+    mount_point = os.path.join(tmp_dir, "dmg-mount")
+
+    try:
+        # Download
+        result = subprocess.run(
+            ["curl", "-L", "-s", "--cacert", "/etc/ssl/cert.pem",
+             "-H", "User-Agent: onionpress", "--max-time", "300",
+             "-o", dmg_path, dmg_url],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=360,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Download failed (curl exit {result.returncode}): "
+                f"{result.stderr.strip()}")
+
+        dmg_size = os.path.getsize(dmg_path)
+        if log:
+            log(f"Auto-update: downloaded {dmg_size / 1024 / 1024:.1f} MB")
+        if dmg_size < 1_000_000:
+            raise RuntimeError(
+                f"Downloaded file too small ({dmg_size} bytes), "
+                "likely not a valid DMG")
+
+        # Mount
+        os.makedirs(mount_point, exist_ok=True)
+        result = subprocess.run(
+            ["hdiutil", "attach", dmg_path,
+             "-mountpoint", mount_point, "-nobrowse", "-quiet"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to mount DMG: {result.stderr.strip()}")
+
+        if log:
+            log(f"Auto-update: DMG mounted at {mount_point}")
+
+        # Find OnionPress.app inside the DMG
+        source_app = os.path.join(mount_point, "OnionPress.app")
+        if not os.path.isdir(source_app):
+            for item in os.listdir(mount_point):
+                candidate = os.path.join(mount_point, item, "OnionPress.app")
+                if os.path.isdir(candidate):
+                    source_app = candidate
+                    break
+            else:
+                raise RuntimeError(
+                    f"OnionPress.app not found in DMG. "
+                    f"Contents: {os.listdir(mount_point)}")
+
+        if log:
+            log(f"Auto-update: replacing {install_path}")
+
+        # Backup current app
+        backup_path = install_path + ".bak"
+        if os.path.exists(backup_path):
+            shutil.rmtree(backup_path)
+
+        os.rename(install_path, backup_path)
+        try:
+            result = subprocess.run(
+                ["cp", "-R", source_app, install_path],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Copy failed: {result.stderr.strip()}")
+        except Exception:
+            # Restore from backup
+            if log:
+                log("Auto-update: copy failed, restoring backup")
+            if os.path.exists(install_path):
+                shutil.rmtree(install_path)
+            os.rename(backup_path, install_path)
+            raise
+
+        # Remove Gatekeeper quarantine flag
+        subprocess.run(
+            ["xattr", "-dr", "com.apple.quarantine", install_path],
+            capture_output=True, timeout=10,
+        )
+
+        # Remove backup
+        shutil.rmtree(backup_path, ignore_errors=True)
+
+        if log:
+            log(f"Auto-update: installed v{latest_version} successfully")
+
+        return latest_version
+
+    finally:
+        # Always unmount and clean up
+        subprocess.run(
+            ["hdiutil", "detach", mount_point, "-quiet", "-force"],
+            capture_output=True, timeout=15,
+        )
+        shutil.rmtree(tmp_dir, ignore_errors=True)
