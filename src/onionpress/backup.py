@@ -61,20 +61,22 @@ def verify_wp_admin(username, password):
     except Exception as e:
         return (False, f"Error checking user role: {e}")
 
-    # Verify password by piping it to wp_authenticate via stdin
-    # Never pass the password as a command-line argument.
+    # Verify password by piping username and password via stdin.
+    # Never embed user input into the PHP code string (injection risk).
     php_code = (
-        "$pw = file_get_contents('php://stdin');"
-        "$pw = trim($pw);"
-        "$u = wp_authenticate('" + username.replace("'", "\\'") + "', $pw);"
+        "$lines = explode(\"\\n\", trim(file_get_contents('php://stdin')));"
+        "$user = $lines[0];"
+        "$pw = $lines[1];"
+        "$u = wp_authenticate($user, $pw);"
         "if (is_wp_error($u)) { fwrite(STDERR, $u->get_error_message()); exit(1); }"
         "echo 'ok';"
     )
     try:
+        stdin_data = (username + "\n" + password).encode()
         result = subprocess.run(
             ['docker', 'exec', '-i', 'onionpress-wordpress',
              'wp', 'eval', php_code, '--allow-root'],
-            input=password.encode(),
+            input=stdin_data,
             capture_output=True, timeout=15
         )
         if result.returncode != 0:

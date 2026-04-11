@@ -762,6 +762,31 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        # Validate setup inputs — reject values that could be misinterpreted
+        # as CLI flags or contain control characters.
+        import re
+        _ctrl_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+        errors = []
+        if not re.match(r'^[a-zA-Z0-9_.\-]+$', username):
+            errors.append("Username may only contain letters, numbers, underscores, dots, and hyphens.")
+        if _ctrl_re.search(password):
+            errors.append("Password must not contain control characters.")
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+            errors.append("Please enter a valid email address.")
+        if _ctrl_re.search(title) or title.startswith('-'):
+            errors.append("Site title must not start with a dash or contain control characters.")
+        if len(title) > 200 or len(username) > 60 or len(email) > 254:
+            errors.append("One or more fields are too long.")
+        if errors:
+            msg = '<br>'.join(errors)
+            body = f'<html><body><h1>Error</h1><p>{msg}</p><p><a href="/setup">Go back</a></p></body></html>'.encode()
+            self.send_response(400)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         # Use shared archive.org credentials for Wayback Machine archiving
         archive_s3_keys = self._fetch_archive_s3_keys(
             'onionpress@internetarchive.eu', 'aat:aep7'

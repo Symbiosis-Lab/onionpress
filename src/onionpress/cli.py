@@ -163,8 +163,11 @@ class OnionPressCLI:
     def cmd_backup(self, password: str, output_path: str = None) -> int:
         """Create a backup."""
         if not output_path:
-            output_path = os.path.expanduser(
-                f"~/Downloads/onionpress-{time.strftime('%Y-%m-%d')}-{os.getpid()}.zip"
+            backups_dir = os.path.expanduser("~/Documents/onionpress/backups")
+            os.makedirs(backups_dir, exist_ok=True)
+            output_path = os.path.join(
+                backups_dir,
+                f"onionpress-{time.strftime('%Y-%m-%d')}-{os.getpid()}.zip"
             )
         addr = self.containers.get_onion_address()
         # Delegate to onionpress.backup
