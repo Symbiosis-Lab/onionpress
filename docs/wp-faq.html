@@ -252,6 +252,36 @@
             <strong>To remove:</strong> Clear the token in OnionPress Settings and restart. Your site goes back to .onion-only.
         </div>
     </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Can I host multiple users on one machine?</div>
+        <div class="op-faq-a">
+            Yes! WordPress has a built-in feature called <strong>Multisite</strong> that turns a single WordPress installation into a network of sites. Each user gets their own blog with their own posts, themes, and settings &mdash; all running under your one .onion address.
+            <br><br>
+            <strong>How it works:</strong> WordPress Multisite is enabled by default in OnionPress. The administrator invites users to create their own blogs from the WordPress dashboard. Each blog lives at a subpath like <code>your-address.onion/alice/</code> and <code>your-address.onion/bob/</code>. Users manage their own content independently, while the administrator controls the overall network.
+            <br><br>
+            <strong>What you get:</strong>
+            <br>&bull; One OnionPress instance, many blogs
+            <br>&bull; Each user has their own login, posts, and media
+            <br>&bull; Shared hosting resources (one Tor connection, one database, one .onion address)
+            <br>&bull; The administrator can add or remove sites at any time
+            <br><br>
+            This is the recommended approach for hosting a community of bloggers on a single machine, whether it's a family, a classroom, a newsroom, or an organization.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">Can multiple Mac users run OnionPress at the same time?</div>
+        <div class="op-faq-a">
+            Yes. On a Mac with multiple user accounts, each user can launch OnionPress from the same <code>/Applications/OnionPress.app</code> and get their own independent site with its own .onion address.
+            <br><br>
+            <strong>How it works:</strong> Each macOS user gets a completely separate OnionPress environment &mdash; their own virtual machine, Docker containers, database, onion key, and data directory (<code>~/.onionpress/</code>). OnionPress automatically detects when another user is already running and shifts its network ports so there are no conflicts. Up to about 5 users can run simultaneously.
+            <br><br>
+            <strong>Key difference from Multisite:</strong> WordPress Multisite gives multiple blogs under one .onion address. Multiple Mac users give each person their own independent .onion address and WordPress installation, fully isolated from each other. Neither user can see the other's data.
+            <br><br>
+            No configuration needed &mdash; just log in to your Mac account and launch OnionPress.
+        </div>
+    </div>
 </div>
 
 <div class="op-footer">
