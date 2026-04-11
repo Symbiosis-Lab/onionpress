@@ -18,7 +18,12 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
 MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
 DATA_DIR="$HOME/.onionpress"
-DOCUMENTS_DIR="$HOME/Documents/onionpress"
+DOCUMENTS_DIR="$HOME/Documents/OnionPress"
+
+# One-time migration: rename old lowercase directory (remove after next release)
+if [ -d "$HOME/Documents/onionpress" ] && [ ! -d "$DOCUMENTS_DIR" ]; then
+    mv "$HOME/Documents/onionpress" "$DOCUMENTS_DIR"
+fi
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 

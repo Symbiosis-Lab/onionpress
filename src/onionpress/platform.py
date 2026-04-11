@@ -91,7 +91,7 @@ def detect_timezone() -> str:
 def default_documents_dir() -> str:
     """Return the user-visible documents directory for backups and Creations.
 
-    Both platforms: ~/Documents/onionpress/
+    Both platforms: ~/Documents/OnionPress/
     Linux: uses xdg-user-dir DOCUMENTS if available (handles localisation).
     """
     if detect_os() == OS.LINUX:
@@ -101,10 +101,10 @@ def default_documents_dir() -> str:
                 capture_output=True, text=True, timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return os.path.join(result.stdout.strip(), "onionpress")
+                return os.path.join(result.stdout.strip(), "OnionPress")
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-    return os.path.join(os.path.expanduser("~"), "Documents", "onionpress")
+    return os.path.join(os.path.expanduser("~"), "Documents", "OnionPress")
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,7 @@ def resolve_paths(data_dir: str = None, documents_dir: str = None,
 
     Args:
         data_dir: Override for ~/.onionpress/. Defaults to ~/.onionpress/.
-        documents_dir: Override for ~/Documents/onionpress/. Defaults to platform default.
+        documents_dir: Override for ~/Documents/OnionPress/. Defaults to platform default.
         app_bundle: Path to OnionPress.app. If None, attempts find_app_bundle().
     """
     if data_dir is None:

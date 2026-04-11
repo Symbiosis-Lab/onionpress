@@ -16,7 +16,7 @@
 - Launcher shell script at `app/MacOS/onionpress` (assembled into `OnionPress.app/Contents/MacOS/` at build time)
 - Docker containers (tor, wordpress, mariadb) run inside Colima VM
 - Logs at `~/.onionpress/onionpress.log` and `~/.onionpress/launcher.log`
-- User-visible content at `~/Documents/onionpress/` (backups, Creations)
+- User-visible content at `~/Documents/OnionPress/` (backups, Creations)
 
 ## Repo Layout
 - `src/` — Python source (menubar.py, onion_proxy.py, etc.)
@@ -54,10 +54,10 @@
 - Do not commit or log database passwords.
 
 ## Colima VM Sandboxing
-- The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/Documents/onionpress:w`
+- The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/Documents/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)
 - `~/.onionpress/` stays as-is for app state (no spaces in path — required by Colima/Lima/Docker socket paths)
-- `~/Documents/onionpress/` holds user-visible backups and Creations
+- `~/Documents/OnionPress/` holds user-visible backups and Creations
 - All other container data uses Docker named volumes (which live inside the VM)
 - **Do not move app state to `~/Library/Application Support/`** — the space in the path breaks Colima/Docker socket paths (104-char Unix socket limit + space handling issues)
 - **Do not add additional `--mount` flags without considering security implications**
