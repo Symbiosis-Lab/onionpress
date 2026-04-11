@@ -1221,6 +1221,19 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy Tor proxy mu-plugin — routes all WordPress HTTP through Tor
+    if [ -f "$plugins_dir/onionpress-tor-proxy.php" ]; then
+        if docker cp "$plugins_dir/onionpress-tor-proxy.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-tor-proxy.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-tor-proxy.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-tor-proxy.php"
+            log "✓ onionpress-tor-proxy.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-tor-proxy.php"
+        fi
+    fi
+
     return 0
 }
 

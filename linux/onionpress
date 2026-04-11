@@ -662,6 +662,7 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         "onionpress-favicon.php"
         "onionpress-status.php"
         "onionpress-settings.php"
+        "onionpress-tor-proxy.php"
     )
 
     docker exec onionpress-wordpress mkdir -p \
