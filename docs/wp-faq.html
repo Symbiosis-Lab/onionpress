@@ -215,10 +215,41 @@
         </div>
     </div>
 
-    <div class="op-faq-item">
+<div class="op-faq-item">
         <div class="op-faq-q">Can I use my own domain name instead?</div>
         <div class="op-faq-a">
-            OnionPress gives you a .onion address, which works on the Tor network. You can't use a regular domain name (.com, .org) directly, but you can set up a clearnet-to-onion proxy if you want both. The .onion address is the core of what makes OnionPress decentralized and uncensorable.
+            Yes! You can make your OnionPress site reachable at a regular domain like <code>www.example.com</code> using a free Cloudflare Tunnel. Your .onion address keeps working too.
+
+            <div style="border:3px solid #FFA500; background:#FFF3CD; padding:15px; margin:15px 0;">
+                <strong style="color:#856404;">Privacy Note:</strong> Your .onion address keeps your server location hidden.
+                A clearnet domain with Cloudflare Tunnel reveals your Mac's IP address to Cloudflare.
+            </div>
+
+            <strong>What you need:</strong> OnionPress running, a domain name, and a free <a href="https://dash.cloudflare.com/sign-up">Cloudflare account</a>.
+
+            <br><br><strong>Step 1: Add your domain to Cloudflare</strong><br>
+            Log in to <a href="https://dash.cloudflare.com/">dash.cloudflare.com</a>, click <strong>Add a site</strong>, enter your domain, select the <strong>Free</strong> plan. Cloudflare will give you two nameservers — update them at your domain registrar.
+
+            <br><br><strong>Step 2: Create a tunnel</strong><br>
+            In Cloudflare, go to <strong>Zero Trust &rarr; Networks &rarr; Tunnels</strong>. Click <strong>Create a tunnel</strong>, choose <strong>Cloudflared</strong>, name it (e.g. <code>onionpress</code>).
+
+            <br><br><strong>Step 3: Copy the tunnel token</strong><br>
+            Cloudflare shows a command like <code>cloudflared service install eyJhIGxvbmcg...</code>. Copy just the long token string at the end.
+
+            <div style="border:3px solid #FFA500; background:#FFF3CD; padding:15px; margin:15px 0;">
+                <strong style="color:#856404;">Do NOT run that install command on your Mac.</strong>
+                OnionPress runs cloudflared automatically inside Docker. Installing it on your Mac creates a second connector that causes intermittent 502 errors. Just copy the token.
+            </div>
+
+            <strong>Step 4: Set the public hostname</strong><br>
+            In the tunnel setup, click <strong>Public Hostname &rarr; Add a public hostname</strong>. Set your domain, and under <strong>Service</strong> set Type: <code>HTTP</code>, URL: <code>wordpress:80</code>. (This works because the tunnel agent runs inside Docker alongside WordPress.)
+
+            <br><br><strong>Step 5: Paste the token in OnionPress</strong><br>
+            Click the OnionPress icon in your menu bar &rarr; <strong>Settings</strong> &rarr; paste your token into the <strong>Cloudflare Token</strong> field &rarr; <strong>Save</strong>. OnionPress restarts and your site is live at your domain with HTTPS.
+
+            <br><br><strong>Cost:</strong> Cloudflare Tunnel and DNS are free. You only pay for the domain name (~$10-15/year).<br>
+            <strong>When your Mac is off:</strong> The clearnet domain shows a Cloudflare error, but your .onion address falls back to the Wayback Machine as usual.<br>
+            <strong>To remove:</strong> Clear the token in OnionPress Settings and restart. Your site goes back to .onion-only.
         </div>
     </div>
 </div>
