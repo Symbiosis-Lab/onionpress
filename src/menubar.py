@@ -189,7 +189,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.51"
+        self.version = "2.4.52"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -3216,8 +3216,10 @@ class OnionPressApp(rumps.App):
         panel.setTitle_("Save Backup")
         panel.setNameFieldStringValue_(
             backup_manager.backup_filename(self.onion_address, username))
+        backups_dir = os.path.expanduser("~/Documents/onionpress/backups")
+        os.makedirs(backups_dir, exist_ok=True)
         panel.setDirectoryURL_(
-            AppKit.NSURL.fileURLWithPath_(os.path.expanduser("~/Downloads/")))
+            AppKit.NSURL.fileURLWithPath_(backups_dir))
         panel.setAllowedContentTypes_([
             AppKit.UTType.typeWithFilenameExtension_("zip")])
 
