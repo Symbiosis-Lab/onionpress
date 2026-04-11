@@ -1708,10 +1708,13 @@ class OnionPressApp(rumps.App):
                     self._onionheaven_registration_in_flight = True
                     onionheaven.start_registration_thread(self)
 
-                    # Start analytics sharing (opt-in, checks config each cycle)
-                    if not getattr(self, '_analytics_sharing_started', False):
-                        self._analytics_sharing_started = True
-                        analytics_sharing.start_analytics_sharing(self)
+                # Start analytics sharing (opt-in, checks config each cycle).
+                # Runs for ALL instances including OnionHeaven.
+                if (tor_bootstrapped and self.onion_address
+                        and self.onion_address not in ["Starting...", "Not running", "Generating address..."]
+                        and not getattr(self, '_analytics_sharing_started', False)):
+                    self._analytics_sharing_started = True
+                    analytics_sharing.start_analytics_sharing(self)
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:

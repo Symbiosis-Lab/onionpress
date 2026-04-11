@@ -7,7 +7,8 @@ RUN curl -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh
 # Enable mod_remoteip for PROXY protocol support and add port 81 listener
 RUN a2enmod remoteip rewrite headers
 COPY onionpress-proxy-protocol.conf /etc/apache2/conf-available/
-RUN a2enconf onionpress-proxy-protocol
+COPY onionpress-xmlrpc-block.conf /etc/apache2/conf-available/
+RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block
 
 # Multisite init script — runs on every container start to ensure
 # multisite is configured (safe to re-run, checks if already done)
