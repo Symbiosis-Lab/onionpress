@@ -221,10 +221,13 @@ def download_and_install(release_data, latest_version, install_path,
         if log:
             log(f"Auto-update: replacing {install_path}")
 
-        # Backup current app
-        backup_path = install_path + ".bak"
+        # Backup current app — use a PID-unique path so a stale .bak
+        # owned by another user doesn't block us with PermissionError
+        backup_path = install_path + f".bak-{os.getpid()}"
         if os.path.exists(backup_path):
-            shutil.rmtree(backup_path)
+            shutil.rmtree(backup_path, ignore_errors=True)
+            if os.path.exists(backup_path):
+                subprocess.run(["rm", "-rf", backup_path], capture_output=True, timeout=15)
 
         os.rename(install_path, backup_path)
         try:
@@ -250,8 +253,11 @@ def download_and_install(release_data, latest_version, install_path,
             capture_output=True, timeout=10,
         )
 
-        # Remove backup
+        # Remove backup and any stale .bak dirs from previous updates
         shutil.rmtree(backup_path, ignore_errors=True)
+        import glob as _glob
+        for stale_bak in _glob.glob(install_path + ".bak*"):
+            shutil.rmtree(stale_bak, ignore_errors=True)
 
         if log:
             log(f"Auto-update: installed v{latest_version} successfully")
