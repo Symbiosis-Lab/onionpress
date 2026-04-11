@@ -21,7 +21,6 @@ from .platform import OnionPressPaths
 DEFAULTS = {
     "ADDRESS_PREFIX": "op2",
     "INSTALL_IA_PLUGIN": "yes",
-    "INSTALL_WP_STATISTICS": "yes",
     "UPDATE_ON_LAUNCH": "yes",
     "LAUNCH_ON_LOGIN": "yes",
     "PREVENT_SLEEP": "normal",

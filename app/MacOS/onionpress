@@ -841,134 +841,24 @@ ensure_archive_s3_keys() {
     fi
 }
 
-# Function to install and activate WP Statistics plugin
-install_wp_statistics() {
-    # Check if plugin installation is enabled in config
-    local install_plugin="yes"
-    if [ -f "$DATA_DIR/config" ]; then
-        local config_value=$(grep "^INSTALL_WP_STATISTICS=" "$DATA_DIR/config" | cut -d= -f2)
-        if [ ! -z "$config_value" ]; then
-            install_plugin="$config_value"
-        fi
-    fi
 
-    if [ "$install_plugin" != "yes" ]; then
-        log "WP Statistics plugin installation disabled in config"
-        return 0
-    fi
+# WP-Statistics plugin removed — it phoned home to connect.wp-statistics.com
+# despite telemetry settings being disabled.  OnionPress's built-in hit counter
+# (onionpress-hit-counter plugin) provides the same functionality without
+# any clearnet leaks.  On existing installs the plugin is deactivated on the
+# next launch (see deactivate_wp_statistics below).
 
-    # Check if installation scripts exist
-    if [ ! -d "$SCRIPTS_DIR" ] || [ ! -f "$SCRIPTS_DIR/install_plugin.sh" ]; then
-        log "Plugin installation scripts not available, skipping WP Statistics"
-        return 0
-    fi
-
-    log "Checking WP Statistics plugin..."
-
-    cd "$DOCKER_DIR"
-
-    # Check if plugin is already installed
-    if docker compose exec -T wordpress test -f /var/www/html/wp-content/plugins/wp-statistics/wp-statistics.php 2>/dev/null; then
-        # Plugin is installed, try to network-activate if WordPress is configured
-        log "WP Statistics plugin already installed, checking activation status..."
-        # Use --network for multisite support
-        if docker exec onionpress-wordpress wp plugin activate wp-statistics --network --allow-root >>"$LOG_FILE" 2>&1; then
-            log "✓ WP Statistics plugin is network-active"
-        else
-            log "WP Statistics plugin will auto-activate after WordPress setup"
-        fi
-        return 0
-    fi
-
-    log "Installing WP Statistics plugin..."
-
-    # Create temp directory for plugin download
-    local temp_dir=$(mktemp -d)
-
-    # Download and verify plugin
-    if "$SCRIPTS_DIR/install_plugin.sh" "wp-statistics" "$temp_dir" >>"$LOG_FILE" 2>&1; then
-        # Copy plugin to WordPress container
-        if docker cp "$temp_dir/wp-statistics" onionpress-wordpress:/var/www/html/wp-content/plugins/ 2>>"$LOG_FILE" && \
-            cd "$DOCKER_DIR" && \
-            docker compose exec -T wordpress chown -R www-data:www-data /var/www/html/wp-content/plugins/wp-statistics 2>>"$LOG_FILE"; then
-            log "✓ WP Statistics plugin installed!"
-
-            # Try to network-activate immediately if WordPress is configured (multisite)
-            if docker exec onionpress-wordpress wp plugin activate wp-statistics --network --allow-root >>"$LOG_FILE" 2>&1; then
-                log "✓ WP Statistics plugin network-activated!"
-            else
-                log "WP Statistics plugin will auto-activate after WordPress setup"
-            fi
-        else
-            log "Failed to copy WP Statistics plugin to container"
-        fi
-    else
-        log "Failed to download WP Statistics plugin - check log for details"
-    fi
-
-    # Clean up
-    rm -rf "$temp_dir"
-
-    return 0
-}
-
-# Function to configure WP Statistics plugin with privacy-friendly defaults
-configure_wp_statistics() {
-    # Check if plugin installation is enabled in config
-    local install_plugin="yes"
-    if [ -f "$DATA_DIR/config" ]; then
-        local config_value=$(grep "^INSTALL_WP_STATISTICS=" "$DATA_DIR/config" | cut -d= -f2)
-        if [ ! -z "$config_value" ]; then
-            install_plugin="$config_value"
-        fi
-    fi
-
-    if [ "$install_plugin" != "yes" ]; then
-        return 0
-    fi
-
-    # Skip if WordPress is not installed yet
+deactivate_wp_statistics() {
+    # Deactivate and remove WP-Statistics if present (legacy installs)
     if ! wp_is_installed; then
         return 0
     fi
-
-    # Skip if plugin is not installed
-    if ! docker exec onionpress-wordpress test -f /var/www/html/wp-content/plugins/wp-statistics/wp-statistics.php 2>/dev/null; then
-        return 0
+    if docker exec onionpress-wordpress test -f /var/www/html/wp-content/plugins/wp-statistics/wp-statistics.php 2>/dev/null; then
+        log "Removing WP-Statistics plugin (clearnet leak — replaced by built-in hit counter)..."
+        docker exec onionpress-wordpress wp plugin deactivate wp-statistics --network --allow-root >>"$LOG_FILE" 2>&1 || true
+        docker exec onionpress-wordpress wp plugin delete wp-statistics --allow-root >>"$LOG_FILE" 2>&1 || true
+        log "✓ WP-Statistics plugin removed"
     fi
-
-    # Check if already configured (idempotent)
-    local configured
-    configured=$(docker exec onionpress-wordpress wp option get wp_statistics_configured_by_onionpress --allow-root 2>/dev/null || echo "")
-    if [ "$configured" = "1" ]; then
-        log "✓ WP Statistics plugin already configured"
-        return 0
-    fi
-
-    log "Configuring WP Statistics with privacy-friendly defaults..."
-
-    # Disable GeoIP lookups (privacy — no external service calls)
-    docker exec onionpress-wordpress wp option update wp_statistics_geoip 0 --allow-root >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to disable GeoIP"
-
-    # Enable page tracking
-    docker exec onionpress-wordpress wp option update wp_statistics_pages 1 --allow-root >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to enable page tracking"
-
-    # Disable sending data to wp-statistics.com
-    docker exec onionpress-wordpress wp option update wp_statistics_send_anonymous_data 0 --allow-root >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to disable anonymous data sending"
-
-    # Disable external update checks (privacy)
-    docker exec onionpress-wordpress wp option update wp_statistics_check_update 0 --allow-root >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to disable update checks"
-
-    # Mark as configured by OnionPress
-    docker exec onionpress-wordpress wp option update wp_statistics_configured_by_onionpress 1 --allow-root >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to set configured flag"
-
-    log "✓ WP Statistics configured (GeoIP disabled, page tracking enabled, no external data sharing)"
-    return 0
 }
 
 # Function to fix permissions for onionpress persistent data directory
@@ -1621,11 +1511,8 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # and should not block the rest of the setup
     ensure_archive_s3_keys &
 
-    # Install WP Statistics plugin
-    install_wp_statistics
-
-    # Configure WP Statistics with privacy-friendly defaults
-    configure_wp_statistics
+    # Remove WP-Statistics if left over from a previous version
+    deactivate_wp_statistics
 
     # Install multisite and domain mapping
     # Order matters: ensure_multisite MUST run before SUNRISE is set,
