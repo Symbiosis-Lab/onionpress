@@ -340,7 +340,7 @@ add_action( 'admin_init', function () {
         return;
     }
 
-    $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' ) );
+    $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion', 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' ) );
     if ( ! is_array( $following ) ) {
         $following = array();
     }
@@ -869,7 +869,7 @@ function onionpress_settings_page() {
 
         <!-- Following Section -->
         <?php
-        $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' ) );
+        $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion', 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' ) );
         if ( ! is_array( $following ) ) {
             $following = array();
         }

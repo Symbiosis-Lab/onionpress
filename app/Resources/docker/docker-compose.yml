@@ -60,6 +60,7 @@ services:
     volumes:
       - wordpress-data:/var/www/html
       - onionpress-data:/var/lib/onionpress
+      - ${ONIONPRESS_DOCUMENTS_DIR:-/tmp/onionpress-no-docs}/Creations/My Creations:/var/www/html/wp-content/creations:ro
     depends_on:
       - db
     restart: unless-stopped

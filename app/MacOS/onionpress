@@ -171,6 +171,9 @@ ONIONPRESS_SHARED_DIR="$DATA_DIR/shared"
 mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
 export ONIONPRESS_SHARED_DIR
 
+# Documents directory for Creations mount into WordPress container
+export ONIONPRESS_DOCUMENTS_DIR="$DOCUMENTS_DIR"
+
 
 # Build compose flags — include cloudflare override file only when token is set
 if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
@@ -1242,6 +1245,68 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     return 0
 }
 
+# Install OnionPress theme and plugins into the WordPress container
+install_onionpress_theme() {
+    if ! wp_is_installed; then
+        return 0
+    fi
+
+    local themes_dir="$RESOURCES_DIR/themes"
+    local plugins_dir="$RESOURCES_DIR/plugins"
+
+    # Install OnionPress theme
+    if [ -d "$themes_dir/onionpress" ]; then
+        if docker cp "$themes_dir/onionpress" \
+            onionpress-wordpress:/var/www/html/wp-content/themes/onionpress >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown -R www-data:www-data \
+                /var/www/html/wp-content/themes/onionpress >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress theme"
+            log "✓ OnionPress theme installed"
+
+            # Activate as default theme if no theme is explicitly set yet
+            # (i.e. still on the WordPress default theme)
+            local current_theme
+            current_theme=$(docker exec onionpress-wordpress wp theme list --status=active --field=name --allow-root 2>/dev/null | head -1)
+            case "$current_theme" in
+                twentytwenty*|'')
+                    docker exec onionpress-wordpress wp theme activate onionpress --allow-root >> "$LOG_FILE" 2>&1 \
+                        && log "✓ OnionPress theme activated" \
+                        || log "WARNING: Failed to activate OnionPress theme"
+                    ;;
+                *)
+                    log "User has custom theme '$current_theme' — not overriding"
+                    ;;
+            esac
+        else
+            log "WARNING: Failed to copy OnionPress theme"
+        fi
+    fi
+
+    # Install hit counter plugin
+    if [ -d "$plugins_dir/onionpress-hit-counter" ]; then
+        docker cp "$plugins_dir/onionpress-hit-counter" \
+            onionpress-wordpress:/var/www/html/wp-content/plugins/onionpress-hit-counter >> "$LOG_FILE" 2>&1 && \
+        docker exec onionpress-wordpress chown -R www-data:www-data \
+            /var/www/html/wp-content/plugins/onionpress-hit-counter >> "$LOG_FILE" 2>&1 && \
+        docker exec onionpress-wordpress wp plugin activate onionpress-hit-counter --allow-root >> "$LOG_FILE" 2>&1 && \
+        log "✓ onionpress-hit-counter plugin installed and activated" || \
+        log "WARNING: Failed to install onionpress-hit-counter plugin"
+    fi
+
+    # Install creations plugin
+    if [ -d "$plugins_dir/onionpress-creations" ]; then
+        docker cp "$plugins_dir/onionpress-creations" \
+            onionpress-wordpress:/var/www/html/wp-content/plugins/onionpress-creations >> "$LOG_FILE" 2>&1 && \
+        docker exec onionpress-wordpress chown -R www-data:www-data \
+            /var/www/html/wp-content/plugins/onionpress-creations >> "$LOG_FILE" 2>&1 && \
+        docker exec onionpress-wordpress wp plugin activate onionpress-creations --allow-root >> "$LOG_FILE" 2>&1 && \
+        log "✓ onionpress-creations plugin installed and activated" || \
+        log "WARNING: Failed to install onionpress-creations plugin"
+    fi
+
+    return 0
+}
+
 # Function to set up OnionHeaven (onionheaven mode only)
 # Registration API now runs in the onionheaven container (web-server.py),
 # which creates its own data directories on the shared volume at startup.
@@ -1540,6 +1605,9 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         ensure_multisite
         install_multisite_domain_map
     fi
+
+    # Install OnionPress theme and plugins
+    install_onionpress_theme
 
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
