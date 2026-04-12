@@ -254,6 +254,26 @@
     </div>
 
     <div class="op-faq-item">
+        <div class="op-faq-q">Is OnionPress hosting this website?</div>
+        <div class="op-faq-a">
+            Yes! This site is running on OnionPress on a Mac mini. It's the same software you download &mdash; nothing special, no extra servers. What you're reading right now is a WordPress blog served over a Tor onion service, backed up by the Wayback Machine, just like yours would be.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
+        <div class="op-faq-q">What is OnionHeaven?</div>
+        <div class="op-faq-a">
+            OnionHeaven is a community backup network built into OnionPress. It keeps your site reachable at the same .onion address even when your computer is off, asleep, or disconnected.
+            <br><br>
+            <strong>How it works:</strong> While your computer is running, OnionPress sends a quiet heartbeat to the OnionHeaven network to say "I'm online." If your computer goes offline and the heartbeats stop, another OnionPress node in the network steps in and serves a cached copy of your site at your .onion address. When you come back online, OnionPress automatically reclaims your address and serves the live site again. The whole process is seamless &mdash; your visitors always see your site.
+            <br><br>
+            <strong>What about my onion service key?</strong> Your key is shared with the OnionHeaven network so that a backup node can serve your address while you're away. The network is run by the Internet Archive, the same nonprofit that runs the Wayback Machine. Your key is only used to keep your site available &mdash; nothing else.
+            <br><br>
+            OnionHeaven is automatic &mdash; there's nothing to configure. It starts working as soon as your OnionPress site is up.
+        </div>
+    </div>
+
+    <div class="op-faq-item">
         <div class="op-faq-q">Can I host multiple users on one machine?</div>
         <div class="op-faq-a">
             Yes! WordPress has a built-in feature called <strong>Multisite</strong> that turns a single WordPress installation into a network of sites. Each user gets their own blog with their own posts, themes, and settings &mdash; all running under your one .onion address.
@@ -267,10 +287,12 @@
             <br>&bull; The administrator can add or remove sites at any time
             <br><br>
             This is the recommended approach for hosting a community of bloggers on a single machine, whether it's a family, a classroom, a newsroom, or an organization.
+            <br><br>
+            <strong>On a Mac?</strong> You can also give each person their own macOS account &mdash; each gets a completely independent OnionPress with its own .onion address. See <a href="#mac-multi-user">"Can multiple Mac users run OnionPress at the same time?"</a> below.
         </div>
     </div>
 
-    <div class="op-faq-item">
+    <div id="mac-multi-user" class="op-faq-item">
         <div class="op-faq-q">Can multiple Mac users run OnionPress at the same time?</div>
         <div class="op-faq-a">
             Yes. On a Mac with multiple user accounts, each user can launch OnionPress from the same <code>/Applications/OnionPress.app</code> and get their own independent site with its own .onion address.
