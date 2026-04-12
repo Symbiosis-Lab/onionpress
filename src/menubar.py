@@ -373,6 +373,7 @@ class OnionPressApp(rumps.App):
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
         self.local_site_item = rumps.MenuItem("Open Local Site", callback=self.open_local_site)
         self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
+        self._onionheaven_alert_in_menu = False
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
@@ -1789,21 +1790,26 @@ class OnionPressApp(rumps.App):
         def do_update():
             state = self.display_state
 
-            # OnionHeaven alert indicator: show "!" next to icon when messages exist
+            # OnionHeaven alert indicator: show "!" next to icon when messages exist.
+            # Track insertion with a flag because the item's title changes with the
+            # alert count, which invalidates any `title in self.menu` lookup and
+            # would otherwise re-insert an already-attached NSMenuItem (raises
+            # NSInternalInconsistencyException).
             if self.onionheaven_messages:
                 self.title = "!"
                 count = len(self.onionheaven_messages)
                 self.onionheaven_alert_item.title = f"OnionHeaven Alerts ({count})"
                 self.onionheaven_alert_item.set_callback(self.view_onionheaven_alerts)
-                if self.onionheaven_alert_item.title not in self.menu:
+                if not self._onionheaven_alert_in_menu:
                     self.menu.insert_after("Copy Onion Address", self.onionheaven_alert_item)
+                    self._onionheaven_alert_in_menu = True
             else:
                 self.title = ""
-                if "OnionHeaven Alerts" in self.menu:
-                    del self.menu["OnionHeaven Alerts"]
-                for key in list(self.menu.keys()):
-                    if isinstance(key, str) and key.startswith("OnionHeaven Alerts ("):
-                        del self.menu[key]
+                if self._onionheaven_alert_in_menu:
+                    for key in list(self.menu.keys()):
+                        if isinstance(key, str) and key.startswith("OnionHeaven Alerts"):
+                            del self.menu[key]
+                    self._onionheaven_alert_in_menu = False
 
             # Show/hide clearnet status based on tunnel config and state
             show_clearnet = (state == "available" and self.cloudflare_tunnel_enabled)
