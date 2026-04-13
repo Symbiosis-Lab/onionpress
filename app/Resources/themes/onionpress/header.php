@@ -33,6 +33,12 @@
                         <?php bloginfo('name'); ?>
                     </a>
                 </h1>
+                <?php
+                $onionname = function_exists('onionpress_get_onionname')
+                    ? onionpress_get_onionname() : '';
+                if ($onionname) : ?>
+                    <p class="site-onionname">@<?php echo esc_html($onionname); ?></p>
+                <?php endif; ?>
                 <?php $description = get_bloginfo('description', 'display');
                 if ($description) : ?>
                     <p class="site-description"><?php echo esc_html($description); ?></p>
@@ -43,7 +49,14 @@
                 if ($onion_addr) :
                     $onionhome = defined('ONIONHOME_ADDRESS') ? ONIONHOME_ADDRESS
                         : 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion';
-                    $follow_url = 'http://' . $onionhome . '/follow?address=' . urlencode($onion_addr); ?>
+                    // Prefer the onionname-based follow URL so visitors get a
+                    // short, human-readable link; OnionHome resolves it.
+                    if ($onionname) {
+                        $follow_url = 'http://' . $onionhome . '/follow?name=' . urlencode($onionname);
+                    } else {
+                        $follow_url = 'http://' . $onionhome . '/follow?address=' . urlencode($onion_addr);
+                    }
+                    ?>
                     <a class="header-follow" href="<?php echo esc_url($follow_url); ?>">+ Follow</a>
                 <?php endif; ?>
             </div>

@@ -103,6 +103,73 @@ function onionpress_get_avatar_letter() {
 }
 
 /**
+ * Return this blog's onionname — the WP user_login of the primary author /
+ * site admin. On multisite each blog's URL is /<onionname>/; on single-site
+ * we fall back to the site's admin user. Returns an empty string if we
+ * can't determine one (pre-name-sync installs).
+ */
+function onionpress_get_onionname() {
+    // Multisite: primary author of the current blog.
+    if ( is_multisite() ) {
+        $blog_id = get_current_blog_id();
+        $blog    = function_exists( 'get_site' ) ? get_site( $blog_id ) : null;
+        if ( $blog && ! empty( $blog->user_id ) ) {
+            $user = get_userdata( (int) $blog->user_id );
+            if ( $user && ! empty( $user->user_login ) ) {
+                return $user->user_login;
+            }
+        }
+        // Fallback: the first administrator registered for this blog.
+        $admins = get_users( array(
+            'blog_id' => $blog_id,
+            'role'    => 'administrator',
+            'number'  => 1,
+            'orderby' => 'ID',
+            'order'   => 'ASC',
+            'fields'  => array( 'user_login' ),
+        ) );
+        if ( ! empty( $admins ) ) {
+            return $admins[0]->user_login;
+        }
+    }
+    // Single-site: admin_email → user.
+    $admin = get_user_by( 'email', get_option( 'admin_email' ) );
+    if ( $admin ) {
+        return $admin->user_login;
+    }
+    return '';
+}
+
+/**
+ * Return the .onion address this request arrived on.
+ *
+ * When a visitor reaches the site via Tor the HTTP Host header is the full
+ * v3 .onion address — use that directly. Fall back to the shared-volume
+ * file the launcher populates so server-side code paths (cron, wp-cli)
+ * can still answer truthfully.
+ */
+function onionpress_follow_get_own_address() {
+    if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
+        $host = strtolower( (string) $_SERVER['HTTP_HOST'] );
+        // Strip port if present (rare on .onion, but defensive).
+        if ( strpos( $host, ':' ) !== false ) {
+            $host = substr( $host, 0, strpos( $host, ':' ) );
+        }
+        if ( preg_match( '/^[a-z2-7]{56}\.onion$/', $host ) ) {
+            return $host;
+        }
+    }
+    $addr_file = '/var/lib/onionpress/onion_address';
+    if ( is_readable( $addr_file ) ) {
+        $addr = trim( (string) @file_get_contents( $addr_file ) );
+        if ( preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+            return $addr;
+        }
+    }
+    return null;
+}
+
+/**
  * Create Follow page on theme activation if it doesn't exist
  */
 function onionpress_create_follow_page() {

@@ -145,6 +145,14 @@ img {
     color: #7c3aed;
 }
 
+.site-onionname {
+    margin: 2px 0 0;
+    font-size: 14px;
+    font-weight: 500;
+    color: #7c3aed;
+    letter-spacing: 0.01em;
+}
+
 .site-description {
     margin: 2px 0 0;
     font-size: 15px;
