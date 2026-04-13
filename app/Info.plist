@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.4.56</string>
+	<string>2.4.57</string>
 	<key>CFBundleVersion</key>
 	<string>92</string>
 	<key>LSApplicationCategoryType</key>
@@ -33,12 +33,12 @@
 	<string>13.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>OnionPress saves your posts, backups, Creations in ~/Documents/OnionPress/ so they're easy to find and share. Access is limited to that subfolder.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.</string>
-	<key>NSDocumentsFolderUsageDescription</key>
-	<string>OnionPress saves your posts, backups, Creations in ~/Documents/OnionPress/ so they're easy to find and share. Access is limited to that subfolder.</string>
 	<key>NSRequiresAquaSystemAppearance</key>
 	<false/>
 </dict>
