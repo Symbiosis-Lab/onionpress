@@ -61,7 +61,7 @@ OPTIONS = {
         'NSRequiresAquaSystemAppearance': False,
         'LSApplicationCategoryType': 'public.app-category.utilities',
         'NSLocalNetworkUsageDescription': 'OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.',
-        'NSDocumentsFolderUsageDescription': 'OnionPress saves backups and Creations in ~/Documents/OnionPress/ so they\'re easy to find and share. Access is limited to that subfolder.',
+        'NSDocumentsFolderUsageDescription': 'OnionPress saves your posts, backups, Creations in ~/Documents/OnionPress/ so they\'re easy to find and share. Access is limited to that subfolder.',
     },
     'packages': ['rumps', 'objc', 'AppKit'],
     # CRITICAL: Local modules that menubar.py imports at runtime.

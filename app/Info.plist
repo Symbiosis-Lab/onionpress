@@ -38,7 +38,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>OnionPress saves backups and Creations in ~/Documents/OnionPress/ so they're easy to find and share. Access is limited to that subfolder.</string>
+	<string>OnionPress saves your posts, backups, Creations in ~/Documents/OnionPress/ so they're easy to find and share. Access is limited to that subfolder.</string>
 	<key>NSRequiresAquaSystemAppearance</key>
 	<false/>
 </dict>
