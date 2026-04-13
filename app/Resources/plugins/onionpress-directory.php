@@ -78,8 +78,14 @@ function onionpress_directory_lookup( $name ) {
 }
 
 /**
- * Redirect to the target .onion's /follow page, or 404 if the name is
- * unknown. Only called when the caller explicitly asked to follow a name.
+ * Follow-by-name landing page. Served by OnionHome (or the clearnet face)
+ * so it works reliably regardless of whether the target's theme has its
+ * own /follow page — there's no guarantee alice's site has one, and
+ * sending the user there blind would just 404 on a vanilla install.
+ *
+ * The page shows the target's .onion address in a copyable block. When
+ * we render on onionpress.org we add noindex headers; on the onion side
+ * we don't bother since search indexing of onion services isn't a thing.
  */
 function onionpress_directory_handle_follow_by_name( $name ) {
     $info = onionpress_directory_lookup( $name );
@@ -94,9 +100,37 @@ function onionpress_directory_handle_follow_by_name( $name ) {
         echo '</body>';
         exit;
     }
-    $target = 'http://' . $info['onionaddress'] . '/follow?address='
-        . rawurlencode( $info['onionaddress'] );
-    wp_redirect( $target, 302 );
+
+    $own = strtolower( (string) ( $_SERVER['HTTP_HOST'] ?? '' ) );
+    if ( strpos( $own, ':' ) !== false ) {
+        $own = substr( $own, 0, strpos( $own, ':' ) );
+    }
+    $is_clearnet = ( $own === ONIONPRESS_CLEARNET_HOST
+                     || $own === 'www.' . ONIONPRESS_CLEARNET_HOST );
+
+    status_header( 200 );
+    header( 'Content-Type: text/html; charset=utf-8' );
+    if ( $is_clearnet ) {
+        header( 'X-Robots-Tag: noindex, nofollow' );
+    }
+
+    $name_h = esc_html( $info['onionname'] );
+    $addr_h = esc_html( $info['onionaddress'] );
+    $site_url = 'http://' . $info['onionaddress'] . '/';
+    $deep_link = 'onionpress://follow/' . $info['onionaddress'];
+
+    echo '<!doctype html><meta charset="utf-8">';
+    echo '<title>Follow @' . $name_h . ' — OnionPress</title>';
+    if ( $is_clearnet ) {
+        echo '<meta name="robots" content="noindex, nofollow">';
+    }
+    echo '<body style="font-family:system-ui,sans-serif;padding:2em;max-width:640px;margin:auto">';
+    echo '<h1>Follow @' . $name_h . '</h1>';
+    echo '<p>To follow this site, open it in <a href="https://www.torproject.org/download/">Tor Browser</a>:</p>';
+    echo '<p style="background:#f3f4f6;padding:1em;border-radius:6px;word-break:break-all;font-family:ui-monospace,monospace;font-size:14px">' . $addr_h . '</p>';
+    echo '<p>Direct link: <a href="' . esc_url( $site_url ) . '">' . esc_html( $site_url ) . '</a></p>';
+    echo '<p>If you run OnionPress: <a href="' . esc_url( $deep_link ) . '">+ Follow @' . $name_h . '</a></p>';
+    echo '</body>';
     exit;
 }
 
@@ -143,7 +177,9 @@ function onionpress_directory_handle_name_lookup( $name ) {
         $name_h  = esc_html( $info['onionname'] );
         $addr_h  = esc_html( $info['onionaddress'] );
         $addr_a  = esc_attr( $info['onionaddress'] );
-        $onion_h = esc_html( 'http://' . $info['onionaddress'] . '/' . $info['onionname'] );
+        $onion_h = esc_html(
+            'http://' . $info['onionaddress'] . '/' . $info['onionname'] . '/'
+        );
         echo '<!doctype html><meta charset="utf-8"><title>@' . $name_h . ' — OnionPress</title>';
         echo '<meta name="robots" content="noindex, nofollow">';
         echo '<body style="font-family:system-ui,sans-serif;padding:2em;max-width:640px;margin:auto">';
@@ -156,7 +192,15 @@ function onionpress_directory_handle_name_lookup( $name ) {
         exit;
     }
 
-    wp_redirect( 'http://' . $info['onionaddress'] . '/' . $info['onionname'], 302 );
+    // Bare-NAME redirect on the onion side: point at the target's
+    // /<name>/ path, which onionpress-user-path.php rewrites to the
+    // user's author archive on the target's WordPress. That gives us a
+    // stable, share-worthy URL (op2abc.onion/brewsterkahle) even when the
+    // target has just one blog.
+    wp_redirect(
+        'http://' . $info['onionaddress'] . '/' . $info['onionname'] . '/',
+        302
+    );
     exit;
 }
 

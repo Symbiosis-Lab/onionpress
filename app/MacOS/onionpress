@@ -1269,6 +1269,20 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy user-path mu-plugin — serves /<onionname>/ as that user's
+    # author archive on every OnionPress install.
+    if [ -f "$plugins_dir/onionpress-user-path.php" ]; then
+        if docker cp "$plugins_dir/onionpress-user-path.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-user-path.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-user-path.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-user-path.php"
+            log "✓ onionpress-user-path.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-user-path.php"
+        fi
+    fi
+
     return 0
 }
 
