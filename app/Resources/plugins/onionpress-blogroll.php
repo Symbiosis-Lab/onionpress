@@ -28,6 +28,21 @@ add_action( 'update_option_onionpress_following', function () {
 } );
 
 /**
+ * Rewrite a Wayback Machine URL to use the "id_" (identity) flag so the
+ * server returns the raw archived bytes instead of a banner-wrapped page.
+ *     https://web.archive.org/web/YYYYMMDDHHMMSS/URL
+ *   → https://web.archive.org/web/YYYYMMDDHHMMSSid_/URL
+ * No-op for non-Wayback URLs and URLs that already carry a flag
+ * (id_, if_, im_, js_, fw_, etc.).
+ */
+function onionpress_wayback_raw_url( $url ) {
+    if ( preg_match( '#^(https?://web\.archive\.org/web/)(\d{14})(/)(.+)$#', $url, $m ) ) {
+        return $m[1] . $m[2] . 'id_' . $m[3] . $m[4];
+    }
+    return $url;
+}
+
+/**
  * Try to discover the RSS feed URL for a followed .onion address.
  *
  * For OnionPress multisite: http://<addr>/<onionname>/feed/
@@ -35,9 +50,10 @@ add_action( 'update_option_onionpress_following', function () {
  *
  * @param string $addr      56-char .onion address
  * @param string $onionname Optional onionname (path prefix)
+ * @param int    $timeout   Per-candidate HEAD timeout in seconds.
  * @return string Feed URL or empty string on failure
  */
-function onionpress_discover_feed_url( $addr, $onionname = '' ) {
+function onionpress_discover_feed_url( $addr, $onionname = '', $timeout = 15 ) {
     $candidates = array();
     if ( $onionname ) {
         $candidates[] = 'http://' . $addr . '/' . $onionname . '/feed/';
@@ -45,7 +61,7 @@ function onionpress_discover_feed_url( $addr, $onionname = '' ) {
     $candidates[] = 'http://' . $addr . '/feed/';
 
     foreach ( $candidates as $url ) {
-        $response = wp_remote_head( $url, array( 'timeout' => 15 ) );
+        $response = wp_remote_head( $url, array( 'timeout' => $timeout ) );
         if ( ! is_wp_error( $response ) ) {
             $code = wp_remote_retrieve_response_code( $response );
             if ( $code >= 200 && $code < 400 ) {
@@ -123,6 +139,9 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
                 $feed_url = onionpress_discover_feed_url( $addr, $onionname );
             }
             if ( $feed_url ) {
+                // Wayback Machine URLs need the id_ flag to serve raw feed
+                // bytes instead of the banner-wrapped HTML.
+                $feed_url = onionpress_wayback_raw_url( $feed_url );
                 $feeds_map[ $addr ] = $feed_url;
                 $feeds_changed = true;
             } else {

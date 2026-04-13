@@ -327,6 +327,30 @@ add_action( 'admin_init', function () {
 } );
 
 /**
+ * Surface the follow-probe result (set by the admin_init handler below)
+ * on the next page render.
+ */
+add_action( 'admin_notices', function () {
+    $key   = 'onionpress_follow_probe_' . get_current_user_id();
+    $probe = get_transient( $key );
+    if ( ! $probe ) {
+        return;
+    }
+    delete_transient( $key );
+    $label = isset( $probe['label'] ) ? $probe['label'] : 'follow';
+    if ( ! empty( $probe['ok'] ) ) {
+        echo '<div class="notice notice-success is-dismissible"><p>'
+            . 'Added <strong>' . esc_html( $label ) . '</strong> &mdash; feed verified.'
+            . '</p></div>';
+    } else {
+        echo '<div class="notice notice-warning is-dismissible"><p>'
+            . 'Added <strong>' . esc_html( $label ) . '</strong>, but the feed could not be reached on this first try. '
+            . 'It will be retried in the background with backoff.'
+            . '</p></div>';
+    }
+} );
+
+/**
  * Handle follow/unfollow submissions.
  */
 add_action( 'admin_init', function () {
@@ -383,7 +407,12 @@ add_action( 'admin_init', function () {
                 $resolved_name = strtolower( $pm[1] );
             }
         } elseif ( preg_match( '#^https?://#i', $raw ) ) {
-            // Direct feed or clearnet URL — store the URL itself as the key
+            // Direct feed or clearnet URL — store the URL itself as the
+            // key. Normalize Wayback URLs to the id_ flag so later fetches
+            // get raw feed bytes, not the banner-wrapped HTML.
+            if ( function_exists( 'onionpress_wayback_raw_url' ) ) {
+                $raw = onionpress_wayback_raw_url( $raw );
+            }
             $addr = $raw;
             $feed_url = $raw;
         } elseif ( function_exists( 'onionpress_directory_lookup' ) ) {
@@ -399,23 +428,78 @@ add_action( 'admin_init', function () {
         } else {
             $addr = strtolower( $raw );
         }
-        if ( $addr && ! in_array( $addr, $following, true ) ) {
-            $following[] = $addr;
-            update_option( 'onionpress_following', $following );
-            // Save the onionname mapping
+        if ( $addr ) {
+            if ( ! in_array( $addr, $following, true ) ) {
+                $following[] = $addr;
+                update_option( 'onionpress_following', $following );
+            }
+            // Update name/feed mappings whether or not this is a new follow:
+            // resubmitting .../<name>/... upgrades a previously nameless
+            // follow with the user-path, and a fresh explicit feed URL
+            // supersedes a stale cached one.
             if ( $resolved_name ) {
                 $names = get_option( 'onionpress_following_names', array() );
                 if ( ! is_array( $names ) ) { $names = array(); }
-                $names[ $addr ] = $resolved_name;
-                update_option( 'onionpress_following_names', $names );
+                if ( ! isset( $names[ $addr ] ) || $names[ $addr ] !== $resolved_name ) {
+                    $names[ $addr ] = $resolved_name;
+                    update_option( 'onionpress_following_names', $names );
+                    // Name changed → invalidate the cached feed URL so
+                    // discover_feed_url re-resolves against /<name>/feed/.
+                    $feeds = get_option( 'onionpress_following_feeds', array() );
+                    if ( is_array( $feeds ) && isset( $feeds[ $addr ] ) ) {
+                        unset( $feeds[ $addr ] );
+                        update_option( 'onionpress_following_feeds', $feeds );
+                    }
+                }
             }
-            // Save feed URL if known
             if ( $feed_url ) {
                 $feeds = get_option( 'onionpress_following_feeds', array() );
                 if ( ! is_array( $feeds ) ) { $feeds = array(); }
                 $feeds[ $addr ] = $feed_url;
                 update_option( 'onionpress_following_feeds', $feeds );
             }
+
+            // Quick-probe the feed so the admin gets immediate confirmation.
+            // Tight timeout keeps the save responsive; on failure we still
+            // keep the follow — the background fetcher retries with backoff.
+            $probe_label = $resolved_name ? ( '@' . $resolved_name ) : $addr;
+            $probe = array( 'label' => $probe_label, 'ok' => false, 'url' => '' );
+            $probe_url = '';
+            if ( preg_match( '/^[a-z2-7]{56}\.onion$/', $addr )
+                 && function_exists( 'onionpress_discover_feed_url' ) ) {
+                $probe_url = onionpress_discover_feed_url( $addr, $resolved_name, 8 );
+            } elseif ( preg_match( '#^https?://#i', $addr ) ) {
+                $probe_url = $addr;
+            }
+            if ( $probe_url ) {
+                $resp = wp_remote_get( $probe_url, array(
+                    'timeout' => 8,
+                    'headers' => array( 'Accept' => 'application/rss+xml, application/atom+xml, application/xml, text/xml' ),
+                ) );
+                if ( ! is_wp_error( $resp ) ) {
+                    $code = wp_remote_retrieve_response_code( $resp );
+                    $body = wp_remote_retrieve_body( $resp );
+                    if ( $code >= 200 && $code < 400
+                         && preg_match( '#<(rss|feed|rdf:RDF)\b#i', substr( $body, 0, 2048 ) ) ) {
+                        $probe['ok']  = true;
+                        $probe['url'] = $probe_url;
+                        // Seed stats so the UI immediately shows a green check.
+                        $stats = get_option( 'onionpress_following_stats', array() );
+                        if ( ! is_array( $stats ) ) { $stats = array(); }
+                        $stats[ $addr ] = array(
+                            'last_success' => time(),
+                            'fail_count'   => 0,
+                        );
+                        update_option( 'onionpress_following_stats', $stats );
+                        // Cache the verified feed URL too.
+                        $feeds = get_option( 'onionpress_following_feeds', array() );
+                        if ( ! is_array( $feeds ) ) { $feeds = array(); }
+                        $feeds[ $addr ] = $probe_url;
+                        update_option( 'onionpress_following_feeds', $feeds );
+                    }
+                }
+            }
+            set_transient( 'onionpress_follow_probe_' . get_current_user_id(), $probe, 60 );
         }
         wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
         exit;
@@ -941,6 +1025,9 @@ function onionpress_settings_page() {
         // Feed titles learned from RSS fetches
         $following_titles = get_option( 'onionpress_following_titles', array() );
         if ( ! is_array( $following_titles ) ) { $following_titles = array(); }
+        // Per-follow stats — used to color-code the status indicator.
+        $following_stats = get_option( 'onionpress_following_stats', array() );
+        if ( ! is_array( $following_stats ) ) { $following_stats = array(); }
         ?>
         <div style="margin-bottom: 20px; border: 1px solid #c3c4c7; border-radius: 4px; padding: 12px 16px; background: #f9f9f9;">
             <h2 style="margin-top: 0;">Following</h2>
@@ -950,9 +1037,25 @@ function onionpress_settings_page() {
                 <?php endif; ?>
                 <?php foreach ( $following as $addr ) : ?>
                 <div class="onionpress-following-entry" style="display: flex; align-items: center; margin-bottom: 4px;">
-                    <span class="onionpress-following-status" style="margin-right: 6px;"><?php
-                        echo preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ? '&#10003;' : '&#9888;';
-                    ?></span>
+                    <?php
+                        // Status: green check for confirmed (last_success set, no recent failures),
+                        // red warning for repeated failures, gray check for untested-but-well-formed,
+                        // red warning for malformed addresses.
+                        $st           = isset( $following_stats[ $addr ] ) ? $following_stats[ $addr ] : array();
+                        $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
+                        $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
+                        $well_formed  = preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) || preg_match( '#^https?://#i', $addr );
+                        if ( $last_success && ! $fail_count ) {
+                            $glyph = '&#10003;'; $color = '#1e8244'; // green
+                        } elseif ( $fail_count ) {
+                            $glyph = '&#9888;';  $color = '#d63638'; // red
+                        } elseif ( $well_formed ) {
+                            $glyph = '&#10003;'; $color = '#999';    // gray: awaiting first fetch
+                        } else {
+                            $glyph = '&#9888;';  $color = '#d63638'; // red
+                        }
+                    ?>
+                    <span class="onionpress-following-status" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>;"><?php echo $glyph; ?></span>
                     <code style="flex: 1; font-size: 12px;"><?php
                         $has_title = isset( $following_titles[ $addr ] ) && $following_titles[ $addr ];
                         $has_name  = isset( $following_names[ $addr ] );
