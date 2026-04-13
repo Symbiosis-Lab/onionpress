@@ -355,6 +355,8 @@ class OnionPressApp(rumps.App):
         self._onionheaven_registration_succeeded = False  # Whether registration succeeded
         self._onionheaven_heartbeat_succeeded = False     # Suppresses repeat heartbeat logs
         self._onionheaven_registration_in_flight = False  # Whether registration thread is running
+        self._onionname_retry_in_flight = False            # Onionname registration retry thread running
+        self._onionname_retry_giveup = False               # Stop retrying (post-collision, etc.)
         self._heartbeat_generation = 0                     # Incremented on wake; stale loops exit
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
         self._quitting = False                 # True once quit cleanup has started
@@ -1718,6 +1720,25 @@ class OnionPressApp(rumps.App):
                     self._analytics_sharing_started = True
                     analytics_sharing.start_analytics_sharing(self)
 
+                # Onionname: if a previous setup couldn't reach OnionHome,
+                # retry now that Tor is bootstrapped. No-op if already
+                # registered or not applicable.
+                if (tor_bootstrapped and self.onion_address
+                        and self.onion_address not in ["Starting...", "Not running", "Generating address..."]
+                        and not self.is_onionheaven
+                        and not self._onionname_retry_in_flight
+                        and not self._onionname_retry_giveup):
+                    pending = self.read_config_value("ONIONNAME", "")
+                    registered = self.read_config_value(
+                        "ONIONNAME_REGISTERED", "no"
+                    ) == "yes"
+                    if pending and not registered:
+                        self._onionname_retry_in_flight = True
+                        threading.Thread(
+                            target=self._retry_pending_onionname,
+                            daemon=True, name="onionname-retry",
+                        ).start()
+
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
                     wp_installed = self.check_wp_installed()
@@ -2740,6 +2761,207 @@ class OnionPressApp(rumps.App):
                 trigger_upload()
         self.start_service(None)
 
+    # ── Onionname registration ───────────────────────────────────────────
+    #
+    # The onionname is registered with OnionHome BEFORE WordPress is
+    # installed — that way the WP admin username is always a confirmed
+    # onionname and we never need a rename later. If OnionHome is
+    # unreachable we proceed with the user's chosen name and retry on every
+    # subsequent launch (see _retry_pending_onionname).
+
+    def _read_onion_address(self):
+        """Return the local wordpress .onion address, or None if not yet written."""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor", "cat",
+                 "/var/lib/tor/hidden_service/wordpress/hostname"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=10,
+            )
+            addr = result.stdout.strip()
+            if addr.endswith('.onion'):
+                return addr
+        except Exception as e:
+            self.log(f"onionname: can't read onion address: {e}")
+        return None
+
+    def _save_onionname(self, name, onionaddress, registered):
+        """Persist onionname state to ~/.onionpress/config."""
+        self.write_config_value("ONIONNAME", name)
+        self.write_config_value("ONIONNAME_ADDRESS", onionaddress or "")
+        self.write_config_value(
+            "ONIONNAME_REGISTERED", "yes" if registered else "no"
+        )
+
+    def _prompt_onionname_collision(self, current_name, suggestions):
+        """Modal alert — returns chosen new name or None if canceled.
+
+        MUST be called from a background thread; the AppKit modal runs on
+        the main thread and we block here until the user dismisses it.
+        """
+        result = {"name": None}
+        done = threading.Event()
+
+        def _show():
+            try:
+                alert = AppKit.NSAlert.alloc().init()
+                alert.setMessageText_(
+                    f"The onionname '{current_name}' is already taken"
+                )
+                info = "Pick a different onionname."
+                if suggestions:
+                    info += "\n\nSuggestions: " + ", ".join(suggestions)
+                alert.setInformativeText_(info)
+                alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
+
+                field = AppKit.NSTextField.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(0, 0, 320, 24)
+                )
+                field.setStringValue_(suggestions[0] if suggestions else "")
+                field.setPlaceholderString_("your-onionname")
+                alert.setAccessoryView_(field)
+
+                alert.addButtonWithTitle_("Use this name")
+                alert.addButtonWithTitle_("Skip for now")
+
+                response = alert.runModal()
+                if response == AppKit.NSAlertFirstButtonReturn:
+                    result["name"] = field.stringValue().strip()
+            finally:
+                done.set()
+
+        try:
+            from onionpress.ui_helpers import main_thread
+            main_thread(_show)
+        except ImportError:
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
+
+        # 5-minute timeout — user may be AFK mid-install. After that we give
+        # up and continue unregistered; they can fix it from Settings later.
+        if not done.wait(timeout=300):
+            self.log("onionname: collision dialog timed out")
+            return None
+        return result["name"] or None
+
+    def _retry_pending_onionname(self):
+        """Background retry for an onionname that didn't register during setup.
+
+        Runs on a daemon thread launched from check_status once Tor is up.
+        Silent on success and on retryable failures; logs and gives up on
+        a confirmed collision (which is rare — would mean another install
+        grabbed the name during an OnionHome outage).
+        """
+        try:
+            name = self.read_config_value("ONIONNAME", "")
+            if not name:
+                return
+            onionaddress = self._read_onion_address()
+            if not onionaddress:
+                return
+            try:
+                from onionpress.onionnames_registrar import Registrar
+            except Exception as e:
+                self.log(f"onionname: retry cannot import registrar: {e}")
+                return
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            reg = Registrar(docker_bin=docker_bin, log=self.log)
+            result = reg.register(name, onionaddress)
+            if result.ok:
+                self._save_onionname(name, onionaddress, registered=True)
+                self.log(f"onionname: retry succeeded for '{name}'")
+                self._onionname_retry_giveup = True
+            elif result.status == "collision":
+                # Someone else registered this name during the outage. We
+                # can't silently rename the user's WP admin account, so stop
+                # retrying and leave a breadcrumb in the log.
+                self.log(
+                    f"onionname: retry collision for '{name}'. "
+                    "Name was taken during an outage; skipping further "
+                    "retries. Manual fix required."
+                )
+                self._onionname_retry_giveup = True
+            else:
+                # Unreachable / forbidden / server error — try again next cycle
+                self.log(f"onionname: retry deferred ({result.status})")
+        except Exception as e:
+            self.log(f"onionname: retry thread error: {e}")
+        finally:
+            self._onionname_retry_in_flight = False
+
+    def _register_onionname_during_setup(self, sw):
+        """Try to register sw.admin_user with OnionHome.
+
+        On collision: prompt the user to pick a new name, update sw.admin_user,
+        retry. On unreachable / other failure: mark pending and let the
+        next-launch retry path handle it. Must not raise — failures here
+        should never block the install.
+        """
+        try:
+            from onionpress.onionnames_registrar import Registrar
+            from onionpress.onionnames_client import validate_name
+        except Exception as e:
+            self.log(f"onionname: cannot import registrar: {e}")
+            return
+
+        onionaddress = self._read_onion_address()
+        if not onionaddress:
+            self.log("onionname: no onion address yet, skipping register")
+            # Still save the preference so the retry path has something to
+            # register on the next launch.
+            self._save_onionname(sw.admin_user, "", registered=False)
+            return
+
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        reg = Registrar(docker_bin=docker_bin, log=self.log)
+
+        max_attempts = 5
+        name = sw.admin_user
+        for attempt in range(max_attempts):
+            if sw:
+                sw.set_status(f"Reserving onionname '{name}'...")
+                sw.add_log(f"Registering '{name}' with OnionHome...")
+            self.log(f"onionname: register attempt {attempt + 1}: "
+                     f"{name} -> {onionaddress}")
+            result = reg.register(name, onionaddress)
+
+            if result.ok:
+                self.log(f"onionname: registered '{name}'")
+                sw.admin_user = name
+                self._save_onionname(name, onionaddress, registered=True)
+                if sw:
+                    sw.add_log(f"Onionname '{name}' registered")
+                return
+
+            if result.status == "collision":
+                self.log(f"onionname: '{name}' taken; prompting user")
+                suggestions = result.suggestions or []
+                new_name = self._prompt_onionname_collision(name, suggestions)
+                if not new_name:
+                    break
+                ok, _ = validate_name(new_name)
+                if not ok:
+                    self.log(f"onionname: user-entered '{new_name}' invalid, "
+                             "retrying with same prompt")
+                    # Loop back — server will 400 this but we'd rather send
+                    # and let the server be authoritative than hide details.
+                name = new_name
+                continue
+
+            # Anything else is a non-collision failure — give up and let the
+            # retry-on-launch path handle it.
+            reason = result.reason or result.status
+            self.log(f"onionname: register failed ({result.status}: {reason})")
+            break
+
+        sw.admin_user = name
+        self._save_onionname(name, onionaddress, registered=False)
+        if sw:
+            sw.add_log(
+                "Onionname not registered with OnionHome yet — "
+                "will retry on next launch."
+            )
+
     def _wp_core_install(self, sw):
         """Run wp core install with credentials from the setup window."""
         if not sw or not sw.admin_pass:
@@ -2958,8 +3180,16 @@ class OnionPressApp(rumps.App):
                     self.log("WordPress responding")
                     if sw:
                         sw.add_log("WordPress responding")
-                    # Install WordPress with credentials from setup window
+                    # Install WordPress with credentials from setup window.
+                    # Register the onionname FIRST so the WP admin username is
+                    # always a confirmed, OnionHome-blessed onionname — the
+                    # registrar may mutate sw.admin_user if the user hit a
+                    # collision and picked a new name.
                     if sw and sw.admin_pass:
+                        try:
+                            self._register_onionname_during_setup(sw)
+                        except Exception as e:
+                            self.log(f"onionname: register path errored: {e}")
                         self._wp_core_install(sw)
                     if sw:
                         sw.complete_step(4)

@@ -25,6 +25,11 @@ import objc
 import threading
 import os
 
+try:
+    from onionpress import onionnames_client
+except ImportError:
+    onionnames_client = None
+
 
 # ---------------------------------------------------------------------------
 # Standard macOS colors
@@ -154,10 +159,21 @@ class SetupProgressWindow(AppKit.NSObject):
         self._log_file_path = os.path.expanduser("~/.onionpress/onionpress.log")
         # Credentials from welcome phase
         self.site_title = _default_site_title()
-        self.admin_user = "admin"
+        # Onionname defaults to a local adjective-noun suggestion. If the
+        # word lists aren't discoverable (unusual), we fall back to "admin"
+        # so the flow still works — the server-side registration path will
+        # catch anything weird.
+        default_name = None
+        if onionnames_client is not None:
+            try:
+                default_name = onionnames_client.suggest_name_local("en")
+            except Exception:
+                default_name = None
+        self.admin_user = default_name or "admin"
         self.admin_pass = ""
         self._title_field = None
         self._user_field = None
+        self._user_hint = None           # inline validation label
         self._pass_field = None
         self.language = "en_US"
         self._on_setup_callback = None  # Called when user clicks "Set Up"
@@ -253,22 +269,48 @@ class SetupProgressWindow(AppKit.NSObject):
         self._title_field.setStringValue_(_default_site_title())
         self.welcome_view.addSubview_(self._title_field)
 
-        # Username
+        # Onionname — the human-readable handle that OnionHome maps back to
+        # this site's .onion address. Doubles as the WordPress admin username.
         y -= 40
         self.welcome_view.addSubview_(_label(
             NSMakeRect(label_x, y, 130, 20),
-            "Username",
+            "Onionname",
             font=_bold(13), color=NSColor.labelColor(),
         ))
+        refresh_w = 28
+        user_field_w = field_w - refresh_w - 6
         self._user_field = _input_field(
-            NSMakeRect(field_x, y - 2, field_w, 24),
-            placeholder="admin",
+            NSMakeRect(field_x, y - 2, user_field_w, 24),
+            placeholder="your-onionname",
         )
-        self._user_field.setStringValue_("admin")
+        self._user_field.setStringValue_(self.admin_user)
         self.welcome_view.addSubview_(self._user_field)
 
+        refresh_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(field_x + user_field_w + 6, y - 2, refresh_w, 24)
+        )
+        refresh_btn.setTitle_("")
+        refresh_btn.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "arrow.clockwise", "Suggest a new onionname"
+        ))
+        refresh_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        refresh_btn.setImagePosition_(AppKit.NSImageOnly)
+        refresh_btn.setTarget_(self)
+        refresh_btn.setAction_(objc.selector(self.regenerateOnionname_, signature=b'v@:@'))
+        self.welcome_view.addSubview_(refresh_btn)
+
+        # Inline validation hint (hidden unless there's an error).
+        y -= 18
+        self._user_hint = _label(
+            NSMakeRect(field_x, y, field_w, 14),
+            "",
+            font=_sys(10), color=NSColor.systemRedColor(),
+        )
+        self._user_hint.setHidden_(True)
+        self.welcome_view.addSubview_(self._user_hint)
+
         # Password
-        y -= 40
+        y -= 22
         self.welcome_view.addSubview_(_label(
             NSMakeRect(label_x, y, 130, 20),
             "Password",
@@ -539,13 +581,40 @@ class SetupProgressWindow(AppKit.NSObject):
             self._pass_field.becomeFirstResponder()
             self._pass_visible = True
 
+    def regenerateOnionname_(self, sender):
+        """Pick a fresh local adjective-noun suggestion in the current language."""
+        if onionnames_client is None:
+            return
+        # Use the currently-selected language so the suggestion matches what
+        # the user just chose in the popup.
+        try:
+            lang_idx = self._language_popup.indexOfSelectedItem()
+        except Exception:
+            lang_idx = -1
+        lang = self._language_codes[lang_idx] if lang_idx >= 0 else "en_US"
+        try:
+            name = onionnames_client.suggest_name_local(lang) \
+                or onionnames_client.suggest_name_local("en")
+        except Exception:
+            name = None
+        if name and self._user_field:
+            self._user_field.setStringValue_(name)
+            self.admin_user = name
+            if self._user_hint:
+                self._user_hint.setHidden_(True)
+
+    def _show_user_hint(self, message):
+        if self._user_hint:
+            self._user_hint.setStringValue_(message)
+            self._user_hint.setHidden_(False)
+
     def setupClicked_(self, sender):
         """User clicked Set Up — save credentials and switch to progress view."""
         # Read field values
         if self._title_field:
             self.site_title = self._title_field.stringValue() or _default_site_title()
         if self._user_field:
-            self.admin_user = self._user_field.stringValue() or "admin"
+            self.admin_user = (self._user_field.stringValue() or "").strip()
         # Read from whichever password field is visible
         if self._pass_visible:
             self.admin_pass = self._pass_field.stringValue() or ""
@@ -556,12 +625,26 @@ class SetupProgressWindow(AppKit.NSObject):
         missing = False
         if not self.admin_user:
             red_placeholder = AppKit.NSAttributedString.alloc().initWithString_attributes_(
-                "Choose a username", {
+                "Choose an onionname", {
                     AppKit.NSForegroundColorAttributeName: NSColor.systemRedColor(),
                     AppKit.NSFontAttributeName: _sys(13),
                 })
             self._user_field.setPlaceholderAttributedString_(red_placeholder)
             missing = True
+        elif onionnames_client is not None:
+            ok, reason = onionnames_client.validate_name(self.admin_user)
+            if not ok:
+                self._show_user_hint({
+                    "too_short": "Onionname must be at least 5 characters.",
+                    "too_long":  "Onionname must be 40 characters or fewer.",
+                    "invalid_chars": "Use only letters, digits, '.', '_' or '-' "
+                                     "(start and end with a letter or digit).",
+                    "all_numeric": "Onionname cannot be all digits.",
+                }.get(reason, f"Onionname is invalid ({reason})."))
+                missing = True
+            else:
+                self._show_user_hint("")  # clear any prior error
+                self._user_hint.setHidden_(True)
         if not self.admin_pass:
             red_placeholder = AppKit.NSAttributedString.alloc().initWithString_attributes_(
                 "Choose a password", {
