@@ -1038,24 +1038,23 @@ function onionpress_settings_page() {
                 <?php foreach ( $following as $addr ) : ?>
                 <div class="onionpress-following-entry" style="display: flex; align-items: center; margin-bottom: 4px;">
                     <?php
-                        // Status: green check for confirmed (last_success set, no recent failures),
-                        // red warning for repeated failures, gray check for untested-but-well-formed,
-                        // red warning for malformed addresses.
+                        // Status glyph matches the menubar vocabulary:
+                        //   purple ✓ = fetched successfully (like menubar "running")
+                        //   yellow ⚠ = failing or malformed (like menubar "starting/stuck")
+                        //   blank    = never attempted yet (new follow, before first fetch)
                         $st           = isset( $following_stats[ $addr ] ) ? $following_stats[ $addr ] : array();
                         $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
                         $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
                         $well_formed  = preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) || preg_match( '#^https?://#i', $addr );
                         if ( $last_success && ! $fail_count ) {
-                            $glyph = '&#10003;'; $color = '#1e8244'; // green
-                        } elseif ( $fail_count ) {
-                            $glyph = '&#9888;';  $color = '#d63638'; // red
-                        } elseif ( $well_formed ) {
-                            $glyph = '&#10003;'; $color = '#999';    // gray: awaiting first fetch
+                            $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
+                        } elseif ( $fail_count || ! $well_formed ) {
+                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: failing
                         } else {
-                            $glyph = '&#9888;';  $color = '#d63638'; // red
+                            $glyph = '';         $color = '';        // blank: untested
                         }
                     ?>
-                    <span class="onionpress-following-status" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>;"><?php echo $glyph; ?></span>
+                    <span class="onionpress-following-status" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>; min-width: 14px; display: inline-block;"><?php echo $glyph; ?></span>
                     <code style="flex: 1; font-size: 12px;"><?php
                         $has_title = isset( $following_titles[ $addr ] ) && $following_titles[ $addr ];
                         $has_name  = isset( $following_names[ $addr ] );
