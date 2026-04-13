@@ -2900,15 +2900,26 @@ class OnionPressApp(rumps.App):
                 self.log(f"onionname: retry succeeded for '{name}'")
                 self._onionname_retry_giveup = True
             elif result.status == "collision":
-                # Someone else registered this name during the outage. We
-                # can't silently rename the user's WP admin account, so stop
-                # retrying and leave a breadcrumb in the log.
-                self.log(
-                    f"onionname: retry collision for '{name}'. "
-                    "Name was taken during an outage; skipping further "
-                    "retries. Manual fix required."
-                )
-                self._onionname_retry_giveup = True
+                # Someone else registered this name during the outage.
+                # Prompt the user to pick a new name, then update both
+                # OnionHome and the WordPress admin username.
+                self.log(f"onionname: retry collision for '{name}'")
+                suggestions = result.suggestions or []
+                new_name = self._prompt_onionname_collision(name, suggestions)
+                if new_name:
+                    retry_result = reg.register(new_name, onionaddress)
+                    if retry_result.ok:
+                        self._rename_wp_admin(name, new_name)
+                        self._save_onionname(new_name, onionaddress,
+                                             registered=True)
+                        self.log(f"onionname: collision resolved, "
+                                 f"renamed '{name}' -> '{new_name}'")
+                        self._onionname_retry_giveup = True
+                        return
+                    self.log(f"onionname: re-register '{new_name}' "
+                             f"failed ({retry_result.status})")
+                # User canceled or re-register failed — try again next cycle
+                self.log("onionname: collision not resolved, will retry")
             else:
                 # Unreachable / forbidden / server error — try again next cycle
                 self.log(f"onionname: retry deferred ({result.status})")
@@ -2989,6 +3000,31 @@ class OnionPressApp(rumps.App):
                 "Onionname not registered with OnionHome yet — "
                 "will retry on next launch."
             )
+
+    def _rename_wp_admin(self, old_name, new_name):
+        """Rename the WordPress admin user via WP-CLI (direct DB update)."""
+        try:
+            from onionpress.onionnames_client import validate_name
+        except ImportError:
+            return
+        # Safety: both names must pass validation (alphanumeric + ._- only)
+        if not validate_name(old_name)[0] or not validate_name(new_name)[0]:
+            self.log("onionname: rename aborted — name failed validation")
+            return
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        result = subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "db", "query",
+             f"UPDATE wp_users SET user_login='{new_name}', "
+             f"user_nicename='{new_name}' WHERE user_login='{old_name}'",
+             "--allow-root"],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=15
+        )
+        if result.returncode == 0:
+            self.log(f"WordPress admin renamed: '{old_name}' -> '{new_name}'")
+        else:
+            self.log(f"WordPress admin rename failed: {result.stderr.strip()}")
 
     def _wp_core_install(self, sw):
         """Run wp core install with credentials from the setup window."""
