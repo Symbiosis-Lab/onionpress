@@ -36,36 +36,42 @@ function onionpress_namesync_log( $message ) {
  * POST {"onionname": <login>} to /api/name/{register,release}-local and
  * record the result. Never throws — user creation/deletion must not be
  * blocked by a registrar outage.
+ *
+ * Uses direct curl rather than wp_remote_post because onionpress-tor-proxy
+ * globally routes WP HTTP through the Tor SOCKS proxy, which would turn a
+ * cheap Docker-network call into a full Tor round-trip and fail when the
+ * SOCKS proxy doesn't know how to reach docker-internal hostnames.
  */
 function onionpress_namesync_call( $action, $onionname ) {
-    $url = ONIONPRESS_NAMESYNC_ENDPOINT . '/api/name/' . $action . '-local';
-    $response = wp_remote_post(
-        $url,
-        array(
-            // Match the register-local forward path timeout; if we time out
-            // here it is because the tor container is stuck forwarding to
-            // OnionHome, and we should not hold up WP any longer than that.
-            'timeout'    => 35,
-            'headers'    => array( 'Content-Type' => 'application/json' ),
-            'body'       => wp_json_encode( array( 'onionname' => $onionname ) ),
-            'sslverify'  => false,
-            'user-agent' => 'onionpress-name-sync/1.0',
-        )
-    );
+    $url  = ONIONPRESS_NAMESYNC_ENDPOINT . '/api/name/' . $action . '-local';
+    $body = wp_json_encode( array( 'onionname' => $onionname ) );
 
-    if ( is_wp_error( $response ) ) {
-        onionpress_namesync_log(
-            sprintf( '%s %s: ERROR %s', $action, $onionname, $response->get_error_message() )
-        );
+    $ch = curl_init( $url );
+    if ( ! $ch ) {
+        onionpress_namesync_log( "$action $onionname: curl_init failed" );
+        return;
+    }
+    curl_setopt_array( $ch, array(
+        CURLOPT_POST           => 1,
+        CURLOPT_POSTFIELDS     => $body,
+        CURLOPT_HTTPHEADER     => array( 'Content-Type: application/json' ),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 35,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_USERAGENT      => 'onionpress-name-sync/1.0',
+    ) );
+    $response = curl_exec( $ch );
+    $code     = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $err      = curl_error( $ch );
+    curl_close( $ch );
+
+    if ( $response === false || $err ) {
+        onionpress_namesync_log( "$action $onionname: ERROR $err" );
         return;
     }
 
-    $code = (int) wp_remote_retrieve_response_code( $response );
-    $body = wp_remote_retrieve_body( $response );
-    $short = is_string( $body ) ? substr( $body, 0, 300 ) : '';
-    onionpress_namesync_log(
-        sprintf( '%s %s: %d %s', $action, $onionname, $code, $short )
-    );
+    $short = is_string( $response ) ? substr( $response, 0, 300 ) : '';
+    onionpress_namesync_log( "$action $onionname: $code $short" );
 }
 
 /**
