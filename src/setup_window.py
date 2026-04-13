@@ -159,17 +159,9 @@ class SetupProgressWindow(AppKit.NSObject):
         self._log_file_path = os.path.expanduser("~/.onionpress/onionpress.log")
         # Credentials from welcome phase
         self.site_title = _default_site_title()
-        # Onionname defaults to a local adjective-noun suggestion. If the
-        # word lists aren't discoverable (unusual), we fall back to "admin"
-        # so the flow still works — the server-side registration path will
-        # catch anything weird.
-        default_name = None
-        if onionnames_client is not None:
-            try:
-                default_name = onionnames_client.suggest_name_local("en")
-            except Exception:
-                default_name = None
-        self.admin_user = default_name or "admin"
+        # Onionname starts empty — the user types their own name first.
+        # A "Suggest" button offers random adjective-noun alternatives.
+        self.admin_user = ""
         self.admin_pass = ""
         self._title_field = None
         self._user_field = None
@@ -196,6 +188,9 @@ class SetupProgressWindow(AppKit.NSObject):
         self.window.setReleasedWhenClosed_(False)
         self.window.setHidesOnDeactivate_(False)
 
+        # Ensure an Edit menu exists so ⌘A/⌘C/⌘V/⌘X work in text fields.
+        self._ensure_edit_menu()
+
         content = self.window.contentView()
         self._create_welcome_view(content, width, height)
         self._create_progress_view(content, width, height)
@@ -204,6 +199,34 @@ class SetupProgressWindow(AppKit.NSObject):
         self.welcome_view.setHidden_(False)
         self.progress_view.setHidden_(True)
         self._showing_welcome = True
+
+    def _ensure_edit_menu(self):
+        """Add a standard Edit menu so ⌘A/⌘C/⌘V/⌘X work in text fields."""
+        app = AppKit.NSApplication.sharedApplication()
+        main_menu = app.mainMenu()
+        if main_menu is None:
+            main_menu = AppKit.NSMenu.alloc().init()
+            app.setMainMenu_(main_menu)
+        # Check if Edit menu already exists
+        for i in range(main_menu.numberOfItems()):
+            if main_menu.itemAtIndex_(i).title() == "Edit":
+                return
+        edit_menu = AppKit.NSMenu.alloc().initWithTitle_("Edit")
+        for title, action, key in [
+            ("Cut",        "cut:",        "x"),
+            ("Copy",       "copy:",       "c"),
+            ("Paste",      "paste:",      "v"),
+            ("Select All", "selectAll:",  "a"),
+            ("Undo",       "undo:",       "z"),
+        ]:
+            item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, objc.selector(None, selector=action.encode(), signature=b'v@:@'), key
+            )
+            edit_menu.addItem_(item)
+        edit_item = AppKit.NSMenuItem.alloc().init()
+        edit_item.setTitle_("Edit")
+        edit_item.setSubmenu_(edit_menu)
+        main_menu.addItem_(edit_item)
 
     def _create_welcome_view(self, content, width, height):
         """Phase 1: Logo + credential fields + Set Up button."""
@@ -277,24 +300,23 @@ class SetupProgressWindow(AppKit.NSObject):
             "Onionname",
             font=_bold(13), color=NSColor.labelColor(),
         ))
-        refresh_w = 28
-        user_field_w = field_w - refresh_w - 6
+        suggest_w = 100
+        user_field_w = field_w - suggest_w - 6
         self._user_field = _input_field(
             NSMakeRect(field_x, y - 2, user_field_w, 24),
-            placeholder="your-onionname",
+            placeholder="Your OnionName",
         )
-        self._user_field.setStringValue_(self.admin_user)
         self.welcome_view.addSubview_(self._user_field)
 
         refresh_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(field_x + user_field_w + 6, y - 2, refresh_w, 24)
+            NSMakeRect(field_x + user_field_w + 6, y - 2, suggest_w, 24)
         )
-        refresh_btn.setTitle_("")
+        refresh_btn.setTitle_("Suggest")
         refresh_btn.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "arrow.clockwise", "Suggest a new onionname"
+            "dice", "Suggest a random onionname"
         ))
         refresh_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
-        refresh_btn.setImagePosition_(AppKit.NSImageOnly)
+        refresh_btn.setImagePosition_(AppKit.NSImageLeading)
         refresh_btn.setTarget_(self)
         refresh_btn.setAction_(objc.selector(self.regenerateOnionname_, signature=b'v@:@'))
         self.welcome_view.addSubview_(refresh_btn)
@@ -408,6 +430,7 @@ class SetupProgressWindow(AppKit.NSObject):
         setup_btn.setKeyEquivalent_("\r")
         # Force blue appearance even when window is not key
         setup_btn.setWantsLayer_(True)
+        setup_btn.setIsBordered_(False)
         blue = NSColor.systemBlueColor()
         setup_btn.layer().setBackgroundColor_(blue.CGColor())
         setup_btn.layer().setCornerRadius_(7)
