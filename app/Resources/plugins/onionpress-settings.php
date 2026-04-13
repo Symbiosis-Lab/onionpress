@@ -370,6 +370,9 @@ add_action( 'admin_init', function () {
     if ( ! empty( $_POST['onionpress_follow_address'] ) ) {
         $raw = sanitize_text_field( wp_unslash( $_POST['onionpress_follow_address'] ) );
         $raw = trim( $raw );
+        // Accept @onionname — theme displays names as @handle, so users
+        // will copy/paste with the @ still attached.
+        $raw = ltrim( $raw, '@' );
         $resolved_name = '';
         $feed_url = '';
 
