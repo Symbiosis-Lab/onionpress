@@ -21,6 +21,17 @@ if '--bdist-base' not in ' '.join(sys.argv):
     sys.argv.extend(['--bdist-base=py2app_build'])
 
 APP = ['src/menubar.py']
+
+# Wordlists for local onionname suggestions — bundled from the same source
+# the tor container uses, so adding/editing a language only happens in one
+# place.
+_WORDLISTS_DIR = 'app/Resources/docker/tor/wordlists'
+_WORDLIST_FILES = [
+    os.path.join(_WORDLISTS_DIR, fname)
+    for fname in ('__init__.py', 'en.py', 'fr.py', 'es.py', 'de.py',
+                  'nl.py', 'pt.py', 'ja.py', 'zh.py', 'ar.py')
+]
+
 DATA_FILES = [
     ('', [
         'app/Resources/app-icon.png',
@@ -33,6 +44,7 @@ DATA_FILES = [
         'assets/branding/noun-computer-5963091.svg',
         'assets/branding/logo.png',
     ]),
+    ('wordlists', _WORDLIST_FILES),
 ]
 
 OPTIONS = {
@@ -63,7 +75,9 @@ OPTIONS = {
                  'onionpress.tor', 'onionpress.colima',
                  'onionpress.ui_helpers', 'onionpress.settings_ui',
                  'onionpress.browser', 'onionpress.log_rotation',
-                 'onionpress.analytics_sharing', 'setup_window'],
+                 'onionpress.analytics_sharing',
+                 'onionpress.onionnames_client',
+                 'onionpress.onionnames_registrar', 'setup_window'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size
