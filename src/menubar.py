@@ -3556,7 +3556,7 @@ class OnionPressApp(rumps.App):
 
         user_field = AppKit.NSTextField.alloc().initWithFrame_(
             AppKit.NSMakeRect(85, 44, 210, 24))
-        user_field.setStringValue_("admin")
+        user_field.setStringValue_(self._read_config_value("ONIONNAME", "admin"))
         container.addSubview_(user_field)
 
         pass_label = AppKit.NSTextField.labelWithString_("Password:")
