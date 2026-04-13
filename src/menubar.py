@@ -51,6 +51,21 @@ from onionpress.log_rotation import RotatingLog
 from onionpress import analytics_sharing
 
 
+# Branded onion addresses — canonical owners of special brand names.
+# Installs whose .onion matches one of these are "branded sites" where
+# blog_id=1 is the visible public surface (product pages, directory),
+# so first-run skips creating a /<onionname>/ subsite for the primary
+# user. Set onionpress_root_site=yes on the blog so the root-redirect
+# mu-plugin short-circuits too.
+#
+# Keep this list in sync with BRAND_NAMES in
+# app/Resources/docker/tor/onionnames.py.
+_BRANDED_ONIONS = frozenset({
+    "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",  # OnionHome / onionpress.org
+    "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",  # OnionHeaven
+})
+
+
 class OnionPressApp(rumps.App):
     def __init__(self):
         # Get paths first (fast - no I/O)
@@ -3009,12 +3024,96 @@ class OnionPressApp(rumps.App):
                 self.log("Plugins and mu-plugins installed")
                 if sw:
                     sw.add_log("Plugins installed")
+                # After multisite is up, either create the primary user's
+                # subsite at /<onionname>/ or mark this as a branded site
+                # (blog_id=1 stays canonical). See issue #187.
+                self._provision_primary_subsite(sw, onion_addr)
             else:
                 self.log(f"wp core install failed: {result.stderr[-200:]}")
                 if sw:
                     sw.add_log("WordPress setup may need manual configuration")
         except Exception as e:
             self.log(f"wp core install error: {e}")
+
+    def _provision_primary_subsite(self, sw, onion_addr):
+        """Create a subsite at /<onionname>/ for the primary user.
+
+        Unless this install is a branded site (matches `_BRANDED_ONIONS`) —
+        in which case blog_id=1 is the canonical public site (product
+        pages / directory), and we just set `onionpress_root_site=yes` so
+        the root-redirect mu-plugin leaves `/` alone.
+
+        Runs once during first-run after multisite conversion completes.
+        Idempotent: if a subsite at /<onionname>/ already exists the second
+        call is a no-op.
+        """
+        if not sw or not sw.admin_user:
+            return
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        onionname = sw.admin_user
+        branded = onion_addr in _BRANDED_ONIONS
+
+        if branded:
+            self.log(
+                f"Branded install ({onion_addr}); skipping /{onionname}/ "
+                "subsite, keeping blog_id=1 as the canonical surface"
+            )
+            # `--url=http://localhost/` routes wp-cli to blog_id=1 via
+            # sunrise.php (which keys on domain='localhost' path='/').
+            subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "option", "update", "onionpress_root_site", "yes",
+                 "--url=http://localhost/", "--allow-root"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=30,
+            )
+            return
+
+        # Non-branded: create the subsite at /<onionname>/ and make the
+        # primary user its admin. wp site create needs --url to identify
+        # an existing site in the network; we use localhost/ which routes
+        # to blog_id=1.
+        self.log(f"Creating primary subsite /{onionname}/")
+        if sw:
+            sw.set_status(f"Creating your blog at /{onionname}/...")
+            sw.add_log(f"Creating subsite /{onionname}/...")
+        result = subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "site", "create",
+             f"--slug={onionname}",
+             f"--title={sw.site_title or onionname}",
+             "--email=admin@onionpress.local",
+             "--url=http://localhost/", "--allow-root"],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=60,
+        )
+        if result.returncode != 0:
+            # "already exists" is fine; anything else we log and move on —
+            # the install is still usable, primary user just lives on
+            # blog_id=1 until they retry.
+            stderr = (result.stderr or "")[-300:]
+            if "already exists" in stderr.lower():
+                self.log(f"Subsite /{onionname}/ already exists — ok")
+            else:
+                self.log(f"wp site create failed: {stderr}")
+                if sw:
+                    sw.add_log("Subsite creation failed — your blog lives at /")
+                return
+        else:
+            self.log(f"Subsite /{onionname}/ created")
+
+        # `wp site create --email=...` adds the user as admin of the new
+        # subsite when the email matches an existing user, but belt-and-
+        # suspenders: explicitly grant administrator role on the subsite.
+        subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "user", "add-role", onionname, "administrator",
+             f"--url=http://localhost/{onionname}/", "--allow-root"],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=30,
+        )
+        if sw:
+            sw.add_log(f"Your blog is at /{onionname}/")
 
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.

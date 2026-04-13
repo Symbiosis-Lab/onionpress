@@ -1,10 +1,13 @@
 <?php
 /**
  * Plugin Name: OnionPress Root Redirect
- * Description: Redirects / to /<primary_onionname> when no static front page
- *              is configured. Lets users see their blog at their onionname URL
- *              by default, but respects any custom front page they set up.
- * Version:     1.0
+ * Description: On the network-root blog (blog_id=1), redirect / to the
+ *              primary subsite's home so visitors see the user's
+ *              /<onionname>/ URL rather than an empty root blog. Respects
+ *              static front pages, the onionpress_root_site flag (set on
+ *              branded installs like onionpress.org / OnionHome), and
+ *              pages that aren't the actual front URL.
+ * Version:     2.0
  * Network:     true
  */
 
@@ -13,40 +16,55 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 add_action( 'template_redirect', function () {
-    // Only redirect the exact root URL
-    if ( ! is_front_page() || ! is_home() ) {
+    // Only run on the network-root blog. On subsites the user is already
+    // on /<onionname>/; they should see their own site, not get bounced.
+    if ( get_current_blog_id() !== 1 ) {
         return;
     }
 
-    // If the user set a static front page, respect it — don't redirect
+    // Branded installs (onionpress.org product pages, OnionHome directory)
+    // keep blog_id=1 as the public face — never redirect.
+    if ( get_option( 'onionpress_root_site' ) === 'yes' ) {
+        return;
+    }
+
+    // Respect a static front page: the admin configured what `/` should
+    // show; don't second-guess them.
     if ( get_option( 'show_on_front' ) === 'page' && get_option( 'page_on_front' ) ) {
         return;
     }
 
-    // Get the primary onionname: first administrator's user_login
-    $admins = get_users( array(
-        'role'    => 'administrator',
-        'number'  => 1,
-        'orderby' => 'ID',
+    // Only redirect the actual front URL — not /?s=search, /feed, etc.
+    if ( ! is_front_page() ) {
+        return;
+    }
+
+    // Find the primary subsite: first wp_blogs row whose path isn't '/'.
+    // In the current single-primary-user model there's at most one; when
+    // we grow secondary subsites, the primary will still be created first
+    // and sort to the lowest id.
+    $sites = get_sites( array(
+        'number'  => 10,
+        'orderby' => 'id',
         'order'   => 'ASC',
-        'fields'  => array( 'ID', 'user_login' ),
     ) );
-    if ( empty( $admins ) || empty( $admins[0]->user_login ) ) {
-        return;
+    $primary = null;
+    foreach ( $sites as $s ) {
+        if ( $s->path !== '/' ) {
+            $primary = $s;
+            break;
+        }
     }
-    $onionname = $admins[0]->user_login;
-
-    // Don't redirect generic "admin" username — only redirect meaningful onionnames
-    if ( $onionname === 'admin' ) {
-        return;
-    }
-
-    // Don't redirect if we're already at /onionname
-    $path = trim( parse_url( $_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH ), '/' );
-    if ( strtolower( $path ) === strtolower( $onionname ) ) {
+    if ( ! $primary ) {
+        // No subsite yet — nothing to redirect to; fall through so the
+        // default blog listing still renders.
         return;
     }
 
-    wp_redirect( home_url( '/' . $onionname . '/' ), 302 );
+    switch_to_blog( $primary->blog_id );
+    $target = home_url( '/' );
+    restore_current_blog();
+
+    wp_redirect( $target, 302 );
     exit;
 } );

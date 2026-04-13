@@ -26,6 +26,18 @@ if ( ! defined( 'ABSPATH' ) ) {
  * get a chance to look at the path.
  */
 add_action( 'parse_request', function ( $wp ) {
+    // Only run on the network-root blog (blog_id=1). On real subsites
+    // (created per issue #187), `/<onionname>/` IS the subsite root and
+    // WP's native routing already serves it — intercepting here would
+    // override the subsite's own homepage with an author archive.
+    //
+    // On branded installs (onionpress.org / OnionHome) with no subsites,
+    // blog_id=1 is also the only blog and this plugin's author-archive
+    // fallback still applies for legacy /<login>/ paths.
+    if ( get_current_blog_id() !== 1 ) {
+        return;
+    }
+
     // Only GETs; leave wp-admin, XML-RPC, login, etc. untouched.
     if ( ( $_SERVER['REQUEST_METHOD'] ?? 'GET' ) !== 'GET' ) {
         return;
