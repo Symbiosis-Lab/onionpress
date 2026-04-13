@@ -65,6 +65,6 @@ add_action( 'template_redirect', function () {
     $target = home_url( '/' );
     restore_current_blog();
 
-    wp_redirect( $target, 302 );
+    wp_redirect( $target, 301 );
     exit;
 } );
