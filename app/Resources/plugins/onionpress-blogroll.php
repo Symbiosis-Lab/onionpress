@@ -81,15 +81,34 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
     $titles_map = get_option( 'onionpress_following_titles', array() );
     if ( ! is_array( $titles_map ) ) { $titles_map = array(); }
 
+    // Per-follow stats: last_success (unix), last_post (unix), fail_count (int)
+    $stats_map = get_option( 'onionpress_following_stats', array() );
+    if ( ! is_array( $stats_map ) ) { $stats_map = array(); }
+
     $all_items  = array();
     $start_time = time();
-    $feeds_changed = false;
+    $now        = time();
+    $feeds_changed  = false;
     $titles_changed = false;
+    $stats_changed  = false;
 
     foreach ( $following as $addr ) {
         // Bail if we've spent too long fetching feeds (Tor can be slow).
         if ( time() - $start_time > 60 ) {
             break;
+        }
+
+        // Back off on repeated failures: skip if not enough time has passed.
+        // 0 failures = always try, 1 = 1h, 2 = 2h, 3 = 4h, ... max 24h
+        $st = isset( $stats_map[ $addr ] ) ? $stats_map[ $addr ] : array();
+        $fail_count  = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
+        $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
+        if ( $fail_count > 0 && $last_success > 0 ) {
+            $backoff_hours = min( pow( 2, $fail_count - 1 ), 24 );
+            if ( $now - $last_success < $backoff_hours * HOUR_IN_SECONDS ) {
+                // Use cached items if available, skip fetching
+                continue;
+            }
         }
 
         $feed_url = isset( $feeds_map[ $addr ] ) ? $feeds_map[ $addr ] : '';
@@ -107,14 +126,27 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
                 $feeds_map[ $addr ] = $feed_url;
                 $feeds_changed = true;
             } else {
+                // Discovery failed — count as a failure
+                $st['fail_count'] = $fail_count + 1;
+                if ( ! $last_success ) { $st['last_success'] = $now; } // seed so backoff works
+                $stats_map[ $addr ] = $st;
+                $stats_changed = true;
                 continue;
             }
         }
 
         $feed = fetch_feed( $feed_url );
         if ( is_wp_error( $feed ) ) {
+            $st['fail_count'] = $fail_count + 1;
+            if ( ! $last_success ) { $st['last_success'] = $now; }
+            $stats_map[ $addr ] = $st;
+            $stats_changed = true;
             continue;
         }
+
+        // Success — reset failure count, record contact time
+        $st['last_success'] = $now;
+        $st['fail_count']   = 0;
 
         $feed_title = $feed->get_title();
         // Save the feed title for display in settings/sidebar
@@ -123,25 +155,38 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
             $titles_changed = true;
         }
         $items = $feed->get_items( 0, 10 );
+        $newest_post = 0;
         foreach ( $items as $item ) {
+            $item_date = (int) $item->get_date( 'U' );
+            if ( $item_date > $newest_post ) {
+                $newest_post = $item_date;
+            }
             $all_items[] = array(
                 'title'       => $item->get_title(),
                 'permalink'   => $item->get_permalink(),
-                'date'        => (int) $item->get_date( 'U' ),
+                'date'        => $item_date,
                 'author'      => $item->get_author() ? $item->get_author()->get_name() : '',
                 'source'      => $feed_title,
                 'source_addr' => $addr,
                 'excerpt'     => wp_trim_words( wp_strip_all_tags( $item->get_description() ), 30 ),
             );
         }
+        if ( $newest_post ) {
+            $st['last_post'] = $newest_post;
+        }
+        $stats_map[ $addr ] = $st;
+        $stats_changed = true;
     }
 
-    // Persist any newly discovered feed URLs or titles.
+    // Persist any newly discovered feed URLs, titles, or stats.
     if ( $feeds_changed ) {
         update_option( 'onionpress_following_feeds', $feeds_map );
     }
     if ( $titles_changed ) {
         update_option( 'onionpress_following_titles', $titles_map );
+    }
+    if ( $stats_changed ) {
+        update_option( 'onionpress_following_stats', $stats_map );
     }
 
     // Sort newest first.

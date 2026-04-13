@@ -352,14 +352,16 @@ add_action( 'admin_init', function () {
             return $a !== $remove;
         } ) );
         update_option( 'onionpress_following', $following );
-        // Clean up name, feed, and title mappings
+        // Clean up name, feed, title, and stats mappings
         $names  = get_option( 'onionpress_following_names', array() );
         $feeds  = get_option( 'onionpress_following_feeds', array() );
         $titles = get_option( 'onionpress_following_titles', array() );
-        unset( $names[ $remove ], $feeds[ $remove ], $titles[ $remove ] );
+        $stats  = get_option( 'onionpress_following_stats', array() );
+        unset( $names[ $remove ], $feeds[ $remove ], $titles[ $remove ], $stats[ $remove ] );
         update_option( 'onionpress_following_names', $names );
         update_option( 'onionpress_following_feeds', $feeds );
         update_option( 'onionpress_following_titles', $titles );
+        update_option( 'onionpress_following_stats', $stats );
         wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
         exit;
     }
