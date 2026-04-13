@@ -22,6 +22,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import sqlite3
 import string
 import subprocess
@@ -36,8 +37,21 @@ from datetime import datetime, timezone
 # Paths & constants
 # ---------------------------------------------------------------------------
 
-DATA_DIR = "/var/lib/onionhome"
+# The registry DB lives inside the `onionpress-data` named Docker volume
+# (already mounted at /var/lib/onionpress for the tor container), so it
+# survives container recreates — `docker compose down/up`, image updates,
+# VM-memory resizes, etc. OnionHeaven has been using this same volume for
+# its own registry.db since forever; we just park alongside it in a
+# sibling subdirectory.
+#
+# Analytics stay at /var/lib/onionhome/analytics/ via the existing host
+# bind-mount. Do NOT move that.
+DATA_DIR = "/var/lib/onionpress/onionhome"
 DB_PATH = os.path.join(DATA_DIR, "onionnames.db")
+
+# Pre-fix path for the one-shot migration on upgrade. Remove once every
+# deployed OnionHome has been booted at least once with the new path.
+LEGACY_DB_PATH = "/var/lib/onionhome/onionnames.db"
 
 MIN_NAME_LEN = 5
 MAX_NAME_LEN = 40
@@ -127,6 +141,45 @@ def db_connect(path=DB_PATH):
 def db_init(conn):
     conn.executescript(SCHEMA)
     conn.commit()
+
+
+def migrate_legacy_db():
+    """One-shot migration from the pre-fix location.
+
+    Pre-fix, the DB lived at /var/lib/onionhome/onionnames.db — a path
+    inside the tor container's writable layer, which meant every recreate
+    (image update, VM resize, compose edit) wiped the registry. If we find
+    a legacy file and nothing at the new path, move it across. If the new
+    path already has data, leave the legacy file alone — first-boot after
+    migration wins.
+
+    Never raises: an init-time failure here must not keep the web server
+    from starting, it just means this instance won't auto-migrate.
+    """
+    try:
+        if not os.path.exists(LEGACY_DB_PATH):
+            return False
+        if os.path.exists(DB_PATH):
+            log(f"migrate_legacy_db: new path already populated, "
+                f"leaving {LEGACY_DB_PATH} alone")
+            return False
+        os.makedirs(DATA_DIR, exist_ok=True)
+        shutil.move(LEGACY_DB_PATH, DB_PATH)
+        # Best-effort move of SQLite sidecar files too (-wal, -shm) if Arti's
+        # WAL mode left them behind. Absent sidecars are fine; they'll be
+        # regenerated on next open.
+        for suffix in ("-wal", "-shm"):
+            src = LEGACY_DB_PATH + suffix
+            if os.path.exists(src):
+                try:
+                    shutil.move(src, DB_PATH + suffix)
+                except OSError as e:
+                    log(f"migrate_legacy_db: sidecar {suffix} move failed: {e}")
+        log(f"migrate_legacy_db: relocated {LEGACY_DB_PATH} → {DB_PATH}")
+        return True
+    except Exception as e:
+        log(f"migrate_legacy_db: failed: {e}")
+        return False
 
 
 def _utcnow():

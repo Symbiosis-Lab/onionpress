@@ -1321,6 +1321,14 @@ def main():
     # Only OnionHome exposes the /api/name/* endpoints, but it's harmless to
     # create an empty DB on non-OnionHome instances (won't be read).
     if _is_onionhome():
+        # One-shot migration for installs that were running the pre-fix
+        # DB location (/var/lib/onionhome/onionnames.db) — harmless no-op
+        # on fresh installs. Runs BEFORE the first db_connect so we don't
+        # create an empty DB at the new path and block the migration.
+        try:
+            onionnames.migrate_legacy_db()
+        except Exception as e:
+            onionnames.log(f"startup: migrate_legacy_db errored: {e}")
         try:
             conn = onionnames.db_connect()
             try:

@@ -167,6 +167,27 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             if os.path.exists(unlocked_file):
                 os.unlink(unlocked_file)
 
+        # 4b. Backup OnionHome name registry if this is an OnionHome instance.
+        #     The DB is tiny (KB) but losing it strands every inbound
+        #     /api/name/lookup/NAME that ever pointed here — it's the
+        #     canonical record of who's who in the onion directory.
+        is_onionhome = False
+        onionhome_check = subprocess.run(
+            ['docker', 'exec', 'onionpress-wordpress',
+             'test', '-f', '/var/lib/onionpress/onionhome/onionnames.db'],
+            capture_output=True, timeout=10
+        )
+        if onionhome_check.returncode == 0:
+            log_func("Backup: copying OnionHome name registry...")
+            is_onionhome = True
+            onionhome_dir = os.path.join(staging, 'onionhome')
+            subprocess.run(
+                ['docker', 'cp',
+                 'onionpress-wordpress:/var/lib/onionpress/onionhome/.',
+                 onionhome_dir],
+                capture_output=True, timeout=60, check=True
+            )
+
         # 5. Save non-default config values
         data_dir = os.path.expanduser('~/.onionpress')
         config_path = os.path.join(data_dir, 'config')
@@ -186,6 +207,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             'onionpress_version': version,
             'username': username,
             'is_onionheaven': is_onionheaven,
+            'is_onionhome': is_onionhome,
         }
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -399,6 +421,26 @@ def restore_from_backup(zip_path, password, log_func):
                 capture_output=True, timeout=30
             )
             log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
+
+        # 4b. Restore OnionHome name registry if present in backup.
+        #     Kept root-owned — the tor container reads/writes these files
+        #     as root, same as OnionHeaven's tor-container-root files
+        #     alongside the www-data restore target above.
+        onionhome_dir = _find_dir(staging, 'onionhome')
+        if os.path.isdir(onionhome_dir) and os.path.exists(os.path.join(onionhome_dir, 'onionnames.db')):
+            log_func("Restore: restoring OnionHome name registry...")
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'mkdir', '-p', '/var/lib/onionpress/onionhome'],
+                capture_output=True, timeout=10
+            )
+            subprocess.run(
+                ['docker', 'cp',
+                 onionhome_dir + '/.',
+                 'onionpress-wordpress:/var/lib/onionpress/onionhome/'],
+                capture_output=True, timeout=60, check=True
+            )
+            log_func("Restore: OnionHome name registry restored")
 
         # 5. Re-add multisite constants to wp-config.php
         # WordPress Docker image generates a fresh wp-config.php without multisite
