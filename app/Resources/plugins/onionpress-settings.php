@@ -352,12 +352,14 @@ add_action( 'admin_init', function () {
             return $a !== $remove;
         } ) );
         update_option( 'onionpress_following', $following );
-        // Clean up name and feed mappings
-        $names = get_option( 'onionpress_following_names', array() );
-        $feeds = get_option( 'onionpress_following_feeds', array() );
-        unset( $names[ $remove ], $feeds[ $remove ] );
+        // Clean up name, feed, and title mappings
+        $names  = get_option( 'onionpress_following_names', array() );
+        $feeds  = get_option( 'onionpress_following_feeds', array() );
+        $titles = get_option( 'onionpress_following_titles', array() );
+        unset( $names[ $remove ], $feeds[ $remove ], $titles[ $remove ] );
         update_option( 'onionpress_following_names', $names );
         update_option( 'onionpress_following_feeds', $feeds );
+        update_option( 'onionpress_following_titles', $titles );
         wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
         exit;
     }
@@ -931,6 +933,9 @@ function onionpress_settings_page() {
             'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' => 'onionhome',
             'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' => 'onionheaven',
         );
+        // Feed titles learned from RSS fetches
+        $following_titles = get_option( 'onionpress_following_titles', array() );
+        if ( ! is_array( $following_titles ) ) { $following_titles = array(); }
         ?>
         <div style="margin-bottom: 20px; border: 1px solid #c3c4c7; border-radius: 4px; padding: 12px 16px; background: #f9f9f9;">
             <h2 style="margin-top: 0;">Following</h2>
@@ -944,7 +949,17 @@ function onionpress_settings_page() {
                         echo preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ? '&#10003;' : '&#9888;';
                     ?></span>
                     <code style="flex: 1; font-size: 12px;"><?php
-                        if ( isset( $following_names[ $addr ] ) ) {
+                        $has_title = isset( $following_titles[ $addr ] ) && $following_titles[ $addr ];
+                        $has_name  = isset( $following_names[ $addr ] );
+                        if ( $has_title ) {
+                            // Title is primary, address/onionname in gray
+                            echo '<strong>' . esc_html( $following_titles[ $addr ] ) . '</strong>';
+                            if ( $has_name ) {
+                                echo ' <span style="color:#999;">' . esc_html( $addr ) . '/' . esc_html( $following_names[ $addr ] ) . '</span>';
+                            } else {
+                                echo ' <span style="color:#999;">' . esc_html( substr( $addr, 0, 12 ) ) . '&hellip;.onion</span>';
+                            }
+                        } elseif ( $has_name ) {
                             echo '<strong>' . esc_html( $following_names[ $addr ] ) . '</strong>';
                             echo ' <span style="color:#999;">' . esc_html( substr( $addr, 0, 12 ) ) . '&hellip;.onion</span>';
                         } else {

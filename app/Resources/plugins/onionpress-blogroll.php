@@ -78,9 +78,13 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
     if ( ! is_array( $feeds_map ) ) { $feeds_map = array(); }
     if ( ! is_array( $names_map ) ) { $names_map = array(); }
 
+    $titles_map = get_option( 'onionpress_following_titles', array() );
+    if ( ! is_array( $titles_map ) ) { $titles_map = array(); }
+
     $all_items  = array();
     $start_time = time();
     $feeds_changed = false;
+    $titles_changed = false;
 
     foreach ( $following as $addr ) {
         // Bail if we've spent too long fetching feeds (Tor can be slow).
@@ -113,6 +117,11 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
         }
 
         $feed_title = $feed->get_title();
+        // Save the feed title for display in settings/sidebar
+        if ( $feed_title && ( ! isset( $titles_map[ $addr ] ) || $titles_map[ $addr ] !== $feed_title ) ) {
+            $titles_map[ $addr ] = $feed_title;
+            $titles_changed = true;
+        }
         $items = $feed->get_items( 0, 10 );
         foreach ( $items as $item ) {
             $all_items[] = array(
@@ -127,9 +136,12 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
         }
     }
 
-    // Persist any newly discovered feed URLs.
+    // Persist any newly discovered feed URLs or titles.
     if ( $feeds_changed ) {
         update_option( 'onionpress_following_feeds', $feeds_map );
+    }
+    if ( $titles_changed ) {
+        update_option( 'onionpress_following_titles', $titles_map );
     }
 
     // Sort newest first.

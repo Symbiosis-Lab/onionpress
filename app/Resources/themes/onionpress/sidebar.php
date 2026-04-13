@@ -7,8 +7,10 @@
     // Follows — reads from the onionpress_following option (managed in OnionPress Settings)
     $following = get_option('onionpress_following', array());
     $following_names = get_option('onionpress_following_names', array());
+    $following_titles = get_option('onionpress_following_titles', array());
     if (!is_array($following)) { $following = array(); }
     if (!is_array($following_names)) { $following_names = array(); }
+    if (!is_array($following_titles)) { $following_titles = array(); }
     // Well-known names
     $following_names += array(
         'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' => 'onionhome',
@@ -19,7 +21,9 @@
             <h3>Follows</h3>
             <ul>
                 <?php foreach ($following as $addr) :
-                    if (isset($following_names[$addr])) {
+                    if (isset($following_titles[$addr]) && $following_titles[$addr]) {
+                        $label = $following_titles[$addr];
+                    } elseif (isset($following_names[$addr])) {
                         $label = '@' . $following_names[$addr];
                     } elseif (strlen($addr) > 20) {
                         $label = substr($addr, 0, 12) . '...';
@@ -48,9 +52,13 @@
             <h3>Feed</h3>
             <ul>
                 <?php foreach ($feed_items as $item) :
-                    $source = isset($following_names[$item['source_addr']])
-                        ? '@' . $following_names[$item['source_addr']]
-                        : $item['source'];
+                    if (isset($following_titles[$item['source_addr']]) && $following_titles[$item['source_addr']]) {
+                        $source = $following_titles[$item['source_addr']];
+                    } elseif (isset($following_names[$item['source_addr']])) {
+                        $source = '@' . $following_names[$item['source_addr']];
+                    } else {
+                        $source = $item['source'];
+                    }
                 ?>
                     <li>
                         <a href="<?php echo esc_url($item['permalink']); ?>">

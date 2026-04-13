@@ -17,6 +17,8 @@ $names_map += array(
     'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' => 'onionhome',
     'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' => 'onionheaven',
 );
+$titles_map = get_option( 'onionpress_following_titles', array() );
+if ( ! is_array( $titles_map ) ) { $titles_map = array(); }
 ?>
 
 <article class="post">
@@ -29,9 +31,12 @@ $names_map += array(
     <?php else : ?>
         <div class="blogroll-feed">
             <?php foreach ( $items as $item ) :
-                $source_label = $item['source'];
-                if ( isset( $names_map[ $item['source_addr'] ] ) ) {
+                if ( isset( $titles_map[ $item['source_addr'] ] ) && $titles_map[ $item['source_addr'] ] ) {
+                    $source_label = $titles_map[ $item['source_addr'] ];
+                } elseif ( isset( $names_map[ $item['source_addr'] ] ) ) {
                     $source_label = '@' . $names_map[ $item['source_addr'] ];
+                } else {
+                    $source_label = $item['source'];
                 }
                 $date_display = $item['date'] ? date( 'M j, Y', $item['date'] ) : '';
             ?>
