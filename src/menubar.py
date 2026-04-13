@@ -2253,13 +2253,23 @@ class OnionPressApp(rumps.App):
         """The local URL for accessing WordPress."""
         return f"http://localhost:{self.wp_port}"
 
+    def _onion_url(self):
+        """Return the full onion URL including /onionname if set."""
+        if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
+            return None
+        name = self.read_config_value("ONIONNAME", "")
+        if name:
+            return f"http://{self.onion_address}/{name}"
+        return f"http://{self.onion_address}/"
+
     @rumps.clicked("Copy Onion Address")
     def copy_address(self, _):
         """Copy onion address to clipboard"""
-        if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
+        url = self._onion_url()
+        if url:
             subprocess.run(
                 ["pbcopy"],
-                input=self.onion_address.encode(),
+                input=url.encode(),
                 check=True
             )
         else:
@@ -2297,7 +2307,9 @@ class OnionPressApp(rumps.App):
 
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
-        url = self._generate_login_url(self.local_url)
+        name = self.read_config_value("ONIONNAME", "")
+        local_base = f"{self.local_url}/{name}" if name else self.local_url
+        url = self._generate_login_url(local_base)
         subprocess.run(["open", url])
         self.log(f"Opened local site: {url}")
 
@@ -2369,8 +2381,9 @@ class OnionPressApp(rumps.App):
 
     def open_tor_browser(self, _):
         """Open the onion address in the best available browser."""
-        if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            url = self._generate_login_url(f"http://{self.onion_address}/")
+        base = self._onion_url()
+        if base:
+            url = self._generate_login_url(base)
             if not op_browser.open_onion_url(url, self.app_support, self.log):
                 self.show_browser_install_dialog()
         else:
