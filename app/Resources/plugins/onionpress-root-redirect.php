@@ -65,6 +65,10 @@ add_action( 'template_redirect', function () {
     $target = home_url( '/' );
     restore_current_blog();
 
+    // 301 tells search engines the canonical location, but no-store keeps
+    // browsers and proxies from caching it — so if the primary onionname
+    // ever changes, users don't get permanently stuck on the old target.
+    nocache_headers();
     wp_redirect( $target, 301 );
     exit;
 } );

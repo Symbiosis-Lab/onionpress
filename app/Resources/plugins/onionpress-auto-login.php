@@ -52,6 +52,10 @@ add_action( 'init', function () {
     setcookie( LOGGED_IN_COOKIE, $logged_in_cookie, $expiration, COOKIEPATH,          $cookie_domain, false, true );
     setcookie( LOGGED_IN_COOKIE, $logged_in_cookie, $expiration, SITECOOKIEPATH,      $cookie_domain, false, true );
 
+    // Response carries Set-Cookie headers — nocache_headers() stops any
+    // intermediate from caching the cookies and serving them to the next
+    // visitor.
+    nocache_headers();
     wp_redirect( remove_query_arg( 'op_login' ) );
     exit;
 } );
