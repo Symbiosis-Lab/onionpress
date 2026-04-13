@@ -1255,6 +1255,20 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy directory mu-plugin — turns OnionHome / onionpress.org into the
+    # registry resolver (no-op on non-OnionHome instances).
+    if [ -f "$plugins_dir/onionpress-directory.php" ]; then
+        if docker cp "$plugins_dir/onionpress-directory.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-directory.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-directory.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-directory.php"
+            log "✓ onionpress-directory.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-directory.php"
+        fi
+    fi
+
     return 0
 }
 
