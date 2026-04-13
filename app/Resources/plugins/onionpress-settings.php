@@ -407,12 +407,7 @@ add_action( 'admin_init', function () {
                 $resolved_name = strtolower( $pm[1] );
             }
         } elseif ( preg_match( '#^https?://#i', $raw ) ) {
-            // Direct feed or clearnet URL — store the URL itself as the
-            // key. Normalize Wayback URLs to the id_ flag so later fetches
-            // get raw feed bytes, not the banner-wrapped HTML.
-            if ( function_exists( 'onionpress_wayback_raw_url' ) ) {
-                $raw = onionpress_wayback_raw_url( $raw );
-            }
+            // Direct feed or clearnet URL — store the URL itself as the key.
             $addr = $raw;
             $feed_url = $raw;
         } elseif ( function_exists( 'onionpress_directory_lookup' ) ) {
