@@ -22,7 +22,7 @@ RUN useradd -r -m -s /bin/false arti
 COPY --from=builder /usr/local/cargo/bin/arti /usr/local/bin/arti
 
 # Cache-bust: changing this value forces rebuild of all COPY layers below
-ARG CACHEBUST=2026-03-18a
+ARG CACHEBUST=2026-04-13a
 COPY arti.toml /etc/arti/arti.toml
 COPY arti-polling.toml /etc/arti/arti-polling.toml
 COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
@@ -39,5 +39,7 @@ COPY onionheaven-queue-manager.py /onionheaven-queue-manager.py
 COPY key-convert.py /key-convert.py
 COPY torrc.template /etc/tor/torrc.template
 COPY tor-watchdog.py /tor-watchdog.py
+COPY onionnames.py /onionnames.py
+COPY wordlists /wordlists
 RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py
 ENTRYPOINT ["/entrypoint.sh"]

@@ -271,3 +271,50 @@ def verify_payload(content_address, endpoint, healthcheck_address,
         return False, "Invalid signature"
 
     return True, ""
+
+
+# ── OnionPress name-registry payload signing / verification ──
+#
+# Distinct namespace from the OnionHeaven payload so a signature from one
+# system can never be replayed against the other. Canonical message:
+#   "name:{endpoint}|{onionaddress}|{name_lower}|{timestamp}"
+
+def sign_name_payload(expanded_key, public_key, endpoint, onionaddress,
+                      name, timestamp):
+    """Sign an onionname-registry payload. Returns base64 signature string."""
+    canonical = f"name:{endpoint}|{onionaddress}|{name.lower()}|{timestamp}"
+    sig = sign_expanded(expanded_key, public_key, canonical.encode('utf-8'))
+    return base64.b64encode(sig).decode('ascii')
+
+
+def verify_name_payload(onionaddress, endpoint, name, timestamp, signature_b64):
+    """Verify an onionname-registry payload signature.
+
+    Returns (ok, error_message).
+    """
+    if not timestamp or not signature_b64:
+        return False, "Missing timestamp or signature"
+
+    try:
+        ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        delta = abs((datetime.now(timezone.utc) - ts).total_seconds())
+        if delta > TIMESTAMP_TOLERANCE:
+            return False, "Timestamp expired or too far in future"
+    except (ValueError, TypeError):
+        return False, "Invalid timestamp format"
+
+    try:
+        public_key = decode_onion_address(onionaddress)
+    except ValueError as e:
+        return False, f"Cannot decode public key from onionaddress: {e}"
+
+    try:
+        sig = base64.b64decode(signature_b64)
+    except Exception:
+        return False, "Invalid signature base64"
+
+    canonical = f"name:{endpoint}|{onionaddress}|{name.lower()}|{timestamp}"
+    if not verify(public_key, canonical.encode('utf-8'), sig):
+        return False, "Invalid signature"
+
+    return True, ""

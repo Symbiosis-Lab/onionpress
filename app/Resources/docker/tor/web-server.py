@@ -31,13 +31,15 @@ import struct
 import sys
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 
-from onion_auth import verify_payload
+from onion_auth import verify_payload, verify_name_payload
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_tor,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR,
 )
+import onionnames
 
 SERVER_VERSION = os.environ.get("ONIONPRESS_VERSION", "unknown")
 
@@ -306,6 +308,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         elif path.startswith("/status/"):
             addr = path[len("/status/"):]
             self._handle_status_detail(addr)
+        elif path == "/api/name/suggest":
+            self._handle_name_suggest()
+        elif path == "/api/name/check":
+            self._handle_name_check()
+        elif path.startswith("/api/name/lookup/"):
+            name = path[len("/api/name/lookup/"):]
+            self._handle_name_lookup(name)
         else:
             self._send_json(404, {"error": "Not found"})
 
@@ -520,6 +529,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "/reset-onionheaven": self._handle_reset_onionheaven,
             "/logs/manifest": self._handle_logs_manifest,
             "/logs/upload": self._handle_logs_upload,
+            "/api/name/register": self._handle_name_register,
+            "/api/name/release": self._handle_name_release,
         }
         handler = handlers.get(path)
         if handler is None:
@@ -530,6 +541,181 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.log_message("ERROR in %s: %s", path, e)
             self._send_json(500, {"error": str(e)})
+
+    # -- Name registry -----------------------------------------------------
+    #
+    # All /api/name/* endpoints are OnionHome-only. Non-OnionHome instances
+    # return 404 so clients don't try to talk to them.
+    #
+    # Signature verification for register/release is unconditional — the
+    # signature IS the ownership proof. Source IP is irrelevant (OnionHome
+    # sees every .onion-origin request as coming from the Docker network).
+
+    def _name_query(self):
+        return parse_qs(urlparse(self.path).query)
+
+    def _handle_name_suggest(self):
+        if not _is_onionhome():
+            self._send_json(404, {"error": "Not found"})
+            return
+        params = self._name_query()
+        lang = (params.get("lang", ["en"])[0] or "en").lower()
+        conn = onionnames.db_connect()
+        try:
+            onionnames.db_init(conn)
+            name = onionnames.suggest_name(conn, lang=lang)
+        finally:
+            conn.close()
+        if not name:
+            self._send_json(503, {"error": "Unable to generate suggestion"})
+            return
+        self._send_json(200, {"onionname": name, "lang": lang})
+
+    def _handle_name_check(self):
+        if not _is_onionhome():
+            self._send_json(404, {"error": "Not found"})
+            return
+        params = self._name_query()
+        name = params.get("name", [""])[0]
+        if not name:
+            self._send_json(400, {"error": "Missing required parameter: name"})
+            return
+        conn = onionnames.db_connect()
+        try:
+            onionnames.db_init(conn)
+            result = onionnames.check_name(conn, name)
+            if not result["available"] and result["reason"] in ("taken", "reserved"):
+                result["suggestions"] = onionnames.generate_alternatives(conn, name)
+        finally:
+            conn.close()
+        self._send_json(200, result)
+
+    def _handle_name_lookup(self, name):
+        if not _is_onionhome():
+            self._send_json(404, {"error": "Not found"})
+            return
+        if not name:
+            self._send_json(400, {"error": "Missing name"})
+            return
+        conn = onionnames.db_connect()
+        try:
+            onionnames.db_init(conn)
+            entry = onionnames.lookup_name(conn, name)
+        finally:
+            conn.close()
+        if entry is None:
+            self._send_json(404, {"error": "Not found"})
+            return
+        self._send_json(200, entry)
+
+    def _handle_name_register(self):
+        if not _is_onionhome():
+            self._send_json(404, {"error": "Not found"})
+            return
+        data = self._read_json()
+        if data is False:
+            return  # 413 already sent
+        if not data:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        onionaddress = data.get("onionaddress", "")
+        name = data.get("onionname", "")
+        timestamp = data.get("timestamp", "")
+        signature = data.get("signature", "")
+
+        if not onionaddress or not ONION_RE.match(onionaddress):
+            self._send_json(400, {"error": "Invalid or missing onionaddress"})
+            return
+        if not name:
+            self._send_json(400, {"error": "Missing onionname"})
+            return
+
+        ok, err = verify_name_payload(
+            onionaddress, "register", name, timestamp, signature
+        )
+        if not ok:
+            self._send_json(403, {"error": err})
+            return
+
+        conn = onionnames.db_connect()
+        try:
+            onionnames.db_init(conn)
+            # If the same address has already registered this exact name, the
+            # second call is a no-op success (idempotent retry).
+            existing = onionnames.lookup_name(conn, name)
+            if (existing and existing["onionaddress"] == onionaddress
+                    and existing["onionname"].lower() == name.lower()):
+                self._send_json(200, {
+                    "onionname": existing["onionname"],
+                    "onionaddress": onionaddress,
+                    "url": existing["url"],
+                    "already_registered": True,
+                })
+                return
+            ok, reason, alternatives = onionnames.register_name(
+                conn, name, onionaddress
+            )
+        finally:
+            conn.close()
+
+        if not ok:
+            status = 400
+            if reason in ("taken", "reserved"):
+                status = 409
+            body = {"error": reason}
+            if alternatives:
+                body["suggestions"] = alternatives
+            self._send_json(status, body)
+            return
+
+        self._send_json(201, {
+            "onionname": name,
+            "onionaddress": onionaddress,
+            "url": f"http://{onionaddress}/{name}",
+        })
+
+    def _handle_name_release(self):
+        if not _is_onionhome():
+            self._send_json(404, {"error": "Not found"})
+            return
+        data = self._read_json()
+        if data is False:
+            return
+        if not data:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        onionaddress = data.get("onionaddress", "")
+        name = data.get("onionname", "")
+        timestamp = data.get("timestamp", "")
+        signature = data.get("signature", "")
+
+        if not onionaddress or not ONION_RE.match(onionaddress):
+            self._send_json(400, {"error": "Invalid or missing onionaddress"})
+            return
+        if not name:
+            self._send_json(400, {"error": "Missing onionname"})
+            return
+
+        ok, err = verify_name_payload(
+            onionaddress, "release", name, timestamp, signature
+        )
+        if not ok:
+            self._send_json(403, {"error": err})
+            return
+
+        conn = onionnames.db_connect()
+        try:
+            onionnames.db_init(conn)
+            ok, reason = onionnames.release_name(conn, name, onionaddress)
+        finally:
+            conn.close()
+        if not ok:
+            status = 404 if reason == "not_found" else 403
+            self._send_json(status, {"error": reason})
+            return
+        self._send_json(200, {"released": True, "onionname": name})
 
     # -- POST /unregister ---------------------------------------------------
 
@@ -1055,11 +1241,34 @@ def main():
     os.makedirs(KEYS_DIR, exist_ok=True)
     if _is_onionhome():
         os.makedirs(ANALYTICS_DIR, exist_ok=True)
+        os.makedirs(onionnames.DATA_DIR, exist_ok=True)
 
     # Initialize DB schema
     conn = db_connect()
     db_ensure_schema(conn)
     conn.close()
+
+    # Initialize onionname registry DB and kick off reservation refresh.
+    # Only OnionHome exposes the /api/name/* endpoints, but it's harmless to
+    # create an empty DB on non-OnionHome instances (won't be read).
+    if _is_onionhome():
+        try:
+            conn = onionnames.db_connect()
+            try:
+                onionnames.db_init(conn)
+                # Synchronous refresh at boot so reservations are present
+                # before the first request. Failure is non-fatal — retry
+                # handled by the background thread.
+                count = onionnames.refresh_dynamic_reservations(conn)
+                if count is not None:
+                    onionnames.log(
+                        f"dynamic reservations refreshed on startup: {count}"
+                    )
+            finally:
+                conn.close()
+        except Exception as e:
+            onionnames.log(f"startup refresh failed: {e}")
+        onionnames.start_refresh_thread()
 
     server = HTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
