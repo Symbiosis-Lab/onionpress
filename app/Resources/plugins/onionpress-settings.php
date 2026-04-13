@@ -995,13 +995,12 @@ function onionpress_settings_page() {
             <span class="onionpress-state-dot" style="background:<?php echo esc_attr( $state_color ); ?>"></span>
             <strong><?php echo esc_html( ucfirst( $state ) ); ?></strong>
             <?php if ( $onion_address && strpos( $onion_address, '.onion' ) !== false ) : ?>
-                &mdash; <code style="font-size:12px;color:#8b5cf6;"><?php
+                &mdash; <?php
                     $display_url = $onion_address;
                     if ( $onionname ) {
                         $display_url .= '/' . $onionname;
                     }
-                    echo esc_html( $display_url );
-                ?></code>
+                ?><a href="http://<?php echo esc_attr( $display_url ); ?>/" style="font-size:12px;font-family:monospace;color:#8b5cf6;"><?php echo esc_html( $display_url ); ?></a>
             <?php endif; ?>
             &mdash; <a href="/onionpress-status">View full status &amp; logs &rarr;</a>
         </p>

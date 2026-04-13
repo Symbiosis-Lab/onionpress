@@ -72,14 +72,14 @@ img {
 
 .header-cover {
     width: 100%;
-    height: 240px;
+    height: 140px;
     object-fit: cover;
     display: block;
 }
 
 .header-cover-placeholder {
     width: 100%;
-    height: 240px;
+    height: 140px;
     background: linear-gradient(135deg, #e9e0f5 0%, #c4b5e0 50%, #a78bdb 100%);
 }
 
