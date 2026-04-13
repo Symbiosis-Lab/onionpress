@@ -228,6 +228,37 @@ class TestRegistration(_FreshDBMixin, unittest.TestCase):
         self.assertEqual(reason, "reserved")
         self.assertIsInstance(alts, list)
 
+    def test_brand_exception_allows_canonical_owner(self):
+        # onionhome is reserved globally, but the canonical op2home
+        # address can still register it.
+        canonical_home = onionnames.BRAND_NAMES["onionhome"]
+        ok, reason, alts = onionnames.register_name(
+            self.conn, "onionhome", canonical_home
+        )
+        self.assertTrue(ok, f"canonical owner should succeed (got {reason})")
+        self.assertIsNone(reason)
+        row = onionnames.lookup_name(self.conn, "onionhome")
+        self.assertEqual(row["onionaddress"], canonical_home)
+
+    def test_brand_exception_rejects_non_canonical(self):
+        # Some other .onion trying to claim onionhome is still rejected.
+        ok, reason, alts = onionnames.register_name(
+            self.conn, "onionhome", self.addr1
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "reserved")
+        self.assertIsInstance(alts, list)
+
+    def test_brand_exception_case_insensitive(self):
+        canonical_home = onionnames.BRAND_NAMES["onionhome"]
+        # Display case preserved, exception still applies.
+        ok, reason, _ = onionnames.register_name(
+            self.conn, "OnionHome", canonical_home
+        )
+        self.assertTrue(ok, f"canonical owner should succeed (got {reason})")
+        row = onionnames.lookup_name(self.conn, "OnionHome")
+        self.assertEqual(row["onionname"], "OnionHome")
+
     def test_register_rejects_invalid_address(self):
         ok, reason, _ = onionnames.register_name(
             self.conn, "alice1", "not-a-real-onion"

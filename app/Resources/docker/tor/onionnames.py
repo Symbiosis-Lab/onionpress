@@ -95,6 +95,15 @@ HARDCODED_RESERVED = frozenset([
     "register", "settings", "account", "profile", "search",
 ])
 
+# Brand names that are reserved for everyone EXCEPT the specific .onion
+# address they're meant to belong to. The canonical owner can register
+# their brand name; every other caller hits the usual "reserved" rejection.
+# Keyed by lowercased name → the single .onion address allowed to claim it.
+BRAND_NAMES = {
+    "onionhome":   "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
+    "onionheaven": "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",
+}
+
 
 # ---------------------------------------------------------------------------
 # Logging — mirrors the style used by onionheaven_common.log()
@@ -289,7 +298,12 @@ def register_name(conn, name, onionaddress):
         return False, reason, None
 
     if is_reserved(conn, name):
-        return False, "reserved", generate_alternatives(conn, name)
+        # Brand exception: onionhome / onionheaven are reserved against
+        # everyone EXCEPT their canonical .onion address. Any other
+        # instance trying to claim these still hits "reserved" here.
+        canonical = BRAND_NAMES.get(name.lower())
+        if canonical is None or canonical != onionaddress:
+            return False, "reserved", generate_alternatives(conn, name)
 
     name_lower = name.lower()
     try:
