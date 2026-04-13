@@ -24,6 +24,7 @@ import re
 import secrets
 import sqlite3
 import string
+import subprocess
 import sys
 import threading
 import time
@@ -492,3 +493,207 @@ def start_refresh_thread(db_path=DB_PATH, interval=DYNAMIC_REFRESH_INTERVAL):
     t = threading.Thread(target=loop, name="onionnames-refresh", daemon=True)
     t.start()
     return t
+
+
+# ---------------------------------------------------------------------------
+# Local sign-and-forward path
+# ---------------------------------------------------------------------------
+#
+# The tor container exposes /api/name/register-local and /release-local on
+# port 8083, but source-IP-locked to the Docker network so they are only
+# reachable from sibling containers (the WordPress mu-plugin). The handler
+# either (a) short-circuits to the in-process registry when this instance IS
+# OnionHome, or (b) signs with the local HS key and forwards to the remote
+# OnionHome via Tor SOCKS. Both paths go through helpers here so the logic
+# is testable without touching HTTPServer.
+
+CTOR_SECRET_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"
+CTOR_PUBLIC_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
+
+# 32-byte fixed prefixes used by C Tor's key files. See key-convert.py for
+# the reference implementation.
+_CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 =="
+_CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 =="
+
+
+def read_local_hs_key(secret_path=CTOR_SECRET_PATH,
+                      public_path=CTOR_PUBLIC_PATH):
+    """Load the local wordpress HS Ed25519 keys.
+
+    Returns (expanded_64, public_32). Raises OSError / ValueError on any
+    failure — callers should treat the endpoint as unavailable in that case.
+    """
+    with open(secret_path, "rb") as f:
+        sdata = f.read()
+    if len(sdata) != 96 or not sdata.startswith(_CTOR_SECRET_HEADER):
+        raise ValueError(f"unexpected secret key file format ({len(sdata)} bytes)")
+    expanded = sdata[32:]
+
+    with open(public_path, "rb") as f:
+        pdata = f.read()
+    if len(pdata) != 64 or not pdata.startswith(_CTOR_PUBLIC_HEADER):
+        raise ValueError(f"unexpected public key file format ({len(pdata)} bytes)")
+    public = pdata[32:]
+
+    return expanded, public
+
+
+def read_local_onion_address(
+        hostname_path="/var/lib/tor/hidden_service/wordpress/hostname"):
+    """Return this instance's wordpress onion address, or None if not written."""
+    try:
+        with open(hostname_path) as f:
+            addr = f.read().strip()
+    except OSError:
+        return None
+    if addr.endswith(".onion") and len(addr) == 62:
+        return addr
+    return None
+
+
+def local_register(name, own_address, db_path=DB_PATH):
+    """Direct in-process registration on OnionHome. No signing, no network.
+
+    Returns (http_status, body_dict). Idempotent for same-address re-register
+    just like /api/name/register.
+    """
+    conn = db_connect(db_path)
+    try:
+        db_init(conn)
+        existing = lookup_name(conn, name)
+        if (existing and existing["onionaddress"] == own_address
+                and existing["onionname"].lower() == name.lower()):
+            return 200, {
+                "onionname": existing["onionname"],
+                "onionaddress": own_address,
+                "url": existing["url"],
+                "already_registered": True,
+            }
+        ok, reason, alternatives = register_name(conn, name, own_address)
+    finally:
+        conn.close()
+
+    if ok:
+        return 201, {
+            "onionname": name,
+            "onionaddress": own_address,
+            "url": f"http://{own_address}/{name}",
+        }
+    status = 409 if reason in ("taken", "reserved") else 400
+    body = {"error": reason}
+    if alternatives:
+        body["suggestions"] = alternatives
+    return status, body
+
+
+def local_release(name, own_address, db_path=DB_PATH):
+    """Direct in-process release on OnionHome. Returns (status, body_dict)."""
+    conn = db_connect(db_path)
+    try:
+        db_init(conn)
+        ok, reason = release_name(conn, name, own_address)
+    finally:
+        conn.close()
+    if ok:
+        return 200, {"released": True, "onionname": name}
+    status = 404 if reason == "not_found" else 403
+    return status, {"error": reason}
+
+
+# Importing onion_auth at module top-time is fine in the tor container, but
+# lazy-loaded here so the rest of onionnames.py can be imported in test
+# environments where onion_auth might not be on sys.path.
+
+def _sign(onionaddress, endpoint, name):
+    import onion_auth
+    expanded, public = read_local_hs_key()
+    ts = onion_auth.make_timestamp()
+    sig = onion_auth.sign_name_payload(
+        expanded, public, endpoint, onionaddress, name, ts,
+    )
+    return ts, sig
+
+
+def forward_via_tor(path, payload, target_address, target_port=8083,
+                    timeout=30, runner=None):
+    """Send a signed payload to OnionHome via Tor SOCKS, return (status, body).
+
+    Uses `curl --socks5-hostname 127.0.0.1:9050 …`. `runner` is a callable
+    (args_list, timeout) -> (rc, stdout_str); injected for tests. In prod we
+    shell out to `curl` via subprocess.
+    """
+    url = f"http://{target_address}:{target_port}{path}"
+    body = json.dumps(payload)
+    curl_args = [
+        "curl", "-s", "-S", "-o", "-",
+        "-X", "POST",
+        "-H", "Content-Type: application/json",
+        "--data", body,
+        "--max-time", str(timeout),
+        "--socks5-hostname", "127.0.0.1:9050",
+        "-w", "\n__HTTP_STATUS__:%{http_code}",
+        url,
+    ]
+
+    if runner is None:
+        def _default(args, to):
+            try:
+                r = subprocess.run(
+                    args, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=to,
+                )
+                return r.returncode, r.stdout or ""
+            except subprocess.TimeoutExpired:
+                return -1, ""
+        runner = _default
+
+    rc, raw = runner(curl_args, timeout + 5)
+    if rc != 0 or not raw:
+        return 503, {
+            "error": "upstream_unreachable",
+            "detail": {"curl_rc": rc},
+        }
+
+    marker = "\n__HTTP_STATUS__:"
+    idx = raw.rfind(marker)
+    if idx == -1:
+        return 502, {"error": "bad_upstream_response"}
+    body_str = raw[:idx]
+    try:
+        status = int(raw[idx + len(marker):].strip())
+    except ValueError:
+        return 502, {"error": "bad_upstream_status"}
+
+    body_dict = {}
+    if body_str.strip():
+        try:
+            body_dict = json.loads(body_str)
+        except json.JSONDecodeError:
+            return 502, {"error": "bad_upstream_json",
+                         "raw": body_str[:200]}
+    return status, body_dict
+
+
+def sign_and_forward(endpoint, name, own_address, target_address,
+                     target_port=8083, timeout=30, runner=None):
+    """Sign a register/release payload with the local HS key and forward.
+
+    `endpoint` is "register" or "release". Returns (http_status, body_dict).
+    """
+    try:
+        ts, sig = _sign(own_address, endpoint, name)
+    except Exception as e:
+        log(f"sign_and_forward: sign failed: {e}")
+        return 500, {"error": "sign_failed", "detail": str(e)}
+
+    payload = {
+        "onionname": name,
+        "onionaddress": own_address,
+        "timestamp": ts,
+        "signature": sig,
+    }
+    path = f"/api/name/{endpoint}"
+    return forward_via_tor(
+        path, payload, target_address,
+        target_port=target_port, timeout=timeout, runner=runner,
+    )

@@ -30,7 +30,7 @@ import shutil
 import struct
 import sys
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from onion_auth import verify_payload, verify_name_payload
@@ -531,6 +531,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "/logs/upload": self._handle_logs_upload,
             "/api/name/register": self._handle_name_register,
             "/api/name/release": self._handle_name_release,
+            "/api/name/register-local": self._handle_name_register_local,
+            "/api/name/release-local": self._handle_name_release_local,
         }
         handler = handlers.get(path)
         if handler is None:
@@ -716,6 +718,73 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(status, {"error": reason})
             return
         self._send_json(200, {"released": True, "onionname": name})
+
+    # -- Local sign-and-forward endpoints ----------------------------------
+    #
+    # These are called by the WordPress mu-plugin on user create/delete.
+    # They are NOT meant to be reachable from outside the Docker network;
+    # we enforce that by rejecting any source IP that isn't on the Docker
+    # bridge range. Tor-proxied traffic arrives at 127.0.0.1 (arti forwards
+    # connections locally), so explicitly denying 127.x blocks Tor-origin
+    # callers.
+
+    def _name_local_src_ok(self):
+        src = self.client_address[0]
+        if src.startswith("172.") or src.startswith("10."):
+            return True
+        return False
+
+    def _passthrough(self, status, body):
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode("utf-8"))
+        except BrokenPipeError:
+            pass
+
+    def _handle_name_local(self, endpoint):
+        """Shared implementation for /api/name/{register,release}-local."""
+        if not self._name_local_src_ok():
+            self._send_json(403, {"error": "local-only endpoint"})
+            return
+
+        data = self._read_json()
+        if data is False:
+            return
+        if not data:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+
+        name = (data.get("onionname") or "").strip()
+        if not name:
+            self._send_json(400, {"error": "Missing onionname"})
+            return
+
+        own_address = _get_own_address()
+        if not own_address:
+            self._send_json(503, {"error": "local onion address not ready"})
+            return
+
+        if _is_onionhome():
+            if endpoint == "register":
+                status, body = onionnames.local_register(name, own_address)
+            else:
+                status, body = onionnames.local_release(name, own_address)
+            self._passthrough(status, body)
+            return
+
+        # Remote path — sign with our HS key and forward to OnionHome.
+        status, body = onionnames.sign_and_forward(
+            endpoint, name, own_address, _ONIONHOME_ADDRESS,
+        )
+        self._passthrough(status, body)
+
+    def _handle_name_register_local(self):
+        self._handle_name_local("register")
+
+    def _handle_name_release_local(self):
+        self._handle_name_local("release")
 
     # -- POST /unregister ---------------------------------------------------
 
@@ -1270,7 +1339,11 @@ def main():
             onionnames.log(f"startup refresh failed: {e}")
         onionnames.start_refresh_thread()
 
-    server = HTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
+    # ThreadingHTTPServer: the register-local forward path can block up to
+    # 30s waiting on Tor. Single-threaded serving would stall every other
+    # endpoint (heartbeats, status) during that window. Existing handlers
+    # are safe under concurrency (SQLite WAL, per-request connections).
+    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] web-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
     try:

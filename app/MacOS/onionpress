@@ -1242,6 +1242,19 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy name-sync mu-plugin — registers each new WP user with OnionHome
+    if [ -f "$plugins_dir/onionpress-name-sync.php" ]; then
+        if docker cp "$plugins_dir/onionpress-name-sync.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-name-sync.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-name-sync.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-name-sync.php"
+            log "✓ onionpress-name-sync.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-name-sync.php"
+        fi
+    fi
+
     return 0
 }
 

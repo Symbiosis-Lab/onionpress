@@ -403,5 +403,193 @@ class TestSigningEnvelope(unittest.TestCase):
         self.assertFalse(ok)
 
 
+# ---------------------------------------------------------------------------
+# Sign-and-forward helpers — read_local_hs_key, local_register/release,
+# forward_via_tor, sign_and_forward. All pure / injectable so the HTTP
+# layer isn't exercised here.
+# ---------------------------------------------------------------------------
+
+class TestReadLocalHsKey(unittest.TestCase):
+    """read_local_hs_key parses the C Tor binary key files."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self.secret_path = os.path.join(self._tmp, "hs_ed25519_secret_key")
+        self.public_path = os.path.join(self._tmp, "hs_ed25519_public_key")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_valid_pair(self):
+        secret_header = b"== ed25519v1-secret: type0 =="
+        secret_header = secret_header + b"\x00" * (32 - len(secret_header))
+        public_header = b"== ed25519v1-public: type0 =="
+        public_header = public_header + b"\x00" * (32 - len(public_header))
+        expanded = b"\x11" * 64
+        public = b"\x22" * 32
+        with open(self.secret_path, "wb") as f:
+            f.write(secret_header + expanded)
+        with open(self.public_path, "wb") as f:
+            f.write(public_header + public)
+        return expanded, public
+
+    def test_reads_valid_pair(self):
+        expected_exp, expected_pub = self._write_valid_pair()
+        expanded, public = onionnames.read_local_hs_key(
+            self.secret_path, self.public_path,
+        )
+        self.assertEqual(expanded, expected_exp)
+        self.assertEqual(public, expected_pub)
+
+    def test_rejects_truncated_secret(self):
+        with open(self.secret_path, "wb") as f:
+            f.write(b"\x00" * 40)
+        with open(self.public_path, "wb") as f:
+            f.write(b"\x00" * 64)
+        with self.assertRaises(ValueError):
+            onionnames.read_local_hs_key(self.secret_path, self.public_path)
+
+
+class TestLocalRegisterRelease(_FreshDBMixin, unittest.TestCase):
+    """local_register / local_release — the short-circuit path on OnionHome."""
+
+    def setUp(self):
+        super().setUp()
+        _, _, self.addr = _make_identity(0x55)
+
+    def test_local_register_returns_201_then_200_idempotent(self):
+        status, body = onionnames.local_register(
+            "brewsterkahle", self.addr, db_path=self.db_path,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["onionname"], "brewsterkahle")
+        self.assertEqual(body["onionaddress"], self.addr)
+
+        # Second call from the same address is idempotent.
+        status, body = onionnames.local_register(
+            "brewsterkahle", self.addr, db_path=self.db_path,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(body.get("already_registered"))
+
+    def test_local_register_collision_returns_409(self):
+        _, _, other = _make_identity(0x66)
+        onionnames.local_register("alice1", self.addr, db_path=self.db_path)
+        status, body = onionnames.local_register(
+            "alice1", other, db_path=self.db_path,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "taken")
+        self.assertIn("suggestions", body)
+
+    def test_local_register_reserved(self):
+        status, body = onionnames.local_register(
+            "wp-admin", self.addr, db_path=self.db_path,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "reserved")
+
+    def test_local_release_not_owner(self):
+        _, _, other = _make_identity(0x77)
+        onionnames.local_register("alice1", self.addr, db_path=self.db_path)
+        status, body = onionnames.local_release(
+            "alice1", other, db_path=self.db_path,
+        )
+        self.assertEqual(status, 403)
+
+    def test_local_release_round_trip(self):
+        onionnames.local_register("alice1", self.addr, db_path=self.db_path)
+        status, body = onionnames.local_release(
+            "alice1", self.addr, db_path=self.db_path,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(body["released"])
+        status, _ = onionnames.local_release(
+            "alice1", self.addr, db_path=self.db_path,
+        )
+        self.assertEqual(status, 404)
+
+
+class TestForwardViaTor(unittest.TestCase):
+    """forward_via_tor parses curl output and maps curl errors to 503."""
+
+    def _runner(self, rc, body, http_status):
+        def run(args, timeout):
+            # Sanity: confirm the args include a real socks5-hostname and
+            # the URL we expected.
+            self.assertIn("--socks5-hostname", args)
+            self.assertIn("127.0.0.1:9050", args)
+            if body is None:
+                return rc, ""
+            return rc, f"{body}\n__HTTP_STATUS__:{http_status}"
+        return run
+
+    def test_ok_passthrough(self):
+        runner = self._runner(0, json.dumps({"onionname": "foo"}), 201)
+        status, body = onionnames.forward_via_tor(
+            "/api/name/register", {"onionname": "foo"},
+            "op2abc.onion", runner=runner,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["onionname"], "foo")
+
+    def test_timeout_mapped_to_503(self):
+        runner = self._runner(-1, None, 0)
+        status, body = onionnames.forward_via_tor(
+            "/api/name/register", {}, "op2abc.onion", runner=runner,
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body["error"], "upstream_unreachable")
+
+    def test_bad_json_maps_to_502(self):
+        runner = self._runner(0, "not json", 200)
+        status, body = onionnames.forward_via_tor(
+            "/api/name/register", {}, "op2abc.onion", runner=runner,
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(body["error"], "bad_upstream_json")
+
+
+class TestSignAndForward(unittest.TestCase):
+    """sign_and_forward builds a valid signature the real server would accept."""
+
+    def test_signature_verifies_server_side(self):
+        # We can't easily inject the tor container's key files in a unit
+        # test, so patch read_local_hs_key for the duration of the call.
+        expanded, pub = _make_keypair(b"\x88" * 32)
+        own_address = onion_auth.derive_onion_address(pub)
+
+        observed = {}
+
+        def runner(args, timeout):
+            data_idx = args.index("--data")
+            observed["payload"] = json.loads(args[data_idx + 1])
+            body = json.dumps({"onionname": "alice1", "onionaddress": own_address})
+            return 0, f"{body}\n__HTTP_STATUS__:201"
+
+        # Monkey-patch: read_local_hs_key is called inside onionnames._sign
+        original = onionnames.read_local_hs_key
+        onionnames.read_local_hs_key = lambda *a, **kw: (expanded, pub)
+        try:
+            status, _ = onionnames.sign_and_forward(
+                "register", "alice1", own_address, "op2home.onion",
+                runner=runner,
+            )
+        finally:
+            onionnames.read_local_hs_key = original
+
+        self.assertEqual(status, 201)
+        payload = observed["payload"]
+        self.assertEqual(payload["onionname"], "alice1")
+        self.assertEqual(payload["onionaddress"], own_address)
+        ok, _ = onion_auth.verify_name_payload(
+            own_address, "register", "alice1",
+            payload["timestamp"], payload["signature"],
+        )
+        self.assertTrue(ok, "real server should accept this signature")
+
+
 if __name__ == "__main__":
     unittest.main()
