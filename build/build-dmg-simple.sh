@@ -50,6 +50,7 @@ echo "  launcher compiled"
 
 cp -R "$PROJECT_DIR/app/Resources/docker" "$APP_PATH/Contents/Resources/docker"
 cp -R "$PROJECT_DIR/app/Resources/plugins" "$APP_PATH/Contents/Resources/plugins"
+cp -R "$PROJECT_DIR/app/Resources/themes" "$APP_PATH/Contents/Resources/themes"
 cp -R "$PROJECT_DIR/app/Resources/scripts" "$APP_PATH/Contents/Resources/scripts"
 cp "$PROJECT_DIR/app/Resources/"*.png "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_DIR/app/Resources/AppIcon.icns" "$APP_PATH/Contents/Resources/"

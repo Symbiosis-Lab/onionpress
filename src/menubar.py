@@ -4466,6 +4466,7 @@ License: AGPL v3"""
                 'state': state,
                 'version': self.version,
                 'onion_address': onion_addr,
+                'onionname': self._read_config_value("ONIONNAME", ""),
                 'tor_impl': self._read_config_value("TOR_IMPL", "tor"),
                 'uptime_seconds': uptime_seconds,
                 'bootstrap_pct': bootstrap_pct,

@@ -337,6 +337,64 @@ img {
     border-radius: 4px;
 }
 
+/* === Blogroll Feed === */
+.blogroll-feed-item {
+    padding: 20px 0;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.blogroll-feed-item:last-child {
+    border-bottom: none;
+}
+
+.blogroll-feed-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 6px;
+}
+
+.blogroll-feed-source {
+    color: #7c3aed;
+    font-weight: 600;
+}
+
+.blogroll-feed-title {
+    font-size: 20px;
+    margin: 0 0 8px;
+    line-height: 1.3;
+}
+
+.blogroll-feed-title a {
+    color: #2c2c2c;
+    text-decoration: none;
+}
+
+.blogroll-feed-title a:hover {
+    color: #7c3aed;
+}
+
+.blogroll-feed-excerpt {
+    color: #555;
+    font-size: 15px;
+    margin: 0;
+    line-height: 1.5;
+}
+
+.sidebar-feed-source {
+    display: block;
+    font-size: 12px;
+    color: #999;
+}
+
+.sidebar-more-link {
+    display: block;
+    margin-top: 10px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
 /* === My Creations === */
 .creations-grid {
     display: grid;

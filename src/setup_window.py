@@ -188,9 +188,6 @@ class SetupProgressWindow(AppKit.NSObject):
         self.window.setReleasedWhenClosed_(False)
         self.window.setHidesOnDeactivate_(False)
 
-        # Ensure an Edit menu exists so ⌘A/⌘C/⌘V/⌘X work in text fields.
-        self._ensure_edit_menu()
-
         content = self.window.contentView()
         self._create_welcome_view(content, width, height)
         self._create_progress_view(content, width, height)
@@ -199,34 +196,6 @@ class SetupProgressWindow(AppKit.NSObject):
         self.welcome_view.setHidden_(False)
         self.progress_view.setHidden_(True)
         self._showing_welcome = True
-
-    def _ensure_edit_menu(self):
-        """Add a standard Edit menu so ⌘A/⌘C/⌘V/⌘X work in text fields."""
-        app = AppKit.NSApplication.sharedApplication()
-        main_menu = app.mainMenu()
-        if main_menu is None:
-            main_menu = AppKit.NSMenu.alloc().init()
-            app.setMainMenu_(main_menu)
-        # Check if Edit menu already exists
-        for i in range(main_menu.numberOfItems()):
-            if main_menu.itemAtIndex_(i).title() == "Edit":
-                return
-        edit_menu = AppKit.NSMenu.alloc().initWithTitle_("Edit")
-        for title, action, key in [
-            ("Cut",        "cut:",        "x"),
-            ("Copy",       "copy:",       "c"),
-            ("Paste",      "paste:",      "v"),
-            ("Select All", "selectAll:",  "a"),
-            ("Undo",       "undo:",       "z"),
-        ]:
-            item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                title, objc.selector(None, selector=action.encode(), signature=b'v@:@'), key
-            )
-            edit_menu.addItem_(item)
-        edit_item = AppKit.NSMenuItem.alloc().init()
-        edit_item.setTitle_("Edit")
-        edit_item.setSubmenu_(edit_menu)
-        main_menu.addItem_(edit_item)
 
     def _create_welcome_view(self, content, width, height):
         """Phase 1: Logo + credential fields + Set Up button."""
@@ -313,7 +282,7 @@ class SetupProgressWindow(AppKit.NSObject):
         )
         refresh_btn.setTitle_("Suggest")
         refresh_btn.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "dice", "Suggest a random onionname"
+            "arrow.clockwise", "Suggest a random onionname"
         ))
         refresh_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         refresh_btn.setImagePosition_(AppKit.NSImageLeading)
@@ -430,7 +399,7 @@ class SetupProgressWindow(AppKit.NSObject):
         setup_btn.setKeyEquivalent_("\r")
         # Force blue appearance even when window is not key
         setup_btn.setWantsLayer_(True)
-        setup_btn.setIsBordered_(False)
+        setup_btn.setBordered_(False)
         blue = NSColor.systemBlueColor()
         setup_btn.layer().setBackgroundColor_(blue.CGColor())
         setup_btn.layer().setCornerRadius_(7)
@@ -454,6 +423,16 @@ class SetupProgressWindow(AppKit.NSObject):
             font=_sys(11), color=_TEXT_SECONDARY,
             align=NSCenterTextAlignment,
         ))
+
+        # Tab order: title → onionname → password → analytics → language → setup
+        self._title_field.setNextKeyView_(self._user_field)
+        self._user_field.setNextKeyView_(self._pass_field)
+        self._pass_field.setNextKeyView_(self._analytics_check)
+        self._pass_field_secure.setNextKeyView_(self._analytics_check)
+        self._analytics_check.setNextKeyView_(self._language_popup)
+        self._language_popup.setNextKeyView_(setup_btn)
+        setup_btn.setNextKeyView_(self._title_field)
+        self.window.setInitialFirstResponder_(self._title_field)
 
     def _create_progress_view(self, content, width, height):
         """Phase 2: Step checklist + progress bar + log area."""

@@ -352,22 +352,63 @@ add_action( 'admin_init', function () {
             return $a !== $remove;
         } ) );
         update_option( 'onionpress_following', $following );
+        // Clean up name and feed mappings
+        $names = get_option( 'onionpress_following_names', array() );
+        $feeds = get_option( 'onionpress_following_feeds', array() );
+        unset( $names[ $remove ], $feeds[ $remove ] );
+        update_option( 'onionpress_following_names', $names );
+        update_option( 'onionpress_following_feeds', $feeds );
         wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
         exit;
     }
 
-    // Follow — extract .onion from URL if needed
+    // Follow — accept .onion address, URL, onionname, or direct feed URL
     if ( ! empty( $_POST['onionpress_follow_address'] ) ) {
         $raw = sanitize_text_field( wp_unslash( $_POST['onionpress_follow_address'] ) );
-        $raw = strtolower( trim( $raw ) );
-        if ( preg_match( '/([a-z2-7]{56}\.onion)/', $raw, $m ) ) {
-            $addr = $m[1];
-        } else {
+        $raw = trim( $raw );
+        $resolved_name = '';
+        $feed_url = '';
+
+        if ( preg_match( '/([a-z2-7]{56}\.onion)/i', $raw, $m ) ) {
+            $addr = strtolower( $m[1] );
+            // Extract onionname from URL path: ...onion/NAME or ...onion/NAME/
+            if ( preg_match( '#[a-z2-7]{56}\.onion/([a-zA-Z0-9][a-zA-Z0-9._-]+[a-zA-Z0-9])#i', $raw, $pm ) ) {
+                $resolved_name = strtolower( $pm[1] );
+            }
+        } elseif ( preg_match( '#^https?://#i', $raw ) ) {
+            // Direct feed or clearnet URL — store the URL itself as the key
             $addr = $raw;
+            $feed_url = $raw;
+        } elseif ( function_exists( 'onionpress_directory_lookup' ) ) {
+            // Treat as onionname — resolve to .onion via local registry
+            $raw_lower = strtolower( $raw );
+            $info = onionpress_directory_lookup( $raw_lower );
+            $addr = $info ? ( $info['onionaddress'] ?? '' ) : '';
+            if ( $addr ) {
+                $resolved_name = $raw_lower;
+            } else {
+                $addr = $raw_lower;
+            }
+        } else {
+            $addr = strtolower( $raw );
         }
-        if ( ! in_array( $addr, $following, true ) ) {
+        if ( $addr && ! in_array( $addr, $following, true ) ) {
             $following[] = $addr;
             update_option( 'onionpress_following', $following );
+            // Save the onionname mapping
+            if ( $resolved_name ) {
+                $names = get_option( 'onionpress_following_names', array() );
+                if ( ! is_array( $names ) ) { $names = array(); }
+                $names[ $addr ] = $resolved_name;
+                update_option( 'onionpress_following_names', $names );
+            }
+            // Save feed URL if known
+            if ( $feed_url ) {
+                $feeds = get_option( 'onionpress_following_feeds', array() );
+                if ( ! is_array( $feeds ) ) { $feeds = array(); }
+                $feeds[ $addr ] = $feed_url;
+                update_option( 'onionpress_following_feeds', $feeds );
+            }
         }
         wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
         exit;
@@ -831,6 +872,7 @@ function onionpress_settings_page() {
     // Minimal status values for the status bar
     $state         = $status ? ( $status['state'] ?? 'unknown' ) : 'unknown';
     $onion_address = $status ? ( $status['onion_address'] ?? '' ) : '';
+    $onionname     = $status ? ( $status['onionname'] ?? '' ) : '';
 
     $state_colors = array(
         'running'  => '#4ade80',
@@ -862,7 +904,13 @@ function onionpress_settings_page() {
             <span class="onionpress-state-dot" style="background:<?php echo esc_attr( $state_color ); ?>"></span>
             <strong><?php echo esc_html( ucfirst( $state ) ); ?></strong>
             <?php if ( $onion_address && strpos( $onion_address, '.onion' ) !== false ) : ?>
-                &mdash; <code style="font-size:12px;color:#8b5cf6;"><?php echo esc_html( $onion_address ); ?></code>
+                &mdash; <code style="font-size:12px;color:#8b5cf6;"><?php
+                    $display_url = $onion_address;
+                    if ( $onionname ) {
+                        $display_url .= '/' . $onionname;
+                    }
+                    echo esc_html( $display_url );
+                ?></code>
             <?php endif; ?>
             &mdash; <a href="/onionpress-status">View full status &amp; logs &rarr;</a>
         </p>
@@ -873,6 +921,16 @@ function onionpress_settings_page() {
         if ( ! is_array( $following ) ) {
             $following = array();
         }
+        // Map .onion addresses to onionnames (stored in separate option)
+        $following_names = get_option( 'onionpress_following_names', array() );
+        if ( ! is_array( $following_names ) ) {
+            $following_names = array();
+        }
+        // Well-known onionnames for default follows
+        $following_names += array(
+            'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' => 'onionhome',
+            'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' => 'onionheaven',
+        );
         ?>
         <div style="margin-bottom: 20px; border: 1px solid #c3c4c7; border-radius: 4px; padding: 12px 16px; background: #f9f9f9;">
             <h2 style="margin-top: 0;">Following</h2>
@@ -885,7 +943,14 @@ function onionpress_settings_page() {
                     <span class="onionpress-following-status" style="margin-right: 6px;"><?php
                         echo preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ? '&#10003;' : '&#9888;';
                     ?></span>
-                    <code style="flex: 1; font-size: 12px;"><?php echo esc_html( $addr ); ?></code>
+                    <code style="flex: 1; font-size: 12px;"><?php
+                        if ( isset( $following_names[ $addr ] ) ) {
+                            echo '<strong>' . esc_html( $following_names[ $addr ] ) . '</strong>';
+                            echo ' <span style="color:#999;">' . esc_html( substr( $addr, 0, 12 ) ) . '&hellip;.onion</span>';
+                        } else {
+                            echo esc_html( $addr );
+                        }
+                    ?></code>
                     <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $addr ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
                 </div>
                 <?php endforeach; ?>
@@ -893,7 +958,7 @@ function onionpress_settings_page() {
             <form method="post" id="onionpress-follow-form" style="display: flex; gap: 8px;">
                 <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
                 <input type="text" name="onionpress_follow_address" id="onionpress-follow-input"
-                       placeholder="Paste .onion address or URL" class="regular-text" style="flex: 1;">
+                       placeholder="Onionname, .onion address, or feed URL" class="regular-text" style="flex: 1;">
                 <button type="submit" class="button button-primary">Follow</button>
             </form>
             <?php foreach ( $following as $addr ) : ?>

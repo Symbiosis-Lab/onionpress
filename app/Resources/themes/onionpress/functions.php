@@ -187,3 +187,31 @@ function onionpress_create_follow_page() {
     ));
 }
 add_action('after_switch_theme', 'onionpress_create_follow_page');
+
+/**
+ * Create Blogroll page on theme activation if it doesn't exist
+ */
+function onionpress_create_blogroll_page() {
+    $page = get_page_by_path('blogroll');
+    if ($page) {
+        return;
+    }
+    wp_insert_post(array(
+        'post_title'    => 'Blogroll',
+        'post_name'     => 'blogroll',
+        'post_status'   => 'publish',
+        'post_type'     => 'page',
+        'post_content'  => '',
+        'page_template' => 'page-blogroll.php',
+    ));
+}
+add_action('after_switch_theme', 'onionpress_create_blogroll_page');
+
+// Also create on init for existing installs that already have the theme active
+add_action('init', function () {
+    if (get_option('onionpress_blogroll_page_created')) {
+        return;
+    }
+    onionpress_create_blogroll_page();
+    update_option('onionpress_blogroll_page_created', true);
+});
