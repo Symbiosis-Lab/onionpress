@@ -1269,6 +1269,20 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy root-redirect mu-plugin — redirects / to /<onionname>/
+    # when no static front page is set.
+    if [ -f "$plugins_dir/onionpress-root-redirect.php" ]; then
+        if docker cp "$plugins_dir/onionpress-root-redirect.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-root-redirect.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-root-redirect.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-root-redirect.php"
+            log "✓ onionpress-root-redirect.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-root-redirect.php"
+        fi
+    fi
+
     # Copy user-path mu-plugin — serves /<onionname>/ as that user's
     # author archive on every OnionPress install.
     if [ -f "$plugins_dir/onionpress-user-path.php" ]; then
