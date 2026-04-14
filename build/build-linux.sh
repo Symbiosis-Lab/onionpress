@@ -48,10 +48,17 @@ collect_files() {
         cp -r "$PROJECT_DIR/app/Resources/plugins" "$dest/plugins"
     fi
 
+    # Themes (onionpress theme used by root redirect, directory, blank canvas,
+    # page-follow, page-blogroll, page-creations, onionname header)
+    if [ -d "$PROJECT_DIR/app/Resources/themes" ]; then
+        cp -r "$PROJECT_DIR/app/Resources/themes" "$dest/themes"
+    fi
+
     # Scripts
     mkdir -p "$dest/scripts"
     cp "$PROJECT_DIR/src/onion_auth.py" "$dest/scripts/"
     cp "$PROJECT_DIR/src/key_manager.py" "$dest/scripts/"
+    cp "$PROJECT_DIR/src/backup_manager.py" "$dest/scripts/"
     if [ -f "$PROJECT_DIR/linux/onionpress-heartbeat.py" ]; then
         cp "$PROJECT_DIR/linux/onionpress-heartbeat.py" "$dest/scripts/"
     fi
