@@ -2351,18 +2351,21 @@ class OnionPressApp(rumps.App):
                 return
             self.log(f"{name} detected in Applications!")
             self.dismiss_setup_dialog()
-            address = self.onion_address
+            url = self._onion_url()
+            if not url:
+                url = f"http://{self.onion_address}/"
             try:
                 button_index = self.show_native_alert(
                     title="OnionPress",
-                    message=f"{name} is now installed!\n\nWould you like to open your site?\n\n{address}",
+                    message=f"{name} is now installed!\n\nWould you like to open your site?\n\n{url}",
                     buttons=["Open Site", "Later"],
                     default_button=0,
                     style="informational"
                 )
                 if button_index == 0:
-                    open_func(f"http://{address}")
-                    self.log(f"Opened site in {name}: http://{address}")
+                    login_url = self._generate_login_url(url)
+                    open_func(login_url)
+                    self.log(f"Opened site in {name}: {login_url}")
             except Exception as e:
                 self.log(f"Error showing {name} ready dialog: {e}")
 
@@ -2390,40 +2393,20 @@ class OnionPressApp(rumps.App):
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
     def show_browser_install_dialog(self):
-        """Show dialog with browser options based on what's installed."""
-        installed = op_browser.installed_extension_browsers()
+        """Show dialog offering Tor Browser download."""
         address = self.onion_address or ""
         try:
-            if installed:
-                browsers_str = ", ".join(installed)
-                button_index = self.show_native_alert(
-                    title="OnionPress",
-                    message=f"Your site is ready!\n\n{address}\n\nInstall the OnionPress extension for {browsers_str} to browse .onion sites.\n\nOr download Tor Browser for a dedicated solution.",
-                    buttons=["Install Extension", "Download Tor Browser", "Later"],
-                    default_button=0,
-                    cancel_button=2,
-                    style="informational"
-                )
-                if button_index == 0:
-                    subprocess.run(["open", "https://github.com/brewsterkahle/onionpress/releases/latest"])
-                elif button_index == 1:
-                    subprocess.run(["open", "https://www.torproject.org/download/"])
-                    self.monitor_tor_browser_install()
-            else:
-                button_index = self.show_native_alert(
-                    title="OnionPress",
-                    message=f"Your site is ready!\n\n{address}\n\nTo visit .onion sites, download Tor Browser or Brave Browser (both are free).",
-                    buttons=["Download Tor Browser", "Download Brave Browser", "Later"],
-                    default_button=0,
-                    cancel_button=2,
-                    style="informational"
-                )
-                if button_index == 0:
-                    subprocess.run(["open", "https://www.torproject.org/download/"])
-                    self.monitor_tor_browser_install()
-                elif button_index == 1:
-                    subprocess.run(["open", "https://brave.com/download/"])
-                    self.monitor_brave_install()
+            button_index = self.show_native_alert(
+                title="OnionPress",
+                message=f"Your site is ready!\n\n{address}\n\nTo visit .onion sites, download Tor Browser (free).",
+                buttons=["Download Tor Browser", "Later"],
+                default_button=0,
+                cancel_button=1,
+                style="informational"
+            )
+            if button_index == 0:
+                subprocess.run(["open", "https://www.torproject.org/download/"])
+                self.monitor_tor_browser_install()
         except Exception as e:
             self.log(f"Browser dialog failed: {e}")
 
@@ -2465,7 +2448,8 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            url = self._generate_login_url(f"http://{self.onion_address}/")
+            base = self._onion_url() or f"http://{self.onion_address}/"
+            url = self._generate_login_url(base)
 
             if op_browser.is_tor_browser_installed():
                 self.log(f"Auto-opening Tor Browser: {url}")
