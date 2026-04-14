@@ -175,6 +175,11 @@ if [ "$REAL_USER" != "root" ]; then
     fi
 fi
 
+# Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
+# users access from another device). The shipped compose file uses 127.0.0.1.
+sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' /opt/onionpress/docker/docker-compose.yml
+sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' /opt/onionpress/docker/docker-compose.yml
+
 # Enable services
 systemctl daemon-reload
 systemctl enable onionpress
