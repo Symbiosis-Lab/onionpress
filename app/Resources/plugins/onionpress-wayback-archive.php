@@ -3,7 +3,7 @@
  * Plugin Name: OnionPress Wayback Archive
  * Description: Automatically archives published posts and the homepage to the
  *              Internet Archive Wayback Machine.
- * Version:     1.3
+ * Version:     1.4
  * Network:     true
  */
 
@@ -81,39 +81,40 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         return;
     }
 
+    // Determine the subsite path (e.g. "/alice/" on multisite, "/" on main)
+    $blog      = function_exists( 'get_blog_details' ) ? get_blog_details( get_current_blog_id() ) : null;
+    $site_path = ( $blog && ! empty( $blog->path ) ) ? $blog->path : '/';
+    $permalink = get_permalink( $post_id );
+    $path      = wp_parse_url( $permalink, PHP_URL_PATH ) ?: '/';
+
     // Read the .onion address from the shared volume
     $onion_file = '/var/lib/onionpress/onion_address';
     if ( ! file_exists( $onion_file ) ) {
         // Tor not ready — queue the post path for later (the menubar will
         // prepend the .onion address when it drains the queue)
-        $permalink = get_permalink( $post_id );
-        $path      = wp_parse_url( $permalink, PHP_URL_PATH ) ?: '/';
-        onionpress_wayback_queue_path( $path );
+        onionpress_wayback_queue_path( $path, $site_path );
         return;
     }
     $onion_addr = trim( file_get_contents( $onion_file ) );
     if ( empty( $onion_addr ) ) {
-        $permalink = get_permalink( $post_id );
-        $path      = wp_parse_url( $permalink, PHP_URL_PATH ) ?: '/';
-        onionpress_wayback_queue_path( $path );
+        onionpress_wayback_queue_path( $path, $site_path );
         return;
     }
 
-    // Get the post path from the permalink (strip the scheme+host)
-    $permalink = get_permalink( $post_id );
-    $path      = wp_parse_url( $permalink, PHP_URL_PATH ) ?: '/';
+    // Build URLs to archive (subsite-aware so /alice/ posts archive the /alice/ home and feed)
+    $home_path = $site_path;
+    $feed_path = rtrim( $site_path, '/' ) . '/feed/';
 
-    // Build URLs to archive
     $urls = array();
 
     // 1. Post .onion URL
     $urls[] = 'http://' . $onion_addr . $path;
 
-    // 2. Homepage .onion URL
-    $urls[] = 'http://' . $onion_addr . '/';
+    // 2. Subsite homepage .onion URL
+    $urls[] = 'http://' . $onion_addr . $home_path;
 
-    // 3. RSS feed .onion URL
-    $urls[] = 'http://' . $onion_addr . '/feed/';
+    // 3. Subsite RSS feed .onion URL
+    $urls[] = 'http://' . $onion_addr . $feed_path;
 
 
     // Deduplicate (e.g. if the post IS the homepage)
@@ -287,10 +288,10 @@ function onionpress_wayback_queue_urls( $urls, $retry_after = '' ) {
 /**
  * Queue a post path for later archiving (when onion address becomes available).
  *
- * Stores the path; the wp_cron drain handler will resolve it to full .onion
- * (and clearnet) URLs once the onion_address file appears.
+ * Stores the path and the subsite path; the wp_cron drain handler will resolve
+ * it to full .onion (and clearnet) URLs once the onion_address file appears.
  */
-function onionpress_wayback_queue_path( $path ) {
+function onionpress_wayback_queue_path( $path, $site_path = '/' ) {
     $queue_file = '/var/lib/onionpress/wayback-queue.json';
 
     $queue = array();
@@ -311,7 +312,11 @@ function onionpress_wayback_queue_path( $path ) {
         }
     }
 
-    $queue[] = array( 'path' => $path, 'queued_at' => gmdate( 'Y-m-d\TH:i:s\Z' ) );
+    $queue[] = array(
+        'path'      => $path,
+        'site_path' => $site_path,
+        'queued_at' => gmdate( 'Y-m-d\TH:i:s\Z' ),
+    );
     @file_put_contents( $queue_file, json_encode( $queue ) );
     onionpress_wayback_log( 'Queued path ' . $path . ' for archiving once Tor is ready' );
 }
@@ -396,14 +401,18 @@ add_action( 'onionpress_drain_wayback_queue', function () {
         }
 
         // Resolve path to full URLs and re-queue them
-        $path = $item['path'];
+        $path      = $item['path'];
+        $site_path = isset( $item['site_path'] ) && ! empty( $item['site_path'] ) ? $item['site_path'] : '/';
+        $home_path = $site_path;
+        $feed_path = rtrim( $site_path, '/' ) . '/feed/';
+
         $urls = array( 'http://' . $onion_addr . $path );
 
-        // Also queue homepage and feed if the path isn't already one of them
-        if ( $path !== '/' ) {
-            $urls[] = 'http://' . $onion_addr . '/';
+        // Also queue subsite homepage and feed if the path isn't already one of them
+        if ( $path !== $home_path ) {
+            $urls[] = 'http://' . $onion_addr . $home_path;
         }
-        $urls[] = 'http://' . $onion_addr . '/feed/';
+        $urls[] = 'http://' . $onion_addr . $feed_path;
 
         // Add clearnet URLs if available
         $clearnet_file = '/var/lib/onionpress/clearnet_domain';
@@ -411,10 +420,10 @@ add_action( 'onionpress_drain_wayback_queue', function () {
             $clearnet_domain = trim( file_get_contents( $clearnet_file ) );
             if ( ! empty( $clearnet_domain ) ) {
                 $urls[] = 'https://' . $clearnet_domain . $path;
-                if ( $path !== '/' ) {
-                    $urls[] = 'https://' . $clearnet_domain . '/';
+                if ( $path !== $home_path ) {
+                    $urls[] = 'https://' . $clearnet_domain . $home_path;
                 }
-                $urls[] = 'https://' . $clearnet_domain . '/feed/';
+                $urls[] = 'https://' . $clearnet_domain . $feed_path;
             }
         }
 
