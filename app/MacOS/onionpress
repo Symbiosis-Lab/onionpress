@@ -1318,20 +1318,23 @@ install_onionpress_theme() {
                 || log "WARNING: Failed to chown onionpress theme"
             log "✓ OnionPress theme installed"
 
-            # Activate as default theme if no theme is explicitly set yet
-            # (i.e. still on the WordPress default theme)
+            # Activate the OnionPress theme unless the user already chose it
+            # (or explicitly switched to something non-default).
+            # On multisite, also network-enable so subsites can use it.
             local current_theme
             current_theme=$(docker exec onionpress-wordpress wp theme list --status=active --field=name --allow-root 2>/dev/null | head -1)
             case "$current_theme" in
-                twentytwenty*|'')
+                onionpress)
+                    log "OnionPress theme already active"
+                    ;;
+                *)
                     docker exec onionpress-wordpress wp theme activate onionpress --allow-root >> "$LOG_FILE" 2>&1 \
                         && log "✓ OnionPress theme activated" \
                         || log "WARNING: Failed to activate OnionPress theme"
                     ;;
-                *)
-                    log "User has custom theme '$current_theme' — not overriding"
-                    ;;
             esac
+            # Network-enable for multisite so subsites can use it
+            docker exec onionpress-wordpress wp theme enable onionpress --network --allow-root >> "$LOG_FILE" 2>&1 || true
         else
             log "WARNING: Failed to copy OnionPress theme"
         fi
