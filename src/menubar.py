@@ -430,6 +430,9 @@ class OnionPressApp(rumps.App):
         # Start status checker
         self.start_status_checker()
 
+        # Start Creations thumbnail generator
+        self.start_thumbnail_generator()
+
         # Auto-start on launch
         threading.Thread(target=self.auto_start, daemon=True).start()
 
@@ -2246,6 +2249,50 @@ class OnionPressApp(rumps.App):
                     time.sleep(5)   # Check every 5 seconds during startup/stuck
 
         thread = threading.Thread(target=checker, daemon=True)
+        thread.start()
+
+    def start_thumbnail_generator(self):
+        """Background thread to generate thumbnails for Creations files using qlmanage."""
+        creations_dir = os.path.expanduser("~/Documents/OnionPress/Creations/My Creations")
+        thumbs_dir = os.path.join(creations_dir, ".thumbs")
+
+        def generator():
+            while True:
+                time.sleep(60)
+                if not os.path.isdir(creations_dir):
+                    continue
+                try:
+                    os.makedirs(thumbs_dir, exist_ok=True)
+                    for root, dirs, files in os.walk(creations_dir):
+                        # Skip the .thumbs directory itself
+                        if '.thumbs' in root:
+                            continue
+                        dirs[:] = [d for d in dirs if d != '.thumbs']
+                        for fname in files:
+                            if fname.startswith('.'):
+                                continue
+                            src = os.path.join(root, fname)
+                            rel = os.path.relpath(src, creations_dir)
+                            thumb = os.path.join(thumbs_dir, rel + ".png")
+                            # Skip if thumbnail exists and is newer than source
+                            if os.path.exists(thumb) and os.path.getmtime(thumb) >= os.path.getmtime(src):
+                                continue
+                            # Create subdirectory in .thumbs if needed
+                            os.makedirs(os.path.dirname(thumb), exist_ok=True)
+                            subprocess.run(
+                                ["qlmanage", "-t", "-s", "400", "-o",
+                                 os.path.dirname(thumb), src],
+                                capture_output=True, timeout=30,
+                            )
+                            # qlmanage outputs filename.ext.png — rename if needed
+                            ql_output = os.path.join(os.path.dirname(thumb),
+                                                     fname + ".png")
+                            if os.path.exists(ql_output) and ql_output != thumb:
+                                os.rename(ql_output, thumb)
+                except Exception as e:
+                    self.log(f"Thumbnail generation error: {e}")
+
+        thread = threading.Thread(target=generator, daemon=True)
         thread.start()
 
     @property

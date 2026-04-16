@@ -29,9 +29,69 @@ class OnionPress_Creations {
 
     private function __construct() {
         add_action('template_redirect', array($this, 'serve_file'));
+        add_action('template_redirect', array($this, 'handle_upload'), 5);
         add_filter('theme_page_templates', array($this, 'register_template'));
         add_filter('template_include', array($this, 'load_template'));
         register_activation_hook(__FILE__, array($this, 'activate'));
+    }
+
+    /**
+     * Handle file uploads from the My Creations page.
+     * Requires upload_files capability and a valid nonce.
+     */
+    public function handle_upload() {
+        if (empty($_FILES['creations_upload']) || empty($_POST['creations_upload_nonce'])) {
+            return;
+        }
+        if (!current_user_can('upload_files')) {
+            return;
+        }
+        if (!wp_verify_nonce($_POST['creations_upload_nonce'], 'creations_upload')) {
+            return;
+        }
+
+        $creations_dir = self::CREATIONS_DIR;
+        if (!is_dir($creations_dir) || !is_writable($creations_dir)) {
+            return;
+        }
+
+        $files = $_FILES['creations_upload'];
+        $count = is_array($files['name']) ? count($files['name']) : 1;
+
+        // Normalize single file upload to array format
+        if (!is_array($files['name'])) {
+            $files = array(
+                'name'     => array($files['name']),
+                'tmp_name' => array($files['tmp_name']),
+                'error'    => array($files['error']),
+            );
+        }
+
+        for ($i = 0; $i < $count; $i++) {
+            if ($files['error'][$i] !== UPLOAD_ERR_OK) {
+                continue;
+            }
+            $name = sanitize_file_name($files['name'][$i]);
+            if (empty($name) || $name[0] === '.') {
+                continue;
+            }
+            $dest = $creations_dir . '/' . $name;
+            // Don't overwrite existing files — append a number
+            if (file_exists($dest)) {
+                $ext = pathinfo($name, PATHINFO_EXTENSION);
+                $base = pathinfo($name, PATHINFO_FILENAME);
+                $n = 1;
+                while (file_exists($dest)) {
+                    $dest = $creations_dir . '/' . $base . '-' . $n . ($ext ? '.' . $ext : '');
+                    $n++;
+                }
+            }
+            move_uploaded_file($files['tmp_name'][$i], $dest);
+        }
+
+        // Redirect back to avoid form resubmission
+        wp_redirect(wp_get_referer() ? wp_get_referer() : home_url('/'));
+        exit;
     }
 
     /**
@@ -111,7 +171,9 @@ class OnionPress_Creations {
             }
         }
 
-        if (!$is_inline) {
+        if ($is_inline) {
+            header('Content-Disposition: inline; filename="' . $basename . '"');
+        } else {
             header('Content-Disposition: attachment; filename="' . $basename . '"');
         }
 
@@ -164,6 +226,8 @@ class OnionPress_Creations {
             'gif'  => '&#x1f5bc;',
             'webp' => '&#x1f5bc;',
             'svg'  => '&#x1f5bc;',
+            'heic' => '&#x1f5bc;',
+            'heif' => '&#x1f5bc;',
             'pdf'  => '&#x1f4c4;',
             'html' => '&#x1f310;',
             'htm'  => '&#x1f310;',
@@ -212,22 +276,33 @@ class OnionPress_Creations {
         );
 
         foreach ($iterator as $file_info) {
-            if (!$file_info->isFile()) {
+            if (!$file_info->isFile() || $file_info->getFilename()[0] === '.') {
                 continue;
             }
             $path = $file_info->getPathname();
+            // Skip files inside the .thumbs directory
+            if (strpos($path, $creations_dir . '/.thumbs') === 0) {
+                continue;
+            }
             $name = $file_info->getFilename();
             // Relative path from creations dir (for URL and subfolder display)
             $rel_path = substr($path, strlen($creations_dir) + 1);
+            // Check for a generated thumbnail in .thumbs/
+            $thumb_path = $creations_dir . '/.thumbs/' . $rel_path . '.png';
+            $thumb_url = null;
+            if (file_exists($thumb_path)) {
+                $thumb_url = add_query_arg('onionpress_creation', urlencode('.thumbs/' . $rel_path . '.png'), home_url('/'));
+            }
             $files[] = array(
-                'name'     => $name,
-                'rel_path' => $rel_path,
-                'path'     => $path,
-                'size'     => $file_info->getSize(),
-                'time'     => $file_info->getMTime(),
-                'is_image' => self::is_image($name),
-                'icon'     => self::file_icon($name),
-                'url'      => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
+                'name'      => $name,
+                'rel_path'  => $rel_path,
+                'path'      => $path,
+                'size'      => $file_info->getSize(),
+                'time'      => $file_info->getMTime(),
+                'is_image'  => self::is_image($name),
+                'icon'      => self::file_icon($name),
+                'url'       => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
+                'thumb_url' => $thumb_url,
             );
         }
 

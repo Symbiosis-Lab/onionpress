@@ -417,8 +417,28 @@ img {
 
 .recent-creations-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 10px;
+}
+
+.recent-creations-grid .creation-thumbnail {
+    height: 80px;
+}
+
+.recent-creations-grid .creation-icon {
+    font-size: 28px;
+}
+
+.recent-creations-grid .creation-info {
+    padding: 6px 8px;
+}
+
+.recent-creations-grid .creation-name {
+    font-size: 11px;
+}
+
+.recent-creations-grid .creation-meta {
+    font-size: 10px;
 }
 
 .recent-creations-more {
@@ -427,6 +447,33 @@ img {
     font-size: 14px;
     font-weight: 600;
     color: #7c3aed;
+}
+
+/* === Creations Upload === */
+.creations-upload {
+    margin-bottom: 24px;
+}
+
+.creations-upload-area {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed #d4d0e0;
+    border-radius: 8px;
+    padding: 24px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.creations-upload-area:hover,
+.creations-upload-area.dragover {
+    border-color: #7c3aed;
+    background: #f5f0ff;
+}
+
+.creations-upload-text {
+    color: #888;
+    font-size: 14px;
 }
 
 /* === My Creations === */

@@ -61,8 +61,10 @@ if (class_exists('OnionPress_Creations')) :
         </h2>
         <div class="recent-creations-grid">
             <?php foreach ($recent_creations as $file) : ?>
-                <a href="<?php echo esc_url($file['url']); ?>" class="creation-item">
-                    <?php if ($file['is_image']) : ?>
+                <a href="<?php echo $creations_url ? esc_url($creations_url) : esc_url($file['url']); ?>" class="creation-item">
+                    <?php if (!empty($file['thumb_url'])) : ?>
+                        <img class="creation-thumbnail" src="<?php echo esc_url($file['thumb_url']); ?>" alt="<?php echo esc_attr($file['name']); ?>">
+                    <?php elseif ($file['is_image']) : ?>
                         <img class="creation-thumbnail" src="<?php echo esc_url($file['url']); ?>" alt="<?php echo esc_attr($file['name']); ?>">
                     <?php else : ?>
                         <div class="creation-thumbnail">
