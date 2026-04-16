@@ -51,7 +51,16 @@ class OnionPress_Creations {
         }
 
         $creations_dir = self::CREATIONS_DIR;
-        if (!is_dir($creations_dir) || !is_writable($creations_dir)) {
+        // Support uploading into a subfolder
+        $subfolder = isset($_POST['creations_upload_folder']) ? sanitize_text_field($_POST['creations_upload_folder']) : '';
+        $target_dir = $subfolder ? $creations_dir . '/' . $subfolder : $creations_dir;
+        // Security: ensure target is inside creations dir
+        $real_target = realpath($target_dir);
+        $real_base = realpath($creations_dir);
+        if (!$real_target || !$real_base || ($real_target !== $real_base && strpos($real_target, $real_base . '/') !== 0)) {
+            return;
+        }
+        if (!is_dir($real_target) || !is_writable($real_target)) {
             return;
         }
 
@@ -75,14 +84,14 @@ class OnionPress_Creations {
             if (empty($name) || $name[0] === '.') {
                 continue;
             }
-            $dest = $creations_dir . '/' . $name;
+            $dest = $real_target . '/' . $name;
             // Don't overwrite existing files — append a number
             if (file_exists($dest)) {
                 $ext = pathinfo($name, PATHINFO_EXTENSION);
                 $base = pathinfo($name, PATHINFO_FILENAME);
                 $n = 1;
                 while (file_exists($dest)) {
-                    $dest = $creations_dir . '/' . $base . '-' . $n . ($ext ? '.' . $ext : '');
+                    $dest = $real_target . '/' . $base . '-' . $n . ($ext ? '.' . $ext : '');
                     $n++;
                 }
             }
@@ -256,9 +265,85 @@ class OnionPress_Creations {
         return in_array($ext, array('jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'));
     }
 
+    public static function is_video($filename) {
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        return in_array($ext, array('mp4', 'webm', 'mov', 'avi', 'ogv', 'm4v'));
+    }
+
     /**
-     * Get all files in the creations directory
+     * Get folders and files in a specific subdirectory (one level, like Google Drive).
+     * Returns array with 'folders' and 'files' keys.
      */
+    public static function get_folder_contents( $subfolder = '' ) {
+        $creations_dir = self::CREATIONS_DIR;
+        $browse_dir = $subfolder ? $creations_dir . '/' . $subfolder : $creations_dir;
+
+        $result = array( 'folders' => array(), 'files' => array() );
+
+        // Security: ensure resolved path is inside creations dir
+        $real_browse = realpath($browse_dir);
+        $real_base = realpath($creations_dir);
+        if (!$real_browse || !$real_base || ($real_browse !== $real_base && strpos($real_browse, $real_base . '/') !== 0)) {
+            return $result;
+        }
+        if (!is_dir($real_browse)) {
+            return $result;
+        }
+
+        $entries = scandir($real_browse);
+        foreach ($entries as $entry) {
+            if ($entry[0] === '.') {
+                continue;
+            }
+            $full_path = $real_browse . '/' . $entry;
+            $rel_path = $subfolder ? $subfolder . '/' . $entry : $entry;
+
+            if (is_dir($full_path)) {
+                // Count items inside
+                $count = 0;
+                $sub_entries = @scandir($full_path);
+                if ($sub_entries) {
+                    foreach ($sub_entries as $se) {
+                        if ($se[0] !== '.') $count++;
+                    }
+                }
+                $result['folders'][] = array(
+                    'name'     => $entry,
+                    'rel_path' => $rel_path,
+                    'count'    => $count,
+                );
+            } else {
+                $thumb_path = $creations_dir . '/.thumbs/' . $rel_path . '.png';
+                $thumb_url = null;
+                if (file_exists($thumb_path)) {
+                    $thumb_url = add_query_arg('onionpress_creation', urlencode('.thumbs/' . $rel_path . '.png'), home_url('/'));
+                }
+                $result['files'][] = array(
+                    'name'      => $entry,
+                    'rel_path'  => $rel_path,
+                    'path'      => $full_path,
+                    'size'      => filesize($full_path),
+                    'time'      => filemtime($full_path),
+                    'is_image'  => self::is_image($entry),
+                    'is_video'  => self::is_video($entry),
+                    'icon'      => self::file_icon($entry),
+                    'url'       => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
+                    'thumb_url' => $thumb_url,
+                );
+            }
+        }
+
+        // Sort folders alphabetically, files by modification time (newest first)
+        usort($result['folders'], function($a, $b) {
+            return strcasecmp($a['name'], $b['name']);
+        });
+        usort($result['files'], function($a, $b) {
+            return $b['time'] - $a['time'];
+        });
+
+        return $result;
+    }
+
     /**
      * Get all files in the creations directory, recursively scanning subdirectories.
      */
@@ -300,6 +385,7 @@ class OnionPress_Creations {
                 'size'      => $file_info->getSize(),
                 'time'      => $file_info->getMTime(),
                 'is_image'  => self::is_image($name),
+                'is_video'  => self::is_video($name),
                 'icon'      => self::file_icon($name),
                 'url'       => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
                 'thumb_url' => $thumb_url,

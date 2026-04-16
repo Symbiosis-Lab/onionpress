@@ -19,8 +19,14 @@
         <div class="header-profile">
             <?php
             $avatar_url = onionpress_get_avatar_url();
+            $can_set_avatar = current_user_can('upload_files') && !get_user_meta(get_current_user_id(), 'onionpress_avatar_id', true);
+            $profile_url = $can_set_avatar ? admin_url('profile.php#onionpress-avatar') : '';
             if ($avatar_url) : ?>
                 <img class="header-avatar" src="<?php echo esc_url($avatar_url); ?>" alt="">
+            <?php elseif ($profile_url) : ?>
+                <a href="<?php echo esc_url($profile_url); ?>" class="header-avatar-placeholder header-avatar-add" title="Add profile photo">
+                    <span>+</span>
+                </a>
             <?php else : ?>
                 <div class="header-avatar-placeholder">
                     <?php echo esc_html(onionpress_get_avatar_letter()); ?>

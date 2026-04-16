@@ -2,13 +2,17 @@
 /**
  * Template Name: My Creations
  *
- * Displays files from the My Creations directory as a gallery/list.
+ * Displays files from the My Creations directory with folder navigation.
  * Requires the OnionPress Creations plugin.
  */
 
 get_header();
 
-$files = class_exists('OnionPress_Creations') ? OnionPress_Creations::get_files() : array();
+$current_folder = isset($_GET['folder']) ? sanitize_text_field($_GET['folder']) : '';
+$contents = class_exists('OnionPress_Creations')
+    ? OnionPress_Creations::get_folder_contents($current_folder)
+    : array('folders' => array(), 'files' => array());
+$page_url = get_permalink();
 ?>
 
 <article class="post">
@@ -18,6 +22,9 @@ $files = class_exists('OnionPress_Creations') ? OnionPress_Creations::get_files(
         <div class="creations-upload">
             <form method="post" enctype="multipart/form-data" id="creations-upload-form">
                 <?php wp_nonce_field('creations_upload', 'creations_upload_nonce'); ?>
+                <?php if ($current_folder) : ?>
+                    <input type="hidden" name="creations_upload_folder" value="<?php echo esc_attr($current_folder); ?>">
+                <?php endif; ?>
                 <label class="creations-upload-area" id="creations-drop-area">
                     <input type="file" name="creations_upload[]" multiple style="display:none" id="creations-file-input">
                     <span class="creations-upload-text">Drop files here or click to upload</span>
@@ -42,7 +49,27 @@ $files = class_exists('OnionPress_Creations') ? OnionPress_Creations::get_files(
         </script>
     <?php endif; ?>
 
-    <?php if (empty($files)) : ?>
+    <?php // Breadcrumb navigation ?>
+    <?php if ($current_folder) : ?>
+        <nav class="creations-breadcrumb">
+            <a href="<?php echo esc_url($page_url); ?>">My Creations</a>
+            <?php
+            $parts = explode('/', $current_folder);
+            $path_so_far = '';
+            foreach ($parts as $i => $part) :
+                $path_so_far .= ($path_so_far ? '/' : '') . $part;
+                if ($i < count($parts) - 1) : ?>
+                    <span class="breadcrumb-sep">/</span>
+                    <a href="<?php echo esc_url(add_query_arg('folder', urlencode($path_so_far), $page_url)); ?>"><?php echo esc_html($part); ?></a>
+                <?php else : ?>
+                    <span class="breadcrumb-sep">/</span>
+                    <span class="breadcrumb-current"><?php echo esc_html($part); ?></span>
+                <?php endif;
+            endforeach; ?>
+        </nav>
+    <?php endif; ?>
+
+    <?php if (empty($contents['folders']) && empty($contents['files'])) : ?>
         <div class="creations-empty">
             <p>No creations yet.</p>
             <?php if (current_user_can('upload_files')) : ?>
@@ -50,73 +77,53 @@ $files = class_exists('OnionPress_Creations') ? OnionPress_Creations::get_files(
             <?php endif; ?>
         </div>
     <?php else : ?>
-        <div class="creations-view-toggle">
-            <button class="active" data-view="grid">Grid</button>
-            <button data-view="list">List</button>
-        </div>
 
         <div class="creations-grid" id="creations-grid">
-            <?php foreach ($files as $file) : ?>
-                <a href="<?php echo esc_url($file['url']); ?>" class="creation-item">
-                    <?php if (!empty($file['thumb_url'])) : ?>
-                        <img class="creation-thumbnail" src="<?php echo esc_url($file['thumb_url']); ?>" alt="<?php echo esc_attr($file['name']); ?>">
-                    <?php elseif ($file['is_image']) : ?>
-                        <img class="creation-thumbnail" src="<?php echo esc_url($file['url']); ?>" alt="<?php echo esc_attr($file['name']); ?>">
-                    <?php else : ?>
-                        <div class="creation-thumbnail">
-                            <span class="creation-icon"><?php echo $file['icon']; ?></span>
-                        </div>
-                    <?php endif; ?>
+            <?php // Folders first ?>
+            <?php foreach ($contents['folders'] as $folder) : ?>
+                <a href="<?php echo esc_url(add_query_arg('folder', urlencode($folder['rel_path']), $page_url)); ?>" class="creation-item creation-folder-item">
+                    <div class="creation-thumbnail">
+                        <span class="creation-icon">&#x1f4c1;</span>
+                    </div>
                     <div class="creation-info">
-                        <div class="creation-name"><?php echo esc_html($file['name']); ?></div>
-                        <div class="creation-meta">
-                            <?php echo OnionPress_Creations::format_size($file['size']); ?>
-                            <?php if (!empty($file['rel_path']) && dirname($file['rel_path']) !== '.') : ?>
-                                &middot; <?php echo esc_html(dirname($file['rel_path'])); ?>
-                            <?php endif; ?>
-                        </div>
+                        <div class="creation-name"><?php echo esc_html($folder['name']); ?></div>
+                        <div class="creation-meta"><?php echo $folder['count']; ?> item<?php echo $folder['count'] !== 1 ? 's' : ''; ?></div>
                     </div>
                 </a>
             <?php endforeach; ?>
-        </div>
 
-        <div class="creations-list" id="creations-list" style="display: none;">
-            <?php foreach ($files as $file) : ?>
-                <div class="creations-list-item">
-                    <span class="creations-list-icon"><?php echo $file['icon']; ?></span>
-                    <span class="creations-list-name">
-                        <a href="<?php echo esc_url($file['url']); ?>"><?php echo esc_html($file['name']); ?></a>
-                        <?php if (!empty($file['rel_path']) && dirname($file['rel_path']) !== '.') : ?>
-                            <span class="creations-list-folder"><?php echo esc_html(dirname($file['rel_path'])); ?></span>
+            <?php // Then files ?>
+            <?php foreach ($contents['files'] as $file) : ?>
+                <?php if (!empty($file['is_video'])) : ?>
+                    <div class="creation-item creation-video-item">
+                        <video class="creation-thumbnail" controls preload="none"
+                               <?php if (!empty($file['thumb_url'])) : ?>poster="<?php echo esc_url($file['thumb_url']); ?>"<?php endif; ?>>
+                            <source src="<?php echo esc_url($file['url']); ?>">
+                        </video>
+                        <div class="creation-info">
+                            <div class="creation-name"><?php echo esc_html($file['name']); ?></div>
+                            <div class="creation-meta"><?php echo OnionPress_Creations::format_size($file['size']); ?></div>
+                        </div>
+                    </div>
+                <?php else : ?>
+                    <a href="<?php echo esc_url($file['url']); ?>" class="creation-item">
+                        <?php if (!empty($file['thumb_url'])) : ?>
+                            <img class="creation-thumbnail" src="<?php echo esc_url($file['thumb_url']); ?>" alt="<?php echo esc_attr($file['name']); ?>">
+                        <?php elseif ($file['is_image']) : ?>
+                            <img class="creation-thumbnail" src="<?php echo esc_url($file['url']); ?>" alt="<?php echo esc_attr($file['name']); ?>">
+                        <?php else : ?>
+                            <div class="creation-thumbnail">
+                                <span class="creation-icon"><?php echo $file['icon']; ?></span>
+                            </div>
                         <?php endif; ?>
-                    </span>
-                    <span class="creations-list-size"><?php echo OnionPress_Creations::format_size($file['size']); ?></span>
-                </div>
+                        <div class="creation-info">
+                            <div class="creation-name"><?php echo esc_html($file['name']); ?></div>
+                            <div class="creation-meta"><?php echo OnionPress_Creations::format_size($file['size']); ?></div>
+                        </div>
+                    </a>
+                <?php endif; ?>
             <?php endforeach; ?>
         </div>
-
-        <script>
-        (function() {
-            var buttons = document.querySelectorAll('.creations-view-toggle button');
-            var grid = document.getElementById('creations-grid');
-            var list = document.getElementById('creations-list');
-
-            buttons.forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                    buttons.forEach(function(b) { b.classList.remove('active'); });
-                    btn.classList.add('active');
-
-                    if (btn.dataset.view === 'grid') {
-                        grid.style.display = '';
-                        list.style.display = 'none';
-                    } else {
-                        grid.style.display = 'none';
-                        list.style.display = '';
-                    }
-                });
-            });
-        })();
-        </script>
     <?php endif; ?>
 </article>
 

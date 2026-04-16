@@ -125,6 +125,21 @@ img {
     font-weight: 700;
 }
 
+a.header-avatar-add {
+    text-decoration: none;
+    color: #fff;
+    font-size: 40px;
+    font-weight: 300;
+    border: 4px dashed rgba(255,255,255,0.6);
+    background: linear-gradient(135deg, #d4c8e8, #9b7cd4);
+    transition: border-color 0.15s, background 0.15s;
+}
+
+a.header-avatar-add:hover {
+    border-color: #fff;
+    background: linear-gradient(135deg, #c4b5e0, #7c3aed);
+}
+
 .header-info {
     padding-bottom: 8px;
 }
@@ -476,6 +491,36 @@ img {
     font-size: 14px;
 }
 
+/* === Creations Breadcrumb === */
+.creations-breadcrumb {
+    margin-bottom: 16px;
+    font-size: 14px;
+    color: #888;
+}
+
+.creations-breadcrumb a {
+    color: #7c3aed;
+}
+
+.breadcrumb-sep {
+    margin: 0 6px;
+    color: #ccc;
+}
+
+.breadcrumb-current {
+    color: #333;
+    font-weight: 600;
+}
+
+/* === Creations Folder Items === */
+.creation-folder-item {
+    border: 2px solid #e9e0f5;
+}
+
+.creation-folder-item:hover {
+    border-color: #7c3aed;
+}
+
 /* === My Creations === */
 .creations-grid {
     display: grid;
@@ -494,6 +539,12 @@ img {
 
 .creation-item:hover {
     box-shadow: 0 4px 12px rgba(124, 58, 237, 0.12);
+}
+
+video.creation-thumbnail {
+    height: auto;
+    max-height: 300px;
+    display: block;
 }
 
 .creation-thumbnail {
