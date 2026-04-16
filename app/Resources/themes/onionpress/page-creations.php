@@ -37,7 +37,12 @@ $files = class_exists('OnionPress_Creations') ? OnionPress_Creations::get_files(
                     <?php endif; ?>
                     <div class="creation-info">
                         <div class="creation-name"><?php echo esc_html($file['name']); ?></div>
-                        <div class="creation-meta"><?php echo OnionPress_Creations::format_size($file['size']); ?></div>
+                        <div class="creation-meta">
+                            <?php echo OnionPress_Creations::format_size($file['size']); ?>
+                            <?php if (!empty($file['rel_path']) && dirname($file['rel_path']) !== '.') : ?>
+                                &middot; <?php echo esc_html(dirname($file['rel_path'])); ?>
+                            <?php endif; ?>
+                        </div>
                     </div>
                 </a>
             <?php endforeach; ?>
@@ -49,6 +54,9 @@ $files = class_exists('OnionPress_Creations') ? OnionPress_Creations::get_files(
                     <span class="creations-list-icon"><?php echo $file['icon']; ?></span>
                     <span class="creations-list-name">
                         <a href="<?php echo esc_url($file['url']); ?>"><?php echo esc_html($file['name']); ?></a>
+                        <?php if (!empty($file['rel_path']) && dirname($file['rel_path']) !== '.') : ?>
+                            <span class="creations-list-folder"><?php echo esc_html(dirname($file['rel_path'])); ?></span>
+                        <?php endif; ?>
                     </span>
                     <span class="creations-list-size"><?php echo OnionPress_Creations::format_size($file['size']); ?></span>
                 </div>

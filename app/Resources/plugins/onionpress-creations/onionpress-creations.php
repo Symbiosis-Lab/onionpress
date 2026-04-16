@@ -65,14 +65,14 @@ class OnionPress_Creations {
     }
 
     /**
-     * Serve files from My Creations directory
+     * Serve files from My Creations directory (supports subdirectories)
      */
     public function serve_file() {
         if (!isset($_GET['onionpress_creation'])) {
             return;
         }
 
-        $requested = sanitize_file_name($_GET['onionpress_creation']);
+        $requested = $_GET['onionpress_creation'];
         $creations_dir = self::CREATIONS_DIR;
 
         if (!is_dir($creations_dir)) {
@@ -83,7 +83,8 @@ class OnionPress_Creations {
         $filepath = realpath($creations_dir . '/' . $requested);
 
         // Security: ensure the resolved path is inside creations dir
-        if (!$filepath || strpos($filepath, realpath($creations_dir)) !== 0) {
+        $real_base = realpath($creations_dir);
+        if (!$filepath || !$real_base || strpos($filepath, $real_base . '/') !== 0) {
             status_header(404);
             exit;
         }
@@ -93,7 +94,8 @@ class OnionPress_Creations {
             exit;
         }
 
-        $mime = wp_check_filetype($requested);
+        $basename = basename($filepath);
+        $mime = wp_check_filetype($basename);
         $content_type = $mime['type'] ? $mime['type'] : 'application/octet-stream';
 
         header('Content-Type: ' . $content_type);
@@ -110,7 +112,7 @@ class OnionPress_Creations {
         }
 
         if (!$is_inline) {
-            header('Content-Disposition: attachment; filename="' . $requested . '"');
+            header('Content-Disposition: attachment; filename="' . $basename . '"');
         }
 
         readfile($filepath);
@@ -193,6 +195,9 @@ class OnionPress_Creations {
     /**
      * Get all files in the creations directory
      */
+    /**
+     * Get all files in the creations directory, recursively scanning subdirectories.
+     */
     public static function get_files() {
         $creations_dir = self::CREATIONS_DIR;
         $files = array();
@@ -201,23 +206,29 @@ class OnionPress_Creations {
             return $files;
         }
 
-        $entries = scandir($creations_dir);
-        foreach ($entries as $entry) {
-            if ($entry[0] === '.') {
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($creations_dir, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        foreach ($iterator as $file_info) {
+            if (!$file_info->isFile()) {
                 continue;
             }
-            $path = $creations_dir . '/' . $entry;
-            if (is_file($path)) {
-                $files[] = array(
-                    'name'     => $entry,
-                    'path'     => $path,
-                    'size'     => filesize($path),
-                    'time'     => filemtime($path),
-                    'is_image' => self::is_image($entry),
-                    'icon'     => self::file_icon($entry),
-                    'url'      => add_query_arg('onionpress_creation', urlencode($entry), home_url('/')),
-                );
-            }
+            $path = $file_info->getPathname();
+            $name = $file_info->getFilename();
+            // Relative path from creations dir (for URL and subfolder display)
+            $rel_path = substr($path, strlen($creations_dir) + 1);
+            $files[] = array(
+                'name'     => $name,
+                'rel_path' => $rel_path,
+                'path'     => $path,
+                'size'     => $file_info->getSize(),
+                'time'     => $file_info->getMTime(),
+                'is_image' => self::is_image($name),
+                'icon'     => self::file_icon($name),
+                'url'      => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
+            );
         }
 
         // Sort by modification time, newest first

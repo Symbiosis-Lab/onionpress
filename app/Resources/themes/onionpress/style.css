@@ -395,6 +395,40 @@ img {
     font-weight: 600;
 }
 
+/* === Recent Creations (homepage) === */
+.recent-creations {
+    margin-top: 40px;
+    padding-top: 30px;
+    border-top: 1px solid #e5e5e5;
+}
+
+.recent-creations-heading {
+    font-size: 20px;
+    margin-bottom: 16px;
+}
+
+.recent-creations-heading a {
+    color: inherit;
+}
+
+.recent-creations-heading a:hover {
+    color: #7c3aed;
+}
+
+.recent-creations-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 16px;
+}
+
+.recent-creations-more {
+    display: inline-block;
+    margin-top: 14px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #7c3aed;
+}
+
 /* === My Creations === */
 .creations-grid {
     display: grid;
@@ -484,6 +518,13 @@ img {
 
 .creations-list-name a:hover {
     color: #7c3aed;
+}
+
+.creations-list-folder {
+    display: block;
+    font-size: 12px;
+    color: #999;
+    font-weight: 400;
 }
 
 .creations-list-size {
