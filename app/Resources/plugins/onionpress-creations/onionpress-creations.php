@@ -167,6 +167,21 @@ class OnionPress_Creations {
         $mime = wp_check_filetype($basename);
         $content_type = $mime['type'] ? $mime['type'] : 'application/octet-stream';
 
+        // Last-Modified: standard HTTP header that lets clients (browsers,
+        // mirror tools) detect changes without re-downloading. No downside.
+        $mtime = filemtime($filepath);
+        if ($mtime) {
+            header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
+            // Honor If-Modified-Since with a 304 response.
+            if (!empty($_SERVER['HTTP_IF_MODIFIED_SINCE'])) {
+                $since = strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']);
+                if ($since !== false && $since >= $mtime) {
+                    status_header(304);
+                    exit;
+                }
+            }
+        }
+
         header('Content-Type: ' . $content_type);
         header('Content-Length: ' . filesize($filepath));
 
