@@ -25,22 +25,31 @@ if ( empty( $_SERVER['HTTP_HOST'] ) ) {
  * Cached per-request.
  */
 function onionpress_stored_host() {
-    static $host = false;
-    if ( $host !== false ) {
-        return $host;
-    }
+    // Cache per-blog: $wpdb->options changes per switch_to_blog
+    // (wp_options, wp_2_options, etc.). Without per-blog caching, the
+    // first blog's siteurl host gets reused for every subsequent blog —
+    // breaking My Sites links when different subsites have different
+    // stored hosts (e.g. blog 1 = onion, blog 2 = localhost/<onionname>).
+    static $cache = array();
     global $wpdb;
-    $stored = $wpdb ? $wpdb->get_var(
+    if ( ! $wpdb ) {
+        return '';
+    }
+    $key = $wpdb->options;
+    if ( array_key_exists( $key, $cache ) ) {
+        return $cache[ $key ];
+    }
+    $stored = $wpdb->get_var(
         "SELECT option_value FROM {$wpdb->options} WHERE option_name = 'siteurl' LIMIT 1"
-    ) : '';
+    );
     if ( ! $stored ) {
-        $host = '';
-        return $host;
+        $cache[ $key ] = '';
+        return '';
     }
     $h = parse_url( $stored, PHP_URL_HOST );
     $p = parse_url( $stored, PHP_URL_PORT );
-    $host = $h ? ( $p ? $h . ':' . $p : $h ) : '';
-    return $host;
+    $cache[ $key ] = $h ? ( $p ? $h . ':' . $p : $h ) : '';
+    return $cache[ $key ];
 }
 
 function onionpress_rewrite_url( $url ) {
