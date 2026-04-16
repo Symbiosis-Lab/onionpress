@@ -15,6 +15,16 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+// Hide the network-root blog (blog_id=1) from the "My Sites" admin-bar
+// dropdown — it's just infrastructure, not a real site the user should see.
+// Branded installs keep it visible because blog_id=1 IS their public site.
+add_action( 'admin_bar_menu', function ( $wp_admin_bar ) {
+    if ( get_option( 'onionpress_root_site' ) === 'yes' ) {
+        return;
+    }
+    $wp_admin_bar->remove_node( 'blog-1' );
+}, 999 );
+
 add_action( 'template_redirect', function () {
     // Only run on the network-root blog. On subsites the user is already
     // on /<onionname>/; they should see their own site, not get bounced.
