@@ -891,6 +891,26 @@ fix_onionpress_permissions() {
     fi
 }
 
+# Ensure wp-content/uploads is owned by www-data so WordPress can create
+# the multisite per-blog subtree (sites/<id>/<YYYY>/<MM>/) on demand.
+# Fresh installs had this directory created root-owned, which made the
+# media library fail with "Unable to create directory … Is its parent
+# directory writable by the server?" on any upload.
+fix_wordpress_uploads_permissions() {
+    cd "$DOCKER_DIR"
+
+    if docker compose exec -T wordpress sh -c '
+        mkdir -p /var/www/html/wp-content/uploads
+        chown -R www-data:www-data /var/www/html/wp-content/uploads
+    ' 2>>"$LOG_FILE"; then
+        log "✓ WordPress uploads directory permissions fixed"
+        return 0
+    else
+        log "WARNING: Could not fix WordPress uploads directory permissions"
+        return 1
+    fi
+}
+
 # Function to initialize container runtime
 install_docker() {
     log "Container runtime initialization required"
@@ -1669,6 +1689,11 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
+
+    # Ensure wp-content/uploads is writable by www-data (WP multisite
+    # creates sites/<id>/<YYYY>/<MM>/ on demand — root-owned uploads/
+    # breaks media uploads from the admin UI).
+    fix_wordpress_uploads_permissions
 
     # Install iptables rules to log clearnet access from non-Tor containers
     install_clearnet_logging
