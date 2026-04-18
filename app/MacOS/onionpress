@@ -1334,7 +1334,11 @@ install_onionpress_theme() {
     local plugins_dir="$RESOURCES_DIR/plugins"
 
     # Install OnionPress theme
+    # NOTE: docker cp src dest where dest already exists copies INTO it
+    # (creating dest/src/), so always rm -rf the destination first to
+    # actually replace its contents.
     if [ -d "$themes_dir/onionpress" ]; then
+        docker exec onionpress-wordpress rm -rf /var/www/html/wp-content/themes/onionpress >> "$LOG_FILE" 2>&1 || true
         if docker cp "$themes_dir/onionpress" \
             onionpress-wordpress:/var/www/html/wp-content/themes/onionpress >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown -R www-data:www-data \
@@ -1364,8 +1368,9 @@ install_onionpress_theme() {
         fi
     fi
 
-    # Install hit counter plugin
+    # Install hit counter plugin (rm dest first — see theme-install note above)
     if [ -d "$plugins_dir/onionpress-hit-counter" ]; then
+        docker exec onionpress-wordpress rm -rf /var/www/html/wp-content/plugins/onionpress-hit-counter >> "$LOG_FILE" 2>&1 || true
         docker cp "$plugins_dir/onionpress-hit-counter" \
             onionpress-wordpress:/var/www/html/wp-content/plugins/onionpress-hit-counter >> "$LOG_FILE" 2>&1 && \
         docker exec onionpress-wordpress chown -R www-data:www-data \
@@ -1375,8 +1380,9 @@ install_onionpress_theme() {
         log "WARNING: Failed to install onionpress-hit-counter plugin"
     fi
 
-    # Install creations plugin
+    # Install creations plugin (rm dest first — see theme-install note above)
     if [ -d "$plugins_dir/onionpress-creations" ]; then
+        docker exec onionpress-wordpress rm -rf /var/www/html/wp-content/plugins/onionpress-creations >> "$LOG_FILE" 2>&1 || true
         docker cp "$plugins_dir/onionpress-creations" \
             onionpress-wordpress:/var/www/html/wp-content/plugins/onionpress-creations >> "$LOG_FILE" 2>&1 && \
         docker exec onionpress-wordpress chown -R www-data:www-data \
