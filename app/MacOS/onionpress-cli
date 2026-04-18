@@ -33,6 +33,105 @@ case "${1:-help}" in
     logs)
         "$LAUNCHER" logs
         ;;
+    update)
+        APP_PATH="$( cd "$SCRIPT_DIR/../.." && pwd )"
+        MENUBAR_RES="$APP_PATH/Contents/Resources/MenubarApp/Contents/Resources"
+        PYTHON_BIN="$APP_PATH/Contents/Resources/MenubarApp/Contents/MacOS/python"
+        SCRIPTS_DIR="$APP_PATH/Contents/Resources/scripts"
+
+        if [[ ! -x "$PYTHON_BIN" ]]; then
+            echo "Bundled Python not found at $PYTHON_BIN" >&2
+            exit 1
+        fi
+
+        # py2app's __boot__ normally configures sys.path; we're invoking
+        # the interpreter directly, so point it at the bundled stdlib + packages.
+        BUNDLED_PYTHONPATH="$MENUBAR_RES/lib/python314.zip:$MENUBAR_RES/lib/python3.14:$MENUBAR_RES/lib/python3.14/lib-dynload:$SCRIPTS_DIR"
+
+        YES_FLAG="0"
+        CHECK_ONLY="0"
+        for arg in "${@:2}"; do
+            case "$arg" in
+                -y|--yes) YES_FLAG="1" ;;
+                --check) CHECK_ONLY="1" ;;
+                -h|--help)
+                    cat <<EOF
+Usage: onionpress-cli update [--check] [-y|--yes]
+
+  --check     Only check for an update; don't install.
+  -y, --yes   Install without prompting (use in scripts).
+EOF
+                    exit 0 ;;
+                *)
+                    echo "Unknown update option: $arg" >&2
+                    exit 2 ;;
+            esac
+        done
+
+        PYTHONPATH="$BUNDLED_PYTHONPATH" \
+        ONIONPRESS_APP_PATH="$APP_PATH" \
+        ONIONPRESS_YES="$YES_FLAG" \
+        ONIONPRESS_CHECK_ONLY="$CHECK_ONLY" \
+            "$PYTHON_BIN" - <<'PY'
+import os, sys, plistlib
+for p in os.environ["PYTHONPATH"].split(":"):
+    if p and p not in sys.path:
+        sys.path.insert(0, p)
+try:
+    from onionpress import updater  # v2.4.60+
+except ImportError:
+    try:
+        import updater  # older layout: scripts/updater.py
+    except ImportError as e:
+        print(f"Could not import updater module: {e}", file=sys.stderr)
+        sys.exit(1)
+
+app_path = os.environ["ONIONPRESS_APP_PATH"]
+with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
+    current = plistlib.load(f).get("CFBundleShortVersionString", "0")
+
+print(f"Installed: {current}")
+print("Checking GitHub for updates...")
+result = updater.check_for_update(current, log=lambda m: None)
+if not result:
+    print("Already up to date.")
+    sys.exit(0)
+
+release_data, latest = result
+print(f"Update available: {latest}  (published {release_data.get('published_at', '?')})")
+
+notes = (release_data.get("body") or "").strip()
+if notes:
+    print()
+    snippet = notes if len(notes) <= 800 else notes[:800] + "\n... (truncated)"
+    print(snippet)
+    print()
+
+if os.environ.get("ONIONPRESS_CHECK_ONLY") == "1":
+    sys.exit(0)
+
+others = updater.detect_other_instances()
+if others:
+    print("Note: other users are running OnionPress:")
+    for o in others:
+        print(f"  - {o['user']} (pid {o['pid']})")
+    print("Updating replaces the shared app bundle for everyone.")
+    print()
+
+if os.environ.get("ONIONPRESS_YES") != "1":
+    if not sys.stdin.isatty():
+        print("Re-run with --yes to install non-interactively.", file=sys.stderr)
+        sys.exit(2)
+    reply = input(f"Install v{latest} now? [y/N] ").strip().lower()
+    if reply not in ("y", "yes"):
+        print("Aborted.")
+        sys.exit(0)
+
+print(f"Downloading and installing v{latest}...")
+updater.download_and_install(release_data, latest, app_path, log=print)
+print(f"Installed v{latest}. Quit and relaunch OnionPress to use the new version.")
+PY
+        ;;
     *)
         cat <<EOF
 OnionPress - WordPress + Tor Onion Service
@@ -46,11 +145,15 @@ Commands:
   status    - Show container status
   address   - Show your .onion address
   logs      - View container logs
+  update    - Check GitHub for a new release and install it
+              (--check to only check, -y to skip prompt)
 
 Examples:
   onionpress-cli start
   onionpress-cli address
   onionpress-cli logs
+  onionpress-cli update --check
+  onionpress-cli update -y
 
 Your WordPress site will be available at:
   - Via Tor: http://[your-onion-address].onion
