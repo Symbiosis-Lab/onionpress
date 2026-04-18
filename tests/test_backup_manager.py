@@ -218,16 +218,13 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
 
-        # Sandbox HOME — create_backup reads ~/.onionpress/config at line 189
-        # of backup.py. Not destructive, but isolate for determinism.
-        self.orig_home = os.environ.get("HOME", "")
-        self.fake_home = os.path.join(self.tmpdir, "home")
-        os.makedirs(os.path.join(self.fake_home, ".onionpress"))
-        os.environ["HOME"] = self.fake_home
+        # Sandbox data_dir — passed explicitly to create_backup so it never
+        # touches the real ~/.onionpress/.
+        self.data_dir = os.path.join(self.tmpdir, "onionpress-data")
+        os.makedirs(self.data_dir)
 
     def tearDown(self):
         os.environ["PATH"] = self.orig_path
-        os.environ["HOME"] = self.orig_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_zip_structure(self):
@@ -238,6 +235,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             output_path=self.output_zip,
             version="2.2.84",
             log_func=self.logs.append,
+            data_dir=self.data_dir,
         )
         self.assertTrue(os.path.exists(self.output_zip))
 
@@ -261,6 +259,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             output_path=self.output_zip,
             version="2.2.84",
             log_func=self.logs.append,
+            data_dir=self.data_dir,
         )
 
         with zipfile.ZipFile(self.output_zip, "r") as zf:
@@ -282,6 +281,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             output_path=self.output_zip,
             version="2.2.84",
             log_func=self.logs.append,
+            data_dir=self.data_dir,
         )
 
         with zipfile.ZipFile(self.output_zip, "r") as zf:
@@ -303,6 +303,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             output_path=self.output_zip,
             version="1.0",
             log_func=self.logs.append,
+            data_dir=self.data_dir,
         )
         log_text = " ".join(self.logs)
         self.assertIn("Tor keys", log_text)
@@ -320,6 +321,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             output_path=self.output_zip,
             version="1.0",
             log_func=self.logs.append,
+            data_dir=self.data_dir,
         )
         after = set(os.listdir(tempfile.gettempdir()))
         new_dirs = [d for d in (after - before) if d.startswith("onionpress-backup-")]
@@ -353,17 +355,13 @@ class TestRestoreRoundTrip(unittest.TestCase):
         self.orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
 
-        # Sandbox HOME — restore_from_backup writes to ~/.onionpress/ via
-        # os.path.expanduser. Without this, the test clobbers the real
-        # ~/.onionpress/config and destroys ~/.onionpress/shared/vanity-keys/.
-        self.orig_home = os.environ.get("HOME", "")
-        self.fake_home = os.path.join(self.tmpdir, "home")
-        os.makedirs(os.path.join(self.fake_home, ".onionpress"))
-        os.environ["HOME"] = self.fake_home
+        # Sandbox data_dir — passed explicitly to restore_from_backup so it
+        # never touches the real ~/.onionpress/.
+        self.data_dir = os.path.join(self.tmpdir, "onionpress-data")
+        os.makedirs(self.data_dir)
 
     def tearDown(self):
         os.environ["PATH"] = self.orig_path
-        os.environ["HOME"] = self.orig_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _make_backup_zip(self, password="testpw"):
@@ -411,7 +409,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
     def test_restore_returns_metadata(self):
         zip_path = self._make_backup_zip()
         metadata = backup_manager.restore_from_backup(
-            zip_path, "testpw", self.logs.append)
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
         self.assertEqual(metadata["onion_address"], "restored123.onion")
         self.assertEqual(metadata["username"], "admin")
 
@@ -426,14 +424,15 @@ class TestRestoreRoundTrip(unittest.TestCase):
         # generated a vanity prefix or is running multiple addresses).
         sibling_addr = "siblingaddress.onion"
         sibling_dir = os.path.join(
-            self.fake_home, ".onionpress", "shared", "vanity-keys", sibling_addr)
+            self.data_dir, "shared", "vanity-keys", sibling_addr)
         os.makedirs(sibling_dir)
         sibling_key = os.path.join(sibling_dir, "ks_hs_id.ed25519_expanded_private")
         with open(sibling_key, "wb") as f:
             f.write(b"SIBLING-KEY-DO-NOT-TOUCH")
 
         zip_path = self._make_backup_zip()
-        backup_manager.restore_from_backup(zip_path, "testpw", self.logs.append)
+        backup_manager.restore_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
 
         # Sibling address dir and its key must still be intact.
         self.assertTrue(os.path.isdir(sibling_dir),
@@ -443,12 +442,13 @@ class TestRestoreRoundTrip(unittest.TestCase):
 
         # Restored address dir should also exist alongside it.
         restored_dir = os.path.join(
-            self.fake_home, ".onionpress", "shared", "vanity-keys", "restored123.onion")
+            self.data_dir, "shared", "vanity-keys", "restored123.onion")
         self.assertTrue(os.path.isdir(restored_dir))
 
     def test_restore_logs_progress(self):
         zip_path = self._make_backup_zip()
-        backup_manager.restore_from_backup(zip_path, "testpw", self.logs.append)
+        backup_manager.restore_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
         log_text = " ".join(self.logs)
         self.assertIn("extracting", log_text)
         self.assertIn("Tor keys", log_text)
@@ -458,7 +458,8 @@ class TestRestoreRoundTrip(unittest.TestCase):
     def test_restore_staging_cleaned_up(self):
         zip_path = self._make_backup_zip()
         before = set(os.listdir(tempfile.gettempdir()))
-        backup_manager.restore_from_backup(zip_path, "testpw", self.logs.append)
+        backup_manager.restore_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
         after = set(os.listdir(tempfile.gettempdir()))
         new_dirs = [d for d in (after - before) if d.startswith("onionpress-restore-")]
         self.assertEqual(len(new_dirs), 0, "Staging directory was not cleaned up")
@@ -490,15 +491,8 @@ class TestEnsureMultisiteConstants(unittest.TestCase):
         self.orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
 
-        # Sandbox HOME — _ensure_multisite_constants uses expanduser.
-        self.orig_home = os.environ.get("HOME", "")
-        self.fake_home = os.path.join(self.tmpdir, "home")
-        os.makedirs(os.path.join(self.fake_home, ".onionpress"))
-        os.environ["HOME"] = self.fake_home
-
     def tearDown(self):
         os.environ["PATH"] = self.orig_path
-        os.environ["HOME"] = self.orig_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_adds_constants_for_multisite(self):

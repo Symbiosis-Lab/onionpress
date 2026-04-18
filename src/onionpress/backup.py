@@ -17,6 +17,15 @@ from onionpress import key_manager
 from onionpress.config import DEFAULTS, read_config, write_value
 
 
+def _default_data_dir() -> str:
+    """Resolve the default OnionPress data directory at call time.
+
+    Deliberately not cached: callers (and tests) may mutate $HOME between
+    imports and the first use of backup functions.
+    """
+    return os.path.expanduser("~/.onionpress")
+
+
 # Multisite constants that WordPress needs in wp-config.php for a network install.
 # After restore, the WordPress container generates a fresh wp-config.php without
 # these, causing `wp core is-installed --network` to fail and ensure_multisite to
@@ -87,13 +96,14 @@ def verify_wp_admin(username, password):
     return (True, None)
 
 
-def create_backup(onion_address, username, password, output_path, version, log_func):
+def create_backup(onion_address, username, password, output_path, version, log_func, *, data_dir=None):
     """Create a full OnionPress backup zip.
 
     Args:
         onion_address: Current .onion address
         username: WP admin username (stored in metadata)
         password: Zip encryption password
+        data_dir: OnionPress data directory (defaults to ~/.onionpress). Tests pass a sandbox path.
         output_path: Where to write the .zip file
         version: OnionPress version string
         log_func: Callable for progress logging
@@ -186,8 +196,8 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             )
 
         # 5. Save non-default config values
-        data_dir = os.path.expanduser('~/.onionpress')
-        config_path = os.path.join(data_dir, 'config')
+        _data_dir = data_dir if data_dir is not None else _default_data_dir()
+        config_path = os.path.join(_data_dir, 'config')
         if os.path.exists(config_path):
             current = read_config(config_path)
             overrides = {k: v for k, v in current.items()
@@ -256,13 +266,14 @@ def read_backup_metadata(zip_path, password):
         raise ValueError("Not a valid zip file.")
 
 
-def restore_from_backup(zip_path, password, log_func):
+def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
     """Restore an OnionPress site from a backup zip.
 
     Args:
         zip_path: Path to the backup .zip
         password: Zip password
         log_func: Callable for progress logging
+        data_dir: OnionPress data directory (defaults to ~/.onionpress). Tests pass a sandbox path.
 
     Returns:
         metadata dict from the backup
@@ -308,9 +319,9 @@ def restore_from_backup(zip_path, password, log_func):
         # Sync vanity-keys directory on host so OnionHeaven detection and
         # prefix mismatch logic can see the restored onion address.
         onion_address = metadata.get('onion_address', '')
+        _data_dir = data_dir if data_dir is not None else _default_data_dir()
         if onion_address:
-            data_dir = os.path.expanduser('~/.onionpress')
-            vanity_dir = os.path.join(data_dir, 'shared', 'vanity-keys')
+            vanity_dir = os.path.join(_data_dir, 'shared', 'vanity-keys')
             addr_dir = os.path.join(vanity_dir, onion_address)
             # Clear only this address's cache — sibling address dirs (e.g.
             # other vanity prefixes the user has generated) are preserved.
@@ -327,7 +338,7 @@ def restore_from_backup(zip_path, password, log_func):
             # Update ADDRESS_PREFIX in config to match restored address
             # so the prefix mismatch detector doesn't regenerate on next start
             addr_base = onion_address.replace('.onion', '')
-            config_path = os.path.join(data_dir, 'config')
+            config_path = os.path.join(_data_dir, 'config')
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as cf:
                     lines = cf.readlines()
@@ -453,8 +464,7 @@ def restore_from_backup(zip_path, password, log_func):
         if os.path.exists(overrides_path):
             with open(overrides_path, 'r') as f:
                 overrides = json.load(f)
-            data_dir = os.path.expanduser('~/.onionpress')
-            config_path = os.path.join(data_dir, 'config')
+            config_path = os.path.join(_data_dir, 'config')
             for key, value in overrides.items():
                 write_value(config_path, key, value)
             log_func(f"Restore: applied {len(overrides)} config override(s)")
