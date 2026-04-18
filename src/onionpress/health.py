@@ -232,32 +232,34 @@ class HealthChecker:
 
     @staticmethod
     def check_internet_connectivity() -> bool:
-        """Check if the host has network access via macOS SCNetworkReachability.
+        """Check if the host has network access without triggering TCC.
 
-        Queries the OS network stack directly — no HTTP requests, no traffic,
-        no DNS lookups. Returns True if a default route exists (WiFi/ethernet
-        connected).
+        Scans `ifconfig` output for any non-loopback interface with an
+        IPv4 address. Does NOT call SCNetworkReachability (which fires
+        the macOS Local Network permission prompt on Sequoia+, even
+        though the call makes no traffic). On any failure, assumes
+        connected rather than block the app.
         """
         try:
-            import ctypes
-            import ctypes.util
-
-            lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("SystemConfiguration"))
-            lib.SCNetworkReachabilityCreateWithName.restype = ctypes.c_void_p
-            lib.SCNetworkReachabilityCreateWithName.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-            lib.SCNetworkReachabilityGetFlags.restype = ctypes.c_bool
-            lib.SCNetworkReachabilityGetFlags.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-
-            target = lib.SCNetworkReachabilityCreateWithName(None, b"0.0.0.0")
-            flags = ctypes.c_uint32(0)
-            ok = lib.SCNetworkReachabilityGetFlags(target, ctypes.byref(flags))
-            if not ok:
-                return False
-            kSCNetworkReachabilityFlagsReachable = 1 << 1
-            return bool(flags.value & kSCNetworkReachabilityFlagsReachable)
+            result = subprocess.run(
+                ["ifconfig"],
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=3,
+            )
         except Exception:
-            # Not on macOS or framework unavailable — assume connected
             return True
+
+        if result.returncode != 0:
+            return True
+
+        current_iface = None
+        for line in result.stdout.splitlines():
+            if line and not line[0].isspace():
+                current_iface = line.split(":", 1)[0]
+            elif current_iface and current_iface != "lo0" and "\tinet " in line:
+                return True
+        return False
 
     def tor_container_unhealthy(self) -> bool:
         """Check Tor container logs for signs of sickness.

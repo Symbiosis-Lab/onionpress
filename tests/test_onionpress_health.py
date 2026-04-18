@@ -206,6 +206,46 @@ class TestCheckInternalConnectivity(unittest.TestCase):
         self.assertFalse(hc.check_internal_connectivity())
 
 
+class TestCheckInternetConnectivity(unittest.TestCase):
+    """Interface-scan based check — no TCC-gated API calls."""
+
+    def _run(self, stdout, returncode=0):
+        return mock.Mock(returncode=returncode, stdout=stdout)
+
+    def test_real_en0_has_internet(self):
+        ifconfig = (
+            "lo0: flags=8049<UP,LOOPBACK> mtu 16384\n"
+            "\tinet 127.0.0.1 netmask 0xff000000\n"
+            "en0: flags=8863<UP,BROADCAST> mtu 1500\n"
+            "\tinet 192.168.1.42 netmask 0xffffff00\n"
+        )
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._run(ifconfig)):
+            self.assertTrue(HealthChecker.check_internet_connectivity())
+
+    def test_only_loopback_means_offline(self):
+        ifconfig = (
+            "lo0: flags=8049<UP,LOOPBACK> mtu 16384\n"
+            "\tinet 127.0.0.1 netmask 0xff000000\n"
+            "en0: flags=8863<UP,BROADCAST> mtu 1500\n"
+            "\tether aa:bb:cc:dd:ee:ff\n"
+        )
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._run(ifconfig)):
+            self.assertFalse(HealthChecker.check_internet_connectivity())
+
+    def test_ifconfig_failure_assumes_connected(self):
+        """Don't block the app if ifconfig can't run for some reason."""
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._run("", returncode=1)):
+            self.assertTrue(HealthChecker.check_internet_connectivity())
+
+    def test_subprocess_exception_assumes_connected(self):
+        with mock.patch("onionpress.health.subprocess.run",
+                        side_effect=OSError("boom")):
+            self.assertTrue(HealthChecker.check_internet_connectivity())
+
+
 class TestCheckExternalReachability(unittest.TestCase):
     def test_reachable(self):
         docker = mock.Mock()
