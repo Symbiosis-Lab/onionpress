@@ -3632,7 +3632,7 @@ class OnionPressApp(rumps.App):
         panel.setTitle_("Save Backup")
         panel.setNameFieldStringValue_(
             backup_manager.backup_filename(self.onion_address, username))
-        backups_dir = os.path.expanduser("~/Documents/onionpress/backups")
+        backups_dir = os.path.expanduser("~/Documents/OnionPress/backups")
         os.makedirs(backups_dir, exist_ok=True)
         panel.setDirectoryURL_(
             AppKit.NSURL.fileURLWithPath_(backups_dir))

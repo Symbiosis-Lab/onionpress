@@ -162,20 +162,17 @@ class OnionPressCLI:
 
     def cmd_backup(self, password: str, output_path: str = None) -> int:
         """Create a backup."""
+        from .backup import create_backup, backup_filename
+        addr = self.containers.get_onion_address()
         if not output_path:
-            backups_dir = os.path.expanduser("~/Documents/onionpress/backups")
+            backups_dir = os.path.expanduser("~/Documents/OnionPress/backups")
             os.makedirs(backups_dir, exist_ok=True)
             output_path = os.path.join(
-                backups_dir,
-                f"onionpress-{time.strftime('%Y-%m-%d')}-{os.getpid()}.zip"
-            )
-        addr = self.containers.get_onion_address()
-        # Delegate to onionpress.backup
+                backups_dir, backup_filename(addr, ""))
         try:
-            from .backup import create_backup
             create_backup(
                 onion_address=addr,
-                username="",  # not needed for CLI backup
+                username="",
                 password=password,
                 output_path=output_path,
                 version=__version__,
@@ -314,7 +311,7 @@ def main(argv: list[str] = None) -> int:
 
     p_backup = sub.add_parser("backup", help="Create a backup")
     p_backup.add_argument("password", help="Backup encryption password")
-    p_backup.add_argument("output", nargs="?", help="Output path (default: ~/Downloads/)")
+    p_backup.add_argument("output", nargs="?", help="Output path (default: ~/Documents/OnionPress/backups/)")
 
     p_restore = sub.add_parser("restore", help="Restore from backup")
     p_restore.add_argument("password", help="Backup encryption password")
