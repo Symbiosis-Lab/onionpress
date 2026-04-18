@@ -20,15 +20,13 @@ import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-# key_manager + onion_auth live at the top of src/ (not inside the
-# `onionpress` package), so import them by bare name — that matches how
-# other modules in this package reach them (see analytics_sharing.py,
-# backup.py, etc.).
+# onion_auth still lives at the top of src/ (not inside the `onionpress`
+# package), so add src/ to sys.path to import it by bare name.
 _SRC_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-import key_manager  # noqa: E402
+from onionpress import key_manager  # noqa: E402
 import onion_auth  # noqa: E402
 
 

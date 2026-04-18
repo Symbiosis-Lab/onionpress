@@ -62,9 +62,6 @@ cp "$PROJECT_DIR/app/Resources/logo.png" "$APP_PATH/Contents/Resources/"
 mkdir -p "$APP_PATH/Contents/Resources/scripts"
 cp "$PROJECT_DIR/src/menubar.py" "$APP_PATH/Contents/Resources/scripts/"
 cp "$PROJECT_DIR/src/onion_proxy.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/key_manager.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/backup_manager.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/setup_window.py" "$APP_PATH/Contents/Resources/scripts/"
 cp "$PROJECT_DIR/src/onionheaven.py" "$APP_PATH/Contents/Resources/scripts/"
 cp "$PROJECT_DIR/src/updater.py" "$APP_PATH/Contents/Resources/scripts/"
 cp "$PROJECT_DIR/src/install_native_messaging.py" "$APP_PATH/Contents/Resources/scripts/"
@@ -342,16 +339,11 @@ fi
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt"
 
 # Copy local modules into the build venv's site-packages so py2app can find them.
-# IMPORTANT: py2app does not reliably auto-detect local modules imported via
-# runtime sys.path manipulation. We copy them here AND list them in the
-# 'includes' option in setup.py as a belt-and-suspenders approach.
-# If you add a new local .py module imported by menubar.py, you must:
-#   1. Add it to the 'includes' list in setup.py
-#   2. Add a cp line here
+# The `onionpress` package is the canonical home for shared code; a few
+# top-level modules still live flat in src/ (onion_auth, onionheaven, updater)
+# and must be copied here because py2app resolves `includes` via normal Python
+# import at build time and src/ is not on that venv's path.
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
-cp "$SCRIPTS_DIR/key_manager.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/backup_manager.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/setup_window.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/onion_auth.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/onionheaven.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/updater.py" "$SITE_PACKAGES/"

@@ -3,9 +3,6 @@ Backup and Restore for OnionPress
 
 Creates password-protected zip archives containing Tor keys, WordPress database,
 and wp-content (themes, plugins, uploads).
-
-Moved from src/backup_manager.py to src/onionpress/backup.py (issue #122)
-so it can be shared by the CLI, MenubarApp, and future Linux version.
 """
 
 import json
@@ -16,7 +13,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 
-import key_manager
+from onionpress import key_manager
 from onionpress.config import DEFAULTS, read_config, write_value
 
 

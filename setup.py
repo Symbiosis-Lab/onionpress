@@ -69,16 +69,17 @@ OPTIONS = {
     # not import. If you add a new local .py module, ADD IT HERE or the build
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
-    'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'backup_manager',
+    'includes': ['subprocess', 'threading', 'os', 'time', 'json',
                  'onion_proxy', 'install_native_messaging', 'onionheaven', 'onion_auth', 'updater',
-                 'onionpress', 'onionpress.backup', 'onionpress.platform', 'onionpress.docker',
+                 'onionpress', 'onionpress.backup', 'onionpress.key_manager',
+                 'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
                  'onionpress.tor', 'onionpress.colima',
                  'onionpress.ui_helpers', 'onionpress.settings_ui',
                  'onionpress.browser', 'onionpress.log_rotation',
                  'onionpress.analytics_sharing',
                  'onionpress.onionnames_client',
-                 'onionpress.onionnames_registrar', 'setup_window'],
+                 'onionpress.onionnames_registrar'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

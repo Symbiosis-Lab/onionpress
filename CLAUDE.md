@@ -34,17 +34,15 @@
 
 ## Build & Release Process
 - MenubarApp built with py2app via `setup.py` (extracted from `build/build-dmg-simple.sh` lines 228-276)
-- Must copy `key_manager.py`, `backup_manager.py`, and `setup_window.py` to venv site-packages before build
-- **After editing ANY of these `src/` files, you MUST rebuild the MenubarApp** via `build/rebuild-menubar.sh`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app.
+- **After editing ANY `src/` file that the MenubarApp uses, you MUST rebuild the MenubarApp** via `build/rebuild-menubar.sh`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app.
 - **py2app entry point**: `MenubarApp/Contents/Resources/menubar.py` is the ONLY copy that matters at runtime — py2app `exec()`s it from `__boot__.py`. The copies in `lib/python3.14/` and `scripts/` are unused build artifacts. When hot-patching the installed app without a full rebuild, only update `Contents/Resources/menubar.py` (and its `__pycache__/` pyc).
   - `src/menubar.py` — main app (entry point)
   - `src/onion_proxy.py` — HTTP proxy, setup form, Wayback Machine login
-  - `src/key_manager.py` — vanity key management
-  - `src/backup_manager.py` — backup/restore
-  - `src/setup_window.py` — native setup window
-  - `src/cellar.py` — OnionCellar integration
+  - `src/onionheaven.py` — OnionHeaven client integration
+  - `src/updater.py` — auto-update logic
   - `src/install_native_messaging.py` — browser extension support
-  - `setup.py` — py2app config (if you add a new local module, add it to `includes` AND the build script's `cp` lines)
+  - `src/onionpress/` — canonical package for shared code (backup, key_manager, setup_window, health, docker, tor, colima, platform, config, containers, ui_helpers, settings_ui, browser, log_rotation, analytics_sharing, onionnames_*)
+  - `setup.py` — py2app config (if you add a new module to the `onionpress` package, no build-script change is needed; if you add a new flat `src/*.py` module, add it to `includes` in `setup.py` AND to the `cp` lines in `build/build-dmg-simple.sh` + `build/rebuild-menubar.sh`)
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557

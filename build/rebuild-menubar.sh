@@ -32,9 +32,6 @@ fi
 
 echo "=== Copying local modules to site-packages..."
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
-cp "$SCRIPTS_DIR/key_manager.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/backup_manager.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/setup_window.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/onion_auth.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/onionheaven.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/updater.py" "$SITE_PACKAGES/"

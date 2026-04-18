@@ -23,14 +23,14 @@ import re
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, script_dir)
 
-import key_manager
-import backup_manager
 import onion_proxy
 import install_native_messaging
 import onionheaven
 import updater
+from onionpress import key_manager
+from onionpress import backup as backup_manager
 try:
-    import setup_window
+    from onionpress import setup_window
 except ImportError:
     setup_window = None
 from onionpress.platform import resolve_paths
@@ -4883,7 +4883,6 @@ License: AGPL v3"""
                         filename = f"OnionPress-{onion_short}-{time.strftime('%Y-%m-%d-%H-%M')}.zip"
                         tmp_path = os.path.join(tempfile.gettempdir(), filename)
 
-                        import backup_manager
                         onion_addr = self.onion_address or "unknown"
                         backup_manager.create_backup(
                             onion_addr, "admin", password,
@@ -4958,7 +4957,6 @@ License: AGPL v3"""
                             "restored_at": now_iso
                         })
                     else:
-                        import backup_manager
                         backup_manager.restore_from_backup(local_zip, password, self.log)
                         try:
                             os.remove(local_zip)

@@ -190,7 +190,7 @@ def _do_upload_cycle(app, include_active=False):
 
     # Sign the manifest
     try:
-        import key_manager
+        from onionpress import key_manager
         import onion_auth
 
         secret_key_bytes, public_key_raw = key_manager.extract_keys()

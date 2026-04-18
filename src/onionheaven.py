@@ -293,7 +293,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
         return False
 
     try:
-        import key_manager
+        from onionpress import key_manager
         import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
         timestamp = onion_auth.make_timestamp()
@@ -414,7 +414,7 @@ def unregister_from_onionheaven(app, content_address=None):
 
     # Sign the unregister request with ed25519
     try:
-        import key_manager
+        from onionpress import key_manager
         import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
     except Exception as e:
@@ -514,7 +514,7 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
 
     # Sign with ed25519
     try:
-        import key_manager
+        from onionpress import key_manager
         import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
         timestamp = onion_auth.make_timestamp()
