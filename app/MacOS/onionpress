@@ -44,6 +44,13 @@ mkdir -p "$DATA_DIR"
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
 
+# Log file + log() must be defined before any caller (e.g. detect_port_offset),
+# otherwise bash falls through to macOS /usr/bin/log and prints help.
+LOG_FILE="$DATA_DIR/onionpress.log"
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
 # Per-user lock file to prevent the same user from double-starting.
 # Only checked for 'start' — other commands (status, get, launch, etc.) are safe.
 PIDFILE="$DATA_DIR/onionpress.pid"
@@ -105,10 +112,14 @@ export TZ="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || ech
 # the current user's processes and cannot detect ports bound by other users.
 detect_port_offset() {
     local offset=0
+    # Log to file only — stdout is captured by $(detect_port_offset),
+    # and stderr would spam every CLI invocation (status, address, ...).
+    local _stamp
     while true; do
         local test_port=$((8080 + offset))
         if [ $test_port -gt 65535 ]; then
-            log "ERROR: No available ports (tried offsets 0-$((offset - 10000)))"
+            _stamp=$(date '+%Y-%m-%d %H:%M:%S')
+            echo "[$_stamp] ERROR: No available ports (tried offsets 0-$((offset - 10000)))" >> "$LOG_FILE"
             offset=0  # fall back to default
             break
         fi
@@ -124,7 +135,8 @@ except OSError:
 " "$test_port" 2>/dev/null; then
             break
         fi
-        log "Port $test_port in use, trying offset $((offset + 10000))"
+        _stamp=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[$_stamp] Port $test_port in use, trying offset $((offset + 10000))" >> "$LOG_FILE"
         offset=$((offset + 10000))
     done
     echo "$offset"
@@ -341,14 +353,6 @@ stop_onionheaven_farm() {
         docker rm "$container" >> "$LOG_FILE" 2>&1 || true
         log "OnionHeaven farm: stopped $container"
     done
-}
-
-# Log file
-LOG_FILE="$DATA_DIR/onionpress.log"
-
-# Function to log messages
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
 # Function to check if a command exists
