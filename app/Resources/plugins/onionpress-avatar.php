@@ -1,9 +1,13 @@
 <?php
 /**
  * Plugin Name: OnionPress Local Avatar
- * Description: Adds a profile photo upload to the user profile page and
- *              serves it locally instead of leaking email hashes to Gravatar.
- * Version:     1.0
+ * Description: Adds a profile photo picker (WP media modal, drag-and-drop) to
+ *              the user profile page and serves it locally instead of leaking
+ *              email hashes to Gravatar. Hides the misleading core "Profile
+ *              Picture / Gravatar" section on profile.php. Users without an
+ *              uploaded photo get the OnionPress onion-with-rainbow default
+ *              instead of a Gravatar mystery person.
+ * Version:     1.2
  * Network:     true
  */
 
@@ -12,88 +16,153 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Show the "Profile Photo" upload field on the user profile page.
+ * URL of the default onion-rainbow avatar PNG shipped alongside this plugin.
+ * Returned for any user who hasn't uploaded a profile photo.
+ */
+function onionpress_avatar_default_url() {
+    return plugins_url( 'onionpress-avatar-default.png', __FILE__ );
+}
+
+/**
+ * Hide the core "Profile Picture" row (which always talks about Gravatar
+ * even when overridden). Our own "Profile Photo" section replaces it.
+ */
+function onionpress_avatar_hide_core_section() {
+    $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+    if ( ! $screen || ! in_array( $screen->id, array( 'profile', 'user-edit', 'profile-network', 'user-edit-network' ), true ) ) {
+        return;
+    }
+    ?>
+    <style>
+        .user-profile-picture { display: none !important; }
+    </style>
+    <?php
+}
+add_action( 'admin_head', 'onionpress_avatar_hide_core_section' );
+
+/**
+ * Enqueue the WP media library on the profile page so the picker modal works.
+ */
+function onionpress_avatar_enqueue( $hook ) {
+    if ( ! in_array( $hook, array( 'profile.php', 'user-edit.php' ), true ) ) {
+        return;
+    }
+    wp_enqueue_media();
+}
+add_action( 'admin_enqueue_scripts', 'onionpress_avatar_enqueue' );
+
+/**
+ * Show the "Profile Photo" picker on the user profile page.
  */
 function onionpress_avatar_field( $user ) {
     if ( ! current_user_can( 'upload_files' ) ) {
         return;
     }
-    $avatar_id = get_user_meta( $user->ID, 'onionpress_avatar_id', true );
+    $avatar_id  = (int) get_user_meta( $user->ID, 'onionpress_avatar_id', true );
     $avatar_url = $avatar_id ? wp_get_attachment_image_url( $avatar_id, 'thumbnail' ) : '';
     ?>
     <h3>Profile Photo</h3>
     <table class="form-table">
         <tr>
-            <th><label for="onionpress-avatar">Photo</label></th>
+            <th><label>Photo</label></th>
             <td>
-                <?php if ( $avatar_url ) : ?>
-                    <img src="<?php echo esc_url( $avatar_url ); ?>"
-                         style="width:96px;height:96px;border-radius:50%;object-fit:cover;display:block;margin-bottom:8px;">
-                <?php endif; ?>
-                <input type="file" name="onionpress_avatar" id="onionpress-avatar" accept="image/*">
+                <div id="onionpress-avatar-preview" style="margin-bottom:10px;">
+                    <?php if ( $avatar_url ) : ?>
+                        <img src="<?php echo esc_url( $avatar_url ); ?>"
+                             style="width:96px;height:96px;border-radius:50%;object-fit:cover;display:block;">
+                    <?php else : ?>
+                        <img src="<?php echo esc_url( onionpress_avatar_default_url() ); ?>"
+                             style="width:96px;height:96px;border-radius:50%;object-fit:cover;display:block;">
+                    <?php endif; ?>
+                </div>
+                <input type="hidden" name="onionpress_avatar_id" id="onionpress-avatar-id"
+                       value="<?php echo (int) $avatar_id; ?>">
+                <button type="button" class="button" id="onionpress-avatar-pick">
+                    <?php echo $avatar_id ? 'Change photo' : 'Choose or drop photo'; ?>
+                </button>
                 <?php if ( $avatar_id ) : ?>
-                    <p>
-                        <label>
-                            <input type="checkbox" name="onionpress_avatar_remove" value="1">
-                            Remove photo
-                        </label>
-                    </p>
+                    <button type="button" class="button-link-delete" id="onionpress-avatar-remove" style="margin-left:10px;">
+                        Remove
+                    </button>
                 <?php endif; ?>
+                <p class="description">
+                    Click to open the media library, or drag an image into the modal that opens.
+                    Stored locally on your onion — never sent to Gravatar.
+                </p>
             </td>
         </tr>
     </table>
+    <script>
+    (function($){
+        $(function(){
+            var frame;
+            $('#onionpress-avatar-pick').on('click', function(e){
+                e.preventDefault();
+                if (frame) { frame.open(); return; }
+                frame = wp.media({
+                    title: 'Choose profile photo',
+                    button: { text: 'Use this photo' },
+                    library: { type: 'image' },
+                    multiple: false
+                });
+                frame.on('select', function(){
+                    var att = frame.state().get('selection').first().toJSON();
+                    $('#onionpress-avatar-id').val(att.id);
+                    var url = (att.sizes && att.sizes.thumbnail) ? att.sizes.thumbnail.url : att.url;
+                    $('#onionpress-avatar-preview').html(
+                        '<img src="' + url + '" style="width:96px;height:96px;border-radius:50%;object-fit:cover;display:block;">'
+                    );
+                    $('#onionpress-avatar-pick').text('Change photo');
+                });
+                frame.open();
+            });
+            $('#onionpress-avatar-remove').on('click', function(e){
+                e.preventDefault();
+                $('#onionpress-avatar-id').val('0');
+                $('#onionpress-avatar-preview').html(
+                    '<img src="<?php echo esc_js( esc_url( onionpress_avatar_default_url() ) ); ?>" style="width:96px;height:96px;border-radius:50%;object-fit:cover;display:block;">'
+                );
+                $(this).remove();
+                $('#onionpress-avatar-pick').text('Choose or drop photo');
+            });
+        });
+    })(jQuery);
+    </script>
     <?php
 }
 add_action( 'show_user_profile', 'onionpress_avatar_field' );
 add_action( 'edit_user_profile', 'onionpress_avatar_field' );
 
 /**
- * Ensure the profile form uses multipart encoding for file uploads.
- */
-function onionpress_avatar_form_enctype() {
-    echo ' enctype="multipart/form-data"';
-}
-add_action( 'user_edit_form_tag', 'onionpress_avatar_form_enctype' );
-
-/**
- * Save the uploaded profile photo.
+ * Save the selected profile photo (media-library attachment id).
  */
 function onionpress_avatar_save( $user_id ) {
-    if ( ! current_user_can( 'upload_files' ) ) {
+    if ( ! current_user_can( 'edit_user', $user_id ) ) {
+        return;
+    }
+    if ( ! isset( $_POST['onionpress_avatar_id'] ) ) {
         return;
     }
 
-    // Handle removal
-    if ( ! empty( $_POST['onionpress_avatar_remove'] ) ) {
-        $old_id = get_user_meta( $user_id, 'onionpress_avatar_id', true );
+    $new_id = (int) $_POST['onionpress_avatar_id'];
+    $old_id = (int) get_user_meta( $user_id, 'onionpress_avatar_id', true );
+
+    if ( $new_id <= 0 ) {
         if ( $old_id ) {
-            wp_delete_attachment( $old_id, true );
+            delete_user_meta( $user_id, 'onionpress_avatar_id' );
         }
-        delete_user_meta( $user_id, 'onionpress_avatar_id' );
         return;
     }
 
-    // Handle upload
-    if ( empty( $_FILES['onionpress_avatar'] ) || $_FILES['onionpress_avatar']['error'] !== UPLOAD_ERR_OK ) {
+    // Validate the attachment exists and is an image.
+    $mime = get_post_mime_type( $new_id );
+    if ( ! $mime || strpos( $mime, 'image/' ) !== 0 ) {
         return;
     }
 
-    require_once ABSPATH . 'wp-admin/includes/image.php';
-    require_once ABSPATH . 'wp-admin/includes/file.php';
-    require_once ABSPATH . 'wp-admin/includes/media.php';
-
-    $attachment_id = media_handle_upload( 'onionpress_avatar', 0 );
-    if ( is_wp_error( $attachment_id ) ) {
-        return;
+    if ( $new_id !== $old_id ) {
+        update_user_meta( $user_id, 'onionpress_avatar_id', $new_id );
     }
-
-    // Delete the old avatar attachment
-    $old_id = get_user_meta( $user_id, 'onionpress_avatar_id', true );
-    if ( $old_id && $old_id != $attachment_id ) {
-        wp_delete_attachment( $old_id, true );
-    }
-
-    update_user_meta( $user_id, 'onionpress_avatar_id', $attachment_id );
 }
 add_action( 'personal_options_update', 'onionpress_avatar_save' );
 add_action( 'edit_user_profile_update', 'onionpress_avatar_save' );
@@ -120,13 +189,12 @@ function onionpress_avatar_override( $avatar, $id_or_email, $size, $default, $al
     }
 
     $avatar_id = get_user_meta( $user->ID, 'onionpress_avatar_id', true );
-    if ( ! $avatar_id ) {
-        return $avatar;
+    $url = '';
+    if ( $avatar_id ) {
+        $url = wp_get_attachment_image_url( $avatar_id, array( $size, $size ) );
     }
-
-    $url = wp_get_attachment_image_url( $avatar_id, array( $size, $size ) );
     if ( ! $url ) {
-        return $avatar;
+        $url = onionpress_avatar_default_url();
     }
 
     return sprintf(
@@ -161,14 +229,13 @@ function onionpress_avatar_url_override( $url, $id_or_email, $args ) {
     }
 
     $avatar_id = get_user_meta( $user->ID, 'onionpress_avatar_id', true );
-    if ( ! $avatar_id ) {
-        return $url;
+    if ( $avatar_id ) {
+        $size = isset( $args['size'] ) ? (int) $args['size'] : 96;
+        $local_url = wp_get_attachment_image_url( $avatar_id, array( $size, $size ) );
+        if ( $local_url ) {
+            return $local_url;
+        }
     }
-
-    $size = isset( $args['size'] ) ? (int) $args['size'] : 96;
-    $local_url = wp_get_attachment_image_url( $avatar_id, array( $size, $size ) );
-
-    return $local_url ? $local_url : $url;
+    return onionpress_avatar_default_url();
 }
 add_filter( 'get_avatar_url', 'onionpress_avatar_url_override', 10, 3 );
-

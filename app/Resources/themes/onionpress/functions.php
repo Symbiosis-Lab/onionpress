@@ -42,7 +42,7 @@ add_action('after_setup_theme', 'onionpress_setup');
  * Enqueue theme styles
  */
 function onionpress_scripts() {
-    wp_enqueue_style('onionpress-style', get_stylesheet_uri(), array(), '1.0.2');
+    wp_enqueue_style('onionpress-style', get_stylesheet_uri(), array(), '1.0.4');
 }
 add_action('wp_enqueue_scripts', 'onionpress_scripts');
 
