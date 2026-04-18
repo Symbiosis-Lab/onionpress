@@ -65,9 +65,73 @@ class TestCheckWordpressLocal(unittest.TestCase):
         self.assertFalse(hc.check_wordpress_local())
 
 
+class TestCheckWordpressExternal(unittest.TestCase):
+    """check_wordpress_external shells out to host curl — patch subprocess.run."""
+
+    def _result(self, returncode=0, stdout=""):
+        r = mock.Mock()
+        r.returncode = returncode
+        r.stdout = stdout
+        return r
+
+    def test_healthy(self):
+        hc = HealthChecker(mock.Mock())
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._result(0, "<html>WordPress</html>")):
+            self.assertTrue(hc.check_wordpress_external(8080, log=False))
+
+    def test_database_error_in_body(self):
+        """A 200 OK with a DB-error body is NOT healthy — this is the onionheaven bug fix."""
+        hc = HealthChecker(mock.Mock())
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._result(0, "Error establishing a database connection")):
+            self.assertFalse(hc.check_wordpress_external(8080, log=False))
+
+    def test_alternate_database_error_in_body(self):
+        hc = HealthChecker(mock.Mock())
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._result(0, "Database connection error")):
+            self.assertFalse(hc.check_wordpress_external(8080, log=False))
+
+    def test_curl_exit_code_nonzero(self):
+        hc = HealthChecker(mock.Mock())
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._result(7, "")):
+            self.assertFalse(hc.check_wordpress_external(8080, log=False))
+
+    def test_subprocess_exception(self):
+        hc = HealthChecker(mock.Mock())
+        with mock.patch("onionpress.health.subprocess.run",
+                        side_effect=OSError("boom")):
+            self.assertFalse(hc.check_wordpress_external(8080, log=False))
+
+    def test_logs_on_success(self):
+        logs = []
+        hc = HealthChecker(mock.Mock(), log_func=logs.append)
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._result(0, "<html>")):
+            hc.check_wordpress_external(8080, log=True)
+        self.assertTrue(any("Checking local access" in l for l in logs))
+        self.assertTrue(any("WordPress responding" in l for l in logs))
+
+    def test_silent_when_log_false(self):
+        logs = []
+        hc = HealthChecker(mock.Mock(), log_func=logs.append)
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._result(0, "<html>")):
+            hc.check_wordpress_external(8080, log=False)
+        self.assertEqual(logs, [])
+
+
 class TestCheckTorBootstrap(unittest.TestCase):
+    # check_tor_bootstrap first tries the control-port via docker.exec; if
+    # that doesn't return a parseable PROGRESS line it falls back to
+    # docker.run logs. These tests exercise the log fallback, so exec is
+    # stubbed to fail.
+
     def test_100_percent(self):
         docker = mock.Mock()
+        docker.exec.return_value = _fail()
         docker.run.return_value = _ok("Bootstrapped 100% (done): Done")
         hc = HealthChecker(docker)
         bootstrapped, pct = hc.check_tor_bootstrap()
@@ -76,6 +140,7 @@ class TestCheckTorBootstrap(unittest.TestCase):
 
     def test_partial(self):
         docker = mock.Mock()
+        docker.exec.return_value = _fail()
         docker.run.return_value = _ok("PROGRESS=50 TAG=loading")
         hc = HealthChecker(docker)
         bootstrapped, pct = hc.check_tor_bootstrap()
@@ -84,6 +149,7 @@ class TestCheckTorBootstrap(unittest.TestCase):
 
     def test_arti_sufficiently_bootstrapped(self):
         docker = mock.Mock()
+        docker.exec.return_value = _fail()
         docker.run.return_value = _ok("Sufficiently bootstrapped to build circuits")
         hc = HealthChecker(docker)
         bootstrapped, pct = hc.check_tor_bootstrap()
@@ -91,11 +157,22 @@ class TestCheckTorBootstrap(unittest.TestCase):
 
     def test_no_logs(self):
         docker = mock.Mock()
+        docker.exec.return_value = _fail()
         docker.run.return_value = _fail()
         hc = HealthChecker(docker)
         bootstrapped, pct = hc.check_tor_bootstrap()
         self.assertFalse(bootstrapped)
         self.assertEqual(pct, 0)
+
+    def test_control_port_primary(self):
+        """Control-port probe short-circuits the log-based fallback."""
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done")
+        docker.run.side_effect = AssertionError("should not fall through to logs")
+        hc = HealthChecker(docker)
+        bootstrapped, pct = hc.check_tor_bootstrap()
+        self.assertTrue(bootstrapped)
+        self.assertEqual(pct, 100)
 
 
 class TestCheckTorHostname(unittest.TestCase):
@@ -183,9 +260,9 @@ class TestTorContainerUnhealthy(unittest.TestCase):
 class TestFullCheck(unittest.TestCase):
     def test_all_healthy(self):
         docker = mock.Mock()
-        # WP local
         docker.exec.side_effect = [
             _ok("<html>"),           # check_wordpress_local
+            _fail(),                 # check_tor_bootstrap control-port probe → falls back to docker.run
             _ok("op2abc.onion\n"),   # check_tor_hostname
             _ok(),                   # check_internal_connectivity
             _ok("200"),              # check_external_reachability
@@ -204,6 +281,7 @@ class TestFullCheck(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.side_effect = [
             _fail(),               # check_wordpress_local
+            _fail(),               # check_tor_bootstrap control-port probe
             _ok("op2abc.onion\n"), # check_tor_hostname
         ]
         docker.run.return_value = _ok("Bootstrapped 100%")

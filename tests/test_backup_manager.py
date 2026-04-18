@@ -14,6 +14,16 @@ import zipfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from onionpress import backup as backup_manager
+from onionpress import key_manager
+
+
+def _fake_arti_pem():
+    """A deterministic, parseable OpenSSH PEM for test fixtures.
+
+    The key bytes are arbitrary (not a real ed25519 pair) — build/parse is
+    byte-level, not crypto. Tests round-trip these through backup+restore.
+    """
+    return key_manager.build_openssh_key(b"\x01" * 64, b"\x02" * 32)
 
 
 class TestBackupFilename(unittest.TestCase):
@@ -167,6 +177,12 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.output_zip = os.path.join(self.tmpdir, "backup.zip")
         self.logs = []
 
+        # Write a valid Arti keystore PEM that the fake docker will cat
+        # when key_manager.extract_keys() runs.
+        self.pem_path = os.path.join(self.tmpdir, "arti.pem")
+        with open(self.pem_path, "wb") as f:
+            f.write(_fake_arti_pem())
+
         # Create a fake docker script that returns test data
         self.fake_bin = os.path.join(self.tmpdir, "bin")
         os.makedirs(self.fake_bin)
@@ -174,10 +190,8 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         with open(fake_docker, "w") as f:
             f.write('#!/bin/bash\n')
             # Route based on subcommand + args
-            f.write('if [[ "$1" == "exec" && "$*" == *"hs_ed25519_secret_key"* ]]; then\n')
-            f.write('    printf "fake-secret-key-data-32-bytes-xx"; exit 0\n')
-            f.write('elif [[ "$1" == "exec" && "$*" == *"hs_ed25519_public_key"* ]]; then\n')
-            f.write('    printf "fake-public-key-data-32-bytes-xx"; exit 0\n')
+            f.write(f'if [[ "$1" == "exec" && "$*" == *"ks_hs_id.ed25519_expanded_private"* ]]; then\n')
+            f.write(f'    cat "{self.pem_path}"; exit 0\n')
             f.write('elif [[ "$1" == "exec" && "$*" == *"wp config get DB_NAME"* ]]; then\n')
             f.write('    echo "wordpress"; exit 0\n')
             f.write('elif [[ "$1" == "exec" && "$*" == *"wp config get DB_USER"* ]]; then\n')
@@ -186,6 +200,9 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             f.write('    echo "testpass123"; exit 0\n')
             f.write('elif [[ "$1" == "exec" && "$*" == *"mariadb-dump"* ]]; then\n')
             f.write('    echo "CREATE TABLE wp_posts; INSERT INTO wp_posts VALUES (1);"; exit 0\n')
+            f.write('elif [[ "$1" == "exec" && "$*" == *"test -f"* ]]; then\n')
+            # OnionHeaven detection probe — not an OnionHeaven install
+            f.write('    exit 1\n')
             f.write('elif [[ "$1" == "cp" ]]; then\n')
             # For `docker cp container:/path dest`, create the dest with sample content
             f.write('    dest="${@: -1}"\n')
@@ -223,8 +240,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         names_normalized = [n.lstrip("./") for n in names if n.lstrip("./")]
 
         self.assertIn("metadata.json", names_normalized)
-        self.assertTrue(any("tor-keys/hs_ed25519_secret_key" in n for n in names_normalized))
-        self.assertTrue(any("tor-keys/hs_ed25519_public_key" in n for n in names_normalized))
+        self.assertTrue(any("tor-keys/ks_hs_id.ed25519_expanded_private" in n for n in names_normalized))
         self.assertTrue(any("database/wordpress.sql" in n for n in names_normalized))
         self.assertTrue(any("wp-content/themes/" in n for n in names_normalized))
         self.assertTrue(any("wp-content/plugins/" in n for n in names_normalized))
@@ -348,13 +364,11 @@ class TestRestoreRoundTrip(unittest.TestCase):
         with open(os.path.join(staging, "metadata.json"), "w") as f:
             json.dump(metadata, f)
 
-        # tor-keys
+        # tor-keys — single Arti keystore file in OpenSSH PEM format
         tor_dir = os.path.join(staging, "tor-keys")
         os.makedirs(tor_dir)
-        with open(os.path.join(tor_dir, "hs_ed25519_secret_key"), "wb") as f:
-            f.write(b"secret-key-bytes")
-        with open(os.path.join(tor_dir, "hs_ed25519_public_key"), "wb") as f:
-            f.write(b"public-key-bytes")
+        with open(os.path.join(tor_dir, "ks_hs_id.ed25519_expanded_private"), "wb") as f:
+            f.write(_fake_arti_pem())
 
         # database
         db_dir = os.path.join(staging, "database")
