@@ -1,13 +1,12 @@
 <?php
 /**
  * Plugin Name: OnionPress User Path
- * Description: Makes /<onionname>/ serve that user's author archive on every
- *              OnionPress install, so a visitor landing on
- *              op2abc.onion/brewsterkahle sees Brewster's posts instead of
- *              a 404. OnionPress is single-blog-per-install by default; WP
- *              multisite sub-blog creation on user_register is future work.
- *              Until then, the author archive is the stable per-user page.
- * Version:     1.0
+ * Description: Makes /<onionname>/ serve that user's content on every
+ *              OnionPress install (either an author archive on blog_id=1
+ *              or, once sub-blogs are created per issue #187, the user's
+ *              own subsite) and sets user_url to /<onionname>/ so the WP
+ *              profile "Website" link points at that stable per-user page.
+ * Version:     1.1
  * Network:     true
  */
 
@@ -108,3 +107,46 @@ add_action( 'parse_request', function ( $wp ) {
             : $user->user_login,
     );
 }, 30 );
+
+/**
+ * Derive the per-user URL for a given login:
+ * http://<network-home>/<login>/ — always points at something useful
+ * (author archive today, subsite once per-user blogs land).
+ */
+function onionpress_user_path_url_for( $login ) {
+    $base = function_exists( 'network_home_url' )
+        ? network_home_url( '/' )
+        : home_url( '/' );
+    return trailingslashit( $base ) . $login . '/';
+}
+
+/**
+ * On user creation (single or multisite), set user_url to the per-user
+ * page. Leave existing non-empty values alone unless they point at the
+ * bare network root (the historical default that motivated this fix).
+ */
+add_action( 'user_register', function ( $user_id ) {
+    $user = get_userdata( $user_id );
+    if ( ! $user || empty( $user->user_login ) ) {
+        return;
+    }
+    $desired = onionpress_user_path_url_for( $user->user_login );
+    $current = (string) $user->user_url;
+    $network_root = rtrim(
+        function_exists( 'network_home_url' ) ? network_home_url( '/' ) : home_url( '/' ),
+        '/'
+    );
+    $should_set = ( $current === '' )
+        || ( rtrim( $current, '/' ) === $network_root );
+    if ( ! $should_set ) {
+        return;
+    }
+    // Use $wpdb to avoid re-entering user_register via wp_update_user hooks.
+    global $wpdb;
+    $wpdb->update(
+        $wpdb->users,
+        array( 'user_url' => $desired ),
+        array( 'ID' => $user_id )
+    );
+    clean_user_cache( $user_id );
+}, 20, 1 );

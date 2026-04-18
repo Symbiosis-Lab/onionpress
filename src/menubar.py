@@ -2962,6 +2962,17 @@ class OnionPressApp(rumps.App):
                     sw.add_log("WordPress configured successfully")
                     sw.set_status("Installing plugins...")
                     sw.add_log("Installing plugins and themes...")
+                # Set admin user's Website to their per-user page
+                # (http://<onion>/<login>/) rather than the bare onion root,
+                # so the "Website" link on profile.php points somewhere useful.
+                subprocess.run(
+                    [docker_bin, "exec", "onionpress-wordpress",
+                     "wp", "user", "update", sw.admin_user,
+                     f"--user_url=http://{onion_addr}/{sw.admin_user}/",
+                     "--allow-root"],
+                    capture_output=True, text=True, encoding='utf-8',
+                    errors='replace', timeout=30
+                )
                 # Re-run launcher start to install mu-plugins, multisite, etc.
                 subprocess.run(
                     [self.launcher_script, "start"],
