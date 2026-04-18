@@ -139,15 +139,38 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         with open(os.path.join(db_dir, 'wordpress.sql'), 'wb') as f:
             f.write(result.stdout)
 
-        # 3. Copy wp-content from container
-        log_func("Backup: copying wp-content (themes, plugins, uploads)...")
+        # 3. Copy wp-content from container, excluding:
+        #    - creations/: bind-mounted from ~/Documents/OnionPress/Creations,
+        #      often multi-GB of media. Lives on the host filesystem already,
+        #      so docker-cp'ing it through the VM and then re-encrypting it
+        #      into the zip is redundant work for a local backup.
+        #    - .thumbs/: auto-generated macOS qlmanage thumbnails; regenerate
+        #      on demand.
+        #    - .DS_Store: Finder cruft.
+        #
+        #    Stream via `docker exec tar -cf - | tar -xf -` instead of
+        #    docker cp so the excludes apply at read time (no wasted IO
+        #    pulling Creations across the VM boundary).
+        log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
         wpcontent_dir = os.path.join(staging, 'wp-content')
-        subprocess.run(
-            ['docker', 'cp',
-             'onionpress-wordpress:/var/www/html/wp-content/.',
-             wpcontent_dir],
-            capture_output=True, timeout=300, check=True
+        os.makedirs(wpcontent_dir, exist_ok=True)
+        docker_tar = subprocess.Popen(
+            ['docker', 'exec', 'onionpress-wordpress',
+             'tar', '-cf', '-',
+             '--exclude=./creations',
+             '--exclude=.thumbs',
+             '--exclude=.DS_Store',
+             '-C', '/var/www/html/wp-content', '.'],
+            stdout=subprocess.PIPE
         )
+        host_tar = subprocess.run(
+            ['tar', '-xf', '-', '-C', wpcontent_dir],
+            stdin=docker_tar.stdout, timeout=300
+        )
+        docker_tar.stdout.close()
+        docker_rc = docker_tar.wait(timeout=10)
+        if docker_rc != 0 or host_tar.returncode != 0:
+            raise Exception(f"wp-content tar failed: docker={docker_rc} host={host_tar.returncode}")
 
         # 4. Backup OnionHeaven data if this is OnionHeaven instance
         #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
@@ -213,6 +236,11 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             'username': username,
             'is_onionheaven': is_onionheaven,
             'is_onionhome': is_onionhome,
+            # Creations aren't inside wp-content anymore; they're in the
+            # user's ~/Documents/OnionPress/Creations directory. Flag this
+            # so restore can surface a useful "also copy your Documents"
+            # reminder instead of silently producing an empty Creations page.
+            'excludes_creations': True,
         }
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -223,8 +251,14 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         if os.path.exists(output_path):
             os.unlink(output_path)
 
+        # -n skips deflate for already-compressed formats (images, video,
+        # audio, PDFs, archives). Encryption + CRC still run, but we don't
+        # waste CPU running deflate on bytes that won't shrink.
         result = subprocess.run(
-            ['zip', '-r', '-P', password, output_path, '.'],
+            ['zip', '-r', '-P', password,
+             '-n', '.mov:.mp4:.m4v:.webm:.jpg:.jpeg:.png:.gif:.heic:.heif'
+                   ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz',
+             output_path, '.'],
             cwd=staging,
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600
         )
@@ -401,6 +435,17 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
                  'chown', '-R', 'www-data:www-data', '/var/www/html/wp-content/'],
                 capture_output=True, timeout=60
             )
+
+        # Surface Creations-exclusion reminder. The backup intentionally
+        # skips wp-content/creations (it's the host-side bind mount of
+        # ~/Documents/OnionPress/Creations) — on this machine the bind
+        # mount re-materializes Creations at container start, but on a
+        # different machine the user has to bring their Documents folder
+        # along too, or My Creations will be empty.
+        if metadata.get('excludes_creations'):
+            log_func("Restore: NOTE — backup does not include 'My Creations' files. "
+                     "They live in ~/Documents/OnionPress/Creations/ — if restoring "
+                     "on a new machine, copy that folder across separately.")
 
         # 4. Restore OnionHeaven data if present in backup
         onionheaven_dir = _find_dir(staging, 'onionheaven')

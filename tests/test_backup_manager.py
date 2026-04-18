@@ -203,8 +203,19 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             f.write('elif [[ "$1" == "exec" && "$*" == *"test -f"* ]]; then\n')
             # OnionHeaven detection probe — not an OnionHeaven install
             f.write('    exit 1\n')
+            f.write('elif [[ "$1" == "exec" && "$*" == *"tar -cf -"* ]]; then\n')
+            # New wp-content backup flow: stream a tar of fake wp-content
+            # (matching what the old `docker cp` branch used to fabricate).
+            f.write('    fakedir=$(mktemp -d)\n')
+            f.write('    mkdir -p "$fakedir/themes" "$fakedir/plugins" "$fakedir/uploads"\n')
+            f.write('    echo "theme data" > "$fakedir/themes/flavor.css"\n')
+            f.write('    echo "plugin data" > "$fakedir/plugins/hello.php"\n')
+            f.write('    tar -cf - -C "$fakedir" .\n')
+            f.write('    rm -rf "$fakedir"\n')
+            f.write('    exit 0\n')
             f.write('elif [[ "$1" == "cp" ]]; then\n')
-            # For `docker cp container:/path dest`, create the dest with sample content
+            # For `docker cp container:/path dest` (restore path still uses cp),
+            # create the dest with sample content.
             f.write('    dest="${@: -1}"\n')
             f.write('    mkdir -p "$dest/themes" "$dest/plugins" "$dest/uploads"\n')
             f.write('    echo "theme data" > "$dest/themes/flavor.css"\n')
