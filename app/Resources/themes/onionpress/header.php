@@ -42,16 +42,16 @@
                 <?php
                 $onionname = function_exists('onionpress_get_onionname')
                     ? onionpress_get_onionname() : '';
+                $onion_addr = function_exists('onionpress_follow_get_own_address')
+                    ? onionpress_follow_get_own_address() : null;
                 if ($onionname) : ?>
-                    <p class="site-onionname">@<?php echo esc_html($onionname); ?></p>
+                    <p class="site-onionname"><?php echo esc_html($onionname); ?><?php if ($onion_addr) : ?><span class="site-onion-host">@<?php echo esc_html($onion_addr); ?></span><?php endif; ?></p>
                 <?php endif; ?>
                 <?php $description = get_bloginfo('description', 'display');
                 if ($description) : ?>
                     <p class="site-description"><?php echo esc_html($description); ?></p>
                 <?php endif; ?>
                 <?php
-                $onion_addr = function_exists('onionpress_follow_get_own_address')
-                    ? onionpress_follow_get_own_address() : null;
                 if ($onion_addr) :
                     $onionhome = defined('ONIONHOME_ADDRESS') ? ONIONHOME_ADDRESS
                         : 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion';

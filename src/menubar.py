@@ -1880,8 +1880,9 @@ class OnionPressApp(rumps.App):
 
             if state == "available":
                 self.icon = self.icon_running
-                if self.is_onionheaven:
-                    self.menu["Starting..."].title = f"OnionHeaven: {self.onion_address}"
+                onionname = self.read_config_value("ONIONNAME", "").strip()
+                if onionname:
+                    self.menu["Starting..."].title = f"{onionname}@{self.onion_address}"
                 else:
                     self.menu["Starting..."].title = f"Address: {self.onion_address}"
                 self.menu["Start"].set_callback(None)
