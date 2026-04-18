@@ -51,15 +51,15 @@ def verify_wp_admin(username, password):
         result = subprocess.run(
             ['docker', 'exec', 'onionpress-wordpress',
              'wp', 'user', 'get', username, '--field=roles', '--allow-root'],
-            capture_output=True, timeout=15
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
         if result.returncode != 0:
-            stderr = result.stderr.decode(errors='replace').strip()
+            stderr = result.stderr.strip()
             if 'Invalid user' in stderr:
                 return (False, f"User '{username}' does not exist in WordPress.")
             return (False, f"Could not look up user: {stderr}")
 
-        roles = result.stdout.decode(errors='replace').strip()
+        roles = result.stdout.strip()
         if 'administrator' not in roles:
             return (False, f"User '{username}' is not an administrator (roles: {roles}).")
     except subprocess.TimeoutExpired:
@@ -78,15 +78,13 @@ def verify_wp_admin(username, password):
         "echo 'ok';"
     )
     try:
-        stdin_data = (username + "\n" + password).encode()
         result = subprocess.run(
             ['docker', 'exec', '-i', 'onionpress-wordpress',
              'wp', 'eval', php_code, '--allow-root'],
-            input=stdin_data,
-            capture_output=True, timeout=15
+            input=username + "\n" + password,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
         if result.returncode != 0:
-            stderr = result.stderr.decode(errors='replace').strip()
             return (False, f"Incorrect password for '{username}'.")
     except subprocess.TimeoutExpired:
         return (False, "Timed out verifying password.")
@@ -228,10 +226,10 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         result = subprocess.run(
             ['zip', '-r', '-P', password, output_path, '.'],
             cwd=staging,
-            capture_output=True, timeout=600
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600
         )
         if result.returncode != 0:
-            raise Exception(f"zip failed: {result.stderr.decode(errors='replace')}")
+            raise Exception(f"zip failed: {result.stderr}")
 
         log_func("Backup: complete")
 
@@ -378,10 +376,10 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
              '-p' + db_creds['password'],
              db_creds['name'],
              '-e', 'source /tmp/wordpress.sql'],
-            capture_output=True, timeout=120
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
         )
         if result.returncode != 0:
-            raise Exception(f"Database import failed: {result.stderr.decode(errors='replace')}")
+            raise Exception(f"Database import failed: {result.stderr}")
 
         # Clean up SQL file in container
         subprocess.run(
@@ -490,9 +488,9 @@ def _ensure_multisite_constants(log_func):
         result = subprocess.run(
             ['docker', 'exec', 'onionpress-wordpress',
              'wp', 'db', 'query', "SHOW TABLES LIKE 'wp_blogs';", '--allow-root'],
-            capture_output=True, timeout=15
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
-        if result.returncode != 0 or b'wp_blogs' not in result.stdout:
+        if result.returncode != 0 or 'wp_blogs' not in result.stdout:
             return  # Not a multisite install, nothing to do
     except (subprocess.TimeoutExpired, Exception):
         return  # Can't check, skip rather than break single-site installs
@@ -514,11 +512,11 @@ def _get_db_credentials():
         result = subprocess.run(
             ['docker', 'exec', 'onionpress-wordpress',
              'wp', 'config', 'get', field, '--allow-root'],
-            capture_output=True, timeout=15
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
         if result.returncode != 0:
             raise Exception(f"Could not read {field} from WordPress config")
-        creds[field] = result.stdout.decode(errors='replace').strip()
+        creds[field] = result.stdout.strip()
     return {
         'name': creds['DB_NAME'],
         'user': creds['DB_USER'],
