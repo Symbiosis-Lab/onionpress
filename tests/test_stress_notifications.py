@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from stress.orchestrator.notifications import generate_signed_payloads, generate_unregister_payloads
 from stress.orchestrator.metrics import WorkerInfoStore
-from onion_auth import verify_payload
+from onionpress.onion_auth import verify_payload
 
 
 def _make_test_worker_info(tmpdir: str, workers: list[dict]) -> WorkerInfoStore:

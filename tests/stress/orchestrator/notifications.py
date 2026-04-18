@@ -15,9 +15,9 @@ from .metrics import WorkerInfoStore
 
 from onionpress.docker import Docker
 
-# Import onion_auth from the repo src
+# Import onion_auth from the onionpress package
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
-from onion_auth import sign_payload, make_timestamp
+from onionpress.onion_auth import sign_payload, make_timestamp
 
 
 def generate_signed_payloads(

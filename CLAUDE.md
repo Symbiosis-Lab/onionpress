@@ -19,7 +19,8 @@
 - User-visible content at `~/Documents/OnionPress/` (backups, Creations)
 
 ## Repo Layout
-- `src/` — Python source (menubar.py, onion_proxy.py, etc.)
+- `src/menubar.py` — py2app entry point (the only flat module; everything else lives in the package)
+- `src/onionpress/` — shared Python package (all non-entry-point code)
 - `app/` — macOS .app bundle source (assembled into `OnionPress.app/` at build time)
   - `app/Info.plist` — canonical version source #2
   - `app/MacOS/` — launcher scripts, Swift wrapper source
@@ -37,12 +38,8 @@
 - **After editing ANY `src/` file that the MenubarApp uses, you MUST rebuild the MenubarApp** via `build/rebuild-menubar.sh`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app.
 - **py2app entry point**: `MenubarApp/Contents/Resources/menubar.py` is the ONLY copy that matters at runtime — py2app `exec()`s it from `__boot__.py`. The copies in `lib/python3.14/` and `scripts/` are unused build artifacts. When hot-patching the installed app without a full rebuild, only update `Contents/Resources/menubar.py` (and its `__pycache__/` pyc).
   - `src/menubar.py` — main app (entry point)
-  - `src/onion_proxy.py` — HTTP proxy, setup form, Wayback Machine login
-  - `src/onionheaven.py` — OnionHeaven client integration
-  - `src/updater.py` — auto-update logic
-  - `src/install_native_messaging.py` — browser extension support
-  - `src/onionpress/` — canonical package for shared code (backup, key_manager, setup_window, health, docker, tor, colima, platform, config, containers, ui_helpers, settings_ui, browser, log_rotation, analytics_sharing, onionnames_*)
-  - `setup.py` — py2app config (if you add a new module to the `onionpress` package, no build-script change is needed; if you add a new flat `src/*.py` module, add it to `includes` in `setup.py` AND to the `cp` lines in `build/build-dmg-simple.sh` + `build/rebuild-menubar.sh`)
+  - `src/onionpress/` — shared package: backup, key_manager, setup_window, onion_proxy, onion_auth, onionheaven, updater, install_native_messaging, native_messaging_host, power, health, docker, tor, colima, platform, config, containers, ui_helpers, settings_ui, browser, log_rotation, analytics_sharing, onionnames_*
+  - `setup.py` — py2app config. Adding a new submodule to `onionpress` just means one new line in the `includes` list — no build-script change needed. Build scripts only copy the whole `onionpress` package into site-packages.
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
@@ -66,7 +63,7 @@
 - **Port offsets**: second user auto-detects port 8080 is taken and offsets all ports by +10000 (18080/19050/19077), third user by +20000, etc. Max ~5 users.
 - **Detection uses socket bind test**, not `lsof` — `lsof` only sees the current user's processes and cannot detect ports bound by other users
 - **Port detection must happen in the MenubarApp's `__init__`** (Python socket bind), not in the shell scripts — the MenubarApp launches first and needs the correct ports before the `onionpress` script runs
-- **Module-level constants in `onion_proxy.py`** (`PROXY_PORT`, `PHP_PROXY_PORT`) are set at import time. The MenubarApp must update these globals after detecting the offset: `onion_proxy.PROXY_PORT = self.proxy_port`
+- **Module-level constants in `onionpress.onion_proxy`** (`PROXY_PORT`, `PHP_PROXY_PORT`) are set at import time. The MenubarApp must update these globals after detecting the offset: `onion_proxy.PROXY_PORT = self.proxy_port`
 - The `onionpress` shell script also has detection as a fallback (for standalone use), but respects pre-set `ONIONPRESS_PORT_OFFSET` env var from the MenubarApp
 - **`LSMultipleInstancesProhibited` must NOT be in any Info.plist** — macOS enforces it across ALL users sharing the same app bundle, not just per-user
 - **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes

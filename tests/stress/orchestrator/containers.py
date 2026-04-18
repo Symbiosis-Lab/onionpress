@@ -98,7 +98,7 @@ class WorkerManager:
         for src, dst in [
             (os.path.join(stress_dir, "worker-server.py"), "/worker-server.py"),
             (os.path.join(stress_dir, "worker-bootstrap.py"), "/worker-bootstrap.py"),
-            (os.path.join(src_dir, "onion_auth.py"), "/onion_auth.py"),
+            (os.path.join(src_dir, "onionpress", "onion_auth.py"), "/onion_auth.py"),
             (os.path.join(stress_dir, "tor-watchdog.py"), "/tor-watchdog.py"),
         ]:
             self.docker.run(["cp", src, f"{ctr_name}:{dst}"], timeout=10)

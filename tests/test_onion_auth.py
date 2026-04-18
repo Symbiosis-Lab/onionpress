@@ -8,7 +8,7 @@ import unittest
 # Allow importing from src/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-import onion_auth
+from onionpress import onion_auth
 
 
 def _expand_seed(seed_hex):

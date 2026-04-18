@@ -18,7 +18,7 @@ sys.path.insert(0, _SRC_DIR)
 
 from onionpress import onionnames_client  # noqa: E402
 from onionpress import onionnames_registrar  # noqa: E402
-import onion_auth  # noqa: E402
+from onionpress import onion_auth  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

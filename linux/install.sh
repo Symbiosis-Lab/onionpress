@@ -233,7 +233,7 @@ fi
 
 # Copy shared scripts
 $SUDO mkdir -p "$INSTALL_DIR/scripts"
-$SUDO cp "$REPO_DIR/src/onion_auth.py" "$INSTALL_DIR/scripts/"
+$SUDO cp "$REPO_DIR/src/onionpress/onion_auth.py" "$INSTALL_DIR/scripts/"
 $SUDO cp "$REPO_DIR/src/onionpress/key_manager.py" "$INSTALL_DIR/scripts/"
 if [ -f "$REPO_DIR/linux/onionpress-heartbeat.py" ]; then
     $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"

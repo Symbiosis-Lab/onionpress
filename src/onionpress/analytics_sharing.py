@@ -191,7 +191,7 @@ def _do_upload_cycle(app, include_active=False):
     # Sign the manifest
     try:
         from onionpress import key_manager
-        import onion_auth
+        from onionpress import onion_auth
 
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
         timestamp = onion_auth.make_timestamp()
@@ -231,7 +231,7 @@ def _do_upload_cycle(app, include_active=False):
     app.log(f"Analytics sharing: OnionHome wants {len(wanted_names)} file(s)")
 
     # Step 2: Upload each wanted file
-    import onion_auth as _oa
+    from onionpress import onion_auth as _oa
 
     for name in wanted_names:
         if not _LOG_NAME_RE.match(name):
@@ -275,7 +275,7 @@ def _post_json(app, url, payload_dict):
     Returns parsed JSON response or None on failure.
     """
     # Import docker helpers from onionheaven (same pattern)
-    import onionheaven
+    from onionpress import onionheaven
 
     docker_bin = onionheaven._docker_bin(app)
     docker_env = onionheaven._docker_env(app)

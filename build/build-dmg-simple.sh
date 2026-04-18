@@ -58,13 +58,10 @@ cp "$PROJECT_DIR/app/Resources/config-template.txt" "$APP_PATH/Contents/Resource
 cp "$PROJECT_DIR/app/Resources/settings.html" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_DIR/app/Resources/logo.png" "$APP_PATH/Contents/Resources/"
 
-# Copy src/ scripts that the launcher needs at runtime
+# Copy the menubar entry point into the bundle's scripts dir (unused at
+# runtime per the note below, kept for hot-patch / debugging).
 mkdir -p "$APP_PATH/Contents/Resources/scripts"
 cp "$PROJECT_DIR/src/menubar.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/onion_proxy.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/onionheaven.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/updater.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/install_native_messaging.py" "$APP_PATH/Contents/Resources/scripts/"
 
 echo "OnionPress.app assembled from app/ source"
 
@@ -338,15 +335,10 @@ fi
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt"
 
-# Copy local modules into the build venv's site-packages so py2app can find them.
-# The `onionpress` package is the canonical home for shared code; a few
-# top-level modules still live flat in src/ (onion_auth, onionheaven, updater)
-# and must be copied here because py2app resolves `includes` via normal Python
-# import at build time and src/ is not on that venv's path.
+# Copy the `onionpress` package into the build venv's site-packages so
+# py2app can resolve the `onionpress.*` entries in setup.py's `includes`.
+# All shared code lives inside the package now — no flat-module cp dance.
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
-cp "$SCRIPTS_DIR/onion_auth.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/onionheaven.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/updater.py" "$SITE_PACKAGES/"
 cp -r "$SCRIPTS_DIR/onionpress" "$SITE_PACKAGES/"
 
 # Run py2app build using the root setup.py

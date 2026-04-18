@@ -16,18 +16,11 @@ integration path is validated manually against a live op2home onion.
 import json
 import os
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-# onion_auth still lives at the top of src/ (not inside the `onionpress`
-# package), so add src/ to sys.path to import it by bare name.
-_SRC_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-if _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
-
-from onionpress import key_manager  # noqa: E402
-import onion_auth  # noqa: E402
+from onionpress import key_manager
+from onionpress import onion_auth
 
 
 # ---------------------------------------------------------------------------

@@ -460,7 +460,7 @@ EOF
     # Always copy latest scripts into container (image may be stale)
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-server.py" "${ctr_name}:/worker-server.py"
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-bootstrap.py" "${ctr_name}:/worker-bootstrap.py"
-    docker_cmd cp "${SCRIPT_DIR}/../src/onion_auth.py" "${ctr_name}:/onion_auth.py"
+    docker_cmd cp "${SCRIPT_DIR}/../src/onionpress/onion_auth.py" "${ctr_name}:/onion_auth.py"
     docker_cmd cp "${SCRIPT_DIR}/stress/tor-watchdog.sh" "${ctr_name}:/tor-watchdog.sh"
     if [ "$TOR_IMPL" = "tor" ]; then
         docker_cmd cp "$torrc" "${ctr_name}:/etc/tor/torrc"

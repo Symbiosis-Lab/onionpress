@@ -30,11 +30,8 @@ fi
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app -q
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt" -q
 
-echo "=== Copying local modules to site-packages..."
+echo "=== Copying the onionpress package to site-packages..."
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
-cp "$SCRIPTS_DIR/onion_auth.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/onionheaven.py" "$SITE_PACKAGES/"
-cp "$SCRIPTS_DIR/updater.py" "$SITE_PACKAGES/"
 cp -r "$SCRIPTS_DIR/onionpress" "$SITE_PACKAGES/"
 
 echo "=== Building with py2app..."

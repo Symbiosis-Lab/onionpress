@@ -23,10 +23,10 @@ import re
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, script_dir)
 
-import onion_proxy
-import install_native_messaging
-import onionheaven
-import updater
+from onionpress import onion_proxy
+from onionpress import install_native_messaging
+from onionpress import onionheaven
+from onionpress import updater
 from onionpress import key_manager
 from onionpress import backup as backup_manager
 try:

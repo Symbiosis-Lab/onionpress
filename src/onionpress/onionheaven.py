@@ -286,7 +286,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
 
     try:
         from onionpress import key_manager
-        import onion_auth
+        from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
         timestamp = onion_auth.make_timestamp()
         signature = onion_auth.sign_payload(
@@ -407,7 +407,7 @@ def unregister_from_onionheaven(app, content_address=None):
     # Sign the unregister request with ed25519
     try:
         from onionpress import key_manager
-        import onion_auth
+        from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
     except Exception as e:
         app.log(f"OnionHeaven: failed to extract keys for unregister: {e}")
@@ -507,7 +507,7 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     # Sign with ed25519
     try:
         from onionpress import key_manager
-        import onion_auth
+        from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
         timestamp = onion_auth.make_timestamp()
         signature = onion_auth.sign_payload(

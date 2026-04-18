@@ -64,13 +64,11 @@ OPTIONS = {
         'NSDocumentsFolderUsageDescription': 'OnionPress saves your posts, backups, Creations in ~/Documents/OnionPress/ so they\'re easy to find and share. Access is limited to that subfolder.',
     },
     'packages': ['rumps', 'objc', 'AppKit'],
-    # CRITICAL: Local modules that menubar.py imports at runtime.
-    # py2app cannot auto-detect these because it runs menubar.py via exec(),
-    # not import. If you add a new local .py module, ADD IT HERE or the build
-    # will appear to succeed but the app will crash at launch with
-    # "ModuleNotFoundError".
+    # Local modules that menubar.py imports at runtime. py2app cannot
+    # auto-detect these because it runs menubar.py via exec(), not import.
+    # All shared code now lives in the `onionpress` package — adding a new
+    # submodule means one new line here and nothing in the build scripts.
     'includes': ['subprocess', 'threading', 'os', 'time', 'json',
-                 'onion_proxy', 'install_native_messaging', 'onionheaven', 'onion_auth', 'updater',
                  'onionpress', 'onionpress.backup', 'onionpress.key_manager',
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
@@ -78,6 +76,9 @@ OPTIONS = {
                  'onionpress.ui_helpers', 'onionpress.settings_ui',
                  'onionpress.browser', 'onionpress.log_rotation',
                  'onionpress.analytics_sharing', 'onionpress.power',
+                 'onionpress.onion_proxy', 'onionpress.onion_auth',
+                 'onionpress.onionheaven', 'onionpress.updater',
+                 'onionpress.install_native_messaging', 'onionpress.native_messaging_host',
                  'onionpress.onionnames_client',
                  'onionpress.onionnames_registrar'],
     'excludes': ['tkinter', 'test', 'unittest'],

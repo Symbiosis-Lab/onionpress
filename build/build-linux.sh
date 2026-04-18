@@ -56,7 +56,7 @@ collect_files() {
 
     # Scripts
     mkdir -p "$dest/scripts"
-    cp "$PROJECT_DIR/src/onion_auth.py" "$dest/scripts/"
+    cp "$PROJECT_DIR/src/onionpress/onion_auth.py" "$dest/scripts/"
     cp "$PROJECT_DIR/src/onionpress/key_manager.py" "$dest/scripts/"
     if [ -f "$PROJECT_DIR/linux/onionpress-heartbeat.py" ]; then
         cp "$PROJECT_DIR/linux/onionpress-heartbeat.py" "$dest/scripts/"

@@ -22,7 +22,7 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 
-import onion_auth
+from onionpress import onion_auth
 
 
 def make_test_keypair():
