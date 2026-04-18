@@ -2720,6 +2720,41 @@ class OnionPressApp(rumps.App):
             "ONIONNAME_REGISTERED", "yes" if registered else "no"
         )
 
+    def _get_admin_username(self):
+        """Return the WordPress admin user's login.
+
+        Preference order:
+        1. ONIONNAME from ~/.onionpress/config (fast path, no subprocess).
+        2. First administrator returned by wp user list in the running
+           WordPress container — for installs whose config predates
+           name-sync populating ONIONNAME, or where it was wiped.
+        3. "admin" as a last-resort fallback.
+
+        Caches a successful container query back to the config so future
+        calls hit the fast path.
+        """
+        name = self._read_config_value("ONIONNAME", "").strip()
+        if name:
+            return name
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "user", "list", "--role=administrator",
+                 "--field=user_login", "--allow-root"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=10,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    login = line.strip()
+                    if login:
+                        self.write_config_value("ONIONNAME", login)
+                        return login
+        except Exception as e:
+            self.log(f"_get_admin_username: container query failed: {e}")
+        return "admin"
+
     def _prompt_onionname_collision(self, current_name, suggestions):
         """Modal alert — returns chosen new name or None if canceled.
 
@@ -3465,7 +3500,7 @@ class OnionPressApp(rumps.App):
 
         user_field = AppKit.NSTextField.alloc().initWithFrame_(
             AppKit.NSMakeRect(85, 44, 210, 24))
-        user_field.setStringValue_(self._read_config_value("ONIONNAME", "admin"))
+        user_field.setStringValue_(self._get_admin_username())
         container.addSubview_(user_field)
 
         pass_label = AppKit.NSTextField.labelWithString_("Password:")
@@ -4762,7 +4797,7 @@ License: AGPL v3"""
 
                         onion_addr = self.onion_address or "unknown"
                         backup_manager.create_backup(
-                            onion_addr, "admin", password,
+                            onion_addr, self._get_admin_username(), password,
                             tmp_path, self.version, self.log
                         )
 
