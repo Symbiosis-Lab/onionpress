@@ -311,10 +311,11 @@ def restore_from_backup(zip_path, password, log_func):
         if onion_address:
             data_dir = os.path.expanduser('~/.onionpress')
             vanity_dir = os.path.join(data_dir, 'shared', 'vanity-keys')
-            # Clear old vanity-keys and create directory for restored address
-            if os.path.exists(vanity_dir):
-                shutil.rmtree(vanity_dir)
             addr_dir = os.path.join(vanity_dir, onion_address)
+            # Clear only this address's cache — sibling address dirs (e.g.
+            # other vanity prefixes the user has generated) are preserved.
+            if os.path.isdir(addr_dir):
+                shutil.rmtree(addr_dir)
             os.makedirs(addr_dir, exist_ok=True)
             # Copy the key file so generate_vanity_address isn't needed
             shutil.copy2(key_path, os.path.join(addr_dir, 'ks_hs_id.ed25519_expanded_private'))
