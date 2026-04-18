@@ -1173,6 +1173,27 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy avatar mu-plugin (and its default-avatar PNG, which the plugin
+    # references via plugins_url(__FILE__) — both must live in mu-plugins/).
+    if [ -f "$plugins_dir/onionpress-avatar.php" ]; then
+        if docker cp "$plugins_dir/onionpress-avatar.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-avatar.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-avatar.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-avatar.php"
+            log "✓ onionpress-avatar.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-avatar.php"
+        fi
+    fi
+    if [ -f "$plugins_dir/onionpress-avatar-default.png" ]; then
+        docker cp "$plugins_dir/onionpress-avatar-default.png" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-avatar-default.png >> "$LOG_FILE" 2>&1 \
+            && docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-avatar-default.png >> "$LOG_FILE" 2>&1 \
+            || log "WARNING: Failed to copy onionpress-avatar-default.png"
+    fi
+
     # Copy auto-login mu-plugin
     if [ -f "$plugins_dir/onionpress-auto-login.php" ]; then
         if docker cp "$plugins_dir/onionpress-auto-login.php" \
