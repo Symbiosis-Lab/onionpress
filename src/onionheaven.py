@@ -261,17 +261,9 @@ def _heartbeat_loop(app):
 def _check_wordpress_healthy(app):
     """Quick local check if WordPress is responding."""
     try:
-        ok, output = _run_docker(app, [
-            "exec", "onionpress-wordpress",
-            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-            "--max-time", "5",
-            "http://localhost:80/"
-        ], timeout=10)
-        if ok and output.strip() in ("200", "301", "302"):
-            return True
+        return app._health_checker.check_wordpress_local()
     except Exception:
-        pass
-    return False
+        return False
 
 
 def _send_heartbeat(app, wordpress_healthy=True):

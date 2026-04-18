@@ -1230,43 +1230,6 @@ class OnionPressApp(rumps.App):
             print(f"Error running command {command}: {e}")
             return None
 
-    def check_wordpress_health(self, log_result=True):
-        """Check if WordPress is actually responding to requests"""
-        try:
-            if log_result:
-                self.log(f"Checking local access: http://localhost:{self.wp_port}")
-            # Use curl instead of urllib to avoid "local network" permission prompt
-            result = subprocess.run(
-                ["curl", "-s", "--max-time", "3", "-H", "User-Agent: OnionPress-HealthCheck", f"http://localhost:{self.wp_port}"],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=5
-            )
-            if result.returncode == 0:
-                content = result.stdout
-                # Check for database errors or WordPress not ready
-                if 'Error establishing a database connection' in content:
-                    if log_result:
-                        self.log("✗ Local access: Database connection error")
-                    return False
-                if 'Database connection error' in content:
-                    if log_result:
-                        self.log("✗ Local access: Database connection error")
-                    return False
-                # If we get here and got a response, WordPress is responding
-                # Either it's the install page or actual WordPress content
-                if log_result:
-                    self.log("✓ Local access: WordPress responding")
-                return True
-            else:
-                if log_result:
-                    self.log(f"✗ Local access: Connection failed (curl exit code {result.returncode})")
-                return False
-        except Exception as e:
-            if log_result:
-                self.log(f"✗ Local access: Connection failed ({str(e)})")
-            return False
-
     def check_tor_reachability(self, log_result=True):
         """Check if the .onion service is properly configured and published"""
         self._tor_internally_ready = False
@@ -1534,7 +1497,7 @@ class OnionPressApp(rumps.App):
                     # Once WordPress responds, skip rechecking it — it stays up
                     # reliably inside Docker. Only Tor needs ongoing monitoring.
                     if not self._wordpress_confirmed:
-                        wordpress_ready = self.check_wordpress_health(log_result=should_log)
+                        wordpress_ready = self._health_checker.check_wordpress_external(self.wp_port, log=should_log)
                         if wordpress_ready:
                             self._wordpress_confirmed = True
                     else:
@@ -2791,7 +2754,7 @@ class OnionPressApp(rumps.App):
             max_wait = 60
             waited = 0
             while waited < max_wait:
-                if self.check_wordpress_health(log_result=False):
+                if self._health_checker.check_wordpress_external(self.wp_port, log=False):
                     self.log(f"WordPress responding after {waited}s")
                     break
                 time.sleep(2)
@@ -3355,7 +3318,7 @@ class OnionPressApp(rumps.App):
 
             # Step 4: WordPress responding?
             if step3_done and not step4_done:
-                if self.check_wordpress_health(log_result=False):
+                if self._health_checker.check_wordpress_external(self.wp_port, log=False):
                     step4_done = True
                     self.log("WordPress responding")
                     if sw:
@@ -3470,7 +3433,7 @@ class OnionPressApp(rumps.App):
             max_wait = 60
             waited = 0
             while waited < max_wait:
-                if self.check_wordpress_health(log_result=False):
+                if self._health_checker.check_wordpress_external(self.wp_port, log=False):
                     self.log(f"WordPress responding after restart ({waited}s)")
                     break
                 time.sleep(2)

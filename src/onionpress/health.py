@@ -5,6 +5,7 @@ The MenubarApp (or CLI) creates a HealthMonitor and calls check() periodically.
 """
 
 import re
+import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -86,6 +87,45 @@ class HealthChecker:
                 return False
             return True
         return False
+
+    def check_wordpress_external(self, wp_port: int, log: bool = True) -> bool:
+        """Check WordPress responds via the host port mapping.
+
+        Exercises the Mac → Colima → Docker → WordPress path; complements
+        check_wordpress_local which only tests inside the container. Uses
+        curl instead of urllib to avoid macOS "local network" TCC prompts.
+        """
+        if log:
+            self._log(f"Checking local access: http://localhost:{wp_port}")
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "3",
+                 "-H", "User-Agent: OnionPress-HealthCheck",
+                 f"http://localhost:{wp_port}"],
+                capture_output=True,
+                text=True, encoding='utf-8', errors='replace',
+                timeout=5,
+            )
+        except Exception as e:
+            if log:
+                self._log(f"✗ Local access: Connection failed ({e})")
+            return False
+
+        if result.returncode != 0:
+            if log:
+                self._log(f"✗ Local access: Connection failed (curl exit code {result.returncode})")
+            return False
+
+        content = result.stdout
+        if ("Error establishing a database connection" in content
+                or "Database connection error" in content):
+            if log:
+                self._log("✗ Local access: Database connection error")
+            return False
+
+        if log:
+            self._log("✓ Local access: WordPress responding")
+        return True
 
     def check_tor_bootstrap(self) -> tuple[bool, int]:
         """Check Tor bootstrap status via control port (with log fallback).
