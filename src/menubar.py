@@ -49,6 +49,7 @@ from onionpress.ui_helpers import (
 from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog
 from onionpress import analytics_sharing
+from onionpress.power import CaffeineManager
 
 
 # Branded onion addresses — canonical owners of special brand names.
@@ -344,7 +345,7 @@ class OnionPressApp(rumps.App):
         self.setup_dialog_showing = False  # Track if setup dialog is currently showing
         self.setup_alert = None  # Reference to NSAlert for programmatic dismissal
         self.monitoring_tor_install = False  # Track if we're monitoring for Tor Browser installation
-        self.caffeinate_process = None  # Process handle for caffeinate to prevent sleep
+        self.caffeine = CaffeineManager(self.app_support, self.log, self.read_config_value)
         self.proxy_server = None  # Onion proxy HTTP server instance
         self.proxy_thread = None  # Thread running the proxy server
         self._wp_installed = None  # None = unknown, True/False = checked
@@ -562,103 +563,6 @@ class OnionPressApp(rumps.App):
             self.log_file = self._onionpress_log.current_path()
         except Exception as e:
             print(f"Error writing to log: {e}")
-
-    def _caffeinate_pid_file(self):
-        """Path to the file tracking our caffeinate PID."""
-        return os.path.join(self.app_support, "caffeinate.pid")
-
-    def _cleanup_stale_caffeinate(self):
-        """Kill any orphaned caffeinate process from a previous OnionPress run."""
-        pid_file = self._caffeinate_pid_file()
-        if not os.path.exists(pid_file):
-            return
-        try:
-            with open(pid_file) as f:
-                old_pid = int(f.read().strip())
-            # Verify it's actually a caffeinate process before killing
-            result = subprocess.run(
-                ["ps", "-p", str(old_pid), "-o", "comm="],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
-            )
-            if result.returncode == 0 and "caffeinate" in result.stdout:
-                os.kill(old_pid, 15)  # SIGTERM
-                self.log(f"Cleaned up orphaned caffeinate (PID {old_pid}) from previous run")
-            os.remove(pid_file)
-        except (ValueError, OSError, subprocess.TimeoutExpired):
-            try:
-                os.remove(pid_file)
-            except OSError:
-                pass
-
-    def start_caffeinate(self):
-        """Start caffeinate to prevent Mac from sleeping based on config mode"""
-        # Check if already running
-        if self.caffeinate_process is not None:
-            try:
-                # Check if process is still alive
-                if self.caffeinate_process.poll() is None:
-                    return  # Already running
-            except Exception:
-                pass
-
-        # Clean up any orphaned caffeinate from a previous crash/force-quit
-        self._cleanup_stale_caffeinate()
-
-        # Read config — 3 modes: normal, on-battery, never
-        mode = self.read_config_value("PREVENT_SLEEP", "normal").lower()
-        # Backward compat: yes→on-battery, no→normal
-        if mode == "yes":
-            mode = "on-battery"
-        elif mode == "no":
-            mode = "normal"
-
-        if mode == "on-battery":
-            caff_args = ["caffeinate", "-s"]
-            caff_msg = "staying awake on AC power"
-        elif mode == "never":
-            caff_args = ["caffeinate", "-i"]
-            caff_msg = "never sleeping while OnionPress runs"
-        else:
-            # "normal" or unknown — no caffeinate
-            return
-
-        try:
-            self.caffeinate_process = subprocess.Popen(
-                caff_args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            # Write PID file so we can clean up if we crash
-            try:
-                with open(self._caffeinate_pid_file(), 'w') as f:
-                    f.write(str(self.caffeinate_process.pid))
-            except OSError:
-                pass
-            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - {caff_msg}")
-        except Exception as e:
-            self.log(f"Failed to start caffeinate: {e}")
-
-    def stop_caffeinate(self):
-        """Stop caffeinate to allow Mac to sleep normally"""
-        if self.caffeinate_process is not None:
-            try:
-                self.caffeinate_process.terminate()
-                self.caffeinate_process.wait(timeout=2)
-                self.log("Stopped caffeinate - Mac can sleep normally")
-            except Exception as e:
-                # Force kill if terminate doesn't work
-                try:
-                    self.caffeinate_process.kill()
-                    self.log("Force killed caffeinate process")
-                except Exception:
-                    pass
-            finally:
-                self.caffeinate_process = None
-                # Remove PID file
-                try:
-                    os.remove(self._caffeinate_pid_file())
-                except OSError:
-                    pass
 
     def start_onion_proxy(self):
         """Start the local .onion proxy server in a background thread."""
@@ -1624,8 +1528,7 @@ class OnionPressApp(rumps.App):
                     threading.Thread(target=self.start_clearnet_log_capture, daemon=True).start()
 
                 # Start caffeinate if not already running (prevents sleep while service runs)
-                if self.caffeinate_process is None or self.caffeinate_process.poll() is not None:
-                    self.start_caffeinate()
+                self.caffeine.start()  # idempotent — no-op if already running
 
                 # Start onion proxy if not already running (wait for port check first)
                 if self.proxy_server is None and self._ports_checked:
@@ -1673,8 +1576,8 @@ class OnionPressApp(rumps.App):
                                 pass
                             self.log("Auto-set PREVENT_SLEEP=never for OnionHeaven machine (first detection)")
                         # Restart caffeinate with the (now-updated) config
-                        self.stop_caffeinate()
-                        self.start_caffeinate()
+                        self.caffeine.stop()
+                        self.caffeine.start()
                         self.update_menu()
 
                 # OnionHeaven: start heartbeat as soon as Tor is bootstrapped.
@@ -1774,7 +1677,7 @@ class OnionPressApp(rumps.App):
                     self.stop_container_log_capture()
 
                 # Stop caffeinate to allow Mac to sleep
-                self.stop_caffeinate()
+                self.caffeine.stop()
 
             # Update menu
             self.update_menu()
@@ -2117,7 +2020,7 @@ class OnionPressApp(rumps.App):
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
                     pass
-            self.stop_caffeinate()
+            self.caffeine.stop()
 
     def _handle_terminate(self):
         """Handle app termination (osascript quit, Apple Event, etc.).
@@ -2144,7 +2047,7 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Warning: Stop failed: {e}")
 
-        self.stop_caffeinate()
+        self.caffeine.stop()
         self.stop_onion_proxy()
 
         try:
@@ -2167,7 +2070,7 @@ class OnionPressApp(rumps.App):
         self.log("System wake detected — marking Tor as reconnecting")
         self._sleeping = False
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
-        self.start_caffeinate()
+        self.caffeine.start()
         # Reset OnionHeaven so /online fires when Tor reconnects.
         # The heartbeat thread from before sleep may have died (exception during
         # container restart) or _last_bootstrap_pct may not reach 100 if Tor
@@ -2768,7 +2671,7 @@ class OnionPressApp(rumps.App):
             self.check_status()
 
             # Start caffeinate to prevent sleep while service runs
-            self.start_caffeinate()
+            self.caffeine.start()
 
         threading.Thread(target=start, daemon=True).start()
 
@@ -3371,7 +3274,7 @@ class OnionPressApp(rumps.App):
             self._signal_watchdog(container, "USR2")
 
         self.check_status()
-        self.start_caffeinate()
+        self.caffeine.start()
 
     @rumps.clicked("Stop")
     def stop_service(self, _):
@@ -3396,7 +3299,7 @@ class OnionPressApp(rumps.App):
             # Stop background processes
             self.stop_web_log_capture()
             self.stop_container_log_capture()
-            self.stop_caffeinate()
+            self.caffeine.stop()
             self.stop_onion_proxy()
             self._stopping = False
 
@@ -3508,8 +3411,8 @@ class OnionPressApp(rumps.App):
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
 
         def _restart_caffeinate():
-            self.stop_caffeinate()
-            self.start_caffeinate()
+            self.caffeine.stop()
+            self.caffeine.start()
 
         show_settings_dialog(
             config_path=self.config_file,
@@ -4293,7 +4196,7 @@ License: AGPL v3"""
                 self.stop_web_log_capture()
                 self.stop_container_log_capture()
                 self.stop_onion_proxy()
-                self.stop_caffeinate()
+                self.caffeine.stop()
 
                 # Stop and delete Colima VM
                 # Only affects OnionPress instance, not system Colima
@@ -4565,8 +4468,8 @@ License: AGPL v3"""
 
             # Apply side effects for changed settings
             if "PREVENT_SLEEP" in updates:
-                self.stop_caffeinate()
-                self.start_caffeinate()
+                self.caffeine.stop()
+                self.caffeine.start()
             if "LAUNCH_ON_LOGIN" in updates:
                 if updates["LAUNCH_ON_LOGIN"] == "yes":
                     self.add_login_item()
@@ -5069,7 +4972,7 @@ License: AGPL v3"""
             self.stop_onion_proxy()
 
             # Stop caffeinate to allow Mac to sleep
-            self.stop_caffeinate()
+            self.caffeine.stop()
 
             # Notify OnionHeaven before stopping services (containers needed for curl)
             # Skip if restarting for an update — we're coming right back

@@ -77,7 +77,7 @@ OPTIONS = {
                  'onionpress.tor', 'onionpress.colima',
                  'onionpress.ui_helpers', 'onionpress.settings_ui',
                  'onionpress.browser', 'onionpress.log_rotation',
-                 'onionpress.analytics_sharing',
+                 'onionpress.analytics_sharing', 'onionpress.power',
                  'onionpress.onionnames_client',
                  'onionpress.onionnames_registrar'],
     'excludes': ['tkinter', 'test', 'unittest'],
