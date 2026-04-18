@@ -218,8 +218,16 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
 
+        # Sandbox HOME — create_backup reads ~/.onionpress/config at line 189
+        # of backup.py. Not destructive, but isolate for determinism.
+        self.orig_home = os.environ.get("HOME", "")
+        self.fake_home = os.path.join(self.tmpdir, "home")
+        os.makedirs(os.path.join(self.fake_home, ".onionpress"))
+        os.environ["HOME"] = self.fake_home
+
     def tearDown(self):
         os.environ["PATH"] = self.orig_path
+        os.environ["HOME"] = self.orig_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_zip_structure(self):
@@ -345,8 +353,17 @@ class TestRestoreRoundTrip(unittest.TestCase):
         self.orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
 
+        # Sandbox HOME — restore_from_backup writes to ~/.onionpress/ via
+        # os.path.expanduser. Without this, the test clobbers the real
+        # ~/.onionpress/config and destroys ~/.onionpress/shared/vanity-keys/.
+        self.orig_home = os.environ.get("HOME", "")
+        self.fake_home = os.path.join(self.tmpdir, "home")
+        os.makedirs(os.path.join(self.fake_home, ".onionpress"))
+        os.environ["HOME"] = self.fake_home
+
     def tearDown(self):
         os.environ["PATH"] = self.orig_path
+        os.environ["HOME"] = self.orig_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _make_backup_zip(self, password="testpw"):
@@ -442,8 +459,15 @@ class TestEnsureMultisiteConstants(unittest.TestCase):
         self.orig_path = os.environ.get("PATH", "")
         os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
 
+        # Sandbox HOME — _ensure_multisite_constants uses expanduser.
+        self.orig_home = os.environ.get("HOME", "")
+        self.fake_home = os.path.join(self.tmpdir, "home")
+        os.makedirs(os.path.join(self.fake_home, ".onionpress"))
+        os.environ["HOME"] = self.fake_home
+
     def tearDown(self):
         os.environ["PATH"] = self.orig_path
+        os.environ["HOME"] = self.orig_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_adds_constants_for_multisite(self):
