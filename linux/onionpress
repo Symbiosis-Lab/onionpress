@@ -511,6 +511,26 @@ fix_onionpress_permissions() {
     fi
 }
 
+# Ensure wp-content/uploads is owned by www-data so WordPress can create
+# the multisite per-blog subtree (sites/<id>/<YYYY>/<MM>/) on demand.
+# Fresh installs had this directory created root-owned, which made the
+# media library fail with "Unable to create directory … Is its parent
+# directory writable by the server?" on any upload.
+fix_wordpress_uploads_permissions() {
+    cd "$DOCKER_DIR"
+
+    if docker compose exec -T wordpress sh -c '
+        mkdir -p /var/www/html/wp-content/uploads
+        chown -R www-data:www-data /var/www/html/wp-content/uploads
+    ' 2>>"$LOG_FILE"; then
+        log "WordPress uploads directory permissions fixed"
+        return 0
+    else
+        log "WARNING: Could not fix WordPress uploads directory permissions"
+        return 1
+    fi
+}
+
 # ─── Image updates ────────────────────────────────────────────────────
 
 update_images() {
@@ -1290,6 +1310,7 @@ start_containers() {
         install_onionpress_theme
     fi
     fix_onionpress_permissions
+    fix_wordpress_uploads_permissions
 }
 
 stop_containers() {
