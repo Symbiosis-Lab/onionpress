@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sleep * && DOCKER*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(docker:*)",
+      "Bash(open:*)",
+      "Bash(pgrep:*)",
+      "Bash(pidof:*)",
+      "Bash(plutil:*)",
+      "Bash(defaults:*)",
+      "Bash(sqlite3:*)",
+      "Bash(codesign:*)",
+      "Bash(hdiutil:*)",
+      "Bash(sysctl:*)",
+      "Bash(launchctl:*)",
+      "Bash(xattr:*)",
+      "Bash(lipo:*)",
+      "Bash(md5:*)",
+      "Bash(shasum:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
