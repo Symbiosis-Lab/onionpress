@@ -154,6 +154,12 @@ class OnionPressApp(rumps.App):
         self._wp_visitors_log = RotatingLog(logs_dir, "wordpress-visitors")
         self._tor_log = RotatingLog(logs_dir, "container-tor")
         self._onionheaven_log = RotatingLog(logs_dir, "container-onionheaven")
+        # WordPress container's Apache + PHP stderr. Captures everything
+        # the PHP plugins emit via error_log() — notably the Wayback
+        # archiver's per-sweep state transitions — so fleet operators
+        # can observe archive health across machines that opt into
+        # analytics sharing.
+        self._wp_errors_log = RotatingLog(logs_dir, "container-wordpress")
         self._clearnet_log = RotatingLog(logs_dir, "clearnet")
         self._clearnet_last_offset = 0  # track dmesg position
         self._container_log_processes = {}  # name -> (process, thread)
@@ -842,6 +848,7 @@ class OnionPressApp(rumps.App):
         captures = [
             ("onionpress-tor", self._tor_log),
             ("onionheaven", self._onionheaven_log),
+            ("onionpress-wordpress", self._wp_errors_log),
         ]
 
         # Discover takeover containers

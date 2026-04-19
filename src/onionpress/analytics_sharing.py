@@ -116,6 +116,9 @@ def _do_upload_cycle(app, include_active=False):
         getattr(app, "_wp_visitors_log", None),
         getattr(app, "_tor_log", None),
         getattr(app, "_onionheaven_log", None),
+        # WordPress container stderr — PHP error_log() output from
+        # plugins. Primary source for Wayback archive-state telemetry.
+        getattr(app, "_wp_errors_log", None),
         getattr(app, "_clearnet_log", None),
     ]
     # Include any takeover container logs
