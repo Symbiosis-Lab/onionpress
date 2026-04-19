@@ -11,6 +11,14 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+// How many times we'll retry an SPN submission that gets error:no-captures
+// back. Each retry is 65 minutes later (past SPN's dedup cache), so this
+// bounds the total retry window. 20 ≈ 22 hours of trying, which is
+// empirically enough to outlast most SPN .onion-crawler flake windows.
+if ( ! defined( 'ONIONPRESS_WAYBACK_MAX_RETRIES' ) ) {
+    define( 'ONIONPRESS_WAYBACK_MAX_RETRIES', 20 );
+}
+
 /**
  * Log a Wayback message to both PHP error_log and the persistent host log.
  */
@@ -507,7 +515,7 @@ add_action( 'onionpress_drain_wayback_queue', function () {
         }
         if ( $status['state'] === 'error' ) {
             $retry_count = (int) ( $item['retry_count'] ?? 0 ) + 1;
-            $max_retries = 3;
+            $max_retries = ONIONPRESS_WAYBACK_MAX_RETRIES;
             onionpress_wayback_log( 'Queue drain: SPN crawl failed for ' . $url
                 . ' (job ' . $job_id . ', ' . $status['ext'] . '): '
                 . $status['message'] . ' — attempt ' . $retry_count . '/' . $max_retries );
