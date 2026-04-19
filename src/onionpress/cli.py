@@ -215,6 +215,17 @@ class OnionPressCLI:
             self.log(f"Restore failed: {e}")
             return 1
 
+    def cmd_smoke_test_wayback(self) -> int:
+        """End-to-end smoke test of the Wayback archiving pipeline.
+
+        Publishes a throwaway post, verifies save_post queues the right
+        URLs, force-drains the queue, and polls SPN for each job_id until
+        it reports success or terminal error. Always cleans up the test
+        post.
+        """
+        from .wayback_smoke import smoke_test_wayback
+        return smoke_test_wayback(self.log)
+
     def cmd_reset(self, yes: bool = False) -> int:
         """Reset OnionPress — wipe all data and start fresh."""
         if not yes:
@@ -327,6 +338,11 @@ def main(argv: list[str] = None) -> int:
     p_reset = sub.add_parser("reset", help="Wipe all data and start fresh")
     p_reset.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
+    sub.add_parser(
+        "smoke-test-wayback",
+        help="Publish a throwaway post and verify it got archived to the Wayback Machine",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -351,6 +367,8 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_restore(args.password, args.backup_file)
     elif args.command == "reset":
         return cli.cmd_reset(yes=args.yes)
+    elif args.command == "smoke-test-wayback":
+        return cli.cmd_smoke_test_wayback()
     else:
         parser.print_help()
         return 1
