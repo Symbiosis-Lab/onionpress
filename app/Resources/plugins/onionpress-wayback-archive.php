@@ -121,8 +121,10 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
  * does not support SOCKS5 proxies.
  *
  * Tries each endpoint in order; stops on first success.
- * Returns 'ok' on success, 'cooldown' if SPN deduped (retry after ~1 hour),
- * or false if all endpoints failed.
+ * Returns:
+ *   array('status' => 'ok',       'job_id' => '<spn2-…>')  — submission accepted
+ *   array('status' => 'cooldown')                           — SPN said "same snapshot"
+ *   array('status' => 'failed')                             — all endpoints rejected
  */
 function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
     if ( ! function_exists( 'curl_init' ) ) {
@@ -189,18 +191,19 @@ function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
         // Rate-limited — do NOT treat as success; queue for retry
         if ( $http_code === 429 ) {
             onionpress_wayback_log( 'Rate-limited (HTTP 429) for ' . $url . ' — will queue for retry' );
-            return false;
+            return array( 'status' => 'failed' );
         }
 
         // Any 2xx/3xx response means the endpoint accepted it
         if ( $http_code >= 200 && $http_code < 400 ) {
-            // Detect SPN dedup cooldown: "The same snapshot had been made X ago"
             $body = @json_decode( $response, true );
+            // Detect SPN dedup cooldown: "The same snapshot had been made X ago"
             if ( is_array( $body ) && isset( $body['message'] ) && strpos( $body['message'], 'same snapshot' ) !== false ) {
                 onionpress_wayback_log( 'SPN cooldown for ' . $url . ' — will retry in ~65 minutes' );
-                return 'cooldown';
+                return array( 'status' => 'cooldown' );
             }
-            return 'ok';
+            $job_id = ( is_array( $body ) && ! empty( $body['job_id'] ) ) ? $body['job_id'] : '';
+            return array( 'status' => 'ok', 'job_id' => $job_id );
         }
 
         // 4xx client error (other than auth/rate-limit) — log and try next
@@ -213,7 +216,60 @@ function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
         onionpress_wayback_log( 'Server error (HTTP ' . $http_code . '), trying next endpoint' );
     }
 
-    return false; // All endpoints failed
+    return array( 'status' => 'failed' ); // All endpoints failed
+}
+
+/**
+ * Poll SPN's /save/status/<job_id> endpoint through Tor.
+ *
+ * Returns one of:
+ *   array('state' => 'success',   'timestamp' => '20260419010526')
+ *   array('state' => 'pending')                                         (still crawling)
+ *   array('state' => 'error',     'ext' => 'error:no-captures', 'message' => '…')
+ *   array('state' => 'unknown',   'message' => '<why>')                 (network / parse failure)
+ */
+function onionpress_wayback_poll_status( $job_id ) {
+    if ( ! function_exists( 'curl_init' ) ) {
+        return array( 'state' => 'unknown', 'message' => 'no curl' );
+    }
+    $ch = curl_init();
+    curl_setopt_array( $ch, array(
+        CURLOPT_URL            => 'https://web.archive.org/save/status/' . $job_id,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 3,
+        CURLOPT_USERAGENT      => 'OnionPress/' . onionpress_version(),
+        CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
+        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+    ) );
+    $response  = curl_exec( $ch );
+    $http_code = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $err       = curl_error( $ch );
+    curl_close( $ch );
+
+    if ( $err || $http_code !== 200 || ! $response ) {
+        return array( 'state' => 'unknown', 'message' => $err ?: ( 'HTTP ' . $http_code ) );
+    }
+    $body = @json_decode( $response, true );
+    if ( ! is_array( $body ) || empty( $body['status'] ) ) {
+        return array( 'state' => 'unknown', 'message' => 'malformed SPN response' );
+    }
+    if ( $body['status'] === 'success' ) {
+        return array( 'state' => 'success', 'timestamp' => $body['timestamp'] ?? '' );
+    }
+    if ( $body['status'] === 'error' ) {
+        return array(
+            'state'   => 'error',
+            'ext'     => $body['status_ext'] ?? 'error',
+            'message' => $body['message'] ?? '',
+        );
+    }
+    // pending / running / anything else
+    return array( 'state' => 'pending' );
 }
 
 /**
@@ -433,6 +489,53 @@ add_action( 'onionpress_drain_wayback_queue', function () {
         return;
     }
 
+    // ── State 2: already submitted, poll SPN for the job's outcome ──
+    //
+    // SPN accepts the POST quickly and returns a job_id, then crawls the
+    // URL over Tor in the background. That crawl can succeed, fail with
+    // error:no-captures ("URL unreachable"), or stay pending for
+    // minutes. We can't know until we poll /save/status/<job_id>.
+    if ( ! empty( $item['job_id'] ) ) {
+        $job_id = $item['job_id'];
+        $status = onionpress_wayback_poll_status( $job_id );
+        if ( $status['state'] === 'success' ) {
+            onionpress_wayback_log( 'Queue drain: archived ' . $url
+                . ' (job ' . $job_id . ', ts ' . $status['timestamp'] . ')' );
+            // item already spliced out; just persist
+            @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
+            return;
+        }
+        if ( $status['state'] === 'error' ) {
+            $retry_count = (int) ( $item['retry_count'] ?? 0 ) + 1;
+            $max_retries = 3;
+            onionpress_wayback_log( 'Queue drain: SPN crawl failed for ' . $url
+                . ' (job ' . $job_id . ', ' . $status['ext'] . '): '
+                . $status['message'] . ' — attempt ' . $retry_count . '/' . $max_retries );
+            if ( $retry_count >= $max_retries ) {
+                onionpress_wayback_log( 'Queue drain: giving up on ' . $url
+                    . ' after ' . $max_retries . ' SPN crawl failures' );
+                @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
+                return;
+            }
+            // Strip job_id so the next drain tick resubmits fresh. Wait past
+            // the SPN 65-minute cache window so SPN won't just return the
+            // same failed job_id.
+            unset( $item['job_id'] );
+            $item['retry_count'] = $retry_count;
+            $item['retry_after'] = gmdate( 'Y-m-d\TH:i:s\Z', time() + 3900 );
+            $queue[] = $item;
+            @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
+            return;
+        }
+        // pending / unknown — give SPN more time. Put the item back at the
+        // end with a short check_after so we come back after other work.
+        $item['retry_after'] = gmdate( 'Y-m-d\TH:i:s\Z', time() + 60 );
+        $queue[] = $item;
+        @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
+        return;
+    }
+
+    // ── State 1: not yet submitted — POST to SPN, store the job_id ──
     $endpoints = array(
         array(
             'url'   => 'http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
@@ -445,20 +548,27 @@ add_action( 'onionpress_drain_wayback_queue', function () {
     );
 
     $auth = onionpress_wayback_auth_header();
-
     $result = onionpress_wayback_submit( $endpoints, $url, $auth );
-    if ( $result === 'ok' ) {
-        onionpress_wayback_log( 'Queue drain: archived ' . $url );
+
+    if ( $result['status'] === 'ok' ) {
+        // Submission accepted. Mark with job_id + check_after so a future
+        // drain tick polls /save/status/. Keep retry_count untouched.
+        $item['job_id']      = $result['job_id'];
+        $item['retry_after'] = gmdate( 'Y-m-d\TH:i:s\Z', time() + 60 );
+        $queue[] = $item;
         @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
-    } elseif ( $result === 'cooldown' ) {
-        // Re-queue at end with 65-minute delay
+        return;
+    }
+
+    if ( $result['status'] === 'cooldown' ) {
+        // Re-queue at end with 65-minute delay (SPN's own dedup window).
         $item['retry_after'] = gmdate( 'Y-m-d\TH:i:s\Z', time() + 3900 );
         $queue[] = $item;
         @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
-    } else {
-        onionpress_wayback_log( 'Queue drain: failed to archive ' . $url . ' — will retry next cycle' );
-        // Put back at end for next cycle
-        $queue[] = $item;
-        @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
+        return;
     }
+
+    onionpress_wayback_log( 'Queue drain: submit failed for ' . $url . ' — will retry next cycle' );
+    $queue[] = $item;
+    @file_put_contents( $queue_file, json_encode( array_values( $queue ) ) );
 } );
