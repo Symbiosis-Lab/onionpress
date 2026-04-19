@@ -14,7 +14,7 @@ import zipfile
 from datetime import datetime, timezone
 
 from onionpress import key_manager
-from onionpress.config import DEFAULTS, read_config, write_value
+from onionpress.config import DEFAULTS, read_config, read_value, write_value
 
 
 def _default_data_dir() -> str:
@@ -92,6 +92,37 @@ def verify_wp_admin(username, password):
         return (False, f"Error verifying password: {e}")
 
     return (True, None)
+
+
+def get_admin_username(data_dir=None):
+    """Return the WordPress admin user's login.
+
+    Order: ONIONNAME in config → first admin from `wp user list
+    --role=administrator` (cached back to config) → "admin" as a last
+    resort.
+    """
+    data_dir = data_dir or _default_data_dir()
+    config_path = os.path.join(data_dir, "config")
+    name = read_value(config_path, "ONIONNAME", "").strip()
+    if name:
+        return name
+    try:
+        result = subprocess.run(
+            ['docker', 'exec', 'onionpress-wordpress',
+             'wp', 'user', 'list', '--role=administrator',
+             '--field=user_login', '--allow-root'],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=10,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                login = line.strip()
+                if login:
+                    write_value(config_path, "ONIONNAME", login)
+                    return login
+    except Exception:
+        pass
+    return "admin"
 
 
 def create_backup(onion_address, username, password, output_path, version, log_func, *, data_dir=None):

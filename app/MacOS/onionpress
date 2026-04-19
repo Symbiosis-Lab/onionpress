@@ -2094,146 +2094,6 @@ setup_wordpress_cli() {
     fi
 }
 
-create_backup() {
-    # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
-    # Usage: create_backup <password> <output_path>
-    local password="$1"
-    local output_path="$2"
-    local staging
-
-    if [ -z "$password" ]; then
-        echo "ERROR: Password is required" >&2
-        return 1
-    fi
-
-    # Verify password matches a WordPress admin account before creating backup
-    log "Backup: verifying WordPress admin password..."
-    local pw_valid
-    pw_valid=$(docker exec onionpress-wordpress wp eval "
-        \$users = get_users(array('role' => 'administrator'));
-        foreach (\$users as \$u) {
-            if (wp_check_password('${password//\'/\\\'}', \$u->user_pass)) {
-                echo 'VALID';
-                exit;
-            }
-        }
-        echo 'INVALID';
-    " --allow-root 2>/dev/null | tr -d '\n')
-    if [ "$pw_valid" != "VALID" ]; then
-        log "ERROR: Password does not match any WordPress admin account"
-        echo "ERROR: Password does not match any WordPress admin account" >&2
-        return 1
-    fi
-    log "Backup: password verified"
-
-    staging=$(mktemp -d -t onionpress-backup-XXXXXX)
-    trap "rm -rf '$staging'" RETURN
-
-    # 1. Extract Tor keys
-    log "Backup: extracting Tor keys..."
-    mkdir -p "$staging/tor-keys"
-
-    # C Tor format keys from vanity-keys directory
-    local ctor_key
-    ctor_key=$(find "$DATA_DIR/shared/vanity-keys" -name "hs_ed25519_secret_key" 2>/dev/null | head -1)
-    if [ -n "$ctor_key" ]; then
-        cp "$ctor_key" "$staging/tor-keys/"
-        local ctor_pub="${ctor_key%secret_key}public_key"
-        [ -f "$ctor_pub" ] && cp "$ctor_pub" "$staging/tor-keys/"
-    else
-        # Try extracting from the tor container
-        docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
-        if [ ! -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
-            rm -f "$staging/tor-keys/hs_ed25519_secret_key"
-            log "WARNING: No C Tor secret key found"
-        else
-            docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
-            [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
-        fi
-    fi
-
-    # Arti format key
-    local arti_key
-    arti_key=$(find "$DATA_DIR/shared/vanity-keys" -name "ks_hs_id.ed25519_expanded_private" 2>/dev/null | head -1)
-    if [ -n "$arti_key" ]; then
-        cp "$arti_key" "$staging/tor-keys/"
-    fi
-
-    if [ -z "$(ls -A "$staging/tor-keys/" 2>/dev/null)" ]; then
-        log "WARNING: No Tor keys found — backup will not include keys"
-    fi
-
-    # 2. Dump WordPress database
-    log "Backup: exporting database..."
-    mkdir -p "$staging/database"
-    local db_pass="${WORDPRESS_DB_PASSWORD:-}"
-    if [ -z "$db_pass" ]; then
-        setup_db_passwords
-        db_pass="$WORDPRESS_DB_PASSWORD"
-    fi
-    docker exec onionpress-db mariadb-dump -u wordpress "-p${db_pass}" wordpress > "$staging/database/wordpress.sql" 2>>"$LOG_FILE"
-    if [ $? -ne 0 ] || [ ! -s "$staging/database/wordpress.sql" ]; then
-        log "ERROR: Database export failed"
-        return 1
-    fi
-
-    # 3. Copy wp-content from container
-    log "Backup: copying wp-content (themes, plugins, uploads)..."
-    docker cp onionpress-wordpress:/var/www/html/wp-content/. "$staging/wp-content" 2>>"$LOG_FILE"
-
-    # 4. Save config
-    if [ -f "$DATA_DIR/config" ]; then
-        log "Backup: saving config..."
-        cp "$DATA_DIR/config" "$staging/config"
-    fi
-
-    # 5. OnionHeaven registry + keys (if this instance is an OnionHeaven hub)
-    if docker inspect onionheaven >/dev/null 2>&1; then
-        log "Backup: saving OnionHeaven registry and keys..."
-        mkdir -p "$staging/onionheaven"
-        docker cp onionheaven:/var/lib/onionpress/onionheaven/registry.db "$staging/onionheaven/registry.db" 2>>"$LOG_FILE" || true
-        docker cp onionheaven:/var/lib/onionpress/onionheaven/keys/. "$staging/onionheaven/keys" 2>>"$LOG_FILE" || true
-        if [ -s "$staging/onionheaven/registry.db" ]; then
-            local oh_count
-            oh_count=$(docker exec onionheaven sqlite3 /var/lib/onionpress/onionheaven/registry.db "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL" 2>/dev/null || echo "?")
-            log "Backup: OnionHeaven registry saved ($oh_count active registrations)"
-        else
-            rm -rf "$staging/onionheaven"
-            log "Backup: OnionHeaven container exists but no registry data"
-        fi
-    fi
-
-    # 6. Get onion address and write metadata
-    local onion_addr
-    onion_addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' || echo "")
-    local has_onionheaven="false"
-    [ -d "$staging/onionheaven" ] && has_onionheaven="true"
-
-    log "Backup: writing metadata..."
-    cat > "$staging/metadata.json" <<METAEOF
-{
-  "onion_address": "$onion_addr",
-  "backup_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "onionpress_version": "$ONIONPRESS_VERSION",
-  "platform": "macos",
-  "has_onionheaven": $has_onionheaven
-}
-METAEOF
-
-    # 7. Create password-protected zip
-    log "Backup: creating encrypted zip archive..."
-    rm -f "$output_path"
-    (cd "$staging" && zip -r -P "$password" "$output_path" .) >>"$LOG_FILE" 2>&1
-    if [ $? -ne 0 ]; then
-        log "ERROR: zip failed"
-        return 1
-    fi
-
-    local size
-    size=$(du -h "$output_path" | cut -f1)
-    log "Backup: complete ($size) -> $output_path"
-}
-
 restore_backup() {
     # Restores from a password-protected backup zip.
     # Usage: restore_backup <password> <zip_path>
@@ -2553,19 +2413,14 @@ main() {
             ;;
 
         backup)
-            setup_db_passwords
-            local backup_pass="${2:-}"
-            local backup_path="${3:-}"
-            if [ -z "$backup_pass" ]; then
-                echo "Usage: $0 backup <password> [output_path]"
+            shift  # drop "backup"
+            if [ $# -eq 0 ] || [ -z "$1" ]; then
+                echo "Usage: $0 backup <password> [output_path] [--user <login>]"
                 echo "Creates a password-protected backup of your OnionPress site."
+                echo "Password must match a WordPress administrator account."
                 exit 1
             fi
-            if [ -z "$backup_path" ]; then
-                backup_path="$HOME/Downloads/onionpress-$(date +%Y-%m-%d)-$$.zip"
-            fi
-            create_backup "$backup_pass" "$backup_path"
-            echo "Backup saved to: $backup_path"
+            bundled_python -m onionpress.cli backup "$@"
             ;;
 
         restore)
@@ -2697,8 +2552,7 @@ main() {
                 exit 1
             fi
             local scrub_backup="/tmp/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
-            create_backup "$scrub_pass" "$scrub_backup"
-            echo "  Backup saved to: $scrub_backup"
+            bundled_python -m onionpress.cli backup "$scrub_pass" "$scrub_backup"
 
             # ── Step 2: Reset ───────────────────────────────────────────
             echo ""

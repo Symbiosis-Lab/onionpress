@@ -160,19 +160,25 @@ class OnionPressCLI:
         )
         return result.returncode
 
-    def cmd_backup(self, password: str, output_path: str = None) -> int:
+    def cmd_backup(self, password: str, output_path: str = None, username: str = None) -> int:
         """Create a backup."""
-        from .backup import create_backup, backup_filename
+        from .backup import create_backup, backup_filename, verify_wp_admin, get_admin_username
+        if not username:
+            username = get_admin_username(data_dir=self.paths.data_dir)
+        ok, err = verify_wp_admin(username, password)
+        if not ok:
+            print(f"ERROR: {err}", file=sys.stderr)
+            return 1
         addr = self.containers.get_onion_address()
         if not output_path:
             backups_dir = os.path.expanduser("~/Documents/OnionPress/backups")
             os.makedirs(backups_dir, exist_ok=True)
             output_path = os.path.join(
-                backups_dir, backup_filename(addr, ""))
+                backups_dir, backup_filename(addr, username))
         try:
             create_backup(
                 onion_address=addr,
-                username="",
+                username=username,
                 password=password,
                 output_path=output_path,
                 version=__version__,
@@ -310,8 +316,9 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("logs", help="Follow container logs")
 
     p_backup = sub.add_parser("backup", help="Create a backup")
-    p_backup.add_argument("password", help="Backup encryption password")
+    p_backup.add_argument("password", help="WP admin password (also used to encrypt the zip)")
     p_backup.add_argument("output", nargs="?", help="Output path (default: ~/Documents/OnionPress/backups/)")
+    p_backup.add_argument("--user", help="WP admin username (default: auto-resolve)")
 
     p_restore = sub.add_parser("restore", help="Restore from backup")
     p_restore.add_argument("password", help="Backup encryption password")
@@ -339,7 +346,7 @@ def main(argv: list[str] = None) -> int:
     if args.command in commands:
         return commands[args.command]()
     elif args.command == "backup":
-        return cli.cmd_backup(args.password, args.output)
+        return cli.cmd_backup(args.password, args.output, args.user)
     elif args.command == "restore":
         return cli.cmd_restore(args.password, args.backup_file)
     elif args.command == "reset":
