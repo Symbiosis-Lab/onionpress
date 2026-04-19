@@ -63,6 +63,12 @@ function onionpress_wayback_auth_header() {
 
 /**
  * Archive to the Wayback Machine when a post or page is published/updated.
+ *
+ * URL strategy: trust WordPress. `get_permalink()` and `home_url()` already
+ * return the correct URL for wherever the post lives — on a subsite
+ * (/alice/...) the paths come back prefixed; on a single-site install they
+ * don't. We just swap the returned host for the .onion address when we have
+ * one, since WordPress may have been configured with a clearnet siteurl.
  */
 add_action( 'save_post', function ( $post_id, $post, $update ) {
     // Skip autosaves and revisions
@@ -81,46 +87,30 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         return;
     }
 
-    // Determine the subsite path (e.g. "/alice/" on multisite, "/" on main)
-    $blog      = function_exists( 'get_blog_details' ) ? get_blog_details( get_current_blog_id() ) : null;
-    $site_path = ( $blog && ! empty( $blog->path ) ) ? $blog->path : '/';
-    $permalink = get_permalink( $post_id );
-    $path      = wp_parse_url( $permalink, PHP_URL_PATH ) ?: '/';
+    $post_path = wp_parse_url( get_permalink( $post_id ), PHP_URL_PATH ) ?: '/';
+    $home_path = wp_parse_url( home_url( '/' ), PHP_URL_PATH ) ?: '/';
+    $feed_path = rtrim( $home_path, '/' ) . '/feed/';
 
     // Read the .onion address from the shared volume
     $onion_file = '/var/lib/onionpress/onion_address';
     if ( ! file_exists( $onion_file ) ) {
-        // Tor not ready — queue the post path for later (the menubar will
-        // prepend the .onion address when it drains the queue)
-        onionpress_wayback_queue_path( $path, $site_path );
+        // Tor not ready — queue the path for later; the drain resolver
+        // prepends the .onion address when it fires.
+        onionpress_wayback_queue_path( $post_path, $home_path );
         return;
     }
     $onion_addr = trim( file_get_contents( $onion_file ) );
     if ( empty( $onion_addr ) ) {
-        onionpress_wayback_queue_path( $path, $site_path );
+        onionpress_wayback_queue_path( $post_path, $home_path );
         return;
     }
 
-    // Build URLs to archive (subsite-aware so /alice/ posts archive the /alice/ home and feed)
-    $home_path = $site_path;
-    $feed_path = rtrim( $site_path, '/' ) . '/feed/';
+    $urls = array_unique( array(
+        'http://' . $onion_addr . $post_path,
+        'http://' . $onion_addr . $home_path,
+        'http://' . $onion_addr . $feed_path,
+    ) );
 
-    $urls = array();
-
-    // 1. Post .onion URL
-    $urls[] = 'http://' . $onion_addr . $path;
-
-    // 2. Subsite homepage .onion URL
-    $urls[] = 'http://' . $onion_addr . $home_path;
-
-    // 3. Subsite RSS feed .onion URL
-    $urls[] = 'http://' . $onion_addr . $feed_path;
-
-
-    // Deduplicate (e.g. if the post IS the homepage)
-    $urls = array_unique( $urls );
-
-    // Queue for background archiving by the menubar app — never block publish
     onionpress_wayback_queue_urls( $urls );
 }, 10, 3 );
 
