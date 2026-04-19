@@ -598,8 +598,16 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     if ( $update && get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ) ) {
         onionpress_wayback_post_state_set( $post_id, array() );
     }
+    // Kick a sweep immediately so the new/updated post gets archived
+    // without waiting for the next 5-min cron tick. The author may put
+    // their laptop to sleep right after hitting Publish — we want SPN
+    // to have received the submission before that happens. This single-
+    // event cron queues behind whatever request is already in flight
+    // (almost always the admin's own post-save redirect), so it runs
+    // within a second or two of the publish.
+    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
     onionpress_wayback_log( 'save_post: post ' . $post_id . ' — cleared home/feed state'
-        . ( $update ? ' and post meta' : '' ) . ' for re-archive' );
+        . ( $update ? ' and post meta' : '' ) . ', scheduled immediate sweep' );
 }, 10, 3 );
 
 // ────────────────────────────── cron ────────────────────────────────

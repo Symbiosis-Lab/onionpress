@@ -269,6 +269,29 @@ class TestWaybackStateMachine(unittest.TestCase):
             _eval_php("delete_option('op_wayback_home_state');"
                      "delete_option('op_wayback_feed_state');", self.site_url)
 
+    def test_save_post_schedules_immediate_sweep(self):
+        """Publishing a post should log a 'scheduled immediate sweep'
+        message — proof that save_post queued a run rather than waiting
+        for the 5-min recurring cron. We inspect the log directly since
+        the scheduled event may fire and be removed from the cron array
+        before our test reads it."""
+        # Put a unique marker in the post title so we can find our own
+        # log line unambiguously, even if other posts trigger save_post.
+        marker = f"imm-sweep-{__import__('time').time_ns()}"
+        post_id = self._make_post(marker)
+        try:
+            # The plugin logs this literal string when save_post fires.
+            code = (
+                "$raw = @file_get_contents('/var/lib/onionpress/wayback.log');"
+                "echo $raw !== false && strpos($raw, 'scheduled immediate sweep') !== false ? '1' : '0';"
+            )
+            has_line = _eval_php(code, self.site_url)
+            self.assertEqual(has_line, "1",
+                "wayback.log doesn't contain 'scheduled immediate sweep' "
+                "— save_post may not be scheduling the single-event sweep")
+        finally:
+            self._delete_post(post_id)
+
     def test_sweep_query_picks_up_unarchived(self):
         """The sweep's meta_query returns published posts without
         archived_at/failed_at set. Seed two posts — one archived, one not —
