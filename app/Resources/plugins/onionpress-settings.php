@@ -1153,7 +1153,7 @@ function onionpress_settings_page() {
                                    placeholder="<?php echo esc_attr( $field['placeholder'] ?? '' ); ?>"
                                    class="regular-text">
                         <?php endif; ?>
-                        <?php if ( $key === 'SHARE_ANALYTICS_WITH_ONIONHOME' && ( $current[ $config_key ] ?? ( $current[ $key ] ?? '' ) ) === 'yes' ) : ?>
+                        <?php if ( $key === 'SHARE_ANALYTICS_WITH_ONIONHOME' ) : ?>
                             <button type="button" id="onionpress-share-now" class="button button-secondary" style="margin-left: 8px;">Share Now</button>
                             <span id="onionpress-share-now-status" style="margin-left: 8px;"></span>
                             <script>

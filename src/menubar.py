@@ -1221,14 +1221,12 @@ class OnionPressApp(rumps.App):
         _main_thread(lambda: self.quit_app(None))
 
     def _manual_analytics_upload(self):
-        """Run analytics upload immediately (called from SIGUSR1 handler)."""
+        """Run analytics upload immediately (triggered by Share Now / CLI).
+
+        Runs regardless of SHARE_ANALYTICS_WITH_ONIONHOME — pressing the
+        button is explicit consent for this one upload.
+        """
         try:
-            enabled = self.read_config_value(
-                "SHARE_ANALYTICS_WITH_ONIONHOME", "no"
-            ).lower()
-            if enabled != "yes":
-                self.log("Analytics upload skipped: SHARE_ANALYTICS_WITH_ONIONHOME is not 'yes'")
-                return
             analytics_sharing._do_upload_cycle(self, include_active=True)
             self.log("Analytics upload complete")
         except Exception as e:
