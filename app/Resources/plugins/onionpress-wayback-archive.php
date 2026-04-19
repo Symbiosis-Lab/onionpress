@@ -34,8 +34,19 @@ if ( ! defined( 'ONIONPRESS_WAYBACK_POLL_INTERVAL' ) ) {
     define( 'ONIONPRESS_WAYBACK_POLL_INTERVAL', 60 );
 }
 if ( ! defined( 'ONIONPRESS_WAYBACK_URLS_PER_SWEEP' ) ) {
-    // Max URLs touched per 5-min sweep tick. Keeps SPN traffic gentle.
-    define( 'ONIONPRESS_WAYBACK_URLS_PER_SWEEP', 3 );
+    // Safety-net count cap per sweep tick. The real guardrail is the
+    // wall-clock budget below — this just prevents runaway on a blog
+    // with thousands of posts. 25 comfortably covers catchup for a
+    // normal-sized blog without breaching the time budget.
+    define( 'ONIONPRESS_WAYBACK_URLS_PER_SWEEP', 25 );
+}
+if ( ! defined( 'ONIONPRESS_WAYBACK_SWEEP_TIME_BUDGET' ) ) {
+    // Seconds a single sweep tick may spend before yielding to the next
+    // cron firing. Each URL is a Tor round-trip (CDX check + submit or
+    // poll), typically 5-30s. 90s comfortably fits 3-20 URLs depending
+    // on Tor health, well under PHP's default max_execution_time of 30
+    // (we run inside wp-cron which uses its own longer timeout).
+    define( 'ONIONPRESS_WAYBACK_SWEEP_TIME_BUDGET', 90 );
 }
 
 // Post-meta keys (leading underscore hides them from the edit-post UI).
@@ -496,6 +507,7 @@ function onionpress_wayback_sweep() {
     }
 
     $budget = ONIONPRESS_WAYBACK_URLS_PER_SWEEP;
+    $deadline = microtime( true ) + ONIONPRESS_WAYBACK_SWEEP_TIME_BUDGET;
     $processed = 0;
 
     // 1) Home and feed first. These are one-shot catchup URLs: once each
@@ -517,7 +529,7 @@ function onionpress_wayback_sweep() {
         if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > time() ) {
             continue; // waiting, doesn't count against budget
         }
-        if ( $processed >= $budget ) {
+        if ( $processed >= $budget || microtime( true ) >= $deadline ) {
             break;
         }
         $action = onionpress_wayback_advance(
@@ -529,41 +541,73 @@ function onionpress_wayback_sweep() {
         $processed++;
     }
 
-    // 2) Posts that don't have archived_at AND don't have failed_at.
-    $posts = get_posts( array(
+    // 2) Posts, in two priority queues:
+    //
+    //    Queue A (fresh): posts that have never been attempted
+    //      (retry_count meta doesn't exist). Processed first so a
+    //      just-published post always gets its shot before we spend
+    //      budget on chronically-failing old posts.
+    //
+    //    Queue B (retrying): posts that have been attempted at least
+    //      once but aren't archived or given up on. Processed with
+    //      leftover budget, ordered oldest-attempt-first so nothing
+    //      starves — the URL whose retry_after is furthest in the
+    //      past has been waiting longest for another try.
+    //
+    //    Both queues exclude archived_at and failed_at. The in-PHP
+    //    retry_after check below skips URLs still in their backoff
+    //    window without counting against the budget.
+    $queue_a = get_posts( array(
         'post_status' => 'publish',
         'post_type'   => array( 'post', 'page' ),
-        'numberposts' => 100, // cap scan size; advance() filters by retry_after
+        'numberposts' => 100,
         'orderby'     => 'date',
+        'order'       => 'DESC',
+        'meta_query'  => array(
+            'relation' => 'AND',
+            array( 'key' => OP_WB_META_ARCHIVED_AT, 'compare' => 'NOT EXISTS' ),
+            array( 'key' => OP_WB_META_FAILED_AT,   'compare' => 'NOT EXISTS' ),
+            array( 'key' => OP_WB_META_RETRY_COUNT, 'compare' => 'NOT EXISTS' ),
+        ),
+        'suppress_filters' => false,
+    ) );
+    $queue_b = get_posts( array(
+        'post_status' => 'publish',
+        'post_type'   => array( 'post', 'page' ),
+        'numberposts' => 100,
+        'meta_key'    => OP_WB_META_RETRY_AFTER,
+        'orderby'     => 'meta_value_num',
         'order'       => 'ASC',
         'meta_query'  => array(
             'relation' => 'AND',
             array( 'key' => OP_WB_META_ARCHIVED_AT, 'compare' => 'NOT EXISTS' ),
             array( 'key' => OP_WB_META_FAILED_AT,   'compare' => 'NOT EXISTS' ),
+            array( 'key' => OP_WB_META_RETRY_COUNT, 'compare' => 'EXISTS' ),
         ),
         'suppress_filters' => false,
     ) );
-    foreach ( $posts as $post ) {
-        if ( $processed >= $budget ) {
-            break;
+
+    foreach ( array( $queue_a, $queue_b ) as $queue ) {
+        foreach ( $queue as $post ) {
+            if ( $processed >= $budget || microtime( true ) >= $deadline ) {
+                break 2;
+            }
+            $url = onionpress_wayback_post_url( $post->ID );
+            if ( empty( $url ) ) {
+                continue;
+            }
+            $state = onionpress_wayback_post_state( $post->ID );
+            if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > time() ) {
+                continue;
+            }
+            $action = onionpress_wayback_advance(
+                $url,
+                function () use ( $post ) { return onionpress_wayback_post_state( $post->ID ); },
+                function ( $state ) use ( $post ) { onionpress_wayback_post_state_set( $post->ID, $state ); }
+            );
+            onionpress_wayback_log( 'Sweep: post ' . $post->ID . ' → ' . $action );
+            $processed++;
         }
-        $url = onionpress_wayback_post_url( $post->ID );
-        if ( empty( $url ) ) {
-            continue;
-        }
-        // Check retry_after before spending budget — skip URLs still in
-        // their backoff window without counting against the budget.
-        $state = onionpress_wayback_post_state( $post->ID );
-        if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > time() ) {
-            continue;
-        }
-        $action = onionpress_wayback_advance(
-            $url,
-            function () use ( $post ) { return onionpress_wayback_post_state( $post->ID ); },
-            function ( $state ) use ( $post ) { onionpress_wayback_post_state_set( $post->ID, $state ); }
-        );
-        onionpress_wayback_log( 'Sweep: post ' . $post->ID . ' → ' . $action );
-        $processed++;
     }
 }
 add_action( 'onionpress_wayback_sweep', 'onionpress_wayback_sweep' );
