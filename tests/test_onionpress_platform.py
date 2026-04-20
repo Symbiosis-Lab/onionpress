@@ -71,21 +71,33 @@ class TestDetectTimezone(unittest.TestCase):
 
 
 class TestResolvePaths(unittest.TestCase):
-    def test_default_paths(self):
+    def _assert_platform_independent_paths(self, paths, data_dir):
+        """Paths derived purely from data_dir — same on every OS."""
+        self.assertEqual(paths.data_dir, data_dir)
+        self.assertEqual(paths.config_file, os.path.join(data_dir, "config"))
+        self.assertEqual(paths.secrets_file, os.path.join(data_dir, "secrets"))
+        self.assertEqual(paths.log_file, os.path.join(data_dir, "onionpress.log"))
+        self.assertEqual(paths.pid_file, os.path.join(data_dir, "onionpress.pid"))
+        self.assertEqual(paths.colima_home, os.path.join(data_dir, "colima"))
+
+    @mock.patch("onionpress.platform.detect_os", return_value=OS.MACOS)
+    def test_default_paths_macos(self, _):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = os.path.join(tmpdir, ".onionpress")
             paths = resolve_paths(data_dir=data_dir, app_bundle=None)
-
-            self.assertEqual(paths.data_dir, data_dir)
-            self.assertEqual(paths.config_file, os.path.join(data_dir, "config"))
-            self.assertEqual(paths.secrets_file, os.path.join(data_dir, "secrets"))
-            self.assertEqual(paths.log_file, os.path.join(data_dir, "onionpress.log"))
-            self.assertEqual(paths.pid_file, os.path.join(data_dir, "onionpress.pid"))
-            self.assertEqual(paths.colima_home, os.path.join(data_dir, "colima"))
+            self._assert_platform_independent_paths(paths, data_dir)
             self.assertEqual(
                 paths.docker_socket,
                 os.path.join(data_dir, "colima", "default", "docker.sock"),
             )
+
+    @mock.patch("onionpress.platform.detect_os", return_value=OS.LINUX)
+    def test_default_paths_linux(self, _):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.join(tmpdir, ".onionpress")
+            paths = resolve_paths(data_dir=data_dir, app_bundle=None)
+            self._assert_platform_independent_paths(paths, data_dir)
+            self.assertEqual(paths.docker_socket, "/var/run/docker.sock")
 
     def test_with_app_bundle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
