@@ -20,17 +20,32 @@ MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
 DATA_DIR="$HOME/.onionpress"
 DOCUMENTS_DIR="$HOME/Documents/OnionPress"
 
-# One-time migration: rename old lowercase directory (remove after next release)
-if [ -d "$HOME/Documents/onionpress" ] && [ ! -d "$DOCUMENTS_DIR" ]; then
-    mv "$HOME/Documents/onionpress" "$DOCUMENTS_DIR"
-fi
+# NB: we intentionally do NOT stat or mkdir under $HOME/Documents/ at
+# startup — doing so triggers the macOS TCC "OnionPress would like to
+# access files in your Documents folder" prompt on first launch with
+# zero context. Features that need the Documents subtree (backups,
+# Creations) create it at the moment of use via ensure_documents_dir()
+# in app/MacOS/onionpress. The lowercase→uppercase migration ran at
+# startup in earlier versions; it now runs from ensure_documents_dir
+# so the stat() doesn't fire until first feature activation.
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
-# Ensure data and documents directories exist
+# Ensure data dir exists. Documents/OnionPress subtree is created
+# lazily by the main launcher's ensure_documents_dir() when needed.
 mkdir -p "$DATA_DIR"
-mkdir -p "$DOCUMENTS_DIR/backups"
-mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+
+# Emit `--mount $DOCUMENTS_DIR:w` only if the Documents subtree already
+# exists. Same rationale as docs_mount_args() in app/MacOS/onionpress:
+# Colima stat()s --mount sources at VM creation, which would trigger
+# the TCC Documents prompt at first launch. Gating on directory
+# existence defers the prompt to the first feature that activates
+# Documents via ensure_documents_dir().
+docs_mount_args() {
+    if [ -d "$DOCUMENTS_DIR" ]; then
+        printf -- '--mount %s:w' "$DOCUMENTS_DIR"
+    fi
+}
 
 # Set up bundled binaries in PATH
 export PATH="$BIN_DIR:$PATH"
@@ -145,7 +160,7 @@ initialize_colima() {
                 --vm-type vz \
                 --mount-type virtiofs \
                 --mount "$DATA_DIR/shared:w" \
-                --mount "$DOCUMENTS_DIR:w" \
+                $(docs_mount_args) \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
                 --arch "$VM_ARCH" \
@@ -157,7 +172,7 @@ initialize_colima() {
                 --vm-type qemu \
                 --mount-type sshfs \
                 --mount "$DATA_DIR/shared:w" \
-                --mount "$DOCUMENTS_DIR:w" \
+                $(docs_mount_args) \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
                 --arch "$VM_ARCH" \
@@ -194,7 +209,7 @@ initialize_colima() {
         log "Starting Colima VM..."
         "$BIN_DIR/colima" start \
             --mount "$DATA_DIR/shared:w" \
-            --mount "$DOCUMENTS_DIR:w" \
+            $(docs_mount_args) \
             --memory "$vm_mem" \
             >> "$LOG_FILE" 2>&1
     fi

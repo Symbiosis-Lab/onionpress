@@ -24,10 +24,13 @@ SCRIPTS_DIR="$RESOURCES_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
 DOCUMENTS_DIR="$HOME/Documents/OnionPress"
 
-# One-time migration: rename old lowercase directory (remove after next release)
-if [ -d "$HOME/Documents/onionpress" ] && [ ! -d "$DOCUMENTS_DIR" ]; then
-    mv "$HOME/Documents/onionpress" "$DOCUMENTS_DIR"
-fi
+# NB: we intentionally do NOT stat or mkdir under $HOME/Documents/ at
+# startup — doing so triggers the macOS TCC "OnionPress would like to
+# access files in your Documents folder" prompt at first launch with
+# zero context for the user. Instead each feature that needs the
+# Documents directory (backups, Creations) creates its own subdirs at
+# the moment of use, giving the prompt obvious meaning. The one-time
+# lowercase → uppercase migration moved to ensure_documents_dir().
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
@@ -39,10 +42,42 @@ _BUNDLED_PYTHON_BIN="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
 _BUNDLED_PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
 bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" "$_BUNDLED_PYTHON_BIN" "$@"; }
 
-# Ensure data and documents directories exist
+# Ensure data dir exists. Documents/OnionPress subtree is created
+# lazily by ensure_documents_dir() — called by backup/creations flows
+# when they actually need to write there. Deferring this to first-use
+# moves the macOS TCC Documents prompt to a moment where it has
+# context instead of firing at every first launch.
 mkdir -p "$DATA_DIR"
-mkdir -p "$DOCUMENTS_DIR/backups"
-mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+
+# Lazily ensure ~/Documents/OnionPress/ exists and handles the one-time
+# lowercase→uppercase migration. Call this from anywhere that needs to
+# write to the Documents subtree — it's idempotent and cheap. The
+# first call on a fresh install triggers the TCC prompt WITH context
+# ("about to save a backup" / "opening Creations"); subsequent calls
+# are silent (TCC caches the grant).
+ensure_documents_dir() {
+    if [ -d "$HOME/Documents/onionpress" ] && [ ! -d "$DOCUMENTS_DIR" ]; then
+        mv "$HOME/Documents/onionpress" "$DOCUMENTS_DIR"
+    fi
+    mkdir -p "$DOCUMENTS_DIR/backups"
+    mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+}
+
+# Emit `--mount $DOCUMENTS_DIR:w` only if the Documents subtree already
+# exists. Colima stat()s every --mount source at VM start; if we passed
+# this unconditionally on a fresh install it would trigger the macOS
+# TCC Documents prompt at VM creation (attributed to OnionPress.app
+# with no context). By gating on directory existence, a user who
+# hasn't activated backups or Creations never sees the prompt. When
+# they do activate, ensure_documents_dir() creates the subtree and a
+# subsequent VM restart picks up the mount. The Colima VM config is
+# baked in at `colima start` time, so a running VM needs to be
+# restarted for the new mount to take effect.
+docs_mount_args() {
+    if [ -d "$DOCUMENTS_DIR" ]; then
+        printf -- '--mount %s:w' "$DOCUMENTS_DIR"
+    fi
+}
 
 # Log file + log() must be defined before any caller (e.g. detect_port_offset),
 # otherwise bash falls through to macOS /usr/bin/log and prints help.
@@ -183,8 +218,18 @@ ONIONPRESS_SHARED_DIR="$DATA_DIR/shared"
 mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
 export ONIONPRESS_SHARED_DIR
 
-# Documents directory for Creations mount into WordPress container
-export ONIONPRESS_DOCUMENTS_DIR="$DOCUMENTS_DIR"
+# Documents directory for Creations mount into WordPress container.
+# Only export when the user has activated the Documents subtree (via
+# ensure_documents_dir). If we exported unconditionally, docker-compose
+# would bind-mount ~/Documents/OnionPress/Creations into the WP
+# container at container start, which (a) fails if the source doesn't
+# exist yet and (b) would trigger the TCC Documents prompt on install.
+# When unexported, compose falls back to /tmp/onionpress-no-docs
+# (declared in docker-compose.yml) — an inert stub that lets the
+# container start cleanly without Creations.
+if [ -d "$DOCUMENTS_DIR" ]; then
+    export ONIONPRESS_DOCUMENTS_DIR="$DOCUMENTS_DIR"
+fi
 
 
 # Build compose flags — include cloudflare override file only when token is set
@@ -448,7 +493,7 @@ detect_container_runtime() {
                     "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                     "$BIN_DIR/colima" start \
                         --mount "$DATA_DIR/shared:w" \
-                        --mount "$DOCUMENTS_DIR:w" \
+                        $(docs_mount_args) \
                         --cpu "$_cfg_cpu" \
                         --memory "$_cfg_mem" \
                         >> "$LOG_FILE" 2>&1
@@ -476,7 +521,7 @@ detect_container_runtime() {
 
                 "$BIN_DIR/colima" start \
                     --mount "$DATA_DIR/shared:w" \
-                    --mount "$DOCUMENTS_DIR:w" \
+                    $(docs_mount_args) \
                     --cpu "$_restart_cpu" \
                     --memory "$_restart_mem" \
                     >> "$LOG_FILE" 2>&1
@@ -972,7 +1017,7 @@ install_docker() {
             --vm-type vz \
             --mount-type virtiofs \
             --mount "$DATA_DIR/shared:w" \
-            --mount "$DOCUMENTS_DIR:w" \
+            $(docs_mount_args) \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \
@@ -984,7 +1029,7 @@ install_docker() {
             --vm-type qemu \
             --mount-type sshfs \
             --mount "$DATA_DIR/shared:w" \
-            --mount "$DOCUMENTS_DIR:w" \
+            $(docs_mount_args) \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \
