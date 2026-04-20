@@ -13,6 +13,16 @@ ARTI_KEYSTORE_PATH = "/var/lib/arti/state/keystore/hss/wordpress/ks_hs_id.ed2551
 ARTI_KEY_TYPE = b"ed25519-expanded@spec.torproject.org"
 CONTAINER = "onionpress-tor"
 
+# C Tor onion service key files. In C Tor mode (TOR_IMPL=tor, which has been
+# the default since 2026-03-16, commit 5d91cb3e) the Arti keystore doesn't
+# exist at all — identity lives at these paths instead. Format: 32-byte
+# ASCII header + raw ed25519 material.
+CTOR_SECRET_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"
+CTOR_PUBLIC_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
+CTOR_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
+CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
+CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
+
 OPENSSH_MAGIC = b"openssh-key-v1\x00"
 
 
@@ -158,24 +168,118 @@ def build_openssh_key(private_key, public_key):
     return pem.encode("utf-8")
 
 
-def extract_keys():
-    """
-    Extract both Ed25519 keys from the Arti keystore in one docker exec.
-    Returns (private_key_64bytes, public_key_32bytes).
-    """
+def _docker_cat(path):
+    """docker exec cat <path>. Returns (ok, bytes-or-stderr)."""
     try:
         result = subprocess.run(
-            ["docker", "exec", CONTAINER, "cat", ARTI_KEYSTORE_PATH],
+            ["docker", "exec", CONTAINER, "cat", path],
             capture_output=True,
-            timeout=10
+            timeout=10,
         )
-        if result.returncode != 0:
-            raise Exception(f"Could not read key file: {result.stderr.decode().strip()}")
-
-        return parse_openssh_key(result.stdout)
-
     except Exception as e:
-        raise Exception(f"Failed to extract keys: {e}")
+        return False, str(e).encode()
+    if result.returncode != 0:
+        return False, result.stderr
+    return True, result.stdout
+
+
+def _parse_ctor_secret(data):
+    """Parse a C Tor hs_ed25519_secret_key: 32-byte header + 64-byte expanded."""
+    if len(data) != 96:
+        raise Exception(
+            f"C Tor secret key wrong size: {len(data)} (expected 96)"
+        )
+    if data[:32] != CTOR_SECRET_HEADER:
+        raise Exception("C Tor secret key has bad header")
+    return data[32:]
+
+
+def _parse_ctor_public(data):
+    """Parse a C Tor hs_ed25519_public_key: 32-byte header + 32-byte pubkey."""
+    if len(data) != 64:
+        raise Exception(
+            f"C Tor public key wrong size: {len(data)} (expected 64)"
+        )
+    if data[:32] != CTOR_PUBLIC_HEADER:
+        raise Exception("C Tor public key has bad header")
+    return data[32:]
+
+
+def _pubkey_from_hostname(hostname_bytes):
+    """Recover the 32-byte ed25519 public key from a v3 .onion hostname.
+
+    C Tor writes `hostname` but often doesn't write `hs_ed25519_public_key`
+    (newer tor relies on the secret key + on-demand derivation, plus the
+    hostname file as the canonical public artifact). An onion v3 address
+    is base32(pubkey[32] || checksum[2] || version[1]) + ".onion" — the
+    pubkey is the first 32 bytes of the decoded payload.
+    """
+    text = hostname_bytes.decode("utf-8", errors="replace").strip().lower()
+    if not text.endswith(".onion"):
+        raise Exception(f"hostname file is not a .onion address: {text!r}")
+    b32 = text[:-len(".onion")].upper()
+    if len(b32) != 56:
+        raise Exception(
+            f"onion address wrong length: {len(b32)} chars (expected 56)"
+        )
+    decoded = base64.b32decode(b32)
+    if len(decoded) != 35:
+        raise Exception(
+            f"decoded onion address wrong size: {len(decoded)} (expected 35)"
+        )
+    return decoded[:32]
+
+
+def extract_keys():
+    """
+    Extract both Ed25519 keys from the onionpress-tor container.
+    Returns (private_key_64bytes, public_key_32bytes).
+
+    Tries the Arti keystore first (single file, OpenSSH PEM). Falls back
+    to C Tor's pair of raw header+payload files. The container picks Arti
+    or C Tor at boot based on TOR_IMPL; this function handles both so
+    registration works regardless. Only one layout is expected to exist
+    at a time — if both are missing we surface the Arti error, which is
+    the more informative of the two on a broken install.
+    """
+    arti_ok, arti_data = _docker_cat(ARTI_KEYSTORE_PATH)
+    if arti_ok:
+        try:
+            return parse_openssh_key(arti_data)
+        except Exception as e:
+            raise Exception(f"Failed to parse Arti key: {e}")
+
+    # Fall back to C Tor layout. The secret key is always present in C Tor
+    # mode; the public key file is optional (newer tor omits it), so we
+    # prefer hs_ed25519_public_key when present and otherwise recover the
+    # pubkey from the hostname file (which is authoritative either way).
+    sec_ok, sec_data = _docker_cat(CTOR_SECRET_PATH)
+    if sec_ok:
+        try:
+            expanded = _parse_ctor_secret(sec_data)
+        except Exception as e:
+            raise Exception(f"Failed to parse C Tor secret key: {e}")
+        pub_ok, pub_data = _docker_cat(CTOR_PUBLIC_PATH)
+        if pub_ok:
+            try:
+                return expanded, _parse_ctor_public(pub_data)
+            except Exception as e:
+                raise Exception(f"Failed to parse C Tor public key: {e}")
+        host_ok, host_data = _docker_cat(CTOR_HOSTNAME_PATH)
+        if host_ok:
+            try:
+                return expanded, _pubkey_from_hostname(host_data)
+            except Exception as e:
+                raise Exception(
+                    f"Failed to recover public key from hostname: {e}"
+                )
+
+    # Neither layout was readable. Report the Arti failure (it's what
+    # callers used to see, and it's usually the clearer of the two error
+    # messages — "No such file or directory" vs. the same plus whatever
+    # the C Tor read produced).
+    detail = arti_data.decode(errors="replace").strip() if isinstance(arti_data, bytes) else str(arti_data)
+    raise Exception(f"Failed to extract keys: Could not read key file: {detail}")
 
 
 def extract_private_key():

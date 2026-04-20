@@ -1,4 +1,4 @@
-.PHONY: help build build-simple test clean install
+.PHONY: help build build-simple test test-unit clean install
 
 help:
 	@echo "onionpress Build System"
@@ -28,7 +28,7 @@ test:
 	@test -f app/Info.plist || (echo "ERROR: Info.plist missing" && exit 1)
 	@test -f app/Resources/docker/docker-compose.yml || (echo "ERROR: docker-compose.yml missing" && exit 1)
 	@test -f src/menubar.py || (echo "ERROR: src/menubar.py missing" && exit 1)
-	@test -f src/key_manager.py || (echo "ERROR: src/key_manager.py missing" && exit 1)
+	@test -f src/onionpress/key_manager.py || (echo "ERROR: src/onionpress/key_manager.py missing" && exit 1)
 	@echo "All required source files present"
 	@echo ""
 	@echo "Checking permissions..."
@@ -37,6 +37,19 @@ test:
 	@echo ""
 	@echo "Source layout is valid!"
 	@echo "To build: make build-simple"
+
+test-unit:
+	@# Run the Python unit tests under a pinned 3.14 via uv. Some modules
+	@# in src/onionpress/ use `X | None` syntax that fails to import on
+	@# stock /usr/bin/python3 (3.9) on macOS — uv fetches an isolated
+	@# 3.14 into ~/.local/share/uv/ without touching system Python.
+	@if ! command -v uv >/dev/null 2>&1; then \
+		echo "ERROR: 'uv' is not installed."; \
+		echo "Install with:  curl -LsSf https://astral.sh/uv/install.sh | sh"; \
+		echo "          or:  brew install uv"; \
+		exit 1; \
+	fi
+	uv run --python 3.14 python -m unittest discover tests -p 'test_*.py'
 
 clean:
 	@echo "Cleaning build artifacts..."

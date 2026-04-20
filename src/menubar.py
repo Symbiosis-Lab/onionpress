@@ -3111,6 +3111,19 @@ class OnionPressApp(rumps.App):
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=30,
         )
+
+        # wp site create assigns WP_DEFAULT_THEME (twentytwentyfive), and the
+        # launcher's earlier `wp theme activate onionpress` only touched
+        # blog_id=1 — so without this the subsite renders unthemed. Since
+        # root-redirect.php bounces / → /<onionname>/ once the subsite exists,
+        # the user otherwise never sees OnionPress at all.
+        subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "theme", "activate", "onionpress",
+             f"--url=http://localhost/{onionname}/", "--allow-root"],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=30,
+        )
         if sw:
             sw.add_log(f"Your blog is at /{onionname}/")
 

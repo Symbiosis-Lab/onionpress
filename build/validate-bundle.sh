@@ -128,6 +128,18 @@ fi
 
 echo "✓ Launch scripts present"
 
+# key_manager.py must be present at the path the shell launcher expects —
+# app/MacOS/onionpress invokes $SCRIPTS_DIR/key_manager.py for vanity-key
+# import and Arti PEM format conversion. Shipping without it causes
+# vanity generation to silently fall back to a random .onion AND breaks
+# OnionHeaven registration (sign_failed loop forever).
+if [ ! -f "$APP_PATH/Contents/Resources/scripts/key_manager.py" ]; then
+    echo "ERROR: key_manager.py missing from Contents/Resources/scripts/"
+    echo "       Vanity onion generation will silently fall back to random."
+    exit 1
+fi
+echo "✓ key_manager.py present at Contents/Resources/scripts/"
+
 # Get bundle size
 BUNDLE_SIZE=$(du -sh "$APP_PATH" | cut -f1)
 echo ""
