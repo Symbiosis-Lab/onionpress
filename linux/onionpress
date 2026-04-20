@@ -2729,11 +2729,28 @@ main() {
             # Proves backup/restore integrity, clean install, and that uninstall
             # truly cleans up. Use after changes to install.sh, onionpress CLI,
             # or Docker setup.
+            #
+            # Usage: onionpress scrub [<wp-admin-password>] [--clean]
+            #   --clean: delete backup zip after successful scrub (default: keep it)
             echo ""
             echo "OnionPress Scrub"
             echo "================"
             echo "This will: backup → uninstall → install → restore → verify"
             echo ""
+
+            # Rootless-Docker user services need this set when invoked via sudo/ssh
+            local _xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+            local _uctl="systemctl --user"
+
+            local scrub_clean=false
+            local scrub_pass=""
+            for arg in "$@"; do
+                case "$arg" in
+                    --clean) scrub_clean=true ;;
+                    scrub) ;;
+                    *) [ -z "$scrub_pass" ] && scrub_pass="$arg" ;;
+                esac
+            done
 
             confirm_or_skip "Continue? [y/N] " || { echo "Cancelled."; exit 0; }
 
@@ -2741,7 +2758,6 @@ main() {
             echo ""
             echo "── Step 1/5: Backup ──"
             setup_db_passwords
-            local scrub_pass="${2:-}"
             if [ -z "$scrub_pass" ]; then
                 read -r -s -p "WordPress admin password (for backup): " scrub_pass
                 echo ""
@@ -2750,9 +2766,24 @@ main() {
                 echo "ERROR: Password is required for backup."
                 exit 1
             fi
+
+            # Capture pre-scrub onion address so we can verify it survives the cycle
+            local pre_scrub_addr
+            pre_scrub_addr=$(get_onion_address 2>/dev/null || echo "")
+            if [ -n "$pre_scrub_addr" ] && [ "$pre_scrub_addr" != "Generating..." ]; then
+                echo "  Pre-scrub onion: $pre_scrub_addr"
+            else
+                pre_scrub_addr=""
+                echo "  WARNING: No pre-scrub onion address captured (won't be able to verify match)"
+            fi
+
             local scrub_backup="/tmp/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
             create_backup "$scrub_pass" "$scrub_backup"
-            echo "  Backup saved to: $scrub_backup"
+            if [ ! -s "$scrub_backup" ]; then
+                echo "ERROR: Backup file missing or empty — aborting."
+                exit 1
+            fi
+            echo "  Backup saved to: $scrub_backup ($(du -h "$scrub_backup" | cut -f1))"
 
             # Remember the repo dir for re-install
             local scrub_repo_dir=""
@@ -2770,16 +2801,32 @@ main() {
             # ── Step 2: Uninstall ───────────────────────────────────────
             echo ""
             echo "── Step 2/5: Uninstall ──"
-            # Stop heartbeat client
+
+            # Stop user-level services (rootless install)
+            XDG_RUNTIME_DIR="$_xdg" $_uctl stop onionpress-heartbeat 2>/dev/null || true
+            XDG_RUNTIME_DIR="$_xdg" $_uctl stop onionpress-watcher.timer 2>/dev/null || true
+            XDG_RUNTIME_DIR="$_xdg" $_uctl stop onionpress 2>/dev/null || true
+
+            # Also stop legacy system-level services (pre-rootless installs)
             sudo systemctl stop onionpress-heartbeat 2>/dev/null || true
             sudo systemctl stop onionpress-watcher.timer 2>/dev/null || true
             sudo systemctl stop onionpress 2>/dev/null || true
 
             # Remove containers and volumes
             setup_db_passwords 2>/dev/null || true
-            cd "$DOCKER_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
+            (cd "$DOCKER_DIR" 2>/dev/null && docker compose down -v 2>/dev/null) || true
 
-            # Disable and remove systemd services
+            # Disable user-level services and remove unit files
+            XDG_RUNTIME_DIR="$_xdg" $_uctl disable onionpress 2>/dev/null || true
+            XDG_RUNTIME_DIR="$_xdg" $_uctl disable onionpress-heartbeat 2>/dev/null || true
+            XDG_RUNTIME_DIR="$_xdg" $_uctl disable onionpress-watcher.timer 2>/dev/null || true
+            rm -f "$HOME/.config/systemd/user/onionpress.service"
+            rm -f "$HOME/.config/systemd/user/onionpress-heartbeat.service"
+            rm -f "$HOME/.config/systemd/user/onionpress-watcher.service"
+            rm -f "$HOME/.config/systemd/user/onionpress-watcher.timer"
+            XDG_RUNTIME_DIR="$_xdg" $_uctl daemon-reload 2>/dev/null || true
+
+            # Disable and remove legacy system-level service files
             sudo systemctl disable onionpress 2>/dev/null || true
             sudo systemctl disable onionpress-heartbeat 2>/dev/null || true
             sudo systemctl disable onionpress-watcher.timer 2>/dev/null || true
@@ -2834,14 +2881,17 @@ main() {
                 fi
             done
 
-            # Check onion address is present
+            # Check onion address is present AND matches pre-scrub (vanity key preserved)
             local scrub_addr
-            scrub_addr=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-            if [ -n "$scrub_addr" ]; then
-                echo "  ✓ Onion address: $scrub_addr"
-            else
+            scrub_addr=$(get_onion_address 2>/dev/null || echo "")
+            if [ -z "$scrub_addr" ] || [ "$scrub_addr" = "Generating..." ]; then
                 echo "  ✗ No onion address found"
                 scrub_ok=false
+            elif [ -n "$pre_scrub_addr" ] && [ "$scrub_addr" != "$pre_scrub_addr" ]; then
+                echo "  ✗ Onion address changed: $pre_scrub_addr → $scrub_addr (vanity key NOT restored)"
+                scrub_ok=false
+            else
+                echo "  ✓ Onion address: $scrub_addr (matches pre-scrub)"
             fi
 
             # Check WordPress responds
@@ -2854,24 +2904,28 @@ main() {
                 scrub_ok=false
             fi
 
-            # Check systemd services
-            if systemctl is-enabled onionpress >/dev/null 2>&1; then
-                echo "  ✓ onionpress.service enabled"
+            # Check systemd user service is enabled (matches install.sh's user-level model)
+            if XDG_RUNTIME_DIR="$_xdg" $_uctl is-enabled onionpress >/dev/null 2>&1; then
+                echo "  ✓ onionpress.service enabled (user)"
             else
-                echo "  ✗ onionpress.service not enabled"
+                echo "  ✗ onionpress.service not enabled (user)"
                 scrub_ok=false
             fi
 
             echo ""
             if [ "$scrub_ok" = "true" ]; then
                 echo "Scrub PASSED — backup/uninstall/install/restore all working."
+                if [ "$scrub_clean" = "true" ]; then
+                    rm -f "$scrub_backup"
+                    echo "  Cleaned up: $scrub_backup"
+                else
+                    echo "  Backup retained at: $scrub_backup"
+                    echo "  (pass --clean to delete on success)"
+                fi
             else
                 echo "Scrub FAILED — see errors above."
+                echo "  Backup retained for recovery: $scrub_backup"
             fi
-
-            # Clean up backup file
-            rm -f "$scrub_backup"
-            echo "  Cleaned up: $scrub_backup"
             ;;
 
         uninstall)
