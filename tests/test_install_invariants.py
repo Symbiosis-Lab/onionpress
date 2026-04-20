@@ -197,5 +197,41 @@ class TestSubsiteGetsOnionPressTheme(unittest.TestCase):
         )
 
 
+class TestSubsiteSetsPrimaryBlog(unittest.TestCase):
+    """Second half of the subsite regression: even after the role and
+    theme are set on the new subsite, users still hit blog_id=1's admin
+    from "+ New", "My Sites", and wp-admin redirects until their
+    primary_blog usermeta points at the subsite. Observed on a fresh
+    install where `+ New → Post` routed to http://<onion>/wp-admin/
+    instead of http://<onion>/<onionname>/wp-admin/.
+    """
+
+    def test_primary_blog_is_set_on_new_subsite(self):
+        src = _read("src/menubar.py")
+        import ast
+        tree = ast.parse(src)
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_provision_primary_subsite":
+                func = node
+                break
+        self.assertIsNotNone(func)
+
+        body = ast.unparse(func)
+        self.assertIn("primary_blog", body,
+            "_provision_primary_subsite must update the user's primary_blog "
+            "meta to point at the newly-created subsite. Without this, "
+            'wp-admin\'s "+ New" still routes to blog_id=1 (network root) '
+            "and users end up posting on the wrong site.")
+        self.assertIn("'user', 'meta', 'update'", body,
+            "primary_blog should be set via `wp user meta update`.")
+        # The update must reference the user (onionname) and a resolved
+        # blog_id — guard against a hardcoded `1` or `2` accidentally
+        # shipping.
+        self.assertIn("get_blog_id_from_url", body,
+            "Resolve the subsite's blog_id dynamically (the onionname "
+            "varies per install) rather than hardcoding a literal.")
+
+
 if __name__ == "__main__":
     unittest.main()

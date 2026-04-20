@@ -3112,6 +3112,40 @@ class OnionPressApp(rumps.App):
             errors='replace', timeout=30,
         )
 
+        # Point the user's primary_blog at the new subsite. Otherwise WP's
+        # admin bar "+ New", wp-admin/ redirects, and the "My Sites" default
+        # all resolve to blog_id=1 (the network root) — users end up posting
+        # to http://<onion>/wp-admin/ instead of their own
+        # http://<onion>/<onionname>/wp-admin/, which is wrong and confusing.
+        # `wp site list --path=...` collides with wp-cli's global --path flag,
+        # and --site__in= wants blog IDs, so we use wp eval to call
+        # get_blog_id_from_url() directly — which returns 0 if not found.
+        blog_id_result = subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "eval",
+             f'echo get_blog_id_from_url("localhost", "/{onionname}/");',
+             "--allow-root"],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=30,
+        )
+        # Strip any leading PHP warnings (e.g. the recurring HTTP_HOST one)
+        # and take the last non-empty line as the blog_id.
+        lines = [l.strip() for l in (blog_id_result.stdout or "").splitlines() if l.strip()]
+        blog_id = lines[-1] if lines else ""
+        if blog_id.isdigit() and int(blog_id) > 0:
+            subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "user", "meta", "update", onionname, "primary_blog",
+                 blog_id, "--allow-root"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=30,
+            )
+        else:
+            self.log(
+                f"Could not resolve blog_id for /{onionname}/ — "
+                f"primary_blog not updated (got: {blog_id!r})"
+            )
+
         # wp site create assigns WP_DEFAULT_THEME (twentytwentyfive), and the
         # launcher's earlier `wp theme activate onionpress` only touched
         # blog_id=1 — so without this the subsite renders unthemed. Since
