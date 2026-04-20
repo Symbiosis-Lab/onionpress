@@ -24,6 +24,26 @@ function onionpress_avatar_default_url() {
 }
 
 /**
+ * Map a requested pixel size to the named WP thumbnail that fits best.
+ *
+ * wp_get_attachment_image_url() with array($w, $h) only matches when WP
+ * has a pre-generated size of exactly those dimensions. For avatars we
+ * ask for arbitrary sizes like 96 or 200 pixels, which rarely match,
+ * and WP silently falls back to the ORIGINAL (which can be several MB).
+ *
+ * Using named sizes ('thumbnail' = 150x150, 'medium' = ~300) always
+ * hits a pre-generated file, so an avatar rendered at 100x100 CSS pixels
+ * downloads as ~14 KB instead of ~400 KB.
+ */
+function onionpress_avatar_named_size( $size ) {
+    $s = (int) $size;
+    if ( $s <= 150 ) return 'thumbnail';   // 150x150 cropped, ideal for avatar
+    if ( $s <= 300 ) return 'medium';      // ~300 wide, aspect-preserved
+    if ( $s <= 1024 ) return 'large';
+    return 'full';
+}
+
+/**
  * Hide the core "Profile Picture" row (which always talks about Gravatar
  * even when overridden). Our own "Profile Photo" section replaces it.
  */
@@ -191,7 +211,7 @@ function onionpress_avatar_override( $avatar, $id_or_email, $size, $default, $al
     $avatar_id = get_user_meta( $user->ID, 'onionpress_avatar_id', true );
     $url = '';
     if ( $avatar_id ) {
-        $url = wp_get_attachment_image_url( $avatar_id, array( $size, $size ) );
+        $url = wp_get_attachment_image_url( $avatar_id, onionpress_avatar_named_size( $size ) );
     }
     if ( ! $url ) {
         $url = onionpress_avatar_default_url();
@@ -231,7 +251,7 @@ function onionpress_avatar_url_override( $url, $id_or_email, $args ) {
     $avatar_id = get_user_meta( $user->ID, 'onionpress_avatar_id', true );
     if ( $avatar_id ) {
         $size = isset( $args['size'] ) ? (int) $args['size'] : 96;
-        $local_url = wp_get_attachment_image_url( $avatar_id, array( $size, $size ) );
+        $local_url = wp_get_attachment_image_url( $avatar_id, onionpress_avatar_named_size( $size ) );
         if ( $local_url ) {
             return $local_url;
         }
