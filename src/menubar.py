@@ -35,7 +35,12 @@ except ImportError:
     setup_window = None
 from onionpress.platform import resolve_paths
 from onionpress.docker import Docker
-from onionpress.health import HealthChecker
+from onionpress.health import (
+    HealthChecker,
+    WEDGE_LOAD_WARN,
+    WEDGE_LOAD_ALARM,
+    WEDGE_FAILING_STREAK_ALARM,
+)
 from onionpress import config as op_config
 from onionpress.ui_helpers import (
     HelpButtonTarget as _HelpButtonTarget,
@@ -174,6 +179,10 @@ class OnionPressApp(rumps.App):
         self._paths = resolve_paths(data_dir=self.app_support, app_bundle=_app_bundle)
         self._docker = Docker(self._paths, log_func=self.log)
         self._health_checker = HealthChecker(self._docker, log_func=self.log)
+        # Wedge-detector state: next allowed probe + last logged episode signature,
+        # so a persistent wedge writes one WARN per hour, not one per poll.
+        self._wedge_probe_next = 0.0
+        self._wedge_last_episode = None
 
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None, template=False)
@@ -1254,6 +1263,55 @@ class OnionPressApp(rumps.App):
         """Check if host has internet connectivity."""
         return self._health_checker.check_internet_connectivity()
 
+    def _probe_vm_wedge(self):
+        """Log wedge signals (high VM load, unhealthy WP container).
+
+        Rate-limited: only probes every 5 minutes, and only writes a new
+        WARN line when the episode signature changes (status + alarm
+        tier), so a stuck-for-hours wedge produces a handful of log
+        lines, not thousands. Lines flow into onionpress.log which the
+        analytics pipeline already uploads, giving oheaven a central
+        view of wedges in the fleet without any new transport.
+        """
+        now = time.time()
+        if now < self._wedge_probe_next:
+            return
+        # Next probe in 5 minutes regardless of outcome (cheap but not free).
+        self._wedge_probe_next = now + 300
+
+        signals = self._health_checker.check_vm_wedge()
+        if signals is None:
+            return
+
+        tier = None
+        if signals.loadavg_1min is not None and signals.loadavg_1min >= WEDGE_LOAD_ALARM:
+            tier = "alarm"
+        elif signals.loadavg_1min is not None and signals.loadavg_1min >= WEDGE_LOAD_WARN:
+            tier = "warn"
+        elif (
+            signals.wp_health_status == "unhealthy"
+            and signals.wp_failing_streak is not None
+            and signals.wp_failing_streak >= WEDGE_FAILING_STREAK_ALARM
+        ):
+            tier = "alarm"
+
+        if tier is None:
+            # All clear — reset so next wedge episode re-logs fresh
+            self._wedge_last_episode = None
+            return
+
+        episode = (tier, signals.wp_health_status)
+        if episode == self._wedge_last_episode:
+            return  # Same episode, already logged
+        self._wedge_last_episode = episode
+
+        load_str = f"{signals.loadavg_1min:.2f}" if signals.loadavg_1min is not None else "?"
+        self.log(
+            f"WEDGE {tier}: loadavg1={load_str} "
+            f"wp_health={signals.wp_health_status} "
+            f"wp_failing_streak={signals.wp_failing_streak}"
+        )
+
     def _parse_bootstrap_percentage(self):
         """Parse Tor bootstrap percentage from container logs."""
         try:
@@ -1364,6 +1422,9 @@ class OnionPressApp(rumps.App):
                     self.is_running = False
             else:
                 self.is_running = False
+
+            if self.is_running:
+                self._probe_vm_wedge()
 
             # Get onion address if running
             if self.is_running:

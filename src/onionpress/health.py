@@ -4,12 +4,13 @@ Extracts the health monitoring logic from menubar.py into a testable module.
 The MenubarApp (or CLI) creates a HealthMonitor and calls check() periodically.
 """
 
+import json
 import re
 import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import Callable, Optional
 
 from .docker import Docker
 
@@ -39,6 +40,28 @@ class HealthResult:
     def ready(self) -> bool:
         """Service is fully operational."""
         return self.wp_healthy and self.tor_externally_reachable
+
+
+@dataclass
+class WedgeSignals:
+    """VM/FUSE wedge probe result.
+
+    Produced by HealthChecker.check_vm_wedge(). The wedge pattern
+    (fuse_lock_inode pile-up in the WP container's apache workers,
+    kernel-suppressed after one dmesg report) is invisible to the
+    existing health checks, so we surface it as two cheap signals the
+    analytics uploader can see: VM-wide load average, and the WP
+    container's docker-level health status.
+    """
+    loadavg_1min: Optional[float] = None
+    wp_health_status: Optional[str] = None     # "healthy" | "unhealthy" | "starting"
+    wp_failing_streak: Optional[int] = None
+
+
+# Thresholds for deciding when to log (observational only — no actions).
+WEDGE_LOAD_WARN = 5.0        # VM 1-min load above this is already unusual
+WEDGE_LOAD_ALARM = 20.0      # Above this = real pile-up, worth an alarm
+WEDGE_FAILING_STREAK_ALARM = 3   # WP health-check failed 3+ times in a row
 
 
 # Patterns in Tor logs indicating the container is sick and restart will help.
@@ -229,6 +252,63 @@ class HealthChecker:
             return False, f"000:rc={result.returncode}"
         http_code = result.output.strip()
         return http_code in ("200", "301"), http_code
+
+    def check_vm_wedge(self) -> Optional["WedgeSignals"]:
+        """Probe for VM/FUSE wedge conditions (onionpress.org Apr 2026 incident).
+
+        Two signals read via paths that don't touch the FUSE mount:
+          - /proc/loadavg from the tor container (tor's root fs is a docker
+            named volume, never on sshfs — stays responsive even when
+            apache in the WP container is piled up in fuse_lock_inode).
+          - docker inspect health status for the WP container (API-level;
+            doesn't exec into it — exec on a wedged container would itself
+            queue on the same inode lock).
+
+        Never execs into onionpress-wordpress — during a real wedge that
+        exec would block forever and the health loop would hang.
+
+        Returns WedgeSignals on success, None if the probe itself failed
+        (e.g. containers not up). Caller logs only when thresholds trip
+        so steady-state polling stays quiet.
+        """
+        # Load average from tor container's /proc (VM-global, one number).
+        loadavg_1min = None
+        r = self.docker.exec(
+            "onionpress-tor",
+            ["cat", "/proc/loadavg"],
+            timeout=5,
+            quiet=True,
+        )
+        if r.ok and r.output:
+            try:
+                loadavg_1min = float(r.output.split()[0])
+            except (ValueError, IndexError):
+                pass
+
+        # WP container docker-level health via inspect (no exec).
+        wp_health_status = None
+        wp_failing_streak = None
+        r = self.docker.run(
+            ["inspect", "--format", "{{json .State.Health}}", "onionpress-wordpress"],
+            timeout=5,
+            quiet=True,
+        )
+        if r.ok and r.output.strip() and r.output.strip() != "null":
+            try:
+                h = json.loads(r.output)
+                wp_health_status = h.get("Status")
+                wp_failing_streak = h.get("FailingStreak")
+            except (ValueError, TypeError):
+                pass
+
+        if loadavg_1min is None and wp_health_status is None:
+            return None
+
+        return WedgeSignals(
+            loadavg_1min=loadavg_1min,
+            wp_health_status=wp_health_status,
+            wp_failing_streak=wp_failing_streak,
+        )
 
     @staticmethod
     def check_internet_connectivity() -> bool:

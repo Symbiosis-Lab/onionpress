@@ -11,10 +11,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from onionpress.docker import DockerResult
 from onionpress.health import (
     HealthChecker, HealthResult, HealthMonitor, HealthState,
-    ServiceState, SICK_PATTERNS, HEALTHY_PATTERNS,
+    ServiceState, SICK_PATTERNS, HEALTHY_PATTERNS, WedgeSignals,
     YELLOW_TO_STUCK_SECONDS, YELLOW_TO_RESTART_SECONDS,
     RESTART_COOLDOWN_SECONDS, RECLAIM_RETRY_SECONDS,
     POLL_READY_SECONDS, POLL_STARTING_SECONDS, POLL_OFFLINE_SECONDS,
+    WEDGE_LOAD_WARN, WEDGE_LOAD_ALARM, WEDGE_FAILING_STREAK_ALARM,
 )
 
 
@@ -470,6 +471,95 @@ class TestPollInterval(unittest.TestCase):
     def test_stuck(self):
         hm = HealthMonitor()
         self.assertEqual(hm.poll_interval(ServiceState.STUCK), POLL_STARTING_SECONDS)
+
+
+class TestCheckVMWedge(unittest.TestCase):
+    """Validates the wedge probe against the Apr 2026 onionpress.org snapshot.
+
+    Ground truth (captured live from the hung VM):
+      - /proc/loadavg on tor container: "150.14 150.07 149.73 1/455 1832876"
+      - docker inspect wordpress State.Health: Status="unhealthy", FailingStreak=32
+
+    These cases ensure the probe would have detected that incident and
+    that a healthy machine stays silent.
+    """
+
+    def _make_checker(self, loadavg_output, inspect_output):
+        docker = mock.MagicMock()
+        # `exec("onionpress-tor", ["cat", "/proc/loadavg"], ...)`
+        docker.exec.return_value = _ok(stdout=loadavg_output) if loadavg_output else _fail()
+        # `run(["inspect", ...])`
+        docker.run.return_value = _ok(stdout=inspect_output) if inspect_output else _fail()
+        return HealthChecker(docker)
+
+    def test_wedged_machine_returns_alarm_signals(self):
+        # Snapshot: load=150.14, wp unhealthy, streak=32
+        checker = self._make_checker(
+            "150.14 150.07 149.73 1/455 1832876\n",
+            '{"Status":"unhealthy","FailingStreak":32,"Log":[]}',
+        )
+        s = checker.check_vm_wedge()
+        self.assertAlmostEqual(s.loadavg_1min, 150.14, places=2)
+        self.assertEqual(s.wp_health_status, "unhealthy")
+        self.assertEqual(s.wp_failing_streak, 32)
+        # Both thresholds should classify this as "alarm"
+        self.assertGreaterEqual(s.loadavg_1min, WEDGE_LOAD_ALARM)
+        self.assertGreaterEqual(s.wp_failing_streak, WEDGE_FAILING_STREAK_ALARM)
+
+    def test_healthy_machine_is_below_thresholds(self):
+        checker = self._make_checker(
+            "0.10 0.05 0.01 1/200 12345\n",
+            '{"Status":"healthy","FailingStreak":0,"Log":[]}',
+        )
+        s = checker.check_vm_wedge()
+        self.assertLess(s.loadavg_1min, WEDGE_LOAD_WARN)
+        self.assertEqual(s.wp_health_status, "healthy")
+        self.assertEqual(s.wp_failing_streak, 0)
+
+    def test_no_health_block_handled(self):
+        # A container without a HEALTHCHECK directive returns "null"
+        checker = self._make_checker("0.50 0.40 0.30 1/200 12345\n", "null")
+        s = checker.check_vm_wedge()
+        self.assertAlmostEqual(s.loadavg_1min, 0.50, places=2)
+        self.assertIsNone(s.wp_health_status)
+        self.assertIsNone(s.wp_failing_streak)
+
+    def test_both_probes_fail_returns_none(self):
+        docker = mock.MagicMock()
+        docker.exec.return_value = _fail()
+        docker.run.return_value = _fail()
+        checker = HealthChecker(docker)
+        self.assertIsNone(checker.check_vm_wedge())
+
+    def test_malformed_loadavg_doesnt_crash(self):
+        checker = self._make_checker(
+            "garbage\n",
+            '{"Status":"healthy","FailingStreak":0,"Log":[]}',
+        )
+        s = checker.check_vm_wedge()
+        self.assertIsNone(s.loadavg_1min)
+        self.assertEqual(s.wp_health_status, "healthy")
+
+    def test_malformed_json_doesnt_crash(self):
+        checker = self._make_checker("0.20 0.15 0.10 1/200 12345\n", "not json")
+        s = checker.check_vm_wedge()
+        self.assertAlmostEqual(s.loadavg_1min, 0.20, places=2)
+        self.assertIsNone(s.wp_health_status)
+
+    def test_probe_never_execs_into_wordpress(self):
+        # Critical invariant: docker exec into a wedged WP container would
+        # itself hang on fuse_lock_inode. The probe must only use
+        # exec(onionpress-tor) and run(inspect).
+        docker = mock.MagicMock()
+        docker.exec.return_value = _ok(stdout="1.0 1.0 1.0 1/200 12345\n")
+        docker.run.return_value = _ok(stdout='{"Status":"healthy","FailingStreak":0}')
+        checker = HealthChecker(docker)
+        checker.check_vm_wedge()
+        for call in docker.exec.call_args_list:
+            self.assertNotEqual(
+                call.args[0], "onionpress-wordpress",
+                "wedge probe must never exec into wordpress (would hang)",
+            )
 
 
 if __name__ == "__main__":
