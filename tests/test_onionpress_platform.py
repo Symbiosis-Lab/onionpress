@@ -92,7 +92,18 @@ class TestResolvePaths(unittest.TestCase):
             )
 
     @mock.patch("onionpress.platform.detect_os", return_value=OS.LINUX)
-    def test_default_paths_linux(self, _):
+    @mock.patch("os.path.exists", return_value=True)
+    @mock.patch("os.getuid", return_value=1000)
+    def test_default_paths_linux_rootless(self, _uid, _exists, _os):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.join(tmpdir, ".onionpress")
+            paths = resolve_paths(data_dir=data_dir, app_bundle=None)
+            self._assert_platform_independent_paths(paths, data_dir)
+            self.assertEqual(paths.docker_socket, "/run/user/1000/docker.sock")
+
+    @mock.patch("onionpress.platform.detect_os", return_value=OS.LINUX)
+    @mock.patch("os.path.exists", return_value=False)
+    def test_default_paths_linux_rootful_fallback(self, _exists, _os):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = os.path.join(tmpdir, ".onionpress")
             paths = resolve_paths(data_dir=data_dir, app_bundle=None)

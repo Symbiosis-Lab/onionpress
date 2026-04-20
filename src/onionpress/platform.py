@@ -154,9 +154,12 @@ def resolve_paths(data_dir: str = None, documents_dir: str = None,
         bin_dir = ""
         docker_dir = ""
 
-    # On Linux, use the system Docker socket; on macOS, use Colima's
+    # On Linux, prefer the rootless Docker socket (what install.sh sets up);
+    # fall back to the rootful system socket only if rootless is absent.
+    # On macOS, always use Colima's socket under the data dir.
     if detect_os() == OS.LINUX:
-        docker_socket = "/var/run/docker.sock"
+        rootless_sock = f"/run/user/{os.getuid()}/docker.sock"
+        docker_socket = rootless_sock if os.path.exists(rootless_sock) else "/var/run/docker.sock"
     else:
         docker_socket = os.path.join(colima_home, "default", "docker.sock")
 
