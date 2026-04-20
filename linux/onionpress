@@ -1231,9 +1231,12 @@ start_containers() {
     # Update images if enabled
     update_images
 
-    # Pull pre-built images
-    log "Pulling pre-built images..."
-    docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will use cached)"
+    # Pull pre-built images, but only ones we don't already have locally.
+    # --policy missing avoids a 5-min network hang on every start when images
+    # are already cached. update_images (gated by UPDATE_ON_LAUNCH=yes) is the
+    # path for refreshing images to latest.
+    log "Pulling pre-built images (missing only)..."
+    docker compose pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will use cached)"
 
     # Start WordPress, DB, and OnionHeaven first
     local max_attempts=3

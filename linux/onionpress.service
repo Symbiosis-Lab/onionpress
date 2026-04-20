@@ -9,7 +9,7 @@ Type=notify
 NotifyAccess=all
 ExecStart=/opt/onionpress/onionpress start
 ExecStop=/opt/onionpress/onionpress stop
-TimeoutStartSec=300
+TimeoutStartSec=900
 StandardOutput=journal
 StandardError=journal
 Environment=XDG_RUNTIME_DIR=/run/user/%U
