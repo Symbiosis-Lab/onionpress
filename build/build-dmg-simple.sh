@@ -321,16 +321,42 @@ SCRIPTS_DIR="$PROJECT_DIR/src"
 MENUBAR_BUILD_DIR=$(mktemp -d)
 
 # Create a temporary venv for the py2app build (so we don't require
-# py2app or other deps to be installed globally on the build machine)
-# Use python.org universal2 Python so the built app runs on both arm64 and Intel.
-# Falls back to system python3 if the universal build isn't installed.
+# py2app or other deps to be installed globally on the build machine).
+#
+# Python version selection, in order of preference:
+#   1. python.org universal2 Python 3.14 — ships a universal (arm64 + x86_64)
+#      binary, required for release builds that must run on Intel too.
+#   2. uv-managed Python 3.14 — single-arch but reproducible; good for local
+#      dev on Apple Silicon where the app only needs to run on the dev box.
+#   3. HARD FAIL — do not fall back to /usr/bin/python3: on macOS 13/14 that
+#      is 3.9, and src/onionpress/ uses PEP 604 `X | None` annotations that
+#      fail to import on 3.9 (py2app freezes bytecode against the build
+#      interpreter, so the shipped app would crash on launch with a cryptic
+#      "Launch error / See the py2app website" dialog).
 UNIVERSAL_PYTHON="/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
 if [ -x "$UNIVERSAL_PYTHON" ]; then
     echo "Using universal2 Python: $UNIVERSAL_PYTHON"
     "$UNIVERSAL_PYTHON" -m venv "$MENUBAR_BUILD_DIR/venv"
+elif command -v uv >/dev/null 2>&1; then
+    echo "Using uv-managed Python 3.14 (single-arch — local dev build)"
+    UV_PYTHON=$(uv python find 3.14 2>/dev/null || true)
+    if [ -z "$UV_PYTHON" ]; then
+        echo "Installing Python 3.14 via uv..."
+        uv python install 3.14
+        UV_PYTHON=$(uv python find 3.14)
+    fi
+    "$UV_PYTHON" -m venv "$MENUBAR_BUILD_DIR/venv"
 else
-    echo "WARNING: universal2 Python not found, using system python3 (app may be arm64-only)"
-    python3 -m venv "$MENUBAR_BUILD_DIR/venv"
+    echo "ERROR: no Python 3.14 found." >&2
+    echo "  For release builds, install python.org universal2 Python 3.14:" >&2
+    echo "    https://www.python.org/downloads/" >&2
+    echo "  For local dev builds, install uv:" >&2
+    echo "    curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    echo "" >&2
+    echo "  Refusing to fall back to /usr/bin/python3 (3.9) — the shipped .app" >&2
+    echo "  would crash on launch with a py2app 'Launch error' dialog because" >&2
+    echo "  src/onionpress/ uses PEP 604 \`X | None\` syntax." >&2
+    exit 1
 fi
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install --upgrade pip
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app
