@@ -1,0 +1,12 @@
+[project]
+# This file exists so `uv run` can pin Python 3.14 for the test suite —
+# the shipped macOS .app bundles its own 3.14 interpreter, and some
+# modules in src/onionpress/ use PEP 604 `X | None` syntax that fails
+# to import on stock /usr/bin/python3 (3.9) on macOS. `uv` downloads an
+# isolated Python under ~/.local/share/uv/ without touching the system.
+#
+# This is NOT the distribution metadata for the app — the macOS build is
+# driven by setup.py (py2app) and the Linux install by linux/install.sh.
+name = "onionpress-dev"
+version = "0"
+requires-python = ">=3.10"

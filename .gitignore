@@ -15,8 +15,10 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 ENV/
 env/
+uv.lock
 
 # User data
 .onionpress/
