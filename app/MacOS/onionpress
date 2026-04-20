@@ -1342,6 +1342,20 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy status-hint mu-plugin — redirects port-80 /status/<addr>
+    # requests to the canonical OnionHeaven hub on port 8083.
+    if [ -f "$plugins_dir/onionpress-status-hint.php" ]; then
+        if docker cp "$plugins_dir/onionpress-status-hint.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-status-hint.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-status-hint.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-status-hint.php"
+            log "✓ onionpress-status-hint.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-status-hint.php"
+        fi
+    fi
+
     return 0
 }
 

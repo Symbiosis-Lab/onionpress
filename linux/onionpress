@@ -693,6 +693,7 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         "onionpress-user-path.php"
         "onionpress-avatar.php"
         "onionpress-blogroll.php"
+        "onionpress-status-hint.php"
     )
 
     docker exec onionpress-wordpress mkdir -p \
