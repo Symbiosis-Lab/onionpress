@@ -17,6 +17,8 @@ if (!defined('ABSPATH')) {
 class OnionPress_Creations {
 
     const CREATIONS_DIR = '/var/www/html/wp-content/creations';
+    const FILES_CACHE_KEY = 'op_creations_files';
+    const FILES_CACHE_TTL = 60;  // seconds
 
     private static $instance = null;
 
@@ -97,6 +99,8 @@ class OnionPress_Creations {
             }
             move_uploaded_file($files['tmp_name'][$i], $dest);
         }
+
+        delete_transient(self::FILES_CACHE_KEY);
 
         // Redirect back to avoid form resubmission
         wp_redirect(wp_get_referer() ? wp_get_referer() : home_url('/'));
@@ -361,8 +365,20 @@ class OnionPress_Creations {
 
     /**
      * Get all files in the creations directory, recursively scanning subdirectories.
+     *
+     * Results are cached in a transient for FILES_CACHE_TTL seconds. The
+     * creations dir is a FUSE/SSHFS mount into the host's Documents folder
+     * — recursive stat()s across that boundary on every homepage render
+     * piled apache workers on fuse_lock_inode and took onionpress.org
+     * down for 34h on 2026-04-19. handle_upload() busts the transient so
+     * freshly uploaded files show up within one page load, not a minute.
      */
     public static function get_files() {
+        $cached = get_transient(self::FILES_CACHE_KEY);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
         $creations_dir = self::CREATIONS_DIR;
         $files = array();
 
@@ -412,6 +428,7 @@ class OnionPress_Creations {
             return $b['time'] - $a['time'];
         });
 
+        set_transient(self::FILES_CACHE_KEY, $files, self::FILES_CACHE_TTL);
         return $files;
     }
 }
