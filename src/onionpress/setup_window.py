@@ -107,7 +107,7 @@ def _logo_path():
 
 STEPS = [
     "Checking system requirements",
-    "Starting container runtime",
+    "Preparing your site",
     "Downloading container images",
     "Generating .onion address",
     "Starting WordPress + Tor",

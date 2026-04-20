@@ -975,10 +975,7 @@ class OnionPressApp(rumps.App):
 
         # Wait for Colima to be ready (important for first-time setup)
         self.log("Waiting for container runtime to be ready...")
-        if self._is_first_run:
-            msg = "Starting containers (est. 3 min)..."
-        else:
-            msg = "Waiting for container runtime..."
+        msg = "Preparing your site..."
         self.update_splash_status(msg)
         if self._is_first_run and setup_window and setup_window._setup_window:
             setup_window._setup_window.set_status(msg)
@@ -1001,7 +998,11 @@ class OnionPressApp(rumps.App):
                     )
                     if result.returncode == 0:
                         self.log("Container runtime is ready")
-                        self.update_splash_status("Container runtime ready")
+                        # Don't show a "ready" state here — we're mid-flight
+                        # and there are many more steps. Leaving the status
+                        # alone keeps the last active message ("Preparing
+                        # your site...") so the user doesn't think setup
+                        # is done and hit Dismiss.
                         break
                 except Exception:
                     pass
@@ -2654,11 +2655,11 @@ class OnionPressApp(rumps.App):
                 return
 
             # Start the service normally
-            self.update_splash_status("Starting containers...")
+            self.update_splash_status("Starting your site...")
             subprocess.run([self.launcher_script, "start"])
 
             # Poll until WordPress is responding (replaces fixed sleep)
-            self.update_splash_status("Waiting for WordPress...")
+            self.update_splash_status("Starting your site...")
             max_wait = 60
             waited = 0
             while waited < max_wait:
@@ -3147,7 +3148,7 @@ class OnionPressApp(rumps.App):
 
         # Launch the launcher script in the background — it does steps 1-4
         if sw:
-            sw.set_status("Starting container runtime...")
+            sw.set_status("Preparing your site...")
             sw.add_log("Starting Colima VM...")
         self.log("Starting Colima VM and containers...")
 
@@ -3215,8 +3216,13 @@ class OnionPressApp(rumps.App):
                             if sw:
                                 sw.set_progress(2 / 8)
                                 sw.complete_step(1)
-                                sw.add_log("Container runtime ready")
-                                sw.set_status("Downloading container images...")
+                                # No "ready" log line — the step row in
+                                # the checklist already got its ✓ via
+                                # complete_step(1), which is the right
+                                # way to signal "this step is done, next
+                                # step in progress." Don't add a
+                                # confusing "ready"-sounding status line.
+                                sw.set_status("Downloading components...")
                     except Exception:
                         pass
 
@@ -3893,14 +3899,17 @@ class OnionPressApp(rumps.App):
         """Download DMG, replace app bundle, prompt restart."""
         install_path = os.path.dirname(self.contents_dir)
 
-        def _notify(title, subtitle, message):
-            rumps.notification(title=title, subtitle=subtitle,
-                              message=message, sound=False)
-
+        # No notification toasts — the download-progress splash and the
+        # "Update Installed — Restart Now?" modal below already tell the
+        # user what's happening. Using rumps.notification() would import
+        # Foundation's NSUserNotificationCenter, which on newer macOS can
+        # trigger an unsolicited "Would you like to allow notifications?"
+        # prompt the very first time the app launches — confusing during
+        # setup.
         try:
             updater.download_and_install(
                 release_data, latest_version, install_path,
-                log=self.log, notify=_notify,
+                log=self.log, notify=None,
             )
 
             # Prompt user to restart

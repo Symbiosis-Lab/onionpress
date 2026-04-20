@@ -512,37 +512,69 @@ generate_vanity_address() {
 
     log "Generating custom onion address with prefix '$prefix'..." >&2
 
-    # Create output directory
-    mkdir -p "$output_dir"
+    # Create output directory, abort loudly if we can't
+    if ! mkdir -p "$output_dir" 2>>"$LOG_FILE"; then
+        log "ERROR: Cannot create $output_dir (permissions?). Not falling back to random." >&2
+        return 1
+    fi
 
     # Check if mkp224o is available
     if [ ! -f "$BIN_DIR/mkp224o" ]; then
-        log "WARNING: mkp224o not found, using random address" >&2
+        log "ERROR: mkp224o not found at $BIN_DIR/mkp224o. Not falling back to random." >&2
         return 1
     fi
+    if [ ! -x "$BIN_DIR/mkp224o" ]; then
+        log "ERROR: $BIN_DIR/mkp224o exists but is not executable. Not falling back to random." >&2
+        return 1
+    fi
+    # Quarantine attribute on a nested helper binary (common when the DMG
+    # is downloaded from onionpress.org and Gatekeeper only approved the
+    # main app) makes mkp224o silently killed on first exec. Strip it
+    # defensively — harmless if the attr isn't there.
+    xattr -d com.apple.quarantine "$BIN_DIR/mkp224o" 2>/dev/null || true
 
-    # Generate address with prefix (single threaded for consistency)
-    cd "$output_dir"
+    # Clean stale output dirs from a prior crashed run so `find` below
+    # can't pick up a partial.
+    find "$output_dir" -maxdepth 1 -type d -name "*.onion" -empty -delete 2>/dev/null || true
+
+    # Generate address with prefix (single threaded for consistency).
+    # Capture exit status so we can complain loudly if mkp224o crashes.
+    if ! cd "$output_dir"; then
+        log "ERROR: Cannot cd to $output_dir" >&2
+        return 1
+    fi
     "$BIN_DIR/mkp224o" -d . -n 1 -t 4 "$prefix" >> "$LOG_FILE" 2>&1
-
-    # Find generated directory
-    VANITY_DIR=$(find "$output_dir" -type d -name "${prefix}*" | head -1)
-
-    if [ -z "$VANITY_DIR" ]; then
-        log "ERROR: Failed to generate custom address" >&2
+    local mkp_rc=$?
+    if [ $mkp_rc -ne 0 ]; then
+        log "ERROR: mkp224o exited with status $mkp_rc (prefix='$prefix'). "\
+"This is usually one of: quarantined nested binary (codesign/notarize issue), "\
+"disk full, or platform mismatch. Not falling back to random." >&2
         return 1
     fi
+
+    # Find generated directory — must contain the actual key files, not
+    # just an empty stub from a prior crash.
+    local candidate
+    candidate=$(find "$output_dir" -maxdepth 1 -type d -name "${prefix}*" 2>/dev/null | head -1)
+    if [ -z "$candidate" ]; then
+        log "ERROR: mkp224o exited 0 but no ${prefix}*.onion directory was produced" >&2
+        return 1
+    fi
+    if [ ! -f "$candidate/hs_ed25519_secret_key" ] || [ ! -f "$candidate/hostname" ]; then
+        log "ERROR: $candidate exists but is missing hs_ed25519_secret_key or hostname" >&2
+        return 1
+    fi
+    VANITY_DIR="$candidate"
 
     VANITY_ADDRESS=$(basename "$VANITY_DIR")
     log "Generated custom address: $VANITY_ADDRESS" >&2
 
     # Ensure both key formats exist (mkp224o generates C Tor format, derive Arti PEM)
-    if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ] && [ -f "$VANITY_DIR/hs_ed25519_public_key" ]; then
-        if ! ensure_key_formats "$VANITY_DIR"; then
-            return 1
-        fi
-        log "Ensured both key formats for vanity key" >&2
+    if ! ensure_key_formats "$VANITY_DIR"; then
+        log "ERROR: ensure_key_formats failed for $VANITY_DIR" >&2
+        return 1
     fi
+    log "Ensured both key formats for vanity key" >&2
 
     # Return the directory path (only thing on stdout)
     echo "$VANITY_DIR"
@@ -1518,7 +1550,13 @@ start_containers() {
             log "Address key installed to arti-state volume"
             log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
         else
-            log "Using random onion address"
+            # Vanity generation failed. Continue with a random address so
+            # the user gets a working install, but leave detailed
+            # diagnostic lines in the log (written by generate_vanity_address)
+            # so we can find out after the fact why the op2… generation
+            # didn't work. Common cause: quarantined nested mkp224o helper
+            # on a fresh Apple Silicon install from onionpress.org.
+            log "WARNING: vanity generation failed — continuing with random onion address (see ERROR lines above)"
         fi
     else
         # Not first run — check for prefix mismatch
