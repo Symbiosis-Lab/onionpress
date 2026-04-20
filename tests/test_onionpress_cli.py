@@ -69,14 +69,16 @@ class TestCLIArgParsing(unittest.TestCase):
         instance.cmd_backup.return_value = 0
         result = main(["backup", "mypass"])
         self.assertEqual(result, 0)
-        instance.cmd_backup.assert_called_once_with("mypass", None)
+        # cli.py dispatches backup as cmd_backup(password, output, user) —
+        # output and --user both default to None when omitted.
+        instance.cmd_backup.assert_called_once_with("mypass", None, None)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_backup_with_output(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_backup.return_value = 0
         result = main(["backup", "mypass", "/tmp/backup.zip"])
-        instance.cmd_backup.assert_called_once_with("mypass", "/tmp/backup.zip")
+        instance.cmd_backup.assert_called_once_with("mypass", "/tmp/backup.zip", None)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_restore_command(self, MockCLI):

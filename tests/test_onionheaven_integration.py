@@ -84,8 +84,7 @@ def _make_arti_pem(expanded_key, public_key):
 # Server process management
 # ---------------------------------------------------------------------------
 
-SERVER_DIR = os.path.join(PROJECT_DIR, "OnionPress.app", "Contents",
-                          "Resources", "docker", "tor")
+SERVER_DIR = os.path.join(PROJECT_DIR, "app", "Resources", "docker", "tor")
 SERVER_SCRIPT = os.path.join(SERVER_DIR, "web-server.py")
 
 
@@ -259,7 +258,7 @@ class TestRegister(unittest.TestCase):
         pem = _make_arti_pem(expanded, pub)
 
         ts = onion_auth.make_timestamp()
-        sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
+        sig = onion_auth.sign_payload(expanded, pub, "online", addr, hc_addr, ts)
 
         code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
@@ -299,7 +298,7 @@ class TestRegister(unittest.TestCase):
 
         ts = onion_auth.make_timestamp()
         # Sign with key2 but claim to be addr1
-        sig = onion_auth.sign_payload(expanded2, pub2, "register", addr1, addr2, ts)
+        sig = onion_auth.sign_payload(expanded2, pub2, "online", addr1, addr2, ts)
 
         code, data = _post(f"{server.base_url}/online", {
             "content_address": addr1,
@@ -315,7 +314,7 @@ class TestRegister(unittest.TestCase):
         hc_addr = _make_test_keypair()[2]
 
         ts = onion_auth.make_timestamp()
-        sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
+        sig = onion_auth.sign_payload(expanded, pub, "online", addr, hc_addr, ts)
 
         code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
@@ -331,7 +330,7 @@ class TestRegister(unittest.TestCase):
         pem = _make_arti_pem(expanded, pub)
 
         ts = "2020-01-01T00:00:00Z"
-        sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
+        sig = onion_auth.sign_payload(expanded, pub, "online", addr, hc_addr, ts)
 
         code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
@@ -353,7 +352,7 @@ class TestFullLifecycle(unittest.TestCase):
 
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(
-            self.expanded, self.pub, "register",
+            self.expanded, self.pub, "online",
             self.addr, self.hc_addr, ts
         )
         code, data = _post(f"{server.base_url}/online", {
@@ -393,8 +392,14 @@ class TestFullLifecycle(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(data["entries"][0]["status"], "taken-over")
 
-        # Come back online
-        code, data = self._signed_post("online")
+        # Come back online. /online now requires arti_key_pem on every call
+        # (the server uses it to prove ownership of the key and to enable
+        # takeover when the site goes offline), so include it even on a
+        # re-online of an existing registration.
+        pem = _make_arti_pem(self.expanded, self.pub)
+        code, data = self._signed_post("online", extra={
+            "arti_key_pem": base64.b64encode(pem).decode('ascii'),
+        })
         self.assertEqual(code, 200, f"online failed: {data}")
         self.assertTrue(data.get("online"))
 
@@ -413,7 +418,7 @@ class TestFullLifecycle(unittest.TestCase):
         pem = _make_arti_pem(self.expanded, self.pub)
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(
-            self.expanded, self.pub, "register",
+            self.expanded, self.pub, "online",
             self.addr, self.hc_addr, ts
         )
         code, data = _post(f"{server.base_url}/online", {
@@ -425,7 +430,11 @@ class TestFullLifecycle(unittest.TestCase):
             "signature": sig,
         })
         self.assertEqual(code, 200)
-        self.assertEqual(data.get("message"), "Registration updated")
+        # The response no longer carries a "message" field; `created=False`
+        # on a 200 is how the server signals "row existed, got updated".
+        self.assertFalse(data.get("created"),
+                         f"expected existing row update, got {data}")
+        self.assertTrue(data.get("online"))
 
     def test_wrong_key_cannot_unregister(self):
         """A different key cannot unregister someone else's address."""
@@ -469,7 +478,7 @@ class TestStatusLookup(unittest.TestCase):
         pem = _make_arti_pem(expanded, pub)
 
         ts = onion_auth.make_timestamp()
-        sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
+        sig = onion_auth.sign_payload(expanded, pub, "online", addr, hc_addr, ts)
         _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
@@ -490,7 +499,7 @@ class TestStatusLookup(unittest.TestCase):
         pem = _make_arti_pem(expanded, pub)
 
         ts = onion_auth.make_timestamp()
-        sig = onion_auth.sign_payload(expanded, pub, "register", addr, hc_addr, ts)
+        sig = onion_auth.sign_payload(expanded, pub, "online", addr, hc_addr, ts)
         _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,

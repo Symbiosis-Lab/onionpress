@@ -32,6 +32,7 @@ def _make_paths(tmpdir):
         colima_home=os.path.join(data_dir, "colima"),
         docker_socket=os.path.join(data_dir, "colima", "default", "docker.sock"),
         app_bundle="",
+        documents_dir=os.path.join(tmpdir, "documents"),
     )
 
 

@@ -57,14 +57,23 @@ class TestRotatingLogCompression(unittest.TestCase):
             contents = gf.read()
         self.assertIn("line 00", contents)
 
-        # The uncompressed original should have been removed.
+        # The uncompressed originals should have been removed. 50 writes
+        # at max_size=200 triggers several rotations; gzip runs on a
+        # background thread, so settle-wait rather than sample once.
+        def uncompressed_count():
+            return sum(
+                1 for f in os.listdir(self.tmpdir)
+                if f.endswith(".log") and not f.endswith(".log.gz")
+            )
+        self.assertTrue(
+            self._wait_for(lambda: uncompressed_count() == 1),
+            f"expected 1 active .log, got "
+            f"{[f for f in os.listdir(self.tmpdir) if f.endswith('.log')]}",
+        )
         uncompressed = [
             f for f in os.listdir(self.tmpdir)
             if f.endswith(".log") and not f.endswith(".log.gz")
         ]
-        # Exactly one should remain: the currently-active file.
-        self.assertEqual(len(uncompressed), 1,
-            f"expected 1 active .log, got {uncompressed}")
         self.assertEqual(
             uncompressed[0], os.path.basename(log.current_path())
         )

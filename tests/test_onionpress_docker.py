@@ -118,11 +118,33 @@ class TestDockerRun(FakeDockerTestCase):
         self.assertFalse(result.ok)
 
     def test_logging(self):
+        # Docker.run only logs on failure now (unless quiet=True), to keep
+        # happy-path container operations from spamming launcher.log. The
+        # test verifies log_func is wired through by triggering a failure.
+        self._write_fake_docker('#!/bin/bash\nexit 3\n')
         logs = []
         d = Docker(self.paths, log_func=logs.append)
         d.run(["ps", "-a"])
         self.assertEqual(len(logs), 1)
         self.assertIn("ps -a", logs[0])
+        self.assertIn("FAILED", logs[0])
+
+    def test_logging_quiet_suppresses_failure_log(self):
+        self._write_fake_docker('#!/bin/bash\nexit 3\n')
+        logs = []
+        d = Docker(self.paths, log_func=logs.append)
+        d.run(["ps", "-a"], quiet=True)
+        self.assertEqual(logs, [],
+                         "quiet=True must suppress the failure log")
+
+    def test_logging_success_is_silent(self):
+        self._write_fake_docker('#!/bin/bash\nexit 0\n')
+        logs = []
+        d = Docker(self.paths, log_func=logs.append)
+        d.run(["ps", "-a"])
+        self.assertEqual(logs, [],
+                         "successful docker runs must not log (would "
+                         "flood launcher.log during normal operation)")
 
 
 class TestDockerExec(FakeDockerTestCase):
@@ -247,6 +269,7 @@ class TestDockerBinaryNotFound(unittest.TestCase):
             colima_home="/nonexistent/colima",
             docker_socket="/nonexistent/colima/default/docker.sock",
             app_bundle="",
+            documents_dir="/nonexistent/documents",
         )
         d = Docker(paths)
         # Should not crash, just return error result
