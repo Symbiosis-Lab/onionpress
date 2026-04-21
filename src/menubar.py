@@ -385,6 +385,7 @@ class OnionPressApp(rumps.App):
         self._onionheaven_checked = False       # Whether onionheaven mode has been checked
         self._onionheaven_registration_succeeded = False  # Whether registration succeeded
         self._onionheaven_heartbeat_succeeded = False     # Suppresses repeat heartbeat logs
+        self._pending_manual_upload = False                # Deferred Share Now click — fires when is_ready
         self._onionheaven_registration_in_flight = False  # Whether registration thread is running
         self._onionname_retry_in_flight = False            # Onionname registration retry thread running
         self._onionname_retry_giveup = False               # Stop retrying (post-collision, etc.)
@@ -1243,7 +1244,16 @@ class OnionPressApp(rumps.App):
 
         Runs regardless of SHARE_ANALYTICS_WITH_ONIONHOME — pressing the
         button is explicit consent for this one upload.
+
+        If we're not yet online/ready when triggered (e.g. user clicks
+        Share Now right after wake-up before Tor is back), set a pending
+        flag and fire the upload when readiness is reached. The Share
+        Now REST endpoint reports this back to the UI.
         """
+        if not self.check_internet_connectivity() or not self.is_ready:
+            self._pending_manual_upload = True
+            self.log("Analytics upload queued — will run when online")
+            return
         try:
             result = analytics_sharing._do_upload_cycle(self, include_active=True) or {}
             status = result.get("status", "unknown")
@@ -1648,6 +1658,14 @@ class OnionPressApp(rumps.App):
                 self.poll_wayback_queue()
                 if self.is_ready:
                     self.drain_wayback_queue()
+
+                # Fire a deferred Share Now click once we're online.
+                if self.is_ready and self._pending_manual_upload:
+                    self._pending_manual_upload = False
+                    self.log("Analytics upload: running queued Share Now request")
+                    threading.Thread(
+                        target=self._manual_analytics_upload, daemon=True
+                    ).start()
 
                 # Write status, poll for config updates & action requests from WordPress settings page
                 self.write_status_to_volume()

@@ -158,9 +158,17 @@ add_action( 'rest_api_init', function () {
         'methods'             => 'POST',
         'permission_callback' => function () { return current_user_can( 'manage_options' ); },
         'callback'            => function () {
+            // Touch the trigger file the menubar watches. The menubar's
+            // handler itself decides whether to run the upload now (if
+            // online + ready) or queue it for when the service comes
+            // back online. Either outcome is reported to the user with
+            // the same "queued" wording because we can't cheaply know
+            // the menubar's state from here without more plumbing.
             $trigger = '/var/lib/onionpress/.upload-analytics';
             if ( touch( $trigger ) ) {
-                return new WP_REST_Response( array( 'message' => 'Upload triggered. Check logs for result.' ), 200 );
+                return new WP_REST_Response( array(
+                    'message' => 'Upload queued — will run as soon as the service is online.',
+                ), 200 );
             }
             return new WP_REST_Response( array( 'message' => 'Failed to create trigger file.' ), 500 );
         },

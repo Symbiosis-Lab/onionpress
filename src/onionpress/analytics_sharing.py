@@ -111,6 +111,23 @@ def _sharing_loop(app):
         if enabled != "yes":
             continue
 
+        # Precondition gates: don't attempt when we obviously can't —
+        # no internet, or our own service isn't ready. Neither is a
+        # "failure" worth burning a retry slot, they're just "come back
+        # later." Wait briefly and re-check at the top of the loop.
+        try:
+            online = app.check_internet_connectivity()
+        except Exception:
+            online = True  # conservative: let the upload try
+        if not online:
+            app.log("Analytics sharing: no internet, will retry")
+            _upload_now.wait(60)
+            continue
+        if not getattr(app, "is_ready", False):
+            app.log("Analytics sharing: service not ready, will retry")
+            _upload_now.wait(60)
+            continue
+
         try:
             # Include today's active logs too — otherwise a day-1 install
             # ships only launcher.log (the only file globbed unconditionally)
