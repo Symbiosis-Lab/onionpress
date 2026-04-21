@@ -1245,8 +1245,27 @@ class OnionPressApp(rumps.App):
         button is explicit consent for this one upload.
         """
         try:
-            analytics_sharing._do_upload_cycle(self, include_active=True)
-            self.log("Analytics upload complete")
+            result = analytics_sharing._do_upload_cycle(self, include_active=True) or {}
+            status = result.get("status", "unknown")
+            if status == "ok":
+                w, u = result.get("wanted", 0), result.get("uploaded", 0)
+                if u == w:
+                    self.log(f"Analytics upload complete: {u}/{w} file(s)")
+                else:
+                    self.log(f"Analytics upload partial: {u}/{w} file(s)")
+            elif status == "manifest_failed":
+                self.log("Analytics upload failed: could not reach OnionHome "
+                         "(Tor circuit not ready or hub unreachable)")
+            elif status == "none_wanted":
+                self.log("Analytics upload: OnionHome already has everything")
+            elif status == "no_files":
+                self.log("Analytics upload: no logs to share yet")
+            elif status == "sign_error":
+                self.log("Analytics upload failed: manifest signing error")
+            elif status == "no_onion":
+                self.log("Analytics upload failed: onion address not yet available")
+            else:
+                self.log(f"Analytics upload finished (status={status})")
         except Exception as e:
             self.log(f"Analytics upload error: {e}")
 

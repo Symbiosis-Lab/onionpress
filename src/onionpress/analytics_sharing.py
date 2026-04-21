@@ -50,20 +50,48 @@ def _sharing_loop(app):
 
     upload_hour = _pick_upload_hour(app)
     last_upload_date = None
+    # Transient-failure retry state. Reset when the date changes so a
+    # 24-hour outage doesn't permanently poison the retry counter.
+    failed_attempts_today = 0
+    failed_attempts_date = None
+    MAX_RETRIES_PER_DAY = 5
+    # Progressive backoff between failed retries (seconds): 60s, 3m,
+    # 10m, 30m. With MAX_RETRIES_PER_DAY=5 (initial + 4 retries) and
+    # the 60s initial-wake buffer, total elapsed before giving up is
+    # ~45 min, which covers "Tor bootstrap is slow this morning"
+    # without hammering OnionHome when it's genuinely down.
+    RETRY_DELAYS = (60, 180, 600, 1800)
 
     while True:
         now = datetime.now(timezone.utc)
         today = now.strftime("%Y-%m-%d")
+
+        # Reset retry counter on date rollover.
+        if failed_attempts_date != today:
+            failed_attempts_today = 0
+            failed_attempts_date = today
 
         if last_upload_date == today:
             # Already uploaded today — sleep until tomorrow's window
             target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
             target += timedelta(days=1)
             _upload_now.wait((target - now).total_seconds())
+        elif failed_attempts_today >= MAX_RETRIES_PER_DAY:
+            # Exhausted today's retry budget — sleep until tomorrow.
+            target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
+            target += timedelta(days=1)
+            _upload_now.wait((target - now).total_seconds())
         elif now.hour >= upload_hour:
-            # Missed or hit our window today — wait 60 seconds so the
-            # instance isn't busy right after startup
-            _upload_now.wait(60)
+            # Hit/missed the window; retry with progressive backoff so
+            # a transient Tor hiccup right after startup doesn't lose
+            # the day's upload but we also don't hammer OnionHome.
+            if failed_attempts_today == 0:
+                # First attempt this window — short buffer after wake.
+                _upload_now.wait(60)
+            else:
+                delay = RETRY_DELAYS[min(failed_attempts_today - 1,
+                                         len(RETRY_DELAYS) - 1)]
+                _upload_now.wait(delay)
         else:
             # Haven't hit our window yet today — sleep until it
             target = now.replace(hour=upload_hour, minute=0, second=0, microsecond=0)
@@ -88,8 +116,20 @@ def _sharing_loop(app):
             # ships only launcher.log (the only file globbed unconditionally)
             # because no other log has rolled yet. OnionHome re-requests when
             # the offered size grows, so subsequent days supersede cleanly.
-            _do_upload_cycle(app, include_active=True)
-            last_upload_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            result = _do_upload_cycle(app, include_active=True) or {}
+            status = result.get("status", "unknown")
+            if status == "manifest_failed":
+                # Likely transient: Tor circuit not ready yet, or OnionHome
+                # briefly unreachable. Don't burn the day — bump the retry
+                # counter and let the outer loop wait per RETRY_DELAYS.
+                # Give up only after MAX_RETRIES_PER_DAY attempts.
+                failed_attempts_today += 1
+                app.log(
+                    f"Analytics sharing: manifest failed "
+                    f"(retry {failed_attempts_today}/{MAX_RETRIES_PER_DAY})"
+                )
+            else:
+                last_upload_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         except Exception as e:
             app.log(f"Analytics sharing error: {e}")
 
@@ -111,6 +151,11 @@ def _do_upload_cycle(app, include_active=False):
     When *include_active* is True (manual upload), current/active log files
     are included alongside completed ones.  OnionHome re-requests a file if
     the offered size is larger than what it already has.
+
+    Returns a dict with "status" (one of: "no_files", "no_onion",
+    "sign_error", "manifest_failed", "none_wanted", "ok") plus "wanted"
+    and "uploaded" counts when "ok". Callers decide how to surface the
+    outcome — this function only logs per-file events, not the verdict.
     """
     # Collect completed files from all rotating logs
     all_files = []
@@ -175,17 +220,17 @@ def _do_upload_cycle(app, include_active=False):
             pass
 
     if not all_files:
-        return
+        return {"status": "no_files"}
 
     all_files.sort(key=lambda f: f["name"], reverse=True)  # newest first by date in name
 
     if not all_files:
-        return
+        return {"status": "no_files"}
 
     content_addr = getattr(app, "onion_address", None)
     hc_addr = getattr(app, "healthcheck_address", None)
     if not content_addr or not hc_addr:
-        return
+        return {"status": "no_onion"}
 
     # Read OnionHome address from config
     onionhome_addr = app.read_config_value(
@@ -193,7 +238,7 @@ def _do_upload_cycle(app, include_active=False):
         "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
     )
     if not onionhome_addr:
-        return
+        return {"status": "no_onion"}
 
     # Sign the manifest
     try:
@@ -208,7 +253,7 @@ def _do_upload_cycle(app, include_active=False):
         )
     except Exception as e:
         app.log(f"Analytics sharing: sign error: {e}")
-        return
+        return {"status": "sign_error"}
 
     manifest = {
         "content_address": content_addr,
@@ -230,14 +275,15 @@ def _do_upload_cycle(app, include_active=False):
     # Step 1: POST manifest
     wanted = _post_json(app, f"{base_url}/logs/manifest", manifest)
     if wanted is None:
-        return
+        return {"status": "manifest_failed"}
     wanted_names = wanted.get("wanted", [])
     if not wanted_names:
-        return
+        return {"status": "none_wanted"}
 
     app.log(f"Analytics sharing: OnionHome wants {len(wanted_names)} file(s)")
 
     # Step 2: Upload each wanted file
+    uploaded_count = 0
     from onionpress import onion_auth as _oa
 
     for name in wanted_names:
@@ -273,6 +319,9 @@ def _do_upload_cycle(app, include_active=False):
             resp = _post_json(app, f"{base_url}/logs/upload", upload_payload)
         if resp and resp.get("stored"):
             app.log(f"Analytics sharing: uploaded {name}")
+            uploaded_count += 1
+
+    return {"status": "ok", "wanted": len(wanted_names), "uploaded": uploaded_count}
 
 
 def _post_json(app, url, payload_dict):
