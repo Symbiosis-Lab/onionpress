@@ -74,7 +74,7 @@ TEMP_BIN_DIR=$(mktemp -d)
 COLIMA_VERSION="v0.8.1"
 LIMA_VERSION="2.0.3"
 DOCKER_VERSION="27.5.1"
-DOCKER_COMPOSE_VERSION="v2.32.4"
+DOCKER_COMPOSE_VERSION="v2.40.2"  # >=2.40.2 closes CVE-2025-62725 (HIGH)
 MKP224O_VERSION="v1.7.0"
 
 # GitHub anonymously throttles release-asset downloads to ~30 KB/s, which
