@@ -18,7 +18,7 @@ import time
 # Valid log file name pattern
 _LOG_NAME_RE = re.compile(
     r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|clearnet|launcher)-"
-    r"\d{4}-\d{2}-\d{2}-\d{3}\.log$|^launcher\.log$"
+    r"\d{4}-\d{2}-\d{2}-\d{3}\.log(\.gz)?$|^launcher\.log$"
 )
 
 
