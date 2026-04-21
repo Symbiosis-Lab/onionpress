@@ -2406,6 +2406,27 @@ main() {
             ;;
 
         restart)
+            # Adaptive restart: if Docker is reachable, just bounce the
+            # containers (fast, ~30s). If it isn't, the Lima VM is most
+            # likely in the wedged "Running but SSH refused" state that
+            # occasionally happens after long uptime / sleep — force-
+            # stop and restart the VM first, then proceed. This turns
+            # the menubar "Restart" item into a reliable recovery for
+            # the wedge we've seen 5× in 30 days on a single machine.
+            if ! docker info >/dev/null 2>&1; then
+                log "restart: Docker daemon not reachable — restarting Lima VM first"
+                export COLIMA_HOME LIMA_HOME
+                "$BIN_DIR/limactl" stop -f colima >> "$LOG_FILE" 2>&1 || true
+                # Wait briefly for hostagent processes to fully die
+                # before starting again — lima can trip over itself
+                # otherwise.
+                sleep 3
+                if ! "$BIN_DIR/limactl" start colima >> "$LOG_FILE" 2>&1; then
+                    log "restart: limactl start failed — giving up, user may need to reboot"
+                    exit 1
+                fi
+                log "restart: Lima VM restarted, resuming normal restart"
+            fi
             setup_db_passwords
             stop_containers
             start_containers
