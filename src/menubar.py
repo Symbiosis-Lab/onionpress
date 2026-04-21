@@ -468,8 +468,17 @@ class OnionPressApp(rumps.App):
         # Start status checker
         self.start_status_checker()
 
-        # Start Creations thumbnail generator
-        self.start_thumbnail_generator()
+        # Thumbnail generator is NOT started here. Its 60-second poll
+        # loop stats ~/Documents/OnionPress/Creations/My Creations,
+        # which triggers macOS TCC's "Documents access" prompt at every
+        # launch of a newly-signed binary — and earns that prompt zero
+        # context, since the user hasn't asked for anything Creations-
+        # related yet. The launcher (app/MacOS/onionpress) takes the
+        # same lazy approach for the shell side. Call
+        # :meth:`start_thumbnail_generator` lazily from any flow that
+        # has just legitimately created the Documents subtree (e.g.
+        # ``backup()``'s ``os.makedirs(backups_dir)``); the generator
+        # itself is idempotent, so repeated triggers are safe.
 
         # Auto-start on launch
         threading.Thread(target=self.auto_start, daemon=True).start()
@@ -2351,7 +2360,16 @@ class OnionPressApp(rumps.App):
         thread.start()
 
     def start_thumbnail_generator(self):
-        """Background thread to generate thumbnails for Creations files using qlmanage."""
+        """Background thread to generate thumbnails for Creations files using qlmanage.
+
+        Idempotent: callers may invoke this from any flow that has
+        just touched ``~/Documents/OnionPress/``; the thread is only
+        spawned once per process. See :meth:`__init__` for why this
+        isn't started eagerly at launch.
+        """
+        if getattr(self, "_thumbnail_generator_started", False):
+            return
+        self._thumbnail_generator_started = True
         creations_dir = os.path.expanduser("~/Documents/OnionPress/Creations/My Creations")
         thumbs_dir = os.path.join(creations_dir, ".thumbs")
 
@@ -3830,6 +3848,11 @@ class OnionPressApp(rumps.App):
             backup_manager.backup_filename(self.onion_address, username))
         backups_dir = os.path.expanduser("~/Documents/OnionPress/backups")
         os.makedirs(backups_dir, exist_ok=True)
+        # The backup flow has now earned macOS TCC's Documents grant
+        # (or been denied — either way the prompt has been resolved).
+        # Start the thumbnail generator now so Creations thumbnails
+        # get populated without adding a second TCC prompt later.
+        self.start_thumbnail_generator()
         panel.setDirectoryURL_(
             AppKit.NSURL.fileURLWithPath_(backups_dir))
         panel.setAllowedContentTypes_([
