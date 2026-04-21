@@ -65,14 +65,10 @@ define( 'OP_WB_OPT_FEED', 'op_wayback_feed_state' );
 // ─────────────────────────── logging + helpers ──────────────────────
 
 function onionpress_wayback_log( $msg ) {
-    $line = '[OnionPress Wayback] ' . $msg;
-    error_log( $line );
-    $ts = gmdate( 'Y-m-d H:i:s' );
-    @file_put_contents(
-        '/var/lib/onionpress/wayback.log',
-        '[' . $ts . '] ' . $msg . "\n",
-        FILE_APPEND | LOCK_EX
-    );
+    // Apache error log → container stderr → container-wordpress-*.log on
+    // the host (rotated, gzipped, shipped via analytics). No need for a
+    // separate file on disk, which would grow unbounded.
+    error_log( '[OnionPress Wayback] ' . $msg );
 }
 
 function onionpress_version() {

@@ -12,7 +12,7 @@ import time
 import json
 import plistlib
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 import AppKit
 import signal
 import socket
@@ -54,6 +54,7 @@ from onionpress.ui_helpers import (
 from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog
 from onionpress import analytics_sharing
+from onionpress import redact
 from onionpress.power import CaffeineManager
 
 
@@ -154,18 +155,37 @@ class OnionPressApp(rumps.App):
         self.colima_home = os.path.join(self.app_support, "colima")
         self.info_plist = os.path.join(self.contents_dir, "Info.plist")
         logs_dir = os.path.join(self.app_support, "logs")
-        self._onionpress_log = RotatingLog(logs_dir, "onionpress")
-        self._wp_access_log = RotatingLog(logs_dir, "wordpress-access")
-        self._wp_visitors_log = RotatingLog(logs_dir, "wordpress-visitors")
-        self._tor_log = RotatingLog(logs_dir, "container-tor")
-        self._onionheaven_log = RotatingLog(logs_dir, "container-onionheaven")
+        # Visitor-facing logs get IP pseudonymization on rotation;
+        # internal/outbound logs keep real addresses because those IPs
+        # are destinations, not humans, and scrubbing them destroys
+        # debugging value with no privacy benefit. All logs get URL
+        # query-param and credential-header scrubbing regardless.
+        _IP_SCRUB_TYPES = {
+            "wordpress-access", "wordpress-visitors", "container-wordpress",
+        }
+
+        def _rotating(log_type):
+            scrub = redact.make_scrub_fn(
+                self.app_support,
+                scrub_ips=(log_type in _IP_SCRUB_TYPES),
+            )
+            return RotatingLog(logs_dir, log_type, scrub_fn=scrub)
+
+        self._onionpress_log = _rotating("onionpress")
+        self._wp_access_log = _rotating("wordpress-access")
+        self._wp_visitors_log = _rotating("wordpress-visitors")
+        self._tor_log = _rotating("container-tor")
+        self._onionheaven_log = _rotating("container-onionheaven")
         # WordPress container's Apache + PHP stderr. Captures everything
         # the PHP plugins emit via error_log() — notably the Wayback
         # archiver's per-sweep state transitions — so fleet operators
         # can observe archive health across machines that opt into
         # analytics sharing.
-        self._wp_errors_log = RotatingLog(logs_dir, "container-wordpress")
-        self._clearnet_log = RotatingLog(logs_dir, "clearnet")
+        self._wp_errors_log = _rotating("container-wordpress")
+        self._db_log = _rotating("container-db")
+        self._cloudflared_log = _rotating("container-cloudflared")
+        self._tor_client_log = _rotating("container-tor-client")
+        self._clearnet_log = _rotating("clearnet")
         self._clearnet_last_offset = 0  # track dmesg position
         self._container_log_processes = {}  # name -> (process, thread)
         self.log_file = self._onionpress_log.current_path()  # backward compat
@@ -842,63 +862,155 @@ class OnionPressApp(rumps.App):
                 self.web_log_thread = None
             print("Stopped web log capture")
 
-    def _container_log_reader(self, process, rotating_log):
-        """Read docker logs from a process and write to a rotating log."""
-        try:
-            for line in process.stdout:
-                rotating_log.write(line)
-        except Exception:
-            pass
+    # --- Container log capture (supervised) -----------------------------
+    #
+    # A single supervisor thread periodically reconciles the desired set
+    # of captures (from docker-compose + dynamically-discovered takeover
+    # workers) with the set of live capture workers. Each worker has its
+    # own reattach loop: if ``docker logs -f`` exits (container restart,
+    # daemon hiccup, log-stream break), the worker re-launches with
+    # ``--since <last-seen>`` so we don't lose the window between
+    # exit and reattach. A vanished container lets the worker drain and
+    # exit; if the container later returns, the next supervisor sweep
+    # starts a fresh worker.
+
+    def _capture_specs(self):
+        """Map container-name → RotatingLog for supervised captures."""
+        return {
+            "onionpress-tor": self._tor_log,
+            "onionheaven": self._onionheaven_log,
+            "onionpress-wordpress": self._wp_errors_log,
+            "onionpress-db": self._db_log,
+            "onionpress-cloudflared": self._cloudflared_log,
+            "onionpress-tor-client": self._tor_client_log,
+        }
 
     def start_container_log_capture(self):
-        """Start capturing logs from onionpress-tor, onionheaven, and takeover containers."""
+        """Start the capture supervisor (idempotent)."""
+        if getattr(self, "_capture_supervisor_thread", None) is not None:
+            return
+        self._takeover_logs = {}  # name → RotatingLog (cached per takeover)
+        self._capture_shutdown = threading.Event()
+        self._capture_supervisor_thread = threading.Thread(
+            target=self._capture_supervisor_loop, daemon=True,
+            name="container-capture-supervisor",
+        )
+        self._capture_supervisor_thread.start()
+
+    def _capture_supervisor_loop(self):
         docker_bin = os.path.join(self.bin_dir, "docker")
         docker_env = {"DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"}
+        logs_dir = os.path.join(self.app_support, "logs")
+        while not self._capture_shutdown.is_set():
+            try:
+                running = self._docker_ps_names(docker_bin, docker_env)
+                desired = {}
+                specs = self._capture_specs()
+                for name in running:
+                    if name in specs:
+                        desired[name] = specs[name]
+                    elif name.startswith("onionheaven-takeover"):
+                        rot = self._takeover_logs.get(name)
+                        if rot is None:
+                            rot = RotatingLog(
+                                logs_dir, f"container-{name}",
+                                scrub_fn=redact.make_scrub_fn(
+                                    self.app_support, scrub_ips=False,
+                                ),
+                            )
+                            self._takeover_logs[name] = rot
+                        desired[name] = rot
+                for container_name, rotating_log in desired.items():
+                    entry = self._container_log_processes.get(container_name)
+                    if entry is not None and entry["thread"].is_alive():
+                        continue
+                    self._launch_capture_worker(
+                        container_name, rotating_log, docker_bin, docker_env,
+                    )
+            except Exception as e:
+                try:
+                    self.log(f"Capture supervisor: {e}")
+                except Exception:
+                    pass
+            self._capture_shutdown.wait(60)
 
-        # Fixed containers and their rotating logs
-        captures = [
-            ("onionpress-tor", self._tor_log),
-            ("onionheaven", self._onionheaven_log),
-            ("onionpress-wordpress", self._wp_errors_log),
-        ]
-
-        # Discover takeover containers
+    def _docker_ps_names(self, docker_bin, docker_env):
         try:
             result = subprocess.run(
-                [docker_bin, "ps", "--format", "{{.Names}}", "--filter", "name=onionheaven-takeover"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace',
-                timeout=10, env=docker_env
+                [docker_bin, "ps", "--format", "{{.Names}}"],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=10, env=docker_env,
             )
-            if result.returncode == 0:
-                for name in result.stdout.strip().split('\n'):
-                    name = name.strip()
-                    if name and name.startswith("onionheaven-takeover"):
-                        logs_dir = os.path.join(self.app_support, "logs")
-                        rotating = RotatingLog(logs_dir, f"container-{name}")
-                        captures.append((name, rotating))
         except Exception:
-            pass
+            return set()
+        if result.returncode != 0:
+            return set()
+        return {n.strip() for n in result.stdout.split() if n.strip()}
 
-        for container_name, rotating_log in captures:
-            if container_name in self._container_log_processes:
-                continue  # Already capturing
+    def _launch_capture_worker(self, container_name, rotating_log,
+                                docker_bin, docker_env):
+        entry = {"thread": None, "proc": None, "last_ts": None}
+        self._container_log_processes[container_name] = entry
+        worker = threading.Thread(
+            target=self._capture_worker,
+            args=(container_name, rotating_log, docker_bin, docker_env),
+            daemon=True,
+            name=f"capture-{container_name}",
+        )
+        entry["thread"] = worker
+        worker.start()
+
+    def _capture_worker(self, container_name, rotating_log,
+                         docker_bin, docker_env):
+        """Capture a single container's logs, reattaching on exit.
+
+        Exits cleanly once the container is gone; a later supervisor
+        sweep will start a fresh worker if the container returns.
+        """
+        while not self._capture_shutdown.is_set():
+            entry = self._container_log_processes.get(container_name)
+            if entry is None:  # supervisor asked us to stop
+                return
+            last_ts = entry.get("last_ts")
+            cmd = [docker_bin, "logs", "-f"]
+            if last_ts:
+                cmd += ["--since", last_ts]
+            else:
+                cmd += ["--tail", "100"]
+            cmd.append(container_name)
             try:
                 proc = subprocess.Popen(
-                    [docker_bin, "logs", "-f", "--tail", "100", container_name],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding='utf-8', errors='replace',
-                    env=docker_env
+                    env=docker_env,
                 )
-                thread = threading.Thread(
-                    target=self._container_log_reader,
-                    args=(proc, rotating_log),
-                    daemon=True
-                )
-                thread.start()
-                self._container_log_processes[container_name] = (proc, thread)
+            except Exception:
+                time.sleep(10)
+                continue
+            entry["proc"] = proc
+            try:
+                for line in proc.stdout:
+                    rotating_log.write(line)
+                    entry["last_ts"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    )
             except Exception:
                 pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            # Container removed? Let the thread exit so the supervisor
+            # can decide whether to relaunch at the next sweep.
+            if container_name not in self._docker_ps_names(docker_bin, docker_env):
+                self._container_log_processes.pop(container_name, None)
+                return
+            # Brief backoff before reattach so we don't busy-loop if
+            # the daemon itself is flapping.
+            time.sleep(5)
 
     def start_clearnet_log_capture(self):
         """Periodically poll VM dmesg for CLEARNET iptables log entries."""
@@ -926,8 +1038,13 @@ class OnionPressApp(rumps.App):
             time.sleep(60)
 
     def stop_container_log_capture(self):
-        """Stop all container log capture processes."""
-        for name, (proc, thread) in list(self._container_log_processes.items()):
+        """Stop the supervisor and all container log capture processes."""
+        if hasattr(self, "_capture_shutdown"):
+            self._capture_shutdown.set()
+        for name, entry in list(self._container_log_processes.items()):
+            proc = entry.get("proc") if isinstance(entry, dict) else None
+            if proc is None:
+                continue
             try:
                 proc.terminate()
                 proc.wait(timeout=5)

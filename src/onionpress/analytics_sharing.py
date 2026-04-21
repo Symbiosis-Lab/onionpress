@@ -15,11 +15,12 @@ import subprocess
 import threading
 import time
 
-# Valid log file name pattern
-_LOG_NAME_RE = re.compile(
-    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|clearnet|launcher)-"
-    r"\d{4}-\d{2}-\d{2}-\d{3}\.log(\.gz)?$|^launcher\.log$"
-)
+# Permissive "safe filename" check used when the server asks for a file
+# back. Log naming can evolve on the client side faster than both ends
+# can be redeployed in lockstep, so we only enforce that the name can't
+# escape its storage directory. OnionHome can tighten this on its side
+# if a rogue instance starts spamming weird names.
+_LOG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 
 
 _upload_now = threading.Event()
@@ -337,6 +338,18 @@ def _do_upload_cycle(app, include_active=False):
         if resp and resp.get("stored"):
             app.log(f"Analytics sharing: uploaded {name}")
             uploaded_count += 1
+            # Advance the per-type shipped watermark so RotatingLog's
+            # total-size enforcement won't prematurely rotate this
+            # roll (or any earlier one) out of existence when the
+            # next outage extends beyond retention.
+            try:
+                from onionpress import log_rotation
+                logs_dir = os.path.join(app.app_support, "logs")
+                log_type = log_rotation.extract_log_type(name)
+                if log_type is not None:
+                    log_rotation.mark_shipped(logs_dir, log_type, name)
+            except Exception:
+                pass
 
     return {"status": "ok", "wanted": len(wanted_names), "uploaded": uploaded_count}
 

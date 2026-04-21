@@ -80,7 +80,8 @@ OPTIONS = {
                  'onionpress.onionheaven', 'onionpress.updater',
                  'onionpress.install_native_messaging', 'onionpress.native_messaging_host',
                  'onionpress.onionnames_client',
-                 'onionpress.onionnames_registrar'],
+                 'onionpress.onionnames_registrar',
+                 'onionpress.redact'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

@@ -8,10 +8,81 @@ and bandwidth during analytics upload.
 
 import glob
 import gzip
+import json
 import os
+import re
 import shutil
 import threading
 from datetime import datetime, timezone
+
+
+# --- Shipped-watermark state (module-level, shared across instances) ---
+#
+# analytics_sharing.py records the latest successfully-uploaded filename
+# per log-type here. _enforce_total_size uses it to avoid deleting
+# files we haven't managed to ship yet, so a week-long OnionHome outage
+# doesn't silently cost us log history. When the hard ceiling is reached
+# we still delete unshipped files (oldest first) — data loss eventually
+# beats disk exhaustion — but the soft cap only trims shipped files.
+
+_SHIPPED_LOCK = threading.Lock()
+_SHIPPED_FILE = ".shipped.json"
+
+
+def _shipped_state_path(base_dir):
+    return os.path.join(base_dir, _SHIPPED_FILE)
+
+
+def read_shipped(base_dir):
+    """Return ``{log_type: latest-shipped-filename}`` or ``{}``."""
+    try:
+        with open(_shipped_state_path(base_dir), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def mark_shipped(base_dir, log_type, name):
+    """Move the watermark for *log_type* forward to *name* (max-semantics).
+
+    Names sort correctly under plain string comparison because the
+    rotation scheme embeds ``YYYY-MM-DD-NNN`` in every filename and
+    ``.log < .log.gz`` (the ``.log`` precursor is the partial upload
+    of the same roll).
+    """
+    with _SHIPPED_LOCK:
+        data = read_shipped(base_dir)
+        if name > data.get(log_type, ""):
+            data[log_type] = name
+            tmp = _shipped_state_path(base_dir) + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+                os.replace(tmp, _shipped_state_path(base_dir))
+            except OSError:
+                pass
+
+
+_FILENAME_RE = re.compile(
+    r"^(?P<type>.+?)-\d{4}-\d{2}-\d{2}-\d+\.log(?:\.gz)?$"
+)
+
+
+def extract_log_type(filename):
+    """Return the ``<log_type>`` prefix of a rotated filename, or ``None``.
+
+    ``onionpress-2026-04-21-001.log`` → ``onionpress``
+    ``container-onionheaven-takeover-5-2026-04-21-001.log.gz`` →
+    ``container-onionheaven-takeover-5``
+    ``launcher.log`` → ``launcher``
+    """
+    if filename == "launcher.log":
+        return "launcher"
+    m = _FILENAME_RE.match(filename)
+    return m.group("type") if m else None
 
 
 class RotatingLog:
@@ -25,11 +96,17 @@ class RotatingLog:
     """
 
     def __init__(self, base_dir, log_type, max_size=5_242_880,
-                 max_total_size=104_857_600):
+                 max_total_size=104_857_600, scrub_fn=None):
         self._base_dir = base_dir
         self._log_type = log_type
         self._max_size = max_size
         self._max_total_size = max_total_size
+        # Optional callable(bytes) -> bytes run on each rolled file
+        # before it is gzip-compressed. Used by analytics-sharing to
+        # strip sensitive content (visitor IPs, auth tokens, …) from
+        # the rolled file so only the active log ever contains raw
+        # data locally. See onionpress.redact.make_scrub_fn.
+        self._scrub_fn = scrub_fn
 
         # Pre-compute the home directory string to scrub
         self._home = os.path.expanduser("~")
@@ -166,16 +243,33 @@ class RotatingLog:
         return best if best > 0 else 1
 
     def _gzip_file(self, path):
-        """Gzip *path* in place (writes ``path + .gz``, removes original).
+        """Optionally scrub, then gzip *path* in place.
 
         Runs in a background thread off the write path. Safe to call
         after a rotation because the original file is no longer being
-        appended to.
+        appended to. When *scrub_fn* is configured, the file's bytes
+        are passed through it before compression, so privacy-relevant
+        content (IPs, session tokens, …) never lives on disk in the
+        rolled file and never leaves this machine in the analytics
+        offer.
         """
         gz_path = path + ".gz"
         try:
-            with open(path, "rb") as src, gzip.open(gz_path, "wb", compresslevel=6) as dst:
-                shutil.copyfileobj(src, dst, length=1 << 16)
+            if self._scrub_fn is not None:
+                with open(path, "rb") as src:
+                    raw = src.read()
+                try:
+                    scrubbed = self._scrub_fn(raw)
+                except Exception:
+                    # Fail-open: a scrubbing bug must never cost us the
+                    # log history. Worst case is the rolled file keeps
+                    # its raw content until the next manual audit.
+                    scrubbed = raw
+                with gzip.open(gz_path, "wb", compresslevel=6) as dst:
+                    dst.write(scrubbed)
+            else:
+                with open(path, "rb") as src, gzip.open(gz_path, "wb", compresslevel=6) as dst:
+                    shutil.copyfileobj(src, dst, length=1 << 16)
             os.chmod(gz_path, 0o600)
             os.remove(path)
         except OSError:
@@ -189,9 +283,20 @@ class RotatingLog:
     def _enforce_total_size(self):
         """Delete oldest log files across all types until under the cap.
 
-        Skips any file modified in the last 60 seconds to protect active
-        files from all RotatingLog instances sharing this directory.
-        Considers both ``.log`` and ``.log.gz`` files.
+        Two-phase policy so unshipped history survives OnionHome outages:
+
+        * **Soft cap** (``max_total_size``): only files whose names are
+          ``<=`` the per-type shipped watermark are eligible. A week-
+          long upload outage therefore keeps its full log history
+          rather than silently rotating the data out of existence.
+        * **Hard ceiling** (5× ``max_total_size``): if the soft phase
+          can't get under the cap because most files are unshipped,
+          we fall back to deleting oldest-first regardless of upload
+          state. Data loss eventually beats disk exhaustion.
+
+        Skips any file modified in the last 60 seconds to protect
+        concurrently-active write targets of sibling RotatingLog
+        instances sharing this directory.
         """
         import time as _time
         now = _time.time()
@@ -205,24 +310,54 @@ class RotatingLog:
         except OSError:
             return
 
-        # Background gzip thread may remove a .log file between the glob
-        # above and sizing here — tolerate OSError per file.
         total = 0
+        sizes = {}
         for p in all_logs:
             try:
-                total += os.path.getsize(p)
+                sizes[p] = os.path.getsize(p)
+                total += sizes[p]
             except OSError:
-                pass
+                sizes[p] = 0
 
-        for p in all_logs:
-            if total <= self._max_total_size:
-                break
+        watermarks = read_shipped(self._base_dir)
+
+        def is_shipped(path):
+            name = os.path.basename(path)
+            log_type = extract_log_type(name)
+            if log_type is None:
+                # Unknown naming → treat as shipped so cleanup can reclaim it.
+                return True
+            return name <= watermarks.get(log_type, "")
+
+        def protected(path):
             try:
-                # Protect any recently-written file (likely still active)
-                if now - os.path.getmtime(p) < 60:
-                    continue
-                size = os.path.getsize(p)
-                os.remove(p)
-                total -= size
+                return now - os.path.getmtime(path) < 60
             except OSError:
-                pass
+                return False
+
+        # Phase 1: soft cap over shipped-only pool.
+        if total > self._max_total_size:
+            for p in all_logs:
+                if total <= self._max_total_size:
+                    break
+                if protected(p) or not is_shipped(p):
+                    continue
+                try:
+                    os.remove(p)
+                    total -= sizes.get(p, 0)
+                except OSError:
+                    pass
+
+        # Phase 2: hard ceiling across everything (including unshipped).
+        hard_ceiling = self._max_total_size * 5
+        if total > hard_ceiling:
+            for p in all_logs:
+                if total <= hard_ceiling:
+                    break
+                if protected(p) or not os.path.exists(p):
+                    continue
+                try:
+                    os.remove(p)
+                    total -= sizes.get(p, 0)
+                except OSError:
+                    pass

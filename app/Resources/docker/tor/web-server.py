@@ -29,6 +29,7 @@ import re
 import shutil
 import struct
 import sys
+import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -73,11 +74,48 @@ def _is_onionhome():
 
 # Analytics storage
 ANALYTICS_DIR = "/var/lib/onionhome/analytics"
+
+
+def _append_audit(site_dir, record):
+    """Append one JSONL entry to ``<site_dir>/audit-YYYY-MM-DD.jsonl``.
+
+    Records per-request telemetry (manifest offers + upload receipts)
+    so questions like "what did this instance offer, and what did we
+    actually accept?" can be answered without grepping container
+    stderr. The file is naturally bounded: it rotates daily by name
+    and is subject to the normal per-instance quota + age-expiry
+    cleanup.
+    """
+    try:
+        os.makedirs(site_dir, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        path = os.path.join(site_dir, f"audit-{now.strftime('%Y-%m-%d')}.jsonl")
+        entry = {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        entry.update(record)
+        line = json.dumps(entry, separators=(",", ":")) + "\n"
+        # O_APPEND makes concurrent writes from threaded request
+        # handlers atomic per line on POSIX.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 ANALYTICS_DISK_THRESHOLD = 0.85  # 85% full → stop accepting / clean up
-ANALYTICS_LOG_NAME_RE = re.compile(
-    r"^(onionpress|wordpress-access|wordpress-visitors|container-onionpress-tor|container-onionheaven|container-onionheaven-takeover-\d+|clearnet|launcher)-"
-    r"\d{4}-\d{2}-\d{2}-\d{3}\.log$|^launcher\.log$"
-)
+ANALYTICS_MAX_AGE_DAYS = 90      # hard age ceiling — files older than this
+                                 # are deleted on every cleanup cycle, disk
+                                 # or no disk pressure
+ANALYTICS_PER_INSTANCE_QUOTA = 524_288_000  # 500 MB per (content, healthcheck)
+                                            # pair before we start trimming
+                                            # that instance's oldest files
+ANALYTICS_CLEANUP_INTERVAL = 86_400  # periodic cleanup cadence (seconds)
+# Permissive safe-filename check. We accept whatever clients offer so
+# that log naming can evolve without a server redeploy; only filenames
+# that could escape the site directory or pollute it with hidden files
+# are rejected. If a rogue client starts spamming junk names, tighten
+# this regex on the OnionHome instance.
+ANALYTICS_LOG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
 
@@ -1184,24 +1222,48 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-        # Determine which files we need (new or grown since last upload)
+        # Determine which files we need (new, or grown since last upload).
+        # Active (uncompressed) logs grow over time, so we re-request when
+        # the offered size exceeds what we have. Once the client finishes
+        # rolling a day, it offers the .gz final; at that point the .log
+        # partial is superseded and we stop re-requesting it (the partial
+        # itself is deleted during the subsequent .log.gz upload).
         wanted = []
+        rejected = []  # names dropped (unsafe) — recorded in the audit trail
+        superseded = []  # .log offered when .log.gz already stored
         for f in files:
             name = f.get("name", "")
             if not ANALYTICS_LOG_NAME_RE.match(name):
+                rejected.append(name or "<empty>")
+                self.log_message(
+                    "Analytics: rejected %s from %s (unsafe name)",
+                    name or "<empty>", content_address,
+                )
                 continue
             local_path = os.path.join(site_dir, name)
+            if name.endswith(".log") and os.path.exists(local_path + ".gz"):
+                superseded.append(name)
+                continue
+            remote_size = f.get("size", 0)
             if not os.path.exists(local_path):
                 wanted.append(name)
-            else:
-                # Re-request if the remote file is larger (partial → complete)
-                try:
-                    local_size = os.path.getsize(local_path)
-                    remote_size = f.get("size", 0)
-                    if remote_size > local_size:
-                        wanted.append(name)
-                except OSError:
-                    wanted.append(name)
+                continue
+            try:
+                local_size = os.path.getsize(local_path)
+            except OSError:
+                wanted.append(name)
+                continue
+            if remote_size > local_size:
+                wanted.append(name)
+
+        _append_audit(site_dir, {
+            "event": "manifest",
+            "offered": [f.get("name", "") for f in files],
+            "wanted": wanted,
+            "rejected": rejected,
+            "superseded": superseded,
+            "version": data.get("version", ""),
+        })
 
         self._send_json(200, {"wanted": wanted})
 
@@ -1275,12 +1337,108 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"Write failed: {e}"})
             return
 
+        # Supersede the uncompressed partial once the compressed final arrives.
+        if file_name.endswith(".log.gz"):
+            partial = dest[:-3]  # strip .gz
+            try:
+                os.remove(partial)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+        _append_audit(site_dir, {
+            "event": "upload",
+            "file": file_name,
+            "bytes": len(file_bytes),
+        })
+
         self._send_json(200, {"stored": True, "file_name": file_name})
 
     @staticmethod
     def _analytics_cleanup():
-        """Delete oldest analytics files until disk usage is under threshold."""
+        """Three-phase cleanup of ``ANALYTICS_DIR``.
+
+        1. **Age expiry** — delete any file older than
+           :data:`ANALYTICS_MAX_AGE_DAYS`, unconditionally. Keeps long-
+           retention growth in check even when the disk is fine.
+        2. **Per-instance quota** — for each ``<content>/<healthcheck>``
+           site directory that exceeds
+           :data:`ANALYTICS_PER_INSTANCE_QUOTA`, delete its own oldest
+           files until under quota. A single noisy instance can no
+           longer starve its peers.
+        3. **Disk-full fallback** — if the volume is still over the
+           :data:`ANALYTICS_DISK_THRESHOLD` watermark, delete globally
+           oldest files until under threshold.
+
+        Meta/audit sidecar files are subject to the same rules as
+        log files — we track cadence, not content.
+        """
         if not os.path.isdir(ANALYTICS_DIR):
+            return
+        import time as _time
+
+        now = _time.time()
+        age_cutoff = now - ANALYTICS_MAX_AGE_DAYS * 86400
+
+        # Phase 1: age expiry
+        for root, _dirs, files in os.walk(ANALYTICS_DIR):
+            for name in files:
+                p = os.path.join(root, name)
+                try:
+                    if os.path.getmtime(p) < age_cutoff:
+                        os.remove(p)
+                except OSError:
+                    continue
+
+        # Phase 2: per-instance quota. Group remaining files by site
+        # directory and trim oldest-first within each until under quota.
+        try:
+            content_dirs = os.listdir(ANALYTICS_DIR)
+        except OSError:
+            content_dirs = []
+        for content in content_dirs:
+            content_path = os.path.join(ANALYTICS_DIR, content)
+            try:
+                hc_dirs = os.listdir(content_path)
+            except OSError:
+                continue
+            for hc in hc_dirs:
+                site_dir = os.path.join(content_path, hc)
+                if not os.path.isdir(site_dir):
+                    continue
+                entries = []
+                total = 0
+                try:
+                    for name in os.listdir(site_dir):
+                        p = os.path.join(site_dir, name)
+                        try:
+                            st = os.stat(p)
+                        except OSError:
+                            continue
+                        entries.append((st.st_mtime, st.st_size, p))
+                        total += st.st_size
+                except OSError:
+                    continue
+                if total <= ANALYTICS_PER_INSTANCE_QUOTA:
+                    continue
+                entries.sort()  # oldest first
+                for _mtime, size, path in entries:
+                    if total <= ANALYTICS_PER_INSTANCE_QUOTA:
+                        break
+                    try:
+                        os.remove(path)
+                        total -= size
+                    except OSError:
+                        continue
+
+        # Phase 3: disk-full fallback. Only kicks in if the above two
+        # phases didn't free enough space.
+        try:
+            usage = shutil.disk_usage("/")
+        except OSError:
+            return
+        if usage.used / usage.total <= ANALYTICS_DISK_THRESHOLD:
             return
         all_files = []
         for root, _dirs, files in os.walk(ANALYTICS_DIR):
@@ -1299,6 +1457,26 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 os.remove(path)
             except OSError:
                 continue
+
+
+def _start_analytics_cleanup_thread():
+    """Run :meth:`_analytics_cleanup` once a day in the background.
+
+    Runs the first sweep ~60 s after boot so age-expired and over-quota
+    files from a past outage get trimmed without waiting for an upload.
+    Daemon thread: dies with the process.
+    """
+    def _loop():
+        import time as _time
+        _time.sleep(60)
+        while True:
+            try:
+                OnionHeavenHandler._analytics_cleanup()
+            except Exception:
+                pass
+            _time.sleep(ANALYTICS_CLEANUP_INTERVAL)
+    t = threading.Thread(target=_loop, daemon=True, name="analytics-cleanup")
+    t.start()
 
 
 # ---------------------------------------------------------------------------
@@ -1346,6 +1524,7 @@ def main():
         except Exception as e:
             onionnames.log(f"startup refresh failed: {e}")
         onionnames.start_refresh_thread()
+        _start_analytics_cleanup_thread()
 
     # ThreadingHTTPServer: the register-local forward path can block up to
     # 30s waiting on Tor. Single-threaded serving would stall every other

@@ -174,6 +174,20 @@ TORRC_EOF
                 # If heartbeat log doesn't exist yet, skip
                 [ -f "$HEARTBEAT_LOG" ] || continue
 
+                # Cap log size to keep VM disk bounded. Truncate to the
+                # last ~512 KB when the file exceeds 1 MB; mtime gets
+                # refreshed on the next heartbeat write so the staleness
+                # check below still works. A brief race with concurrent
+                # heartbeat writes can lose a handful of lines, which is
+                # acceptable: the file is diagnostic, not transactional.
+                log_size=$(stat -c %s "$HEARTBEAT_LOG" 2>/dev/null || echo 0)
+                if [ "$log_size" -gt 1048576 ]; then
+                    tmp="$HEARTBEAT_LOG.rotate.$$"
+                    tail -c 524288 "$HEARTBEAT_LOG" > "$tmp" 2>/dev/null && \
+                        cat "$tmp" > "$HEARTBEAT_LOG"
+                    rm -f "$tmp"
+                fi
+
                 # Get log file age in seconds
                 log_mtime=$(stat -c %Y "$HEARTBEAT_LOG" 2>/dev/null) || continue
                 now=$(date +%s)

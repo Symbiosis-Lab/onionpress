@@ -126,7 +126,15 @@ class TestRotatingLogCompression(unittest.TestCase):
             f"expected to continue at seq 003, got {current_name}")
 
     def test_enforce_total_size_counts_gz(self):
-        """Total-size cap should consider .log.gz file sizes."""
+        """Total-size cap should consider .log.gz file sizes.
+
+        New behaviour: the soft cap only trims files that were
+        successfully shipped to OnionHome, so this test marks all
+        rolled files as shipped before triggering enforcement — that's
+        the common case for instances with analytics sharing enabled.
+        """
+        from onionpress import log_rotation as lr
+
         log = RotatingLog(
             self.tmpdir, "testlog",
             max_size=150,
@@ -143,11 +151,22 @@ class TestRotatingLogCompression(unittest.TestCase):
             p = os.path.join(self.tmpdir, f)
             old = time.time() - 120
             os.utime(p, (old, old))
+        # Mark the highest rolled file as shipped so every preceding
+        # roll falls under the watermark and is eligible for soft-cap
+        # cleanup. Without this, the unshipped-retention policy would
+        # keep all rolls up to the 5× hard ceiling.
+        rolled = sorted(
+            f for f in os.listdir(self.tmpdir)
+            if f.endswith(".log") or f.endswith(".log.gz")
+        )
+        if rolled:
+            lr.mark_shipped(self.tmpdir, "testlog", rolled[-1])
         log.write("trigger enforcement\n")
         time.sleep(0.5)
         total = sum(
             os.path.getsize(os.path.join(self.tmpdir, f))
             for f in os.listdir(self.tmpdir)
+            if f.endswith(".log") or f.endswith(".log.gz")
         )
         # Active file may push us slightly over the cap — allow 2×.
         self.assertLess(total, 500 * 2,
