@@ -84,7 +84,11 @@ def _sharing_loop(app):
             continue
 
         try:
-            _do_upload_cycle(app)
+            # Include today's active logs too — otherwise a day-1 install
+            # ships only launcher.log (the only file globbed unconditionally)
+            # because no other log has rolled yet. OnionHome re-requests when
+            # the offered size grows, so subsequent days supersede cleanly.
+            _do_upload_cycle(app, include_active=True)
             last_upload_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         except Exception as e:
             app.log(f"Analytics sharing error: {e}")
