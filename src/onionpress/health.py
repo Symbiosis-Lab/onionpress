@@ -222,8 +222,10 @@ class HealthChecker:
         """Check if WordPress is reachable from inside the Tor container."""
         result = self.docker.exec(
             "onionpress-tor",
-            ["curl", "-sf", "--max-time", "5", "http://wordpress:80/"],
-            timeout=10,
+            ["curl", "-sf", "--max-time", "15",
+             "-H", "User-Agent: OnionPress-HealthCheck",
+             "http://wordpress:80/"],
+            timeout=20,
         )
         return result.ok
 

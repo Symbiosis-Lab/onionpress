@@ -393,6 +393,7 @@ class OnionPressApp(rumps.App):
         self._quitting = False                 # True once quit cleanup has started
         self._stopping = False                 # True while Stop button is in progress
         self._run_generation = 0               # Incremented on stop/start; stale threads check this
+        self._consecutive_fail_count = 0       # Require 2 consecutive failures before flipping to yellow
 
         # Wayback queue state
         self._wayback_queue = []
@@ -1486,6 +1487,7 @@ class OnionPressApp(rumps.App):
                         self._onionheaven_reclaim_last_attempt = 0
                         self._bootstrap_stall_count = 0
                         self._yellow_since = None
+                        self._consecutive_fail_count = 0
                         elapsed = int(time.time() - self.startup_time)
                         self.log(f"✓ System fully operational (launched in {elapsed}s)")
                         self.last_status_logged = current_status
@@ -1547,19 +1549,27 @@ class OnionPressApp(rumps.App):
                         self.is_ready = True
                         self._bootstrap_stall_count = 0
                         self._yellow_since = None
+                        self._consecutive_fail_count = 0
                         self.last_status_logged = current_status
                     elif previous_ready and not ready_now:
-                        # Was ready, now failing — go to reconnecting state
-                        # (but skip if user intentionally stopped or is quitting)
+                        # Was ready, now failing — require 2 consecutive failures
+                        # before flipping to yellow, to suppress transient curl
+                        # timeouts that recover within one poll cycle.
                         if self._stopping or self._quitting:
                             self.is_ready = False
+                            self._consecutive_fail_count = 0
                         else:
-                            self.is_ready = False
-                            self._yellow_since = time.time()
-                            self._bootstrap_stall_count = 0
-                            self._onionheaven_heartbeat_succeeded = False
-                            self.startup_time = time.time()  # Reset so "launched in Xs" shows recovery time
-                            self.log("Service became unreachable — reconnecting")
+                            self._consecutive_fail_count += 1
+                            if self._consecutive_fail_count < 2:
+                                # Transient: stay green, recheck on next tick
+                                pass
+                            else:
+                                self.is_ready = False
+                                self._yellow_since = time.time()
+                                self._bootstrap_stall_count = 0
+                                self._onionheaven_heartbeat_succeeded = False
+                                self.startup_time = time.time()  # Reset so "launched in Xs" shows recovery time
+                                self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
                         pct = self._parse_bootstrap_percentage()
@@ -1726,6 +1736,7 @@ class OnionPressApp(rumps.App):
                 self._last_bootstrap_pct = 0
                 self._bootstrap_stall_count = 0
                 self._yellow_since = None
+                self._consecutive_fail_count = 0
                 self.healthcheck_address = None
                 self.onionheaven_messages = []
                 self._onionheaven_alert_shown = False
