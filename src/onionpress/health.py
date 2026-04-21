@@ -30,7 +30,7 @@ class HealthResult:
     wp_healthy: bool = False
     tor_bootstrapped: bool = False
     tor_internally_ready: bool = False  # Checks 1-4 passed
-    tor_externally_reachable: bool = False  # Check 5 passed (via onionheaven)
+    tor_externally_reachable: bool = False  # Check 5 passed (dual-probe)
     onion_address: str = ""
     bootstrap_pct: int = 0
     external_http_code: str = ""  # HTTP status from external reachability check
@@ -229,18 +229,30 @@ class HealthChecker:
         )
         return result.ok
 
-    def check_external_reachability(self, onion_address: str) -> tuple[bool, str]:
-        """Check if the onion service is reachable through the Tor network.
+    # Well-known onion used to probe whether onionheaven's tor is itself
+    # healthy. If onionheaven can reach the OnionHeaven hub it clearly
+    # has working circuits; if it can't reach anything, its "our onion
+    # is unreachable" verdict is meaningless. Value matches the hub
+    # address in MEMORY.md / onionheaven code.
+    _ONIONHEAVEN_HUB_ADDRESS = (
+        "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+    )
+    # Cache onionheaven-tor-healthy result this long, since we only need
+    # it on self✓/external✗ disagreement and don't want to re-probe the
+    # hub on every health cycle.
+    _ONIONHEAVEN_HEALTH_TTL_SECONDS = 60.0
 
-        Uses the onionheaven container which has an independent Tor instance
-        with its own circuits and descriptor cache — a true external test.
-        Returns (reachable, http_code). Only HTTP 200 or 301 counts as
-        reachable — 302 indicates OnionHeaven takeover.
+    def _probe_onion_via(self, container: str, onion_address: str) -> tuple[bool, str]:
+        """Curl an onion address through `container`'s local SOCKS (127.0.0.1:9050).
+
+        Returns (reachable, http_code) with the same semantics as the old
+        check_external_reachability: 200/301 count as reachable, anything
+        else doesn't. Curl failure returns "000:rc=<exit>".
         """
         if not onion_address:
             return False, ""
         result = self.docker.exec(
-            "onionheaven",
+            container,
             [
                 "curl", "-s", "--max-time", "30",
                 "--socks5-hostname", "127.0.0.1:9050",
@@ -254,6 +266,84 @@ class HealthChecker:
             return False, f"000:rc={result.returncode}"
         http_code = result.output.strip()
         return http_code in ("200", "301"), http_code
+
+    def check_self_reachability(self, onion_address: str) -> tuple[bool, str]:
+        """Probe our onion through onionpress-tor's own SOCKS.
+
+        Confirmed by timing (15s cold, 1.7s warm) that C Tor routes
+        self-connections through real circuits rather than a local
+        shortcut — so this is a genuine Tor-network probe, just using
+        the same tor instance that also hosts the service.
+        """
+        return self._probe_onion_via("onionpress-tor", onion_address)
+
+    def check_onionheaven_tor_healthy(self) -> bool:
+        """Is onionheaven's tor able to reach any onion at all?
+
+        Used to disambiguate self✓/external✗ disagreement in
+        check_external_reachability. Cached for 60s since onionheaven
+        health changes on a container-lifetime scale, not a single
+        health-cycle scale.
+        """
+        now = time.time()
+        cached = getattr(self, "_onionheaven_health_cache", None)
+        if cached and (now - cached[0]) < self._ONIONHEAVEN_HEALTH_TTL_SECONDS:
+            return cached[1]
+        ok, _ = self._probe_onion_via("onionheaven", self._ONIONHEAVEN_HUB_ADDRESS)
+        self._onionheaven_health_cache = (now, ok)
+        return ok
+
+    def check_external_reachability(self, onion_address: str) -> tuple[bool, str]:
+        """Check if our onion service is reachable through the Tor network.
+
+        Dual-probe with disambiguation:
+          - Probe via onionheaven (independent tor, separate circuits).
+            If it succeeds, we're reachable — done. This is the hot path
+            and costs exactly one curl.
+          - If it fails, probe via onionpress-tor (our own tor — self-
+            connection via real circuits). If that fails too, we're
+            genuinely down.
+          - If self✓ and external✗, disambiguate: is onionheaven's tor
+            itself working? If it can't reach the OnionHeaven hub
+            either, the external verdict is untrustworthy — report
+            reachable with code "degraded:<ext>". Otherwise report
+            unreachable (likely a descriptor-publish issue, which is
+            invisible to our own tor but real for outside visitors).
+
+        Returns (reachable, http_code). Only 200/301 from at least one
+        probe counts as reachable; 302 from external means OnionHeaven
+        takeover (still unreachable from our POV).
+        """
+        if not onion_address:
+            return False, ""
+
+        ext_ok, ext_code = self._probe_onion_via("onionheaven", onion_address)
+        if ext_ok:
+            return True, ext_code
+
+        self_ok, self_code = self._probe_onion_via("onionpress-tor", onion_address)
+        if not self_ok:
+            # Both failed — genuinely unreachable. Prefer ext_code since
+            # existing callers know how to format onionheaven failures.
+            return False, ext_code
+
+        # Disagreement: self says yes, external says no. Is the external
+        # probe trustworthy?
+        if not self.check_onionheaven_tor_healthy():
+            self._log(
+                f"Reachability: onionheaven tor is itself unhealthy — "
+                f"trusting self-probe (ext={ext_code})"
+            )
+            return True, f"degraded:ext={ext_code}"
+
+        # External probe is healthy and still can't reach us. That's a
+        # real problem for outside visitors (likely descriptor-publish
+        # failure) even though our own tor can rendezvous to itself.
+        self._log(
+            f"Reachability: onionheaven healthy but can't reach us "
+            f"(ext={ext_code}, self={self_code}) — likely descriptor issue"
+        )
+        return False, ext_code
 
     def check_vm_wedge(self) -> Optional["WedgeSignals"]:
         """Probe for VM/FUSE wedge conditions (onionpress.org Apr 2026 incident).

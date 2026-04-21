@@ -248,19 +248,55 @@ class TestCheckInternetConnectivity(unittest.TestCase):
 
 
 class TestCheckExternalReachability(unittest.TestCase):
-    def test_reachable(self):
+    def test_reachable_external_succeeds_fast_path(self):
+        # Hot path: onionheaven returns 200, we short-circuit without probing self.
         docker = mock.Mock()
         docker.exec.return_value = _ok("200")
         hc = HealthChecker(docker)
         reachable, code = hc.check_external_reachability("op2abc.onion")
         self.assertTrue(reachable)
         self.assertEqual(code, "200")
+        # Exactly one docker.exec — we didn't waste probes.
+        self.assertEqual(docker.exec.call_count, 1)
 
-    def test_unreachable(self):
+    def test_unreachable_both_fail(self):
+        # External fails, self fails → genuinely unreachable.
         docker = mock.Mock()
-        docker.exec.return_value = _fail()
+        docker.exec.side_effect = [
+            _fail(),  # external probe via onionheaven
+            _fail(),  # self probe via onionpress-tor
+        ]
+        hc = HealthChecker(docker)
+        reachable, _code = hc.check_external_reachability("op2abc.onion")
+        self.assertFalse(reachable)
+
+    def test_reachable_self_ok_onionheaven_sick(self):
+        # Today's yellow-state bug: onionheaven's tor stuck, our tor fine.
+        # External probe fails, self probe succeeds, onionheaven can't
+        # reach the hub either → trust self, report reachable.
+        docker = mock.Mock()
+        docker.exec.side_effect = [
+            _ok("000"),   # external probe: curl "ok" but HTTP 000 (timeout)
+            _ok("301"),   # self probe: success
+            _fail(),      # onionheaven hub probe: fails (probe is sick)
+        ]
         hc = HealthChecker(docker)
         reachable, code = hc.check_external_reachability("op2abc.onion")
+        self.assertTrue(reachable)
+        self.assertTrue(code.startswith("degraded:"))
+
+    def test_unreachable_self_ok_onionheaven_healthy(self):
+        # Descriptor-publish failure case: our tor reaches its own HS,
+        # onionheaven's tor is working fine (can reach the hub), yet
+        # onionheaven can't reach us → we're dark to outside visitors.
+        docker = mock.Mock()
+        docker.exec.side_effect = [
+            _ok("000"),    # external probe to us: fails
+            _ok("200"),    # self probe: success
+            _ok("200"),    # onionheaven hub probe: healthy
+        ]
+        hc = HealthChecker(docker)
+        reachable, _code = hc.check_external_reachability("op2abc.onion")
         self.assertFalse(reachable)
 
     def test_empty_address(self):
@@ -268,6 +304,22 @@ class TestCheckExternalReachability(unittest.TestCase):
         hc = HealthChecker(docker)
         reachable, code = hc.check_external_reachability("")
         self.assertFalse(reachable)
+        docker.exec.assert_not_called()
+
+    def test_onionheaven_health_is_cached(self):
+        # Caching: two disagreement cycles within 60s should hit the
+        # onionheaven-hub probe exactly once.
+        docker = mock.Mock()
+        docker.exec.side_effect = [
+            _ok("000"), _ok("301"), _fail(),  # cycle 1: ext, self, hub (fails → sick)
+            _ok("000"), _ok("301"),           # cycle 2: ext, self — hub cached
+        ]
+        hc = HealthChecker(docker)
+        r1, _ = hc.check_external_reachability("op2abc.onion")
+        r2, _ = hc.check_external_reachability("op2abc.onion")
+        self.assertTrue(r1)
+        self.assertTrue(r2)
+        self.assertEqual(docker.exec.call_count, 5)
 
 
 class TestTorContainerUnhealthy(unittest.TestCase):
