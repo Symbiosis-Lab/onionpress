@@ -188,9 +188,6 @@ def _do_upload_cycle(app, include_active=False):
         getattr(app, "_wp_errors_log", None),
         getattr(app, "_clearnet_log", None),
     ]
-    # Include any takeover container logs
-    for _name, (_proc, _thread) in getattr(app, "_container_log_processes", {}).items():
-        pass  # Takeover logs are discovered dynamically below
 
     # Scan logs dir for all container-* rotating logs (catches takeover workers)
     import glob as _glob
