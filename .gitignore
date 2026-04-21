@@ -33,6 +33,7 @@ uv.lock
 
 # Build artifacts
 build/onionpress.dmg
+build/.cache/
 py2app_build/
 py2app_dist/
 

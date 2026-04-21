@@ -75,82 +75,147 @@ COLIMA_VERSION="v0.8.1"
 LIMA_VERSION="2.0.3"
 DOCKER_VERSION="27.5.1"
 DOCKER_COMPOSE_VERSION="v2.32.4"
-MKP224O_VERSION="master"  # Using master for latest version
+MKP224O_VERSION="v1.7.0"
 
-# Download Colima for both architectures
-echo "  Downloading Colima binaries..."
-curl -L -o "$TEMP_BIN_DIR/colima-darwin-amd64" \
-  "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-x86_64"
-curl -L -o "$TEMP_BIN_DIR/colima-darwin-arm64" \
-  "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-arm64"
+# GitHub anonymously throttles release-asset downloads to ~30 KB/s, which
+# turns the bundling step below into a 20+ minute affair. Authenticated
+# requests average ~4-7 MB/s but GitHub's CDN sometimes pins a connection
+# to a slow edge (observed 20 KB/s sustained for minutes). Reconnecting
+# picks a fresh — usually faster — edge. Strategy:
+#   * --speed-limit 100000 --speed-time 30: abort if throughput drops
+#     below 100 KB/s for 30s (slow but usable passes; truly stuck aborts).
+#   * --retry 5 --retry-all-errors --retry-delay 5: retry on any failure
+#     including speed-time timeouts (plain --retry won't). Five attempts
+#     at 5s delay = 25s total retry budget, plenty to cycle CDN edges.
+# Authenticated via `gh` token if available, unauthenticated otherwise.
+GH_DL=(--speed-limit 100000 --speed-time 30 --retry 5 --retry-all-errors --retry-delay 5)
+if command -v gh >/dev/null 2>&1; then
+    _gh_token=$(gh auth token 2>/dev/null || true)
+    if [ -n "$_gh_token" ]; then
+        GH_DL+=(-H "Authorization: Bearer $_gh_token")
+    fi
+fi
 
-chmod +x "$TEMP_BIN_DIR"/colima-*
+# Versioned binary cache. These binaries are static artifacts of pinned
+# versions — once we've downloaded and lipo'd colima-v0.8.1 into a
+# universal binary, it's bit-identical for every subsequent build. Cache
+# keyed by version saves ~3-5 min per iteration. Gitignored; safe to
+# rm -rf to force re-downloads.
+CACHE_DIR="$PROJECT_DIR/build/.cache/bin"
+mkdir -p "$CACHE_DIR"
 
-# Create universal Colima binary
-echo "  Creating universal Colima binary..."
-lipo -create \
-  "$TEMP_BIN_DIR/colima-darwin-arm64" \
-  "$TEMP_BIN_DIR/colima-darwin-amd64" \
-  -output "$TEMP_BIN_DIR/colima"
+# cache_get <cache-name> <dest-path> — copy from cache if present, return
+# 0 on hit, 1 on miss. Caller handles miss by downloading/building.
+cache_get() {
+    local name="$1" dest="$2"
+    if [ -f "$CACHE_DIR/$name" ]; then
+        cp "$CACHE_DIR/$name" "$dest"
+        return 0
+    fi
+    return 1
+}
 
-# Download Lima binaries
-echo "  Downloading Lima binaries..."
-curl -L -o "$TEMP_BIN_DIR/lima-amd64.tar.gz" \
-  "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-x86_64.tar.gz"
-curl -L -o "$TEMP_BIN_DIR/lima-arm64.tar.gz" \
-  "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-arm64.tar.gz"
+# cache_put <cache-name> <source-path> — copy fresh artifact into cache.
+cache_put() {
+    local name="$1" src="$2"
+    [ -f "$src" ] && cp "$src" "$CACHE_DIR/$name"
+}
 
+# Colima universal binary (download both arches, lipo, cache result)
+if cache_get "colima-${COLIMA_VERSION}-universal" "$TEMP_BIN_DIR/colima"; then
+    echo "  Colima ${COLIMA_VERSION}: cache hit"
+else
+    echo "  Downloading Colima ${COLIMA_VERSION}..."
+    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/colima-darwin-amd64" \
+      "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-x86_64"
+    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/colima-darwin-arm64" \
+      "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-arm64"
+    chmod +x "$TEMP_BIN_DIR"/colima-*
+    lipo -create \
+      "$TEMP_BIN_DIR/colima-darwin-arm64" \
+      "$TEMP_BIN_DIR/colima-darwin-amd64" \
+      -output "$TEMP_BIN_DIR/colima"
+    cache_put "colima-${COLIMA_VERSION}-universal" "$TEMP_BIN_DIR/colima"
+fi
+
+# Lima: two things to cache — the universal limactl binary AND the share/
+# tree (guest agents differ per arch, copied later from both amd64 and
+# arm64 extracted dirs). Cache them together as a single .tar.gz so a
+# single cache hit gives us everything.
 mkdir -p "$TEMP_BIN_DIR/lima-amd64" "$TEMP_BIN_DIR/lima-arm64"
-tar xzf "$TEMP_BIN_DIR/lima-amd64.tar.gz" -C "$TEMP_BIN_DIR/lima-amd64"
-tar xzf "$TEMP_BIN_DIR/lima-arm64.tar.gz" -C "$TEMP_BIN_DIR/lima-arm64"
+if cache_get "lima-${LIMA_VERSION}-bundle.tar.gz" "$TEMP_BIN_DIR/lima-bundle.tar.gz"; then
+    echo "  Lima ${LIMA_VERSION}: cache hit"
+    tar xzf "$TEMP_BIN_DIR/lima-bundle.tar.gz" -C "$TEMP_BIN_DIR"
+else
+    echo "  Downloading Lima ${LIMA_VERSION}..."
+    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/lima-amd64.tar.gz" \
+      "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-x86_64.tar.gz"
+    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/lima-arm64.tar.gz" \
+      "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-arm64.tar.gz"
+    tar xzf "$TEMP_BIN_DIR/lima-amd64.tar.gz" -C "$TEMP_BIN_DIR/lima-amd64"
+    tar xzf "$TEMP_BIN_DIR/lima-arm64.tar.gz" -C "$TEMP_BIN_DIR/lima-arm64"
+    lipo -create \
+      "$TEMP_BIN_DIR/lima-arm64/bin/limactl" \
+      "$TEMP_BIN_DIR/lima-amd64/bin/limactl" \
+      -output "$TEMP_BIN_DIR/limactl"
+    # Bundle for cache: limactl + minimal share trees (guest-agent binaries
+    # are the only arch-specific pieces; the rest is identical).
+    (cd "$TEMP_BIN_DIR" && tar czf lima-bundle.tar.gz \
+        limactl \
+        lima-amd64/share/lima \
+        lima-arm64/share/lima)
+    cache_put "lima-${LIMA_VERSION}-bundle.tar.gz" "$TEMP_BIN_DIR/lima-bundle.tar.gz"
+fi
 
-# Create universal Lima binary
-echo "  Creating universal limactl binary..."
-lipo -create \
-  "$TEMP_BIN_DIR/lima-arm64/bin/limactl" \
-  "$TEMP_BIN_DIR/lima-amd64/bin/limactl" \
-  -output "$TEMP_BIN_DIR/limactl"
+# Docker CLI universal binary
+if cache_get "docker-${DOCKER_VERSION}-universal" "$TEMP_BIN_DIR/docker"; then
+    echo "  Docker ${DOCKER_VERSION}: cache hit"
+else
+    echo "  Downloading Docker CLI ${DOCKER_VERSION}..."
+    curl -L -o "$TEMP_BIN_DIR/docker-amd64.tgz" \
+      "https://download.docker.com/mac/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz"
+    curl -L -o "$TEMP_BIN_DIR/docker-arm64.tgz" \
+      "https://download.docker.com/mac/static/stable/aarch64/docker-${DOCKER_VERSION}.tgz"
+    mkdir -p "$TEMP_BIN_DIR/docker-amd64" "$TEMP_BIN_DIR/docker-arm64"
+    tar xzf "$TEMP_BIN_DIR/docker-amd64.tgz" -C "$TEMP_BIN_DIR/docker-amd64"
+    tar xzf "$TEMP_BIN_DIR/docker-arm64.tgz" -C "$TEMP_BIN_DIR/docker-arm64"
+    lipo -create \
+      "$TEMP_BIN_DIR/docker-arm64/docker/docker" \
+      "$TEMP_BIN_DIR/docker-amd64/docker/docker" \
+      -output "$TEMP_BIN_DIR/docker"
+    rm -rf "$TEMP_BIN_DIR/docker-arm64" "$TEMP_BIN_DIR/docker-amd64"
+    cache_put "docker-${DOCKER_VERSION}-universal" "$TEMP_BIN_DIR/docker"
+fi
 
-# Download Docker CLI
-echo "  Downloading Docker CLI binaries..."
-curl -L -o "$TEMP_BIN_DIR/docker-amd64.tgz" \
-  "https://download.docker.com/mac/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz"
-curl -L -o "$TEMP_BIN_DIR/docker-arm64.tgz" \
-  "https://download.docker.com/mac/static/stable/aarch64/docker-${DOCKER_VERSION}.tgz"
+# Docker Compose universal binary
+if cache_get "docker-compose-${DOCKER_COMPOSE_VERSION}-universal" "$TEMP_BIN_DIR/docker-compose"; then
+    echo "  Docker Compose ${DOCKER_COMPOSE_VERSION}: cache hit"
+else
+    echo "  Downloading Docker Compose ${DOCKER_COMPOSE_VERSION}..."
+    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/docker-compose-arm64" \
+      "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-aarch64"
+    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/docker-compose-x86_64" \
+      "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-x86_64"
+    chmod +x "$TEMP_BIN_DIR"/docker-compose-*
+    lipo -create \
+      "$TEMP_BIN_DIR/docker-compose-arm64" \
+      "$TEMP_BIN_DIR/docker-compose-x86_64" \
+      -output "$TEMP_BIN_DIR/docker-compose"
+    cache_put "docker-compose-${DOCKER_COMPOSE_VERSION}-universal" "$TEMP_BIN_DIR/docker-compose"
+fi
 
-mkdir -p "$TEMP_BIN_DIR/docker-amd64" "$TEMP_BIN_DIR/docker-arm64"
-tar xzf "$TEMP_BIN_DIR/docker-amd64.tgz" -C "$TEMP_BIN_DIR/docker-amd64"
-tar xzf "$TEMP_BIN_DIR/docker-arm64.tgz" -C "$TEMP_BIN_DIR/docker-arm64"
-
-# Create universal Docker CLI binary
-echo "  Creating universal Docker CLI binary..."
-lipo -create \
-  "$TEMP_BIN_DIR/docker-arm64/docker/docker" \
-  "$TEMP_BIN_DIR/docker-amd64/docker/docker" \
-  -output "$TEMP_BIN_DIR/docker"
-rm -rf "$TEMP_BIN_DIR/docker-arm64" "$TEMP_BIN_DIR/docker-amd64"
-
-# Download Docker Compose plugin for both architectures
-echo "  Downloading Docker Compose plugin..."
-curl -L -o "$TEMP_BIN_DIR/docker-compose-arm64" \
-  "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-aarch64"
-curl -L -o "$TEMP_BIN_DIR/docker-compose-x86_64" \
-  "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-x86_64"
-
-chmod +x "$TEMP_BIN_DIR"/docker-compose-*
-
-# Create universal Docker Compose binary
-echo "  Creating universal Docker Compose binary..."
-lipo -create \
-  "$TEMP_BIN_DIR/docker-compose-arm64" \
-  "$TEMP_BIN_DIR/docker-compose-x86_64" \
-  -output "$TEMP_BIN_DIR/docker-compose"
-
-# Build mkp224o as a universal binary for custom onion address prefixes
-echo "  Building mkp224o for custom onion address prefixes..."
-if command -v git >/dev/null 2>&1; then
-    # Clone mkp224o
-    git clone https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || true
+# Build mkp224o as a universal binary for custom onion address prefixes.
+# Skip the full source build + cross-compile (~30s + libsodium crosscomp)
+# when we already have a cached universal binary for this pinned tag.
+if cache_get "mkp224o-${MKP224O_VERSION}-universal" "$TEMP_BIN_DIR/mkp224o"; then
+    echo "  mkp224o ${MKP224O_VERSION}: cache hit"
+elif command -v git >/dev/null 2>&1; then
+    echo "  Building mkp224o ${MKP224O_VERSION} for custom onion address prefixes..."
+    # Clone mkp224o at the pinned tag — shallow clone, saves most of the
+    # git fetch cost relative to a full clone of the master history.
+    git clone --branch "${MKP224O_VERSION}" --depth 1 \
+        https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || \
+        git clone https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || true
 
     # Check for required dependencies
     if command -v brew >/dev/null 2>&1; then
@@ -227,9 +292,11 @@ if command -v git >/dev/null 2>&1; then
         else
             echo "  ✓ mkp224o statically linked (no libsodium dependency)"
         fi
+        cache_put "mkp224o-${MKP224O_VERSION}-universal" "$TEMP_BIN_DIR/mkp224o"
     elif [ -f "$MKP_ARM64_DIR/mkp224o" ]; then
         echo "  WARNING: x86_64 build failed, using arm64-only mkp224o"
         cp "$MKP_ARM64_DIR/mkp224o" "$TEMP_BIN_DIR/mkp224o"
+        # Don't cache arch-incomplete builds.
     else
         echo "  WARNING: mkp224o build failed"
     fi
