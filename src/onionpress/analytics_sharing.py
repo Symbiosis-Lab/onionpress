@@ -6,7 +6,9 @@ set ``SHARE_ANALYTICS_WITH_ONIONHOME=yes`` in their config.
 """
 
 import base64
+import gzip
 import hashlib
+import io
 import json
 import os
 import platform
@@ -112,20 +114,21 @@ def _sharing_loop(app):
         if enabled != "yes":
             continue
 
-        # Precondition gates: don't attempt when we obviously can't —
-        # no internet, or our own service isn't ready. Neither is a
-        # "failure" worth burning a retry slot, they're just "come back
-        # later." Wait briefly and re-check at the top of the loop.
+        # Precondition gate: only need internet, not our own onion to
+        # be reachable. Uploading goes to OnionHome over Tor, which
+        # works as soon as the Tor client has circuits — well before
+        # our onion's descriptor has propagated. Gating on is_ready
+        # used to cost us the first 1–5 min of every boot. A
+        # "no internet" isn't a failure worth burning a retry slot —
+        # come back later. If OnionHome itself is unreachable, the
+        # manifest POST below returns "manifest_failed" and the outer
+        # loop applies its own backoff.
         try:
             online = app.check_internet_connectivity()
         except Exception:
             online = True  # conservative: let the upload try
         if not online:
             app.log("Analytics sharing: no internet, will retry")
-            _upload_now.wait(60)
-            continue
-        if not getattr(app, "is_ready", False):
-            app.log("Analytics sharing: service not ready, will retry")
             _upload_now.wait(60)
             continue
 
@@ -237,6 +240,36 @@ def _do_upload_cycle(app, include_active=False):
     if not all_files:
         return {"status": "no_files"}
 
+    # Gzip any uncompressed .log entry in memory so the wire transfer is
+    # ~10–20x smaller. Rolled .log.gz files on disk pass through as-is.
+    # Active logs are still being written, so we compress a point-in-time
+    # snapshot — subsequent writes will ship in the next day's cycle when
+    # the file has either rolled (on-disk .log.gz) or grown enough that
+    # OnionHome re-requests the larger snapshot under the same name.
+    compressed_bytes = {}  # advertised name -> gzipped bytes
+    transformed = []
+    for entry in all_files:
+        name = entry["name"]
+        path = entry["path"]
+        if name.endswith(".gz"):
+            transformed.append(entry)
+            continue
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6) as gz:
+            gz.write(raw)
+        data = buf.getvalue()
+        gz_name = name + ".gz"
+        compressed_bytes[gz_name] = data
+        transformed.append({"name": gz_name, "size": len(data), "path": path})
+    all_files = transformed
+
     all_files.sort(key=lambda f: f["name"], reverse=True)  # newest first by date in name
 
     if not all_files:
@@ -308,11 +341,15 @@ def _do_upload_cycle(app, include_active=False):
         if not path or not os.path.exists(path):
             continue
 
-        try:
-            with open(path, "rb") as f:
-                content_b64 = base64.b64encode(f.read()).decode("ascii")
-        except OSError:
-            continue
+        cached = compressed_bytes.get(name)
+        if cached is not None:
+            content_b64 = base64.b64encode(cached).decode("ascii")
+        else:
+            try:
+                with open(path, "rb") as f:
+                    content_b64 = base64.b64encode(f.read()).decode("ascii")
+            except OSError:
+                continue
 
         ts2 = _oa.make_timestamp()
         sig2 = _oa.sign_payload(
@@ -339,6 +376,18 @@ def _do_upload_cycle(app, include_active=False):
             # total-size enforcement won't prematurely rotate this
             # roll (or any earlier one) out of existence when the
             # next outage extends beyond retention.
+            #
+            # Skip watermark updates for live-compressed uploads (those
+            # whose .log.gz name was synthesized in memory from an
+            # actively-written .log file). The disk name is still .log,
+            # which sorts strictly below the advertised .log.gz — marking
+            # shipped here would make retention treat the still-growing
+            # active file as deletable, and would also mask the fact that
+            # the eventual rolled .log.gz on disk holds more bytes than
+            # what we shipped. The next cycle, once the file has rolled,
+            # picks it up off disk and advances the watermark properly.
+            if name in compressed_bytes:
+                continue
             try:
                 from onionpress import log_rotation
                 logs_dir = os.path.join(app.app_support, "logs")

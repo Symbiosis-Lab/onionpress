@@ -79,7 +79,7 @@ def extract_log_type(filename):
     ``container-onionheaven-takeover-5``
     ``launcher.log`` → ``launcher``
     """
-    if filename == "launcher.log":
+    if filename in ("launcher.log", "launcher.log.gz"):
         return "launcher"
     m = _FILENAME_RE.match(filename)
     return m.group("type") if m else None
