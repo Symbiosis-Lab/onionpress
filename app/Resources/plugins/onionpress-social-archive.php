@@ -558,6 +558,30 @@ function onionpress_social_wrap_as_card( $content ) {
 add_filter( 'the_content', 'onionpress_social_wrap_as_card', 20 );
 
 /**
+ * Tag the <body> and <article> elements with op-is-social when we're
+ * rendering an imported post. The theme-level title + date/author
+ * chrome looks redundant above our tweet-style card (the card already
+ * shows the author and time); CSS in the card stylesheet below uses
+ * these classes to hide the redundant chrome on single-post views,
+ * leaving just the card.
+ */
+add_filter( 'body_class', function ( $classes ) {
+    if ( is_singular() ) {
+        $post_id = get_queried_object_id();
+        if ( $post_id && get_post_meta( $post_id, '_source_id', true ) ) {
+            $classes[] = 'op-is-social';
+        }
+    }
+    return $classes;
+} );
+add_filter( 'post_class', function ( $classes, $class, $post_id ) {
+    if ( $post_id && get_post_meta( $post_id, '_source_id', true ) ) {
+        $classes[] = 'op-is-social';
+    }
+    return $classes;
+}, 10, 3 );
+
+/**
  * Inline stylesheet for the tweet-style card. Emitted once per page
  * via wp_head so we don't pollute post_content with styles that can't
  * be overridden in the theme. Uses CSS custom property --op-accent so
@@ -655,6 +679,16 @@ function onionpress_social_card_styles() {
     .op-social-card__foot a { color: #1d9bf0; text-decoration: none; }
     .op-social-card__foot a:hover { text-decoration: underline; }
     .op-social-card__sep { margin: 0 0.25em; }
+    /* On single-post views of imported content, hide the theme's
+       own title and date/author meta — the card already shows those,
+       and doubling them up makes an imported tweet look like a blog
+       post that happens to contain a tweet. Targets .op-is-social
+       on body (single pages) or on article (archive pages) so the
+       rule applies either way without cross-theme fragility. */
+    body.op-is-social .post-title,
+    body.op-is-social .post-meta,
+    .op-is-social > .post-title,
+    .op-is-social > .post-meta { display: none; }
     @media (prefers-color-scheme: dark) {
         .op-social-card {
             background: #15202b;
