@@ -364,6 +364,35 @@ function onionpress_social_register_importer( $slug ) {
 }
 
 /**
+ * Bump posts_per_page to 200 on social-source category archives.
+ *
+ * The site-wide WordPress "Blog pages show at most" setting stays in
+ * force for your own writing; this filter only kicks in on
+ * /category/twitter/, /category/mastodon/, etc. Tweets are short
+ * and the card rendering is lightweight, so 200 per page is a
+ * reasonable browse/scroll unit for an archive of thousands.
+ *
+ * Gated on main query + front-end + category + source-slug match,
+ * so it won't interfere with admin queries, widget queries, or
+ * non-social categories.
+ */
+add_action( 'pre_get_posts', function ( $query ) {
+    if ( is_admin() || ! $query->is_main_query() || ! is_category() ) {
+        return;
+    }
+    $term = $query->get_queried_object();
+    if ( ! ( $term instanceof WP_Term ) ) {
+        return;
+    }
+    foreach ( onionpress_social_sources() as $info ) {
+        if ( isset( $info['cat_slug'] ) && $info['cat_slug'] === $term->slug ) {
+            $query->set( 'posts_per_page', 200 );
+            return;
+        }
+    }
+} );
+
+/**
  * Wrap imported posts in a tweet-style card.
  *
  * Implemented as a `the_content` filter rather than baked into stored
