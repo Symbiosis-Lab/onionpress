@@ -424,32 +424,219 @@ add_filter( 'widget_archives_dropdown_args', function ( $args ) {
 } );
 
 /**
- * Bump posts_per_page to 200 on social-source category archives.
+ * Uniform posts_per_page=200 on every front-end main-query listing
+ * (home, category/tag archives, date/author archives, search results).
+ * Singular views and admin queries keep WP defaults.
  *
- * The site-wide WordPress "Blog pages show at most" setting stays in
- * force for your own writing; this filter only kicks in on
- * /category/twitter/, /category/mastodon/, etc. Tweets are short
- * and the card rendering is lightweight, so 200 per page is a
- * reasonable browse/scroll unit for an archive of thousands.
- *
- * Gated on main query + front-end + category + source-slug match,
- * so it won't interfere with admin queries, widget queries, or
- * non-social categories.
+ * Rationale: imported tweets are short and the card rendering is
+ * lightweight; 200 per page is a reasonable browse unit, and uniform
+ * pagination means one consistent rhythm instead of "10 on the home,
+ * 200 on the twitter tab." Pairs with the infinite-scroll footer
+ * script below so scrolling doesn't feel like a wall anyway.
  */
 add_action( 'pre_get_posts', function ( $query ) {
-    if ( is_admin() || ! $query->is_main_query() || ! is_category() ) {
+    if ( is_admin() || ! $query->is_main_query() ) {
+        return;
+    }
+    if ( $query->is_singular() ) {
+        return;
+    }
+    $query->set( 'posts_per_page', 200 );
+} );
+
+/**
+ * Render a Twitter-style profile header at the top of the main loop
+ * when viewing a social-source category archive. Injected via
+ * loop_start so the theme's index.php template can handle the post
+ * listing itself — no custom category template needed.
+ *
+ * Gated to main query + front-end + is_category() + source-slug
+ * match, so it won't fire on admin listings, widgets, or
+ * non-source categories.
+ */
+add_action( 'loop_start', function ( $query ) {
+    if ( ! $query instanceof WP_Query
+        || ! $query->is_main_query()
+        || is_admin()
+        || is_feed()
+        || ! is_category() ) {
         return;
     }
     $term = $query->get_queried_object();
     if ( ! ( $term instanceof WP_Term ) ) {
         return;
     }
-    foreach ( onionpress_social_sources() as $info ) {
+    foreach ( onionpress_social_sources() as $slug => $info ) {
         if ( isset( $info['cat_slug'] ) && $info['cat_slug'] === $term->slug ) {
-            $query->set( 'posts_per_page', 200 );
+            echo onionpress_social_render_profile_header( $slug, $info, $term );
             return;
         }
     }
+} );
+
+function onionpress_social_render_profile_header( $source_slug, $info, $term ) {
+    $admin_user = get_user_by( 'id', 1 );
+    $avatar_url = $admin_user ? get_avatar_url( $admin_user->ID, array( 'size' => 128 ) ) : '';
+    $name       = $admin_user ? $admin_user->display_name : get_bloginfo( 'name' );
+    $handle_opt = 'onionpress_social_' . $source_slug . '_handle';
+    $handle     = (string) get_option( $handle_opt, '' );
+
+    $post_count = intval( $term->count );
+    $earliest   = get_posts( array(
+        'category'       => $term->term_id,
+        'posts_per_page' => 1,
+        'orderby'        => 'date',
+        'order'          => 'ASC',
+    ) );
+    $latest = get_posts( array(
+        'category'       => $term->term_id,
+        'posts_per_page' => 1,
+        'orderby'        => 'date',
+        'order'          => 'DESC',
+    ) );
+    $date_range = '';
+    if ( $earliest && $latest ) {
+        $from = mysql2date( 'M Y', $earliest[0]->post_date );
+        $to   = mysql2date( 'M Y', $latest[0]->post_date );
+        $date_range = ( $from === $to ) ? $from : "$from &ndash; $to";
+    }
+
+    ob_start();
+    ?>
+    <section class="op-social-profile" style="--op-accent:<?php echo esc_attr( $info['color'] ); ?>;">
+        <?php if ( $avatar_url ) : ?>
+            <img class="op-social-profile__avatar" src="<?php echo esc_url( $avatar_url ); ?>" alt="">
+        <?php endif; ?>
+        <div class="op-social-profile__meta">
+            <h1 class="op-social-profile__name"><?php echo esc_html( $name ); ?></h1>
+            <?php if ( $handle !== '' ) : ?>
+                <div class="op-social-profile__handle">@<?php echo esc_html( $handle ); ?></div>
+            <?php endif; ?>
+            <div class="op-social-profile__source">
+                Imported from <strong><?php echo esc_html( $info['label'] ); ?></strong>
+            </div>
+            <div class="op-social-profile__stats">
+                <strong><?php echo number_format_i18n( $post_count ); ?></strong>
+                post<?php echo $post_count === 1 ? '' : 's'; ?>
+                <?php if ( $date_range ) : ?>
+                    &middot; <?php echo $date_range; ?>
+                <?php endif; ?>
+            </div>
+        </div>
+    </section>
+    <?php
+    return (string) ob_get_clean();
+}
+
+/**
+ * Universal infinite-scroll on any listing page that renders a
+ * `.pagination` block. IntersectionObserver watches pagination; when
+ * it scrolls into view the script fetches the next page URL from its
+ * <a class="next"> link, extracts all <article> elements from the
+ * fetched document, and appends them above the (newly-replaced)
+ * pagination block. Continues until no next link exists.
+ *
+ * Layered on top of server-rendered pagination, not a replacement —
+ * with JS off or on fetch failure, the normal next-page link is
+ * clickable. Crawlers (SPN, Googlebot) see the same server-side
+ * <a class="next"> and can follow it without JS.
+ */
+add_action( 'wp_footer', function () {
+    if ( is_admin() || is_feed() || is_singular() ) {
+        return;
+    }
+    ?>
+    <script id="op-social-infinite-scroll">
+    (function () {
+        var seen = new Set();
+        var loading = false;
+        function currentNext() {
+            var p = document.querySelector('.pagination .next');
+            return p && p.href ? p.href : null;
+        }
+        function sig(el) {
+            return el.outerHTML.length + ':' + (el.textContent || '').slice(0, 60);
+        }
+        function loadMore(url) {
+            if (loading) return;
+            loading = true;
+            var pag = document.querySelector('.pagination');
+            if (!pag) { loading = false; return; }
+            pag.classList.add('is-loading');
+            fetch(url, { credentials: 'same-origin' })
+                .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
+                .then(function (html) {
+                    var doc = new DOMParser().parseFromString(html, 'text/html');
+                    // Grab the main content area's articles — avoid
+                    // sidebar widgets with post-like markup.
+                    var newArts = doc.querySelectorAll('.main-content article');
+                    newArts.forEach(function (art) {
+                        var s = sig(art);
+                        if (seen.has(s)) return;
+                        seen.add(s);
+                        pag.parentNode.insertBefore(art, pag);
+                    });
+                    var newPag = doc.querySelector('.pagination');
+                    if (newPag) {
+                        pag.replaceWith(newPag);
+                        observe();
+                    } else {
+                        pag.remove();
+                    }
+                })
+                .catch(function () { /* leave pagination click-through intact */ })
+                .finally(function () { loading = false; });
+        }
+        var io = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+                if (!e.isIntersecting) return;
+                var n = currentNext();
+                if (n) loadMore(n);
+            });
+        }, { rootMargin: '600px 0px' });
+        function observe() {
+            var pag = document.querySelector('.pagination');
+            if (pag) io.observe(pag);
+        }
+        // Seed 'seen' with articles already on the page
+        document.querySelectorAll('.main-content article').forEach(function (art) {
+            seen.add(sig(art));
+        });
+        observe();
+    })();
+    </script>
+    <style id="op-social-profile-styles">
+    .op-social-profile {
+        display: flex;
+        align-items: center;
+        gap: 1.25em;
+        max-width: 640px;
+        margin: 1em 0 2em;
+        padding: 1.25em 1.5em;
+        border: 1px solid #e1e8ed;
+        border-top: 6px solid var(--op-accent, #1da1f2);
+        border-radius: 14px;
+        background: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    .op-social-profile__avatar {
+        flex: 0 0 auto; width: 80px; height: 80px;
+        border-radius: 50%; object-fit: cover; background: #eee;
+    }
+    .op-social-profile__meta { min-width: 0; flex: 1; }
+    .op-social-profile__name  { margin: 0 0 0.15em; font-size: 1.6em; line-height: 1.2; color: #0f1419; }
+    .op-social-profile__handle { color: #536471; font-size: 1em; margin-bottom: 0.5em; }
+    .op-social-profile__source,
+    .op-social-profile__stats  { color: #536471; font-size: 0.9em; line-height: 1.5; }
+    .op-social-profile__stats strong { color: #0f1419; }
+    @media (prefers-color-scheme: dark) {
+        .op-social-profile { background: #15202b; border-color: #38444d; }
+        .op-social-profile__name { color: #e7e9ea; }
+        .op-social-profile__handle, .op-social-profile__source, .op-social-profile__stats { color: #8b98a5; }
+        .op-social-profile__stats strong { color: #e7e9ea; }
+    }
+    </style>
+    <?php
 } );
 
 /**
