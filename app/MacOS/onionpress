@@ -61,6 +61,14 @@ ensure_documents_dir() {
     fi
     mkdir -p "$DOCUMENTS_DIR/backups"
     mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+    # Social Archives holds source ZIPs from the Twitter/Mastodon/etc.
+    # importers. Kept outside Creations so users don't see imported-
+    # source clutter alongside their own original creations, but still
+    # in Documents so Time Machine and similar backup tools pick it up.
+    # Sentinel file lets the WP-side importer plugin distinguish the
+    # real mount from compose's /tmp fallback.
+    mkdir -p "$DOCUMENTS_DIR/Social Archives"
+    touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
 }
 
 # Emit `--mount $DOCUMENTS_DIR:w` only if the Documents subtree already

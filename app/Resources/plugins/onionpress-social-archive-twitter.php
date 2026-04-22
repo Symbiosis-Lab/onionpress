@@ -409,7 +409,7 @@ function onionpress_twitter_import_tweet( $tweet, $opts ) {
     // `twitter:` prefix so the same ID can't collide with other sources.
     $source_id = 'twitter:' . $tweet_id;
     $existing  = get_posts( array(
-        'post_type'      => ONIONPRESS_SOCIAL_POST_TYPE,
+        'post_type'      => 'post',
         'meta_key'       => '_source_id',
         'meta_value'     => $source_id,
         'post_status'    => 'any',
@@ -455,7 +455,7 @@ function onionpress_twitter_import_tweet( $tweet, $opts ) {
     }
 
     $post_id = wp_insert_post( array(
-        'post_type'     => ONIONPRESS_SOCIAL_POST_TYPE,
+        'post_type'     => 'post',
         'post_status'   => 'publish',
         'post_title'    => $title,
         'post_content'  => $content,
@@ -477,7 +477,14 @@ function onionpress_twitter_import_tweet( $tweet, $opts ) {
         return 'errors';
     }
 
-    wp_set_object_terms( $post_id, 'twitter', ONIONPRESS_SOCIAL_SOURCE_TAX );
+    // Assign the Twitter category. Created on demand by the core
+    // plugin if it doesn't already exist.
+    if ( function_exists( 'onionpress_social_ensure_category' ) ) {
+        $cat_id = onionpress_social_ensure_category( 'twitter' );
+        if ( $cat_id ) {
+            wp_set_post_categories( $post_id, array( $cat_id ), false );
+        }
+    }
 
     // Hashtags -> post tags. Not a per-platform taxonomy because tags
     // are blog-wide already and cross-source tagging is more useful.
@@ -639,17 +646,11 @@ function onionpress_twitter_sideload_media( $post_id, $tweet_id, $media_dir ) {
 
 function onionpress_twitter_render_recent() {
     $recent = get_posts( array(
-        'post_type'      => ONIONPRESS_SOCIAL_POST_TYPE,
+        'post_type'      => 'post',
         'posts_per_page' => 10,
         'orderby'        => 'date',
         'order'          => 'DESC',
-        'tax_query'      => array(
-            array(
-                'taxonomy' => ONIONPRESS_SOCIAL_SOURCE_TAX,
-                'field'    => 'slug',
-                'terms'    => 'twitter',
-            ),
-        ),
+        'category_name'  => 'twitter',
     ) );
     if ( empty( $recent ) ) {
         echo '<p><em>No Twitter posts imported yet.</em></p>';
