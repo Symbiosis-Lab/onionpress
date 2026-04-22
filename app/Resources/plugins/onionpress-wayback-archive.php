@@ -19,15 +19,28 @@ if ( ! defined( 'ABSPATH' ) ) {
 // ───────────────────────────── tunables ─────────────────────────────
 
 if ( ! defined( 'ONIONPRESS_WAYBACK_MAX_RETRIES' ) ) {
-    // Max SPN crawl failures per URL before we give up. Each retry waits
-    // 65 min (past SPN's dedup cache), so 20 ≈ 22 h of trying.
+    // Max SPN crawl failures per URL before we give up.
     define( 'ONIONPRESS_WAYBACK_MAX_RETRIES', 20 );
 }
 if ( ! defined( 'ONIONPRESS_WAYBACK_RETRY_INTERVAL' ) ) {
-    // Seconds to wait after an SPN error before resubmitting. Must be
-    // > SPN's ~60 min dedup cache or resubmission returns the same
-    // failed job_id.
-    define( 'ONIONPRESS_WAYBACK_RETRY_INTERVAL', 3900 );
+    // Seconds to wait after an SPN error before resubmitting.
+    //
+    // Per Vangelis Banos (SPN maintainer, 2026-04-22): SPN captures
+    // average 20-30 seconds and the service is in great shape, no
+    // queues. The long 3900s (~65 min) value previously used here was
+    // based on a folklore belief about a "60-min dedup cache" that
+    // doesn't actually apply — short retries are fine.
+    //
+    // Rate-limit management is handled separately via the /save/status/
+    // user endpoint check in onionpress_wayback_user_status() below;
+    // this interval only governs the post-error backoff.
+    define( 'ONIONPRESS_WAYBACK_RETRY_INTERVAL', 120 );
+}
+if ( ! defined( 'ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT' ) ) {
+    // Seconds to wait when /save/status/user shows available=0
+    // (we've hit the 7/min patron limit). Short — a slot frees within
+    // ~10s most of the time.
+    define( 'ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT', 20 );
 }
 if ( ! defined( 'ONIONPRESS_WAYBACK_POLL_INTERVAL' ) ) {
     // Seconds between /save/status/<job> polls while a job is pending.
@@ -141,6 +154,61 @@ function onionpress_wayback_feed_url_full() {
 // ──────────────────────────── SPN calls ─────────────────────────────
 
 /**
+ * Check the SPN user's current rate-limit status.
+ *
+ * Archive.org's SPN allows ~7 concurrent captures per authenticated
+ * patron at a time. Rather than submit blindly and learn via HTTP 429
+ * or job errors, we call /save/status/user first to see how many slots
+ * we have available. If available == 0 we back off for a short
+ * interval instead of burning through retries on the submit path.
+ *
+ * Returns an associative array with keys like 'available' and
+ * 'processing' (integers), or null if the call itself failed.
+ * Callers treat null as "unknown — just try submitting" (falling back
+ * to the pre-existing behavior).
+ *
+ * The endpoint is documented in SPN's internal docs (per Vangelis
+ * Banos, 2026-04-22).
+ */
+function onionpress_wayback_user_status() {
+    if ( ! function_exists( 'curl_init' ) ) {
+        return null;
+    }
+    $auth = onionpress_wayback_auth_header();
+    if ( empty( $auth ) ) {
+        return null; // endpoint requires auth
+    }
+    $ch = curl_init( 'https://web.archive.org/save/status/user' );
+    curl_setopt_array( $ch, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 3,
+        CURLOPT_USERAGENT      => 'OnionPress/' . onionpress_version(),
+        CURLOPT_HTTPHEADER     => array(
+            'Accept: application/json',
+            'Authorization: ' . $auth,
+        ),
+        CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
+        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+    ) );
+    $response  = curl_exec( $ch );
+    $http_code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    curl_close( $ch );
+    if ( $http_code !== 200 || ! $response ) {
+        return null;
+    }
+    $body = @json_decode( (string) $response, true );
+    if ( ! is_array( $body ) ) {
+        return null;
+    }
+    return $body;
+}
+
+/**
  * Submit a URL to SPN. Tries the .onion endpoint first, falls back to
  * clearnet. Both go through onionpress-tor:9050.
  *
@@ -198,7 +266,7 @@ function onionpress_wayback_submit( $url ) {
             continue; // next endpoint
         }
         if ( $http_code === 429 ) {
-            return array( 'status' => 'failed' ); // rate-limited
+            return array( 'status' => 'rate_limited' );
         }
         if ( $http_code >= 200 && $http_code < 400 ) {
             $body = @json_decode( (string) $response, true );
@@ -467,6 +535,26 @@ function onionpress_wayback_advance( $url, callable $read, callable $write ) {
             . ' (ts ' . $cdx_ts . ') — no submission needed' );
         return 'cdx-hit';
     }
+    // Before submitting, ask SPN how many capture slots we have
+    // available. The patron rate limit is ~7/min; bursting past that
+    // causes the subsequent submits to return HTTP 429 or job errors
+    // that we'd otherwise misread as "this URL can't be archived."
+    // If user_status tells us we're out of slots, back off for a
+    // short interval and let the next sweep retry — no retry-count
+    // bump, no long cooldown.
+    $user_status = onionpress_wayback_user_status();
+    if ( is_array( $user_status )
+         && isset( $user_status['available'] )
+         && (int) $user_status['available'] < 1 ) {
+        $write( array_merge( $state, array(
+            'retry_after' => $now + ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT,
+        ) ) );
+        onionpress_wayback_log( 'Rate-limited (available=0, processing='
+            . ( $user_status['processing'] ?? '?' ) . '), back off '
+            . ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT . 's' );
+        return 'rate-limited-wait';
+    }
+
     $result = onionpress_wayback_submit( $url );
     if ( $result['status'] === 'ok' && ! empty( $result['job_id'] ) ) {
         $write( array_merge( $state, array(
@@ -480,6 +568,15 @@ function onionpress_wayback_advance( $url, callable $read, callable $write ) {
             'retry_after' => $now + ONIONPRESS_WAYBACK_RETRY_INTERVAL,
         ) ) );
         return 'cooldown';
+    }
+    if ( $result['status'] === 'rate_limited' ) {
+        // HTTP 429 despite user_status saying we had slots — happens
+        // under burst racing with other concurrent submitters on the
+        // same auth. Short wait, no retry-count bump.
+        $write( array_merge( $state, array(
+            'retry_after' => $now + ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT,
+        ) ) );
+        return 'rate-limited-429';
     }
     // submission failed — retry in 5 min (next sweep tick)
     $write( array_merge( $state, array(
@@ -537,23 +634,22 @@ function onionpress_wayback_sweep() {
         $processed++;
     }
 
-    // 2) Posts, in two priority queues:
+    // 2) Posts. Two queries joined by a 2:1 interleave so retries
+    //    aren't starved behind never-attempted posts (which vastly
+    //    outnumber them after a bulk import).
     //
-    //    Queue A (fresh): posts that have never been attempted
-    //      (retry_count meta doesn't exist). Processed first so a
-    //      just-published post always gets its shot before we spend
-    //      budget on chronically-failing old posts.
+    //    fresh: never-attempted posts, newest first. Gives a just-
+    //      published post its shot before we chew through the
+    //      backlog of older retries.
     //
-    //    Queue B (retrying): posts that have been attempted at least
-    //      once but aren't archived or given up on. Processed with
-    //      leftover budget, ordered oldest-attempt-first so nothing
-    //      starves — the URL whose retry_after is furthest in the
-    //      past has been waiting longest for another try.
+    //    retrying: previously-attempted posts that aren't archived
+    //      or given-up-on, oldest-retry_after first so whoever has
+    //      been waiting longest goes next.
     //
-    //    Both queues exclude archived_at and failed_at. The in-PHP
-    //    retry_after check below skips URLs still in their backoff
-    //    window without counting against the budget.
-    $queue_a = get_posts( array(
+    //    Interleave: 2 fresh, 1 retry, repeat. Retries get a
+    //      guaranteed ≥1/3 of the budget; fresh still dominates in
+    //      the common case of "just published something new."
+    $q_fresh = get_posts( array(
         'post_status' => 'publish',
         'post_type'   => array( 'post', 'page' ),
         'numberposts' => 100,
@@ -567,7 +663,7 @@ function onionpress_wayback_sweep() {
         ),
         'suppress_filters' => false,
     ) );
-    $queue_b = get_posts( array(
+    $q_retry = get_posts( array(
         'post_status' => 'publish',
         'post_type'   => array( 'post', 'page' ),
         'numberposts' => 100,
@@ -582,28 +678,34 @@ function onionpress_wayback_sweep() {
         ),
         'suppress_filters' => false,
     ) );
-
-    foreach ( array( $queue_a, $queue_b ) as $queue ) {
-        foreach ( $queue as $post ) {
-            if ( $processed >= $budget || microtime( true ) >= $deadline ) {
-                break 2;
-            }
-            $url = onionpress_wayback_post_url( $post->ID );
-            if ( empty( $url ) ) {
-                continue;
-            }
-            $state = onionpress_wayback_post_state( $post->ID );
-            if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > time() ) {
-                continue;
-            }
-            $action = onionpress_wayback_advance(
-                $url,
-                function () use ( $post ) { return onionpress_wayback_post_state( $post->ID ); },
-                function ( $state ) use ( $post ) { onionpress_wayback_post_state_set( $post->ID, $state ); }
-            );
-            onionpress_wayback_log( 'Sweep: post ' . $post->ID . ' → ' . $action );
-            $processed++;
+    $fi = new ArrayIterator( $q_fresh );
+    $ri = new ArrayIterator( $q_retry );
+    $tick = 0;
+    while ( $processed < $budget && microtime( true ) < $deadline ) {
+        $take_retry = ( $tick % 3 === 2 ) && $ri->valid();
+        if ( $take_retry ) {
+            $post = $ri->current(); $ri->next();
+        } elseif ( $fi->valid() ) {
+            $post = $fi->current(); $fi->next();
+        } elseif ( $ri->valid() ) {
+            $post = $ri->current(); $ri->next();
+        } else {
+            break;
         }
+        $tick++;
+        $url = onionpress_wayback_post_url( $post->ID );
+        if ( empty( $url ) ) continue;
+        $state = onionpress_wayback_post_state( $post->ID );
+        if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > time() ) {
+            continue;  // backoff window still open; doesn't count vs budget
+        }
+        $action = onionpress_wayback_advance(
+            $url,
+            function () use ( $post ) { return onionpress_wayback_post_state( $post->ID ); },
+            function ( $state ) use ( $post ) { onionpress_wayback_post_state_set( $post->ID, $state ); }
+        );
+        onionpress_wayback_log( 'Sweep: post ' . $post->ID . ' → ' . $action );
+        $processed++;
     }
 }
 add_action( 'onionpress_wayback_sweep', 'onionpress_wayback_sweep' );
