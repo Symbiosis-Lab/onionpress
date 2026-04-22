@@ -145,6 +145,75 @@ add_action( 'wp_loaded', function () {
 }, 5 );  // before the rewrite-flush gate below
 
 /**
+ * One-shot migration to strip absolute hostnames from <img> / <video>
+ * URLs in imported-post content. Earlier imports baked in whatever
+ * WordPress's site URL was at import time (typically
+ * http://localhost:8080/brewsterkahle/...), which renders fine on that
+ * exact URL but breaks when the same post is viewed through the onion
+ * (or via clearnet). Switching to root-relative URLs makes each image
+ * load from whichever host the viewer is using. Gated by a version
+ * option so it fires once per site.
+ */
+add_action( 'wp_loaded', function () {
+    if ( get_option( 'onionpress_social_archive_url_scrub' ) === '1' ) {
+        return;
+    }
+    global $wpdb;
+    $rows = $wpdb->get_results( $wpdb->prepare(
+        "SELECT p.ID, p.post_content
+           FROM {$wpdb->posts} p
+           JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+          WHERE pm.meta_key = %s
+            AND p.post_content LIKE %s
+          LIMIT 5000",
+        '_source_id',
+        '%http%://%'
+    ) );
+    $fixed = 0;
+    foreach ( $rows as $row ) {
+        // Rewrite any absolute URL whose host *isn't* twitter.com /
+        // mastodon / etc. to a root-relative path. The allow-list makes
+        // sure we don't rewrite legit outbound links in tweet content
+        // (archive.org, other-user references).
+        $new = preg_replace_callback(
+            '~\b(https?)://([^/\s"\'<>]+)(/[^\s"\'<>]*)?~',
+            function ( $m ) {
+                $host = $m[2];
+                $path = $m[3] ?? '/';
+                // Preserve outbound links to real sites on the public web.
+                if ( preg_match( '~(^|\.)(twitter|x|mastodon|bsky|facebook|instagram|tiktok|youtube|archive|github|wikipedia)\.~i', $host ) ) {
+                    return $m[0];
+                }
+                // Preserve other dotted domains too (generic web URLs).
+                // Only rewrite what looks like a local reference: the
+                // onion hostname, localhost, or 127.0.0.1 — these are
+                // where WP's "absolute URL" baked in during import.
+                if ( $host === 'localhost'
+                     || strpos( $host, 'localhost:' ) === 0
+                     || $host === '127.0.0.1'
+                     || preg_match( '~\.onion(:\d+)?$~', $host ) ) {
+                    return $path;
+                }
+                return $m[0];
+            },
+            $row->post_content
+        );
+        if ( $new !== $row->post_content ) {
+            $wpdb->update(
+                $wpdb->posts,
+                array( 'post_content' => $new ),
+                array( 'ID' => (int) $row->ID ),
+                array( '%s' ),
+                array( '%d' )
+            );
+            clean_post_cache( $row->ID );
+            $fixed++;
+        }
+    }
+    update_option( 'onionpress_social_archive_url_scrub', '1' );
+}, 6 );
+
+/**
  * One-shot rewrite-rule flush on first activation. mu-plugins have no
  * activation hook, so version-gate the flush via a WP option: flush
  * once, record, never again (until the version tag bumps). Per-site on
@@ -259,3 +328,56 @@ function onionpress_social_register_importer( $slug ) {
         return array_values( array_unique( $list ) );
     } );
 }
+
+/**
+ * Append a "View original on <source>" footer to imported posts.
+ *
+ * Implemented as a `the_content` filter rather than baked into stored
+ * post_content so:
+ *   - the stored post stays clean (readable in wp-admin, easy to edit,
+ *     friendly to future re-processing);
+ *   - all existing imports pick up the link without a migration;
+ *   - future importers for Mastodon, Bluesky, etc. inherit the same
+ *     footer for free just by populating _source_id and _source_url.
+ *
+ * Source slug is read from the `source:` prefix in _source_id, so a
+ * post without that meta (your own original writing) gets no footer.
+ */
+function onionpress_social_append_original_link( $content ) {
+    if ( ! in_the_loop() || is_admin() || is_feed() ) {
+        return $content;
+    }
+    $post_id = get_the_ID();
+    if ( ! $post_id ) {
+        return $content;
+    }
+    $source_id  = get_post_meta( $post_id, '_source_id', true );
+    $source_url = get_post_meta( $post_id, '_source_url', true );
+    if ( empty( $source_id ) || empty( $source_url ) ) {
+        return $content;
+    }
+    if ( strpos( $source_id, ':' ) === false ) {
+        return $content;
+    }
+    list( $source_slug ) = explode( ':', $source_id, 2 );
+    $sources = onionpress_social_sources();
+    if ( ! isset( $sources[ $source_slug ] ) ) {
+        return $content;
+    }
+    $info      = $sources[ $source_slug ];
+    $host      = parse_url( $source_url, PHP_URL_HOST );
+    $host_text = $host ? esc_html( $host ) : esc_html( $info['label'] );
+
+    $footer = sprintf(
+        '<div class="onionpress-source-footer" style="margin-top:1.5em;padding:0.5em 0.75em;border-left:3px solid %s;font-size:0.9em;color:#555;">'
+            . 'Originally posted on <strong>%s</strong>. '
+            . '<a href="%s" rel="nofollow noopener" target="_blank">View on %s &rarr;</a>'
+        . '</div>',
+        esc_attr( $info['color'] ),
+        esc_html( $info['label'] ),
+        esc_url( $source_url ),
+        $host_text
+    );
+    return $content . $footer;
+}
+add_filter( 'the_content', 'onionpress_social_append_original_link', 20 );

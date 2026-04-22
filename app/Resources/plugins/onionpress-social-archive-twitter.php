@@ -619,14 +619,19 @@ function onionpress_twitter_sideload_media( $post_id, $tweet_id, $media_dir ) {
         }
 
         if ( strpos( $type['type'], 'image/' ) === 0 ) {
-            $tags[] = wp_get_attachment_image(
+            $img = wp_get_attachment_image(
                 $attach_id,
                 'large',
                 false,
                 array( 'loading' => 'lazy', 'style' => 'max-width:100%;height:auto;' )
             );
+            // Strip absolute hostname from src/srcset so the <img> renders
+            // correctly on any host (onion, localhost, clearnet) the same
+            // post might be viewed through. wp_make_link_relative() would
+            // work on a single URL; we need to scrub every URL in the tag.
+            $tags[] = preg_replace( '~https?://[^/\s"\']+/~', '/', $img );
         } elseif ( strpos( $type['type'], 'video/' ) === 0 ) {
-            $url    = wp_get_attachment_url( $attach_id );
+            $url = wp_make_link_relative( wp_get_attachment_url( $attach_id ) );
             $tags[] = sprintf(
                 '<video controls preload="metadata" style="max-width:100%%;"><source src="%s" type="%s"></video>',
                 esc_url( $url ),
