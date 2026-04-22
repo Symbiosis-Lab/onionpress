@@ -151,6 +151,78 @@ if ( $is_social_source ) :
             ?>
         </div>
 
+        <!--
+          Infinite scroll layered on top of standard pagination. The
+          <a class="next"> link above is a genuine next-page URL, so if
+          JavaScript is off or the fetch fails the user can still click
+          through normally. When JS is on, we IntersectionObserver the
+          pagination element and, when it scrolls into view, fetch the
+          next page, extract its articles, and append them above the
+          (newly-replaced) pagination. Keeps going until a page has no
+          next link.
+        -->
+        <script>
+        (function () {
+            var seen = new Set();  // guard against duplicate appends
+            var loading = false;
+
+            function currentNext() {
+                var p = document.querySelector('.pagination .next');
+                return p && p.href ? p.href : null;
+            }
+
+            function loadMore(url) {
+                if (loading) return;
+                loading = true;
+                var pag = document.querySelector('.pagination');
+                if (!pag) { loading = false; return; }
+                pag.classList.add('is-loading');
+
+                fetch(url, { credentials: 'same-origin' })
+                    .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
+                    .then(function (html) {
+                        var doc = new DOMParser().parseFromString(html, 'text/html');
+                        var newArts = doc.querySelectorAll('.op-social-archive-item');
+                        newArts.forEach(function (art) {
+                            var sig = art.outerHTML.length + ':' + (art.textContent || '').slice(0, 60);
+                            if (seen.has(sig)) return;
+                            seen.add(sig);
+                            pag.parentNode.insertBefore(art, pag);
+                        });
+                        var newPag = doc.querySelector('.pagination');
+                        if (newPag) {
+                            pag.replaceWith(newPag);
+                            observe();
+                        } else {
+                            pag.remove();
+                        }
+                    })
+                    .catch(function () { /* leave pagination click-through intact */ })
+                    .finally(function () { loading = false; });
+            }
+
+            var io = new IntersectionObserver(function (entries) {
+                entries.forEach(function (e) {
+                    if (!e.isIntersecting) return;
+                    var n = currentNext();
+                    if (n) loadMore(n);
+                });
+            }, { rootMargin: '600px 0px' });  // start loading well before pagination is on-screen
+
+            function observe() {
+                var pag = document.querySelector('.pagination');
+                if (pag) io.observe(pag);
+            }
+
+            // Seed the "seen" set with the articles already on page 1
+            document.querySelectorAll('.op-social-archive-item').forEach(function (art) {
+                seen.add(art.outerHTML.length + ':' + (art.textContent || '').slice(0, 60));
+            });
+
+            observe();
+        })();
+        </script>
+
     <?php else : ?>
 
         <p>No posts in this category yet.</p>
