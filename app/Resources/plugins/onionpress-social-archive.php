@@ -691,12 +691,41 @@ function onionpress_social_wrap_as_card( $content ) {
     $handle_opt = 'onionpress_social_' . $source_slug . '_handle';
     $handle     = (string) get_option( $handle_opt, '' );
 
-    // Twitter's "3:57 AM · Nov 22, 2022" format — same shape for
-    // every source so the visual rhythm is consistent.
-    $ts_display = get_the_time( 'g:i A \&middot; M j, Y', $post_id );
+    // Twitter's "3:57 AM · Nov 22, 2022" format. Two separate
+    // get_the_time() calls so the literal middle-dot doesn't have to
+    // be escaped inside a date() format string (a past version tried
+    // '\&middot;' and produced garbage when date() interpreted
+    // 'middot' as format chars).
+    $ts_time = get_the_time( 'g:i A', $post_id );
+    $ts_date = get_the_time( 'M j, Y', $post_id );
+    $ts_display = esc_html( $ts_time ) . ' &middot; ' . esc_html( $ts_date );
 
     $host       = $source_url ? parse_url( $source_url, PHP_URL_HOST ) : '';
     $host_label = $host ? esc_html( $host ) : esc_html( $info['label'] );
+
+    // The source badge in the header links to the per-source category
+    // archive (e.g. /category/twitter/) so it's a usable filter, not
+    // just decoration. Falls back to a span if the category term is
+    // missing or the user lacks permission to see it.
+    $badge_inner = esc_html( $info['label'] );
+    $cat_term    = get_term_by( 'slug', $info['cat_slug'], 'category' );
+    $cat_url     = ( $cat_term && ! is_wp_error( $cat_term ) ) ? get_term_link( $cat_term ) : '';
+    if ( $cat_url && ! is_wp_error( $cat_url ) ) {
+        $badge_element = sprintf(
+            '<a class="op-social-card__badge" href="%s" style="background:%s;" title="Browse all imported %s posts">%s</a>',
+            esc_url( $cat_url ),
+            esc_attr( $info['color'] ),
+            esc_attr( $info['label'] ),
+            $badge_inner
+        );
+    } else {
+        $badge_element = sprintf(
+            '<span class="op-social-card__badge" style="background:%s;" title="Imported from %s">%s</span>',
+            esc_attr( $info['color'] ),
+            esc_attr( $info['label'] ),
+            $badge_inner
+        );
+    }
 
     $header  = '<div class="op-social-card__head">';
     if ( $avatar_url ) {
@@ -711,14 +740,7 @@ function onionpress_social_wrap_as_card( $content ) {
         $header .= '<span class="op-social-card__handle">@' . esc_html( $handle ) . '</span>';
     }
     $header .= '</div>';
-    // Source icon pill — small visual cue of which platform this
-    // imported from, colored with the source's brand color.
-    $header .= sprintf(
-        '<span class="op-social-card__badge" style="background:%s;" title="Imported from %s">%s</span>',
-        esc_attr( $info['color'] ),
-        esc_attr( $info['label'] ),
-        esc_html( $info['label'] )
-    );
+    $header .= $badge_element;
     $header .= '</div>';
 
     $footer  = '<div class="op-social-card__foot">';
@@ -864,11 +886,13 @@ function onionpress_social_card_styles() {
         border-radius: 999px;
         font-size: 0.72em;
         font-weight: 600;
-        color: #fff;
+        color: #fff !important;
         text-transform: uppercase;
         letter-spacing: 0.04em;
         opacity: 0.85;
+        text-decoration: none;
     }
+    a.op-social-card__badge:hover { opacity: 1; text-decoration: none; }
     .op-social-card__body {
         font-size: 1.02em;
         color: #0f1419;
