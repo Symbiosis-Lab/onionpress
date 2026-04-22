@@ -364,6 +364,66 @@ function onionpress_social_register_importer( $slug ) {
 }
 
 /**
+ * When on a category archive page, narrow the built-in WP Archives
+ * widget's month list + post counts to posts IN that category.
+ *
+ * Without these filters the "Archives" widget's counts are site-wide,
+ * so on /category/twitter/ a month with 80 tweets + 1 original blog
+ * post would read "(81)", which is misleading. Filtered:
+ * "(80) tweets in Oct 2022" etc.
+ *
+ * Also flips on show_post_count for category archives so the user
+ * doesn't have to reconfigure the widget manually — on category
+ * pages the counts are now the point.
+ *
+ * Generic (not social-specific): applies whenever is_category() is
+ * true, so a regular category also gets filtered monthly counts.
+ */
+add_filter( 'getarchives_join', function ( $join, $parsed_args ) {
+    global $wpdb;
+    if ( ! is_category() ) {
+        return $join;
+    }
+    $term = get_queried_object();
+    if ( ! ( $term instanceof WP_Term ) ) {
+        return $join;
+    }
+    return $join
+        . " INNER JOIN {$wpdb->term_relationships} tr ON {$wpdb->posts}.ID = tr.object_id"
+        . " INNER JOIN {$wpdb->term_taxonomy} tt ON tr.term_taxonomy_id = tt.term_taxonomy_id";
+}, 10, 2 );
+
+add_filter( 'getarchives_where', function ( $where, $parsed_args ) {
+    global $wpdb;
+    if ( ! is_category() ) {
+        return $where;
+    }
+    $term = get_queried_object();
+    if ( ! ( $term instanceof WP_Term ) ) {
+        return $where;
+    }
+    return $where . $wpdb->prepare(
+        ' AND tt.taxonomy = %s AND tt.term_id = %d',
+        'category',
+        $term->term_id
+    );
+}, 10, 2 );
+
+add_filter( 'widget_archives_args', function ( $args ) {
+    if ( is_category() ) {
+        $args['show_post_count'] = true;
+    }
+    return $args;
+} );
+
+add_filter( 'widget_archives_dropdown_args', function ( $args ) {
+    if ( is_category() ) {
+        $args['show_post_count'] = true;
+    }
+    return $args;
+} );
+
+/**
  * Bump posts_per_page to 200 on social-source category archives.
  *
  * The site-wide WordPress "Blog pages show at most" setting stays in
