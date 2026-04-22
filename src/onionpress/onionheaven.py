@@ -266,6 +266,54 @@ def _check_wordpress_healthy(app):
         return False
 
 
+def _heartbeat_landed(app, content_addr, freshness_seconds=180):
+    """Did an earlier POST /online actually land on the hub, even though
+    we timed out waiting for the ACK?
+
+    Calls GET /status/<content_addr> and checks the most-recent
+    last_healthy across all registered entries. If that timestamp is
+    within *freshness_seconds* of now, the server received and
+    processed our heartbeat — our POST timeout was only on the return
+    path. Used to distinguish "actually delivered" from "never got
+    there" so the log doesn't scream FAILED for transient Tor ACK
+    losses. See issue #208.
+    """
+    try:
+        args = [
+            "exec", "onionpress-tor",
+            "curl", "-s", "--max-time", "30",
+            "--socks5-hostname", "127.0.0.1:9050",
+            "http://" + ONIONHEAVEN_ADDRESS + ":" + str(ONIONHEAVEN_API_PORT)
+            + "/status/" + content_addr,
+        ]
+        rc, output = _run_docker_rc(app, args, timeout=45)
+        if rc != 0 or not output:
+            return False
+        data = json.loads(output)
+        entries = data.get("entries", [])
+        if not entries:
+            return False
+        # We may have multiple entries across healthcheck_address rotations.
+        # Take the most recent last_healthy — that's the one that matters.
+        max_ts = None
+        for e in entries:
+            lh = e.get("last_healthy")
+            if not lh:
+                continue
+            try:
+                ts = datetime.fromisoformat(lh.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if max_ts is None or ts > max_ts:
+                max_ts = ts
+        if max_ts is None:
+            return False
+        age = (datetime.now(timezone.utc) - max_ts).total_seconds()
+        return age < freshness_seconds
+    except Exception:
+        return False
+
+
 def _send_heartbeat(app, wordpress_healthy=True):
     """Send a single /online heartbeat to OnionHeaven.
 
@@ -338,15 +386,21 @@ def _send_heartbeat(app, wordpress_healthy=True):
                 hub = ONIONHEAVEN_ADDRESS[:12]
                 app.log(f"OnionHeaven: heartbeat /online {hub}...onion OK")
         except (json.JSONDecodeError, KeyError):
-            app.log(f"OnionHeaven: heartbeat /online FAILED — bad JSON rc={rc}")
-    else:
-        reason = {6: "DNS error", 7: "connection refused", 28: "timed out",
-                  52: "empty reply", 56: "connection reset"}.get(rc, "unknown")
-        app.log(f"OnionHeaven: heartbeat /online FAILED — {reason} rc={rc}")
+            # Parseable rc=0 but body not JSON; queue retry. Quiet log —
+            # we'll decide FAILED vs delivered-no-ack once retry is done.
+            app.log(f"OnionHeaven: heartbeat /online bad JSON on first try, retrying")
+            ok = False
 
-    # Retry once after 3s on transient Tor HSDir failures
+    # Retry once after 3s on transient Tor HSDir failures. Soft-log the
+    # first-attempt miss here (rather than screaming FAILED before we've
+    # actually given up) so recovered runs don't leave scary breadcrumbs.
     if not (ok and output):
-        app.log("OnionHeaven: retrying in 3s...")
+        if ok:  # we already logged "bad JSON" above
+            pass
+        else:
+            reason = {6: "DNS error", 7: "connection refused", 28: "timed out",
+                      52: "empty reply", 56: "connection reset"}.get(rc, "unknown")
+            app.log(f"OnionHeaven: heartbeat /online {reason} rc={rc}, retrying in 3s")
         import time
         time.sleep(3)
         rc, output = _run_docker_rc(app, curl_args, timeout=45)
@@ -372,8 +426,26 @@ def _send_heartbeat(app, wordpress_healthy=True):
             return False
         except json.JSONDecodeError:
             app.log(f"OnionHeaven: heartbeat got non-JSON response: {output[:200]}")
+            # Before declaring failure, check if the POST actually landed —
+            # JSONDecodeError often means truncated body on a still-
+            # successful server-side write.
+            if _heartbeat_landed(app, content_addr):
+                hub = ONIONHEAVEN_ADDRESS[:12]
+                app.log(f"OnionHeaven: heartbeat /online {hub}...onion delivered (no-ack, response lost on return circuit)")
+                app._onionheaven_heartbeat_succeeded = True
+                return True
             return False
     else:
+        # Both attempts failed to get a parseable response. Before we
+        # log it as FAILED, ask the hub if our heartbeat actually landed
+        # — Tor circuits lose ACK packets often enough that "client
+        # timed out" regularly means "server received + processed,
+        # response never came back." See issue #208.
+        if _heartbeat_landed(app, content_addr):
+            hub = ONIONHEAVEN_ADDRESS[:12]
+            app.log(f"OnionHeaven: heartbeat /online {hub}...onion delivered (no-ack, response lost on return circuit)")
+            app._onionheaven_heartbeat_succeeded = True
+            return True
         app.log(f"OnionHeaven: heartbeat failed after retry: curl_rc={rc}, output={repr(output[:200]) if output else 'empty'}")
         return False
 
