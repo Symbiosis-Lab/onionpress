@@ -558,6 +558,39 @@ function onionpress_social_wrap_as_card( $content ) {
 add_filter( 'the_content', 'onionpress_social_wrap_as_card', 20 );
 
 /**
+ * Twin of the_content filter for excerpt contexts (homepage, search
+ * results, date/author archives — anywhere the theme calls
+ * the_excerpt() on a listing). Without this, imported posts show as
+ * title + plain-text excerpt when scrolling the main blog, which
+ * looks wrong next to cards on the category pages and single-tweet
+ * pages. Returns the full card HTML instead of the excerpt so a
+ * tweet looks like a tweet wherever it appears.
+ */
+function onionpress_social_wrap_excerpt_as_card( $excerpt ) {
+    if ( is_admin() || is_feed() ) {
+        return $excerpt;
+    }
+    $post_id = get_the_ID();
+    if ( ! $post_id ) {
+        return $excerpt;
+    }
+    $source_id = get_post_meta( $post_id, '_source_id', true );
+    if ( empty( $source_id ) || strpos( $source_id, ':' ) === false ) {
+        return $excerpt;
+    }
+    $post = get_post( $post_id );
+    if ( ! $post ) {
+        return $excerpt;
+    }
+    // Render the card using the same code path as the_content so the
+    // visual treatment is identical everywhere. The_content filter
+    // expects raw post_content and adds the card chrome around it.
+    return onionpress_social_wrap_as_card( wpautop( $post->post_content ) );
+}
+add_filter( 'the_excerpt', 'onionpress_social_wrap_excerpt_as_card', 20 );
+add_filter( 'get_the_excerpt', 'onionpress_social_wrap_excerpt_as_card', 20 );
+
+/**
  * Tag the <body> and <article> elements with op-is-social when we're
  * rendering an imported post. The theme-level title + date/author
  * chrome looks redundant above our tweet-style card (the card already
@@ -688,7 +721,12 @@ function onionpress_social_card_styles() {
     body.op-is-social .post-title,
     body.op-is-social .post-meta,
     .op-is-social > .post-title,
-    .op-is-social > .post-meta { display: none; }
+    .op-is-social > .post-meta,
+    .op-is-social > .read-more { display: none; }
+    /* The theme wraps listing excerpts in <div class="post-content">.
+       Our card is a block element that should fill the article — no
+       extra padding from that wrapper. */
+    .op-is-social > .post-content { padding: 0; }
     @media (prefers-color-scheme: dark) {
         .op-social-card {
             background: #15202b;
