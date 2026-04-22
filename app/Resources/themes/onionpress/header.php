@@ -82,6 +82,24 @@
         // Default nav when no menu is configured
         echo '<ul>';
         echo '<li><a href="' . esc_url(home_url('/')) . '">Home</a></li>';
+
+        // Social Archive tabs — one link per source that has imported
+        // posts (e.g. "My Tweets" → /category/twitter/). Labels come
+        // from the source definitions in onionpress-social-archive.php
+        // (mu-plugin; guaranteed loaded by this point).
+        if (function_exists('onionpress_social_sources')) {
+            foreach (onionpress_social_sources() as $slug => $info) {
+                $term = get_term_by('slug', $info['cat_slug'], 'category');
+                if ($term && !is_wp_error($term) && $term->count > 0) {
+                    $cat_url = get_term_link($term);
+                    if (!is_wp_error($cat_url)) {
+                        echo '<li><a href="' . esc_url($cat_url) . '">'
+                            . esc_html($info['nav_label']) . '</a></li>';
+                    }
+                }
+            }
+        }
+
         $creations_page = get_page_by_path('my-creations');
         if ($creations_page) {
             echo '<li><a href="' . esc_url(get_permalink($creations_page)) . '">My Creations</a></li>';

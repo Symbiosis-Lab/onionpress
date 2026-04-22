@@ -30,26 +30,60 @@ const ONIONPRESS_SOCIAL_ADMIN_SLUG = 'onionpress-social-archive';
 function onionpress_social_sources() {
     $sources = array(
         'twitter'  => array(
-            'label'    => 'Twitter / X',
-            'cat_name' => 'Twitter',
-            'cat_slug' => 'twitter',
-            'color'    => '#1da1f2',
+            'label'     => 'Twitter / X',
+            'cat_name'  => 'Twitter',
+            'cat_slug'  => 'twitter',
+            'color'     => '#1da1f2',
+            'nav_label' => 'My Tweets',
         ),
         'mastodon' => array(
-            'label'    => 'Mastodon',
-            'cat_name' => 'Mastodon',
-            'cat_slug' => 'mastodon',
-            'color'    => '#6364ff',
+            'label'     => 'Mastodon',
+            'cat_name'  => 'Mastodon',
+            'cat_slug'  => 'mastodon',
+            'color'     => '#6364ff',
+            'nav_label' => 'My Toots',
         ),
         'bluesky'  => array(
-            'label'    => 'Bluesky',
-            'cat_name' => 'Bluesky',
-            'cat_slug' => 'bluesky',
-            'color'    => '#0085ff',
+            'label'     => 'Bluesky',
+            'cat_name'  => 'Bluesky',
+            'cat_slug'  => 'bluesky',
+            'color'     => '#0085ff',
+            'nav_label' => 'My Skeets',
         ),
     );
     return apply_filters( 'onionpress_social_sources', $sources );
 }
+
+/**
+ * Inject per-source nav items into a custom primary nav menu via
+ * the `wp_nav_menu_items` filter. Only applies when the user has
+ * configured a primary menu AND has imported posts for that source;
+ * sites without configured menus use the theme's fallback nav,
+ * which has parallel logic in header.php.
+ */
+function onionpress_social_inject_nav_items( $items, $args ) {
+    if ( ! is_object( $args ) || ( isset( $args->theme_location ) && $args->theme_location !== 'primary' ) ) {
+        return $items;
+    }
+    $extra = '';
+    foreach ( onionpress_social_sources() as $slug => $info ) {
+        $term = get_term_by( 'slug', $info['cat_slug'], 'category' );
+        if ( ! $term || is_wp_error( $term ) || $term->count < 1 ) {
+            continue;
+        }
+        $url   = get_term_link( $term );
+        if ( is_wp_error( $url ) ) {
+            continue;
+        }
+        $extra .= sprintf(
+            '<li class="menu-item"><a href="%s">%s</a></li>',
+            esc_url( $url ),
+            esc_html( $info['nav_label'] )
+        );
+    }
+    return $items . $extra;
+}
+add_filter( 'wp_nav_menu_items', 'onionpress_social_inject_nav_items', 10, 2 );
 
 /**
  * Ensure a category term exists for *source_slug* and return its term ID.
