@@ -1473,6 +1473,51 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 }
 
 # Install OnionPress theme and plugins into the WordPress container
+configure_site_timezones() {
+    # Set each site's timezone_string to the host machine's IANA TZ
+    # (e.g. America/Los_Angeles) the first time we see each site.
+    # Without this, fresh WordPress installs default to empty string /
+    # gmt_offset=0, and imported tweet timestamps (stored as UTC
+    # post_date_gmt) end up displayed in UTC. Matching the host TZ
+    # reflects the times the user saw when they posted originally.
+    #
+    # Only sets when timezone_string is empty — never clobbers a
+    # user's intentional choice. Idempotent across launches.
+    if ! wp_is_installed; then
+        return 0
+    fi
+
+    local host_tz
+    host_tz="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')"
+    if [ -z "$host_tz" ]; then
+        log "Skipping timezone config: host TZ undetectable"
+        return 0
+    fi
+
+    # On multisite, iterate all sites; on single-site, fall back to the
+    # main siteurl. Empty output from `wp site list` means single-site.
+    local sites
+    sites="$(docker exec onionpress-wordpress wp site list --field=url --allow-root 2>/dev/null)"
+    if [ -z "$sites" ]; then
+        sites="$(docker exec onionpress-wordpress wp option get siteurl --allow-root 2>/dev/null)"
+    fi
+
+    local site_url current
+    for site_url in $sites; do
+        current="$(docker exec onionpress-wordpress wp option get timezone_string --url="$site_url" --allow-root 2>/dev/null || echo "")"
+        if [ -z "$current" ]; then
+            if docker exec onionpress-wordpress wp option update timezone_string "$host_tz" --url="$site_url" --allow-root >> "$LOG_FILE" 2>&1; then
+                log "✓ Set timezone_string=$host_tz for $site_url"
+            else
+                log "WARNING: Failed to set timezone for $site_url"
+            fi
+            # With timezone_string set, gmt_offset becomes redundant;
+            # blank it so WP uses the IANA name rather than a fixed offset.
+            docker exec onionpress-wordpress wp option update gmt_offset "" --url="$site_url" --allow-root >> "$LOG_FILE" 2>&1 || true
+        fi
+    done
+}
+
 install_onionpress_theme() {
     if ! wp_is_installed; then
         return 0
@@ -1850,6 +1895,10 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 
     # Install OnionPress theme and plugins
     install_onionpress_theme
+
+    # Configure site timezones to match the host machine so imported
+    # social-media timestamps display in local time. Idempotent.
+    configure_site_timezones
 
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
