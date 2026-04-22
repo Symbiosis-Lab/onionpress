@@ -1052,6 +1052,7 @@ class OnionPressApp(rumps.App):
             self._capture_shutdown.set()
         for name, entry in list(self._container_log_processes.items()):
             proc = entry.get("proc") if isinstance(entry, dict) else None
+            thread = entry.get("thread") if isinstance(entry, dict) else None
             if proc is None:
                 continue
             try:
@@ -1062,7 +1063,8 @@ class OnionPressApp(rumps.App):
                     proc.kill()
                 except Exception:
                     pass
-            thread.join(timeout=3)
+            if thread is not None:
+                thread.join(timeout=3)
         self._container_log_processes.clear()
 
     def ensure_docker_available(self):
