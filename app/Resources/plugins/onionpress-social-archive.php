@@ -330,20 +330,21 @@ function onionpress_social_register_importer( $slug ) {
 }
 
 /**
- * Append a "View original on <source>" footer to imported posts.
+ * Wrap imported posts in a tweet-style card.
  *
  * Implemented as a `the_content` filter rather than baked into stored
  * post_content so:
  *   - the stored post stays clean (readable in wp-admin, easy to edit,
  *     friendly to future re-processing);
- *   - all existing imports pick up the link without a migration;
+ *   - every existing import picks up the styling without a migration;
  *   - future importers for Mastodon, Bluesky, etc. inherit the same
- *     footer for free just by populating _source_id and _source_url.
+ *     card for free just by populating _source_id / _source_url, with
+ *     the card's accent color coming from the per-source definition.
  *
  * Source slug is read from the `source:` prefix in _source_id, so a
- * post without that meta (your own original writing) gets no footer.
+ * post without that meta (your own original writing) is untouched.
  */
-function onionpress_social_append_original_link( $content ) {
+function onionpress_social_wrap_as_card( $content ) {
     if ( ! in_the_loop() || is_admin() || is_feed() ) {
         return $content;
     }
@@ -353,10 +354,7 @@ function onionpress_social_append_original_link( $content ) {
     }
     $source_id  = get_post_meta( $post_id, '_source_id', true );
     $source_url = get_post_meta( $post_id, '_source_url', true );
-    if ( empty( $source_id ) || empty( $source_url ) ) {
-        return $content;
-    }
-    if ( strpos( $source_id, ':' ) === false ) {
+    if ( empty( $source_id ) || strpos( $source_id, ':' ) === false ) {
         return $content;
     }
     list( $source_slug ) = explode( ':', $source_id, 2 );
@@ -364,20 +362,188 @@ function onionpress_social_append_original_link( $content ) {
     if ( ! isset( $sources[ $source_slug ] ) ) {
         return $content;
     }
-    $info      = $sources[ $source_slug ];
-    $host      = parse_url( $source_url, PHP_URL_HOST );
-    $host_text = $host ? esc_html( $host ) : esc_html( $info['label'] );
+    $info = $sources[ $source_slug ];
 
-    $footer = sprintf(
-        '<div class="onionpress-source-footer" style="margin-top:1.5em;padding:0.5em 0.75em;border-left:3px solid %s;font-size:0.9em;color:#555;">'
-            . 'Originally posted on <strong>%s</strong>. '
-            . '<a href="%s" rel="nofollow noopener" target="_blank">View on %s &rarr;</a>'
-        . '</div>',
+    $post   = get_post( $post_id );
+    $author = $post ? get_userdata( $post->post_author ) : null;
+
+    // Display name: fall back from user → "OnionPress archive" rather
+    // than blank, since an imported post's author should always read
+    // as a person or entity rather than an empty box.
+    $display_name = $author && $author->display_name
+        ? $author->display_name
+        : get_bloginfo( 'name' );
+    $avatar_url   = $author ? get_avatar_url( $author->ID, array( 'size' => 96 ) ) : '';
+
+    // Per-source saved handle (e.g. onionpress_social_twitter_handle).
+    // The Twitter importer sets this via its admin page; other
+    // importers will follow the same convention.
+    $handle_opt = 'onionpress_social_' . $source_slug . '_handle';
+    $handle     = (string) get_option( $handle_opt, '' );
+
+    // Twitter's "3:57 AM · Nov 22, 2022" format — same shape for
+    // every source so the visual rhythm is consistent.
+    $ts_display = get_the_time( 'g:i A \&middot; M j, Y', $post_id );
+
+    $host       = $source_url ? parse_url( $source_url, PHP_URL_HOST ) : '';
+    $host_label = $host ? esc_html( $host ) : esc_html( $info['label'] );
+
+    $header  = '<div class="op-social-card__head">';
+    if ( $avatar_url ) {
+        $header .= sprintf(
+            '<img class="op-social-card__avatar" src="%s" alt="" loading="lazy">',
+            esc_url( $avatar_url )
+        );
+    }
+    $header .= '<div class="op-social-card__identity">'
+        . '<span class="op-social-card__name">' . esc_html( $display_name ) . '</span>';
+    if ( $handle !== '' ) {
+        $header .= '<span class="op-social-card__handle">@' . esc_html( $handle ) . '</span>';
+    }
+    $header .= '</div>';
+    // Source icon pill — small visual cue of which platform this
+    // imported from, colored with the source's brand color.
+    $header .= sprintf(
+        '<span class="op-social-card__badge" style="background:%s;" title="Imported from %s">%s</span>',
         esc_attr( $info['color'] ),
-        esc_html( $info['label'] ),
-        esc_url( $source_url ),
-        $host_text
+        esc_attr( $info['label'] ),
+        esc_html( $info['label'] )
     );
-    return $content . $footer;
+    $header .= '</div>';
+
+    $footer  = '<div class="op-social-card__foot">';
+    $footer .= '<span class="op-social-card__ts">' . $ts_display . '</span>';
+    if ( $source_url ) {
+        $footer .= sprintf(
+            ' <span class="op-social-card__sep">&middot;</span> '
+                . '<a class="op-social-card__viewlink" href="%s" rel="nofollow noopener" target="_blank">View on %s &rarr;</a>',
+            esc_url( $source_url ),
+            $host_label
+        );
+    }
+    $footer .= '</div>';
+
+    return sprintf(
+        '<div class="op-social-card op-social-card--%s" style="--op-accent:%s;">%s<div class="op-social-card__body">%s</div>%s</div>',
+        esc_attr( $source_slug ),
+        esc_attr( $info['color'] ),
+        $header,
+        $content,
+        $footer
+    );
 }
-add_filter( 'the_content', 'onionpress_social_append_original_link', 20 );
+add_filter( 'the_content', 'onionpress_social_wrap_as_card', 20 );
+
+/**
+ * Inline stylesheet for the tweet-style card. Emitted once per page
+ * via wp_head so we don't pollute post_content with styles that can't
+ * be overridden in the theme. Uses CSS custom property --op-accent so
+ * each source's brand color lights up the border without us needing
+ * one CSS block per source.
+ */
+function onionpress_social_card_styles() {
+    // Only emit on front-end views (skip admin / feeds).
+    if ( is_admin() || is_feed() ) {
+        return;
+    }
+    ?>
+    <style id="onionpress-social-card-styles">
+    .op-social-card {
+        max-width: 600px;
+        margin: 1.25em 0;
+        padding: 1em 1.25em;
+        border: 1px solid #e1e8ed;
+        border-left: 4px solid var(--op-accent, #1da1f2);
+        border-radius: 14px;
+        background: #ffffff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        line-height: 1.45;
+        color: #0f1419;
+    }
+    .op-social-card__head {
+        display: flex;
+        align-items: center;
+        gap: 0.75em;
+        margin-bottom: 0.75em;
+    }
+    .op-social-card__avatar {
+        flex: 0 0 auto;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        object-fit: cover;
+        background: #eee;
+    }
+    .op-social-card__identity {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        flex: 1;
+    }
+    .op-social-card__name {
+        font-weight: 700;
+        color: #0f1419;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .op-social-card__handle {
+        color: #536471;
+        font-size: 0.9em;
+    }
+    .op-social-card__badge {
+        flex: 0 0 auto;
+        padding: 0.15em 0.55em;
+        border-radius: 999px;
+        font-size: 0.72em;
+        font-weight: 600;
+        color: #fff;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        opacity: 0.85;
+    }
+    .op-social-card__body {
+        font-size: 1.02em;
+        color: #0f1419;
+        word-wrap: break-word;
+    }
+    .op-social-card__body p:first-child { margin-top: 0; }
+    .op-social-card__body p:last-child  { margin-bottom: 0; }
+    .op-social-card__body img,
+    .op-social-card__body video {
+        max-width: 100%;
+        height: auto;
+        border-radius: 12px;
+        margin: 0.5em 0;
+        display: block;
+    }
+    .op-social-card__body a {
+        color: #1d9bf0;
+        text-decoration: none;
+    }
+    .op-social-card__body a:hover { text-decoration: underline; }
+    .op-social-card__foot {
+        margin-top: 0.9em;
+        padding-top: 0.65em;
+        border-top: 1px solid #eff3f4;
+        color: #536471;
+        font-size: 0.85em;
+    }
+    .op-social-card__foot a { color: #1d9bf0; text-decoration: none; }
+    .op-social-card__foot a:hover { text-decoration: underline; }
+    .op-social-card__sep { margin: 0 0.25em; }
+    @media (prefers-color-scheme: dark) {
+        .op-social-card {
+            background: #15202b;
+            border-color: #38444d;
+            color: #e7e9ea;
+        }
+        .op-social-card__name  { color: #e7e9ea; }
+        .op-social-card__body  { color: #e7e9ea; }
+        .op-social-card__foot  { border-top-color: #22303c; color: #8b98a5; }
+        .op-social-card__handle, .op-social-card__foot { color: #8b98a5; }
+    }
+    </style>
+    <?php
+}
+add_action( 'wp_head', 'onionpress_social_card_styles' );
