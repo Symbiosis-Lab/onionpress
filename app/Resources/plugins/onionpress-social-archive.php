@@ -179,6 +179,57 @@ add_action( 'wp_loaded', function () {
 }, 5 );  // before the rewrite-flush gate below
 
 /**
+ * One-shot migration to rewrite post_date from post_date_gmt using
+ * the site's *current* timezone.
+ *
+ * When imports ran with WP timezone unset (empty string → UTC), the
+ * importer's `get_date_from_gmt( $post_date_gmt )` returned the UTC
+ * value unchanged and stored it as both post_date and post_date_gmt.
+ * Setting WP's timezone afterward doesn't fix the existing rows:
+ * WP reads post_date literally and assumes it's in the current
+ * timezone. A tweet that was really "8:43 AM PST / 16:43 UTC" ends
+ * up displayed as "4:43 PM" (treating the stored 16:43 as local).
+ *
+ * Fix: for each imported post, rerun get_date_from_gmt on
+ * post_date_gmt and overwrite post_date. Idempotent via
+ * onionpress_social_archive_tz_fix option. Re-triggers if WP's
+ * timezone changes (keyed on the current tz_string + gmt_offset)
+ * so a later tz change also repairs the dates.
+ */
+add_action( 'wp_loaded', function () {
+    $tz_key = get_option( 'timezone_string', '' ) . '|' . get_option( 'gmt_offset', 0 );
+    if ( get_option( 'onionpress_social_archive_tz_fix' ) === $tz_key ) {
+        return;
+    }
+    global $wpdb;
+    $rows = $wpdb->get_results( $wpdb->prepare(
+        "SELECT p.ID, p.post_date_gmt
+           FROM {$wpdb->posts} p
+           JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+          WHERE pm.meta_key = %s
+            AND p.post_date_gmt IS NOT NULL
+            AND p.post_date_gmt <> %s
+          LIMIT 5000",
+        '_source_id',
+        '0000-00-00 00:00:00'
+    ) );
+    foreach ( $rows as $row ) {
+        $new_local = get_date_from_gmt( $row->post_date_gmt );
+        if ( $new_local && $new_local !== '' ) {
+            $wpdb->update(
+                $wpdb->posts,
+                array( 'post_date' => $new_local ),
+                array( 'ID' => (int) $row->ID ),
+                array( '%s' ),
+                array( '%d' )
+            );
+            clean_post_cache( $row->ID );
+        }
+    }
+    update_option( 'onionpress_social_archive_tz_fix', $tz_key );
+}, 7 );  // after the CPT migration (5) + rewrite flush (10), before url scrub (6)
+
+/**
  * One-shot migration to strip absolute hostnames from <img> / <video>
  * URLs in imported-post content. Earlier imports baked in whatever
  * WordPress's site URL was at import time (typically
