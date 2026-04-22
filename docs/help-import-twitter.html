@@ -1,0 +1,104 @@
+<!--
+    OnionHome help page: "Import your Twitter / X archive into OnionPress"
+    Slug: /help/import/twitter/
+    Paste into a new WordPress page on OnionHome (op2home…onion and
+    onionpress.org) using the code editor / raw HTML block. Each
+    OnionPress instance links here from its Twitter import admin page,
+    so updates to copy and screenshots take effect everywhere without
+    reshipping the client plugins.
+-->
+<!-- wp:html -->
+<div class="op-help" style="max-width:720px;margin:0 auto;padding:1.5em 1em;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.55;">
+
+<h1>Import your Twitter / X archive into OnionPress</h1>
+
+<p>This walks you through moving your Twitter (X) posts into the Social Archive on your own onion service, so you own a durable copy that doesn't depend on X staying up or keeping your account active.</p>
+
+<p><strong>What we&rsquo;ll do:</strong> ask Twitter to prepare a ZIP of everything you&rsquo;ve posted, wait for them to email a download link, and upload that ZIP into OnionPress. Twitter does the hard work; OnionPress does the importing.</p>
+
+<p><strong>What we <em>won&rsquo;t</em> do:</strong> ask for your Twitter password. OnionPress never sees or stores Twitter credentials. The one place you type a Twitter password is Twitter&rsquo;s own site in your browser, the same as always.</p>
+
+<h2>Before you start</h2>
+
+<ul>
+  <li>Have your Twitter / X account logged in on the same device you&rsquo;re running OnionPress from (or at least the same browser you use for OnionPress admin).</li>
+  <li>Know your handle (e.g. <code>@brewster_kahle</code>). OnionPress asks for it once for labeling purposes.</li>
+  <li>Have an email inbox reachable &mdash; Twitter will send the download link there.</li>
+</ul>
+
+<h2>Step 1 &mdash; Request the archive from Twitter</h2>
+
+<ol>
+  <li>Open <a href="https://twitter.com/settings/download_your_data" target="_blank" rel="noopener">twitter.com/settings/download_your_data</a> in a new tab. You&rsquo;re already logged in.</li>
+  <li>Twitter may ask you to re-enter your password and/or confirm a code sent to your email or phone. That happens entirely in your browser &mdash; nothing about this step involves OnionPress.</li>
+  <li>On the <strong>Download an archive of your data</strong> page, click <strong>Request archive</strong>. The button may read <strong>Request data</strong> on some accounts.</li>
+  <li>Twitter confirms the request and says it&rsquo;ll email you when ready. Close the tab. There&rsquo;s nothing more to do here for now.</li>
+</ol>
+
+<p><strong>If Twitter says &ldquo;You already have a download available&rdquo;:</strong> that means a previous request is still valid. You can use it &mdash; click <strong>Download archive</strong> &mdash; or click <strong>Request archive again</strong> for a fresh one.</p>
+
+<h2>Step 2 &mdash; Wait for the email</h2>
+
+<p>Typical wait: <strong>2&ndash;24 hours</strong>. Occasionally longer (up to a week) for very large accounts or when Twitter is busy.</p>
+
+<p>The email comes from <code>info@twitter.com</code> or similar with a subject like &ldquo;Your X archive is ready.&rdquo; It contains a link that opens a download page. <strong>The link expires after about a week</strong> &mdash; don&rsquo;t put this off.</p>
+
+<p>If the email never shows up:</p>
+<ul>
+  <li>Check spam / junk folder.</li>
+  <li>Check that the email address on your Twitter account is current (Settings &rarr; Your Account &rarr; Account information).</li>
+  <li>Twitter sometimes silently drops requests for suspended / flagged accounts. If you can still log in normally and received no email after a week, try requesting again.</li>
+</ul>
+
+<h2>Step 3 &mdash; Download the ZIP</h2>
+
+<p>Click the link in the email. Twitter opens a page with a <strong>Download</strong> button. The file is named something like <code>twitter-2026-04-18-abc123.zip</code>.</p>
+
+<p><strong>Don&rsquo;t unzip it.</strong> OnionPress reads the ZIP directly. If you&rsquo;ve already unzipped, you can zip the folder back up and it&rsquo;ll still work.</p>
+
+<p>Archive sizes vary wildly: a few megabytes for a light user, tens of gigabytes for a very active account with years of media. Make sure you have disk space before downloading.</p>
+
+<h2>Step 4 &mdash; Upload into OnionPress</h2>
+
+<p>Go back to your OnionPress admin: <strong>Social Archive &rarr; Twitter</strong>. The upload form is near the bottom of that page.</p>
+
+<ol>
+  <li>Drop the ZIP into the <strong>Archive ZIP</strong> field.</li>
+  <li>Decide what to import:
+    <ul>
+      <li><strong>Originals and self-threads</strong> &mdash; always imported. These are your posts and your own continued thoughts on them.</li>
+      <li><strong>Retweets</strong> (RT&nbsp;@&hellip;) &mdash; opt-in checkbox. These are other people&rsquo;s posts you shared. Default: off.</li>
+      <li><strong>Replies to other users</strong> &mdash; opt-in checkbox. These lose context without the post you were replying to, but capture your participation in conversations. Default: off.</li>
+    </ul>
+  </li>
+  <li>Click <strong>Import tweets</strong>. OnionPress reads the ZIP, copies media files into your uploads library, and creates one post per tweet. Large archives can take several minutes.</li>
+</ol>
+
+<p>OnionPress will report how many posts were imported and how many were skipped (filtered or already imported).</p>
+
+<h2>Good to know</h2>
+
+<p><strong>Re-running is safe.</strong> If you change your mind about RTs or replies, check the boxes and re-upload the same ZIP &mdash; OnionPress remembers which tweet IDs it&rsquo;s already seen and only imports new ones. Same deal when you request a fresh archive from Twitter months later to capture new posts.</p>
+
+<p><strong>Your media lives on your onion.</strong> Images and videos from your tweets get copied into WordPress uploads and served from your onion address, not from <code>pbs.twimg.com</code>. If Twitter takes the originals down, your archive still works.</p>
+
+<p><strong>Original dates are preserved.</strong> Each imported post is dated to when the tweet was actually posted, not when you imported it. The Social Archive timeline shows your real history.</p>
+
+<p><strong>URLs are expanded.</strong> Twitter&rsquo;s <code>t.co</code> shortlinks in your tweets get rewritten to their real destinations, so the imported post links go directly to what you linked to instead of bouncing through Twitter.</p>
+
+<h2>Privacy</h2>
+
+<p>The takeout ZIP <em>does</em> contain DMs, likes, lists, follower data, ad preferences, and a lot of other stuff Twitter knows about you. OnionPress reads only the public-post portion (<code>data/tweets.js</code> and the associated <code>data/tweets_media/</code>). Everything else in the ZIP is ignored and not stored.</p>
+
+<p>After import, the uploaded ZIP itself is deleted from the server&rsquo;s temporary storage.</p>
+
+<h2>If something goes wrong</h2>
+
+<ul>
+  <li><strong>&ldquo;No tweets.js found&rdquo;</strong>: you may have uploaded a non-Twitter ZIP, or one from before 2018 (when Twitter&rsquo;s format changed). Re-request a fresh archive.</li>
+  <li><strong>Upload fails with a size limit</strong>: your ZIP is bigger than PHP&rsquo;s upload limit. Settings in <code>php.ini</code> (<code>upload_max_filesize</code>, <code>post_max_size</code>) govern this; the OnionPress defaults are 256MB. For larger archives, contact the OnionPress folks &mdash; raising the limit is a server-side change.</li>
+  <li><strong>Import takes forever and times out</strong>: future versions will use background processing. For now, try again in a less-loaded moment; the idempotent-reimport behavior means you won&rsquo;t double-create posts.</li>
+</ul>
+
+</div>
+<!-- /wp:html -->

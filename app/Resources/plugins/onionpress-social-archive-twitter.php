@@ -21,7 +21,17 @@ add_action( 'plugins_loaded', function () {
     }
 } );
 
-const ONIONPRESS_TWITTER_ADMIN_SLUG = 'onionpress-social-archive-twitter';
+const ONIONPRESS_TWITTER_ADMIN_SLUG   = 'onionpress-social-archive-twitter';
+const ONIONPRESS_TWITTER_HANDLE_OPT   = 'onionpress_social_twitter_handle';
+const ONIONPRESS_TWITTER_DEEPLINK_URL = 'https://twitter.com/settings/download_your_data';
+
+// Canonical walkthrough lives on OnionHome so we can update the
+// screenshots and copy without re-shipping every OnionPress install.
+// Both the onion and the clearnet mirror are offered; viewers in Tor
+// Browser can follow either, others (e.g. a Mac's default browser) can
+// only reach the clearnet one.
+const ONIONPRESS_TWITTER_HELP_ONION    = 'http://op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion/help-import-twitter/';
+const ONIONPRESS_TWITTER_HELP_CLEARNET = 'https://onionpress.org/help-import-twitter/';
 
 /**
  * Register the "Twitter" submenu page under Social Archive. Uses
@@ -47,11 +57,22 @@ function onionpress_twitter_import_page() {
         wp_die( 'Unauthorized' );
     }
 
-    $result = null;
+    $result        = null;
+    $handle_notice = null;
     if ( $_SERVER['REQUEST_METHOD'] === 'POST' ) {
-        check_admin_referer( 'onionpress_twitter_import', 'onionpress_twitter_nonce' );
-        $result = onionpress_twitter_handle_upload();
+        // Two distinct actions post to this page: saving the handle,
+        // and uploading the ZIP. Each has its own nonce so neither can
+        // be replayed as the other.
+        if ( isset( $_POST['onionpress_twitter_save_handle'] ) ) {
+            check_admin_referer( 'onionpress_twitter_save_handle', 'onionpress_twitter_handle_nonce' );
+            $handle_notice = onionpress_twitter_handle_save_handle_post();
+        } elseif ( isset( $_FILES['twitter_zip'] ) ) {
+            check_admin_referer( 'onionpress_twitter_import', 'onionpress_twitter_nonce' );
+            $result = onionpress_twitter_handle_upload();
+        }
     }
+
+    $saved_handle = onionpress_twitter_get_saved_handle();
     ?>
     <div class="wrap">
         <h1>Import Twitter / X archive</h1>
@@ -61,17 +82,61 @@ function onionpress_twitter_import_page() {
                 <p><?php echo wp_kses_post( $result['message'] ); ?></p>
             </div>
         <?php endif; ?>
+        <?php if ( $handle_notice ) : ?>
+            <div class="notice notice-<?php echo esc_attr( $handle_notice['level'] ); ?>">
+                <p><?php echo wp_kses_post( $handle_notice['message'] ); ?></p>
+            </div>
+        <?php endif; ?>
 
-        <p>How to get the archive: Twitter/X &rarr; Settings &rarr; Your Account &rarr; Download an archive of your data. Twitter will email you a link after a few hours.</p>
+        <h2>Step 1 &mdash; Tell us who you are on Twitter</h2>
+        <p>Your handle is saved on this onion, never transmitted anywhere. We use it to label imported posts and for cross-source lookups later.</p>
+        <form method="post" style="margin-bottom:1em;">
+            <?php wp_nonce_field( 'onionpress_twitter_save_handle', 'onionpress_twitter_handle_nonce' ); ?>
+            <input type="hidden" name="onionpress_twitter_save_handle" value="1">
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th><label for="twitter_handle">Your Twitter / X handle</label></th>
+                    <td>
+                        <input type="text" id="twitter_handle" name="twitter_handle"
+                               value="<?php echo esc_attr( $saved_handle ); ?>"
+                               placeholder="yourname"
+                               pattern="@?[A-Za-z0-9_]{1,15}"
+                               class="regular-text" style="max-width:260px;">
+                        <?php submit_button( 'Save', 'secondary', 'submit', false ); ?>
+                        <p class="description">Just the handle &mdash; no URL, no password. Example: <code>brewster_kahle</code>.</p>
+                    </td>
+                </tr>
+            </table>
+        </form>
 
+        <h2>Step 2 &mdash; Request your archive from Twitter</h2>
+        <p>Click the button below to open Twitter's archive-request page in a new tab and click <strong>Request archive</strong> there. You're already logged in there in your own browser &mdash; OnionPress doesn't need, store, or want your Twitter password.</p>
+        <p>
+            <a href="<?php echo esc_url( ONIONPRESS_TWITTER_DEEPLINK_URL ); ?>"
+               target="_blank" rel="noopener noreferrer"
+               class="button button-primary">
+                Open Twitter archive request page &rarr;
+            </a>
+            <span style="margin-left:12px;">
+                <a href="<?php echo esc_url( ONIONPRESS_TWITTER_HELP_ONION ); ?>" target="_blank" rel="noopener">Walkthrough on OnionHome</a>
+                <span style="color:#999;">&middot;</span>
+                <a href="<?php echo esc_url( ONIONPRESS_TWITTER_HELP_CLEARNET ); ?>" target="_blank" rel="noopener">clearnet mirror</a>
+            </span>
+        </p>
+
+        <h2>Step 3 &mdash; Wait for the email</h2>
+        <p><strong>Typical wait: 2&ndash;24 hours</strong>, occasionally up to a week for very large accounts. Twitter will email a download link that expires in about a week.</p>
+
+        <h2>Step 4 &mdash; Upload the ZIP here</h2>
+        <p>Download the ZIP from Twitter's email <em>without unzipping it</em>, then drop it below.</p>
         <form method="post" enctype="multipart/form-data">
             <?php wp_nonce_field( 'onionpress_twitter_import', 'onionpress_twitter_nonce' ); ?>
-            <table class="form-table">
+            <table class="form-table" role="presentation">
                 <tr>
                     <th><label for="twitter_zip">Archive ZIP</label></th>
                     <td>
                         <input type="file" name="twitter_zip" id="twitter_zip" accept=".zip" required>
-                        <p class="description">Upload <code>twitter-YYYY-MM-DD-…zip</code> as-downloaded. Not extracted. Nothing in this file is sent off your onion.</p>
+                        <p class="description">Upload <code>twitter-YYYY-MM-DD-…zip</code> as-downloaded. Nothing in this file is sent off your onion.</p>
                     </td>
                 </tr>
                 <tr>
@@ -92,6 +157,39 @@ function onionpress_twitter_import_page() {
         <?php onionpress_twitter_render_recent(); ?>
     </div>
     <?php
+}
+
+/**
+ * Return the saved Twitter handle (without @), or empty string.
+ */
+function onionpress_twitter_get_saved_handle() {
+    return (string) get_option( ONIONPRESS_TWITTER_HANDLE_OPT, '' );
+}
+
+/**
+ * Handle the "Save" submission from Step 1. Normalizes the handle
+ * (strips leading @, lowercases, validates against Twitter's handle
+ * rules), writes it to the option, returns a notice array.
+ */
+function onionpress_twitter_handle_save_handle_post() {
+    $raw = isset( $_POST['twitter_handle'] ) ? wp_unslash( $_POST['twitter_handle'] ) : '';
+    $handle = ltrim( trim( (string) $raw ), '@' );
+    if ( $handle === '' ) {
+        delete_option( ONIONPRESS_TWITTER_HANDLE_OPT );
+        return array( 'level' => 'success', 'message' => 'Handle cleared.' );
+    }
+    // Twitter handle rules: 1-15 chars, alphanumeric + underscore only.
+    if ( ! preg_match( '/^[A-Za-z0-9_]{1,15}$/', $handle ) ) {
+        return array(
+            'level'   => 'error',
+            'message' => 'That doesn&rsquo;t look like a Twitter handle. Must be 1&ndash;15 letters, digits, or underscores.',
+        );
+    }
+    update_option( ONIONPRESS_TWITTER_HANDLE_OPT, $handle );
+    return array(
+        'level'   => 'success',
+        'message' => sprintf( 'Saved handle <strong>@%s</strong>.', esc_html( $handle ) ),
+    );
 }
 
 /**
