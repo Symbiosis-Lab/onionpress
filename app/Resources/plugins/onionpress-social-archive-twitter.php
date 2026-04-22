@@ -1,0 +1,593 @@
+<?php
+/**
+ * Plugin Name: OnionPress Social Archive — Twitter Importer
+ * Description: Import a Twitter / X takeout ZIP into the unified
+ *              social_post archive. Parses data/tweets.js (all parts),
+ *              copies media out of data/tweets_media/, and creates one
+ *              post per tweet with the original date preserved. Safe
+ *              to re-run — tweet IDs are used as idempotency keys.
+ * Version:     0.1
+ * Network:     true
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+// Declare ourselves to the core dashboard so its "Import" button goes live.
+add_action( 'plugins_loaded', function () {
+    if ( function_exists( 'onionpress_social_register_importer' ) ) {
+        onionpress_social_register_importer( 'twitter' );
+    }
+} );
+
+const ONIONPRESS_TWITTER_ADMIN_SLUG = 'onionpress-social-archive-twitter';
+
+/**
+ * Register the "Twitter" submenu page under Social Archive. Uses
+ * priority 20 so the core plugin's `add_menu_page` (priority 10) has
+ * already registered the parent slug.
+ */
+add_action( 'admin_menu', function () {
+    if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
+        return; // Core plugin not loaded yet; nothing to attach under.
+    }
+    add_submenu_page(
+        ONIONPRESS_SOCIAL_ADMIN_SLUG,
+        'Import Twitter / X',
+        'Twitter',
+        'manage_options',
+        ONIONPRESS_TWITTER_ADMIN_SLUG,
+        'onionpress_twitter_import_page'
+    );
+}, 20 );
+
+function onionpress_twitter_import_page() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Unauthorized' );
+    }
+
+    $result = null;
+    if ( $_SERVER['REQUEST_METHOD'] === 'POST' ) {
+        check_admin_referer( 'onionpress_twitter_import', 'onionpress_twitter_nonce' );
+        $result = onionpress_twitter_handle_upload();
+    }
+    ?>
+    <div class="wrap">
+        <h1>Import Twitter / X archive</h1>
+
+        <?php if ( $result ) : ?>
+            <div class="notice notice-<?php echo esc_attr( $result['level'] ); ?>">
+                <p><?php echo wp_kses_post( $result['message'] ); ?></p>
+            </div>
+        <?php endif; ?>
+
+        <p>How to get the archive: Twitter/X &rarr; Settings &rarr; Your Account &rarr; Download an archive of your data. Twitter will email you a link after a few hours.</p>
+
+        <form method="post" enctype="multipart/form-data">
+            <?php wp_nonce_field( 'onionpress_twitter_import', 'onionpress_twitter_nonce' ); ?>
+            <table class="form-table">
+                <tr>
+                    <th><label for="twitter_zip">Archive ZIP</label></th>
+                    <td>
+                        <input type="file" name="twitter_zip" id="twitter_zip" accept=".zip" required>
+                        <p class="description">Upload <code>twitter-YYYY-MM-DD-…zip</code> as-downloaded. Not extracted. Nothing in this file is sent off your onion.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th>What to import</th>
+                    <td>
+                        <fieldset>
+                            <label><input type="checkbox" name="include_retweets" value="1"> Include retweets (RT&nbsp;@&hellip;)</label><br>
+                            <label><input type="checkbox" name="include_replies" value="1"> Include replies to other users</label>
+                        </fieldset>
+                        <p class="description">Originals and self-threads (replies to your own tweets) are always imported.</p>
+                    </td>
+                </tr>
+            </table>
+            <?php submit_button( 'Import tweets' ); ?>
+        </form>
+
+        <h2>Recent imports</h2>
+        <?php onionpress_twitter_render_recent(); ?>
+    </div>
+    <?php
+}
+
+/**
+ * Handle the posted ZIP: extract safely, parse all tweets.js parts, and
+ * import each tweet as a social_post. Returns a result array for the
+ * admin page notice. Never throws — any failure path returns a
+ * human-readable 'error' message.
+ */
+function onionpress_twitter_handle_upload() {
+    if ( ! isset( $_FILES['twitter_zip'] ) || $_FILES['twitter_zip']['error'] !== UPLOAD_ERR_OK ) {
+        return array( 'level' => 'error', 'message' => 'Upload failed or no file provided.' );
+    }
+
+    $upload_name = $_FILES['twitter_zip']['name'];
+    $upload_tmp  = $_FILES['twitter_zip']['tmp_name'];
+    $opts = array(
+        'include_rts'     => ! empty( $_POST['include_retweets'] ),
+        'include_replies' => ! empty( $_POST['include_replies'] ),
+    );
+
+    // Work under /tmp inside the container. Outside web roots, cleared on
+    // container restart, and a bare directory that no Apache vhost serves.
+    $workdir = sys_get_temp_dir() . '/onionpress-twitter-' . time() . '-' . wp_generate_password( 8, false );
+    if ( ! wp_mkdir_p( $workdir ) ) {
+        return array( 'level' => 'error', 'message' => 'Could not create temp dir for extraction.' );
+    }
+
+    if ( ! onionpress_twitter_extract_safely( $upload_tmp, $workdir ) ) {
+        onionpress_rrmdir( $workdir );
+        return array( 'level' => 'error', 'message' => 'ZIP extraction failed or the file is not a valid Twitter archive.' );
+    }
+
+    // Twitter puts everything under data/; archive may or may not have a
+    // top-level dir above that. Look for tweets.js in both positions.
+    $data_dir = onionpress_twitter_find_data_dir( $workdir );
+    if ( ! $data_dir ) {
+        onionpress_rrmdir( $workdir );
+        return array( 'level' => 'error', 'message' => 'This ZIP does not contain a <code>data/</code> folder with <code>tweets.js</code>. Make sure you downloaded the full archive and uploaded the ZIP as-is.' );
+    }
+
+    $tweets_files = onionpress_twitter_find_tweets_files( $data_dir );
+    if ( empty( $tweets_files ) ) {
+        onionpress_rrmdir( $workdir );
+        return array( 'level' => 'error', 'message' => 'No <code>tweets.js</code> (or <code>tweets-partN.js</code>) found in <code>data/</code>.' );
+    }
+
+    $media_dir = onionpress_twitter_find_media_dir( $data_dir );
+    $self_user_id = onionpress_twitter_read_self_user_id( $data_dir );
+
+    $stats = array( 'imported' => 0, 'skipped' => 0, 'errors' => 0 );
+    foreach ( $tweets_files as $file ) {
+        $tweets = onionpress_twitter_parse_tweets_file( $file );
+        if ( $tweets === null ) {
+            $stats['errors']++;
+            continue;
+        }
+        foreach ( $tweets as $entry ) {
+            if ( ! isset( $entry['tweet'] ) ) {
+                continue;
+            }
+            $result = onionpress_twitter_import_tweet(
+                $entry['tweet'],
+                array_merge( $opts, array(
+                    'media_dir'    => $media_dir,
+                    'self_user_id' => $self_user_id,
+                ) )
+            );
+            if ( isset( $stats[ $result ] ) ) {
+                $stats[ $result ]++;
+            }
+        }
+    }
+
+    onionpress_rrmdir( $workdir );
+
+    $msg = sprintf(
+        'Processed <strong>%s</strong>. Imported: <strong>%d</strong>. Skipped (filtered or already imported): <strong>%d</strong>. Errors: <strong>%d</strong>.',
+        esc_html( $upload_name ),
+        intval( $stats['imported'] ),
+        intval( $stats['skipped'] ),
+        intval( $stats['errors'] )
+    );
+    $level = $stats['errors'] > 0 && $stats['imported'] === 0 ? 'error' : 'success';
+    return array( 'level' => $level, 'message' => $msg );
+}
+
+/**
+ * Unzip ``$zip_path`` into ``$target_dir``, rejecting entries whose paths
+ * would escape the target (zip-slip defense). Also skips symlinks and
+ * files whose extensions fall outside the allow-list — a Twitter archive
+ * only legitimately contains js/html/json/txt/jpg/png/gif/mp4/mov/m4v.
+ */
+function onionpress_twitter_extract_safely( $zip_path, $target_dir ) {
+    $zip = new ZipArchive();
+    if ( $zip->open( $zip_path ) !== true ) {
+        return false;
+    }
+    $target_real = realpath( $target_dir );
+    if ( ! $target_real ) {
+        $zip->close();
+        return false;
+    }
+    $allow_ext = array( 'js', 'html', 'json', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'mp4', 'mov', 'm4v', 'webp' );
+    for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+        $stat = $zip->statIndex( $i );
+        $name = $stat['name'];
+        if ( $name === '' || substr( $name, -1 ) === '/' ) {
+            continue; // directories — extractTo handles on-demand
+        }
+        // Reject anything that tries to traverse
+        if ( strpos( $name, '..' ) !== false ) {
+            continue;
+        }
+        // Extension allow-list
+        $ext = strtolower( pathinfo( $name, PATHINFO_EXTENSION ) );
+        if ( ! in_array( $ext, $allow_ext, true ) ) {
+            continue;
+        }
+        // Extract one entry at a time; extractTo resolves the target
+        // and would catch traversal there too, but the explicit checks
+        // above keep the attack surface small.
+        $zip->extractTo( $target_dir, array( $name ) );
+    }
+    $zip->close();
+    return true;
+}
+
+/**
+ * Locate the archive's `data/` folder. Some exports put it at the root;
+ * older ones nested it inside a per-download folder. Walks up to two
+ * levels down before giving up.
+ */
+function onionpress_twitter_find_data_dir( $root ) {
+    if ( is_dir( $root . '/data' ) ) {
+        return $root . '/data';
+    }
+    foreach ( scandir( $root ) as $entry ) {
+        if ( $entry === '.' || $entry === '..' ) continue;
+        $p = $root . '/' . $entry;
+        if ( is_dir( $p ) && is_dir( $p . '/data' ) ) {
+            return $p . '/data';
+        }
+    }
+    return null;
+}
+
+function onionpress_twitter_find_tweets_files( $data_dir ) {
+    $hits = array();
+    foreach ( scandir( $data_dir ) as $f ) {
+        if ( preg_match( '/^tweets(-part\d+)?\.js$/', $f ) ) {
+            $hits[] = $data_dir . '/' . $f;
+        }
+    }
+    sort( $hits );
+    return $hits;
+}
+
+function onionpress_twitter_find_media_dir( $data_dir ) {
+    foreach ( array( 'tweets_media', 'tweet_media' ) as $try ) {
+        $p = $data_dir . '/' . $try;
+        if ( is_dir( $p ) ) {
+            return $p;
+        }
+    }
+    return null;
+}
+
+/**
+ * Read the user's own Twitter user ID from data/account.js. Used to
+ * distinguish self-replies (always imported — they form threads) from
+ * replies to other users (opt-in via the "include replies" checkbox).
+ * Returns null if the file is missing or unparseable.
+ */
+function onionpress_twitter_read_self_user_id( $data_dir ) {
+    $path = $data_dir . '/account.js';
+    if ( ! is_readable( $path ) ) {
+        return null;
+    }
+    $raw = file_get_contents( $path );
+    if ( preg_match( '/window\.YTD\.account\.\w+\s*=\s*(.*)$/s', $raw, $m ) ) {
+        $data = json_decode( $m[1], true );
+        if ( is_array( $data ) && isset( $data[0]['account']['accountId'] ) ) {
+            return (string) $data[0]['account']['accountId'];
+        }
+    }
+    return null;
+}
+
+/**
+ * Strip Twitter's JS-assignment prefix and parse the JSON body. Each
+ * file starts with `window.YTD.tweets.partN = ` followed by a JSON
+ * array literal.
+ */
+function onionpress_twitter_parse_tweets_file( $file ) {
+    $contents = file_get_contents( $file );
+    if ( $contents === false ) {
+        return null;
+    }
+    if ( preg_match( '/^\s*window\.YTD\.\w+\.\w+\s*=\s*(.*)$/s', $contents, $m ) ) {
+        $contents = $m[1];
+    }
+    $data = json_decode( $contents, true );
+    return is_array( $data ) ? $data : null;
+}
+
+/**
+ * Import one tweet. Returns one of 'imported', 'skipped', 'errors' for
+ * the caller's tally.
+ */
+function onionpress_twitter_import_tweet( $tweet, $opts ) {
+    $tweet_id = $tweet['id_str'] ?? $tweet['id'] ?? null;
+    if ( ! $tweet_id ) {
+        return 'errors';
+    }
+
+    // Idempotency: skip if already imported. Uses _source_id meta with a
+    // `twitter:` prefix so the same ID can't collide with other sources.
+    $source_id = 'twitter:' . $tweet_id;
+    $existing  = get_posts( array(
+        'post_type'      => ONIONPRESS_SOCIAL_POST_TYPE,
+        'meta_key'       => '_source_id',
+        'meta_value'     => $source_id,
+        'post_status'    => 'any',
+        'posts_per_page' => 1,
+        'fields'         => 'ids',
+    ) );
+    if ( ! empty( $existing ) ) {
+        return 'skipped';
+    }
+
+    $full_text     = $tweet['full_text'] ?? $tweet['text'] ?? '';
+    $is_retweet    = ! empty( $tweet['retweeted_status'] )
+        || strpos( $full_text, 'RT @' ) === 0;
+    $reply_status  = $tweet['in_reply_to_status_id_str'] ?? $tweet['in_reply_to_status_id'] ?? null;
+    $reply_user_id = $tweet['in_reply_to_user_id_str']   ?? $tweet['in_reply_to_user_id']   ?? null;
+    $is_reply      = $reply_status !== null;
+    $is_self_reply = $is_reply && $opts['self_user_id']
+                     && $reply_user_id !== null
+                     && (string) $reply_user_id === (string) $opts['self_user_id'];
+
+    if ( $is_retweet && ! $opts['include_rts'] ) {
+        return 'skipped';
+    }
+    if ( $is_reply && ! $is_self_reply && ! $opts['include_replies'] ) {
+        return 'skipped';
+    }
+
+    $created_at = $tweet['created_at'] ?? null;
+    $ts = $created_at ? strtotime( $created_at ) : 0;
+    if ( ! $ts ) {
+        return 'errors';
+    }
+    $post_date_gmt = gmdate( 'Y-m-d H:i:s', $ts );
+
+    $content = onionpress_twitter_render_content( $tweet );
+    // Title is a short preview of the plain-text content. Leaving it
+    // empty causes WP to auto-generate "No title" strings that don't
+    // render well in archive lists. 10 words is enough for recognition.
+    $preview_text = wp_strip_all_tags( $content );
+    $title        = wp_trim_words( $preview_text, 10, '…' );
+    if ( $title === '' ) {
+        $title = gmdate( 'Y-m-d', $ts ) . ' tweet';
+    }
+
+    $post_id = wp_insert_post( array(
+        'post_type'     => ONIONPRESS_SOCIAL_POST_TYPE,
+        'post_status'   => 'publish',
+        'post_title'    => $title,
+        'post_content'  => $content,
+        'post_excerpt'  => wp_trim_words( $preview_text, 35, '…' ),
+        'post_date_gmt' => $post_date_gmt,
+        'post_date'     => get_date_from_gmt( $post_date_gmt ),
+        'meta_input'    => array(
+            '_source_id'      => $source_id,
+            '_source_url'     => 'https://twitter.com/i/status/' . $tweet_id,
+            '_is_repost'      => $is_retweet ? '1' : '0',
+            '_is_reply'       => $is_reply ? '1' : '0',
+            '_reply_to_id'    => $reply_status ?: '',
+            '_thread_root_id' => $is_self_reply ? '' : $tweet_id,
+            '_raw'            => wp_json_encode( $tweet ),
+        ),
+    ), true );
+
+    if ( is_wp_error( $post_id ) ) {
+        return 'errors';
+    }
+
+    wp_set_object_terms( $post_id, 'twitter', ONIONPRESS_SOCIAL_SOURCE_TAX );
+
+    // Hashtags -> post tags. Not a per-platform taxonomy because tags
+    // are blog-wide already and cross-source tagging is more useful.
+    $hashtags = $tweet['entities']['hashtags'] ?? array();
+    if ( ! empty( $hashtags ) ) {
+        $tag_names = array_values( array_filter( array_map(
+            function ( $h ) { return $h['text'] ?? null; },
+            $hashtags
+        ) ) );
+        if ( ! empty( $tag_names ) ) {
+            wp_set_post_tags( $post_id, $tag_names, false );
+        }
+    }
+
+    // Media: look for files in the media dir prefixed with "<tweet_id>-".
+    // Twitter ships them as <id>-<media_hash>.<ext>. Copy each into WP
+    // uploads and append an <img>/<video> to the post.
+    $media_entries = $tweet['extended_entities']['media']
+        ?? $tweet['entities']['media']
+        ?? array();
+    if ( ! empty( $media_entries ) && $opts['media_dir'] ) {
+        onionpress_twitter_sideload_media( $post_id, $tweet_id, $opts['media_dir'] );
+    }
+
+    return 'imported';
+}
+
+/**
+ * Render a tweet's content: expand t.co links, make @mentions clickable,
+ * strip trailing media t.co links (they'll be re-added as attachments),
+ * and wrap in safe HTML. Output is safe for direct insertion as
+ * post_content (no <script> etc.).
+ */
+function onionpress_twitter_render_content( $tweet ) {
+    $text = $tweet['full_text'] ?? $tweet['text'] ?? '';
+
+    // Strip media short-URLs from tail — the attached media will be
+    // re-rendered as <img>/<video> in sideload_media.
+    $media_entries = $tweet['extended_entities']['media']
+        ?? $tweet['entities']['media']
+        ?? array();
+    foreach ( $media_entries as $m ) {
+        $short = $m['url'] ?? '';
+        if ( $short !== '' ) {
+            $text = str_replace( $short, '', $text );
+        }
+    }
+
+    // Expand t.co links with their full URL + display form.
+    $urls = $tweet['entities']['urls'] ?? array();
+    foreach ( $urls as $u ) {
+        $short    = $u['url']          ?? '';
+        $expanded = $u['expanded_url'] ?? $short;
+        $display  = $u['display_url']  ?? $expanded;
+        if ( $short === '' || $expanded === '' ) {
+            continue;
+        }
+        $link = sprintf(
+            '<a href="%s" rel="nofollow noopener">%s</a>',
+            esc_url( $expanded ),
+            esc_html( $display )
+        );
+        $text = str_replace( $short, $link, $text );
+    }
+
+    // @mentions -> link to twitter.com. Users viewing the archive can
+    // follow through to the mentioned account if it still exists.
+    $mentions = $tweet['entities']['user_mentions'] ?? array();
+    foreach ( $mentions as $m ) {
+        $handle = $m['screen_name'] ?? '';
+        if ( $handle === '' ) continue;
+        $text = preg_replace(
+            '/@' . preg_quote( $handle, '/' ) . '\b/i',
+            sprintf(
+                '<a href="https://twitter.com/%s" rel="nofollow noopener">@%s</a>',
+                rawurlencode( $handle ),
+                esc_html( $handle )
+            ),
+            $text
+        );
+    }
+
+    // Remaining newlines -> <br>. Entities above already inserted
+    // safe HTML, so nl2br on the full string is fine.
+    return nl2br( trim( $text ) );
+}
+
+/**
+ * Copy media files associated with a tweet from the extracted archive
+ * into WordPress uploads, then append rendered <img>/<video> tags to
+ * the post content. Twitter names media files `<tweet_id>-<hash>.<ext>`,
+ * so we just glob the prefix.
+ */
+function onionpress_twitter_sideload_media( $post_id, $tweet_id, $media_dir ) {
+    if ( ! is_dir( $media_dir ) ) {
+        return;
+    }
+    require_once ABSPATH . 'wp-admin/includes/image.php';
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    require_once ABSPATH . 'wp-admin/includes/media.php';
+
+    $prefix = $tweet_id . '-';
+    $upload = wp_upload_dir();
+    $tags   = array();
+
+    foreach ( scandir( $media_dir ) as $f ) {
+        if ( strpos( $f, $prefix ) !== 0 ) continue;
+        $src = $media_dir . '/' . $f;
+        if ( ! is_file( $src ) ) continue;
+
+        $dest_name = wp_unique_filename( $upload['path'], $f );
+        $dest_path = $upload['path'] . '/' . $dest_name;
+        if ( ! copy( $src, $dest_path ) ) continue;
+
+        $type = wp_check_filetype( $dest_name );
+        $attach_id = wp_insert_attachment( array(
+            'post_mime_type' => $type['type'] ?? 'application/octet-stream',
+            'post_title'     => sanitize_title( pathinfo( $dest_name, PATHINFO_FILENAME ) ),
+            'post_content'   => '',
+            'post_status'    => 'inherit',
+        ), $dest_path, $post_id );
+
+        if ( is_wp_error( $attach_id ) ) continue;
+
+        $meta = wp_generate_attachment_metadata( $attach_id, $dest_path );
+        wp_update_attachment_metadata( $attach_id, $meta );
+
+        // Set the first image as the post's featured image so archive
+        // listings have a thumbnail. Later ones render inline.
+        if ( empty( $tags ) && strpos( $type['type'], 'image/' ) === 0 ) {
+            set_post_thumbnail( $post_id, $attach_id );
+        }
+
+        if ( strpos( $type['type'], 'image/' ) === 0 ) {
+            $tags[] = wp_get_attachment_image(
+                $attach_id,
+                'large',
+                false,
+                array( 'loading' => 'lazy', 'style' => 'max-width:100%;height:auto;' )
+            );
+        } elseif ( strpos( $type['type'], 'video/' ) === 0 ) {
+            $url    = wp_get_attachment_url( $attach_id );
+            $tags[] = sprintf(
+                '<video controls preload="metadata" style="max-width:100%%;"><source src="%s" type="%s"></video>',
+                esc_url( $url ),
+                esc_attr( $type['type'] )
+            );
+        }
+    }
+
+    if ( ! empty( $tags ) ) {
+        $post = get_post( $post_id );
+        wp_update_post( array(
+            'ID'           => $post_id,
+            'post_content' => $post->post_content . "\n\n" . implode( "\n\n", $tags ),
+        ) );
+    }
+}
+
+function onionpress_twitter_render_recent() {
+    $recent = get_posts( array(
+        'post_type'      => ONIONPRESS_SOCIAL_POST_TYPE,
+        'posts_per_page' => 10,
+        'orderby'        => 'date',
+        'order'          => 'DESC',
+        'tax_query'      => array(
+            array(
+                'taxonomy' => ONIONPRESS_SOCIAL_SOURCE_TAX,
+                'field'    => 'slug',
+                'terms'    => 'twitter',
+            ),
+        ),
+    ) );
+    if ( empty( $recent ) ) {
+        echo '<p><em>No Twitter posts imported yet.</em></p>';
+        return;
+    }
+    echo '<ul>';
+    foreach ( $recent as $p ) {
+        printf(
+            '<li><a href="%s">%s</a> &middot; <small>%s</small></li>',
+            esc_url( get_permalink( $p->ID ) ),
+            esc_html( get_the_title( $p ) ),
+            esc_html( get_the_date( '', $p ) )
+        );
+    }
+    echo '</ul>';
+}
+
+/**
+ * Recursive rmdir for the workdir cleanup. PHP doesn't have a stdlib
+ * equivalent. Fails silently — worst case the /tmp/... dir gets cleaned
+ * up at next container restart.
+ */
+function onionpress_rrmdir( $dir ) {
+    if ( ! is_dir( $dir ) ) {
+        return;
+    }
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator( $dir, FilesystemIterator::SKIP_DOTS ),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+    foreach ( $it as $f ) {
+        if ( $f->isDir() ) {
+            @rmdir( $f->getRealPath() );
+        } else {
+            @unlink( $f->getRealPath() );
+        }
+    }
+    @rmdir( $dir );
+}

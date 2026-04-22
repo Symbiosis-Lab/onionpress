@@ -1433,6 +1433,34 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy social-archive core mu-plugin — registers the social_post CPT,
+    # social_source taxonomy, and the Social Archive admin dashboard.
+    if [ -f "$plugins_dir/onionpress-social-archive.php" ]; then
+        if docker cp "$plugins_dir/onionpress-social-archive.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-social-archive.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-social-archive.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-social-archive.php"
+            log "✓ onionpress-social-archive.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-social-archive.php"
+        fi
+    fi
+
+    # Copy social-archive Twitter importer mu-plugin — adds Twitter/X
+    # takeout ZIP import under the Social Archive admin menu.
+    if [ -f "$plugins_dir/onionpress-social-archive-twitter.php" ]; then
+        if docker cp "$plugins_dir/onionpress-social-archive-twitter.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-social-archive-twitter.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-social-archive-twitter.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-social-archive-twitter.php"
+            log "✓ onionpress-social-archive-twitter.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-social-archive-twitter.php"
+        fi
+    fi
+
     return 0
 }
 
