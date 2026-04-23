@@ -189,6 +189,11 @@ function onionpress_wayback_curl_common( $ch ) {
  * haven't fully come up yet.
  */
 function onionpress_wayback_self_reachable( $onion ) {
+    // Test hook: return non-null to short-circuit the HTTP check.
+    $mock = apply_filters( 'onionpress_wayback_self_reachable_mock', null, $onion );
+    if ( $mock !== null ) {
+        return (bool) $mock;
+    }
     $ch = curl_init( 'http://' . $onion . '/' );
     onionpress_wayback_curl_common( $ch );
     curl_setopt_array( $ch, array(
@@ -206,6 +211,11 @@ function onionpress_wayback_self_reachable( $onion ) {
  * GET /save/status/user. Returns the decoded body or null on failure.
  */
 function onionpress_wayback_user_status() {
+    // Test hook: return an array to short-circuit the SPN call.
+    $mock = apply_filters( 'onionpress_wayback_user_status_mock', null );
+    if ( $mock !== null ) {
+        return is_array( $mock ) ? $mock : null;
+    }
     $auth = onionpress_wayback_auth_header();
     if ( empty( $auth ) ) {
         return null;
@@ -286,6 +296,11 @@ function onionpress_wayback_submit_parallel( array $urls ) {
     if ( empty( $urls ) ) {
         return array();
     }
+    // Test hook: return a same-keyed map to short-circuit the SPN submit.
+    $mock = apply_filters( 'onionpress_wayback_submit_parallel_mock', null, $urls );
+    if ( is_array( $mock ) ) {
+        return $mock;
+    }
     $auth = onionpress_wayback_auth_header();
     if ( empty( $auth ) ) {
         return array_fill_keys( array_keys( $urls ), '' );
@@ -363,6 +378,11 @@ function onionpress_wayback_cdx_lookup_parallel( array $urls ) {
     if ( empty( $urls ) ) {
         return array();
     }
+    // Test hook: return a same-keyed map to short-circuit the CDX call.
+    $mock = apply_filters( 'onionpress_wayback_cdx_lookup_parallel_mock', null, $urls );
+    if ( is_array( $mock ) ) {
+        return $mock;
+    }
     // Single pass — no retry. Misses are acceptable: if CDX didn't see
     // a capture this tick, SPN either really hasn't archived it yet or
     // the rescue call itself transient-failed, and either way the URL
@@ -425,6 +445,11 @@ function onionpress_wayback_cdx_one_pass( array $urls ) {
 function onionpress_wayback_poll_parallel( array $job_ids ) {
     if ( empty( $job_ids ) ) {
         return array();
+    }
+    // Test hook: return a list of status dicts to short-circuit the SPN poll.
+    $mock = apply_filters( 'onionpress_wayback_poll_parallel_mock', null, $job_ids );
+    if ( is_array( $mock ) ) {
+        return $mock;
     }
     $auth = onionpress_wayback_auth_header();
     $headers = array( 'Accept: application/json' );

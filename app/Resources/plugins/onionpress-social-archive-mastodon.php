@@ -135,7 +135,7 @@ function onionpress_mastodon_import_page() {
     $last_sync     = (int) get_option( ONIONPRESS_MASTODON_LAST_SYNC, 0 );
     $last_note     = (string) get_option( ONIONPRESS_MASTODON_LAST_NOTE, '' );
     $oldest_id     = (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' );
-    $opts          = (array) get_option( ONIONPRESS_MASTODON_OPTS_OPT, array() );
+    $opts          = (array) get_option( ONIONPRESS_MASTODON_OPTS_OPT, array( 'include_replies' => 1 ) );
 
     $backfill_done = ( $account_id !== '' ) && ( $oldest_id === '' || $oldest_id === 'done' );
 
@@ -452,7 +452,7 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
     @set_time_limit( ONIONPRESS_MASTODON_TICK_BUDGET_SEC + 30 );
     $deadline = microtime( true ) + ONIONPRESS_MASTODON_TICK_BUDGET_SEC;
 
-    $opts = (array) get_option( ONIONPRESS_MASTODON_OPTS_OPT, array() );
+    $opts = (array) get_option( ONIONPRESS_MASTODON_OPTS_OPT, array( 'include_replies' => 1 ) );
 
     $stats = array( 'imported' => 0, 'skipped' => 0, 'errors' => 0, 'pages' => 0 );
     $errors = array();
@@ -587,6 +587,17 @@ function onionpress_mastodon_fetch_statuses( $server, $account_id, $params ) {
         'exclude_reblogs'  => 'false',
         'exclude_replies'  => 'false',
     ), $params );
+
+    // Test hook: lets integration tests inject canned responses without
+    // making any network call. Filter receives (null, $params) and may
+    // return an array (canned page), a WP_Error, or null to fall
+    // through to the real HTTP fetch below. In production nothing hooks
+    // this filter, so it's a zero-cost no-op.
+    $mock = apply_filters( 'onionpress_mastodon_fetch_statuses_mock', null, $params );
+    if ( $mock !== null ) {
+        return $mock;
+    }
+
     $url = sprintf(
         'https://%s/api/v1/accounts/%s/statuses?%s',
         $server,

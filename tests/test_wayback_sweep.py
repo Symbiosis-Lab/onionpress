@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""Integration tests for the Wayback sweeper plugin.
+"""Integration tests for the Wayback archive plugin's sweep engine.
 
-These tests drive the live plugin inside the onionpress-wordpress container
-via `wp eval` and inspect side effects on post meta. They exercise the
-state machine directly by seeding/reading post meta — no real SPN calls.
+These drive the live plugin inside the onionpress-wordpress container
+via `wp eval`, using the mock filter hooks we added to short-circuit
+every network-touching function (user_status, submit, poll, cdx,
+self_reachable) — no real Tor/SPN traffic.
+
+Coverage focus: behaviors that are easy to break during refactors.
+  1. Queue totals aggregate across every subsite in the network.
+  2. CDX rescue: SPN flips success->error, CDX still has a capture;
+     the post must end up archived via the CDX timestamp, not errored.
+  3. Young-job skip: a job submitted in the last 15s must NOT be
+     polled (wastes a Tor round-trip on a guaranteed "pending").
+  4. Submit path: a fresh post with no job_id gets one, with a
+     matching submitted_at, on a successful submit.
+  5. Lock mutex: a fresh lock blocks a second sweep invocation.
 
 Prerequisites (skips the suite if any fails):
   - Docker running
-  - `onionpress-wordpress` container up
-  - A subsite with path != '/'
+  - `onionpress-wordpress` container up with the wayback plugin
+    present in mu-plugins/
+  - At least one subsite to target
 """
 
 import json
-import os
 import shutil
 import subprocess
-import sys
+import time
 import unittest
 
 _WP = "onionpress-wordpress"
@@ -46,284 +57,228 @@ def _docker_available():
     return r.returncode == 0 and "true" in r.stdout
 
 
-def _pick_test_site():
+def _pick_site():
     r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
             timeout=15)
     if r.returncode != 0 or not r.stdout.strip():
         return None
     sites = json.loads(r.stdout)
-    subsites = [s for s in sites if s.get("path") != "/"]
-    return subsites[0] if subsites else (sites[0] if sites else None)
+    sub = [s for s in sites if s.get("path") != "/"]
+    return sub[0] if sub else (sites[0] if sites else None)
 
 
-def _get_post_state(post_id, site_url):
-    """Read all _op_wayback_* meta into a dict."""
-    keys = {
-        "archived_at":   "_op_wayback_archived_at",
-        "snapshot_ts":   "_op_wayback_snapshot_ts",
-        "job_id":        "_op_wayback_job_id",
-        "retry_count":   "_op_wayback_retry_count",
-        "retry_after":   "_op_wayback_retry_after",
-        "failed_at":     "_op_wayback_failed_at",
-        "failed_reason": "_op_wayback_failed_reason",
-    }
-    state = {}
-    for label, meta_key in keys.items():
-        r = _wp(["post", "meta", "get", str(post_id), meta_key, "--format=json"],
-                url=site_url, timeout=15)
-        state[label] = r.stdout.strip().strip('"') if r.returncode == 0 else ""
-    return state
-
-
-def _set_post_state(post_id, site_url, **kwargs):
-    """Seed _op_wayback_* meta from keyword args. Missing keys are cleared."""
-    mapping = {
-        "archived_at":   "_op_wayback_archived_at",
-        "snapshot_ts":   "_op_wayback_snapshot_ts",
-        "job_id":        "_op_wayback_job_id",
-        "retry_count":   "_op_wayback_retry_count",
-        "retry_after":   "_op_wayback_retry_after",
-        "failed_at":     "_op_wayback_failed_at",
-        "failed_reason": "_op_wayback_failed_reason",
-    }
-    for label, meta_key in mapping.items():
-        if label in kwargs and kwargs[label] not in (None, "", 0):
-            _wp(["post", "meta", "update", str(post_id), meta_key, str(kwargs[label])],
-                url=site_url, timeout=15)
-        else:
-            _wp(["post", "meta", "delete", str(post_id), meta_key],
-                url=site_url, timeout=15)
-
-
-def _eval_php(code, site_url):
-    """Run PHP code inside WP, return stdout."""
-    r = _wp(["eval", code], url=site_url, timeout=60)
+def _eval(php, url):
+    """Run PHP inside WP, return stdout (stripped)."""
+    r = _wp(["eval", php], url=url, timeout=90)
     return r.stdout.strip()
 
 
 @unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestWaybackStateMachine(unittest.TestCase):
-    """Test the advance() state machine by calling it with mocked SPN results.
-
-    The plugin's advance() function takes read/write callables for state,
-    so we inject Python-controlled state and verify the PHP advance()
-    mutates it correctly based on a mocked SPN response.
-
-    We do this by monkeypatching the SPN calls via WP runtime filters:
-    neither onionpress_wayback_submit nor onionpress_wayback_poll_status
-    are filterable directly, so we test via post meta (which IS real) and
-    compare pre/post states through advance().
-
-    For a pure-logic test we instead call advance() with inline-
-    constructed read/write closures and a pre-baked state dict, bypassing
-    the WP post meta layer entirely.
-    """
+class TestWaybackQueueTotals(unittest.TestCase):
+    """Queue totals aggregate correctly across every subsite."""
 
     @classmethod
     def setUpClass(cls):
-        cls.site = _pick_test_site()
-        if cls.site is None:
-            raise unittest.SkipTest("no test site available")
-        cls.site_url = cls.site["url"].rstrip("/") + "/"
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
 
-    def _make_post(self, title_suffix=""):
-        r = _wp(["post", "create",
-                 "--post_title=wayback-test " + title_suffix,
-                 "--post_content=test",
-                 "--post_status=publish",
-                 "--porcelain"],
-                url=self.site_url, timeout=30)
-        self.assertEqual(r.returncode, 0, f"post create failed: {r.stderr}")
+    def test_totals_structure_and_aggregate(self):
+        """Totals come back as expected, with the remaining invariant holding."""
+        php = """
+        $t = onionpress_wayback_queue_totals();
+        echo json_encode($t);
+        """
+        out = _eval(php, self.url)
+        totals = json.loads(out)
+        for k in ("archived", "in_flight", "remaining", "total"):
+            self.assertIn(k, totals, f"missing key: {k}")
+            self.assertIsInstance(totals[k], int)
+        # remaining = max(0, total - archived - in_flight).
+        self.assertEqual(
+            totals["remaining"],
+            max(0, totals["total"] - totals["archived"] - totals["in_flight"]),
+        )
+        # Aggregated total must be >= this subsite alone.
+        php_one = """
+        global $wpdb;
+        echo (int) $wpdb->get_var(
+            "SELECT COUNT(*) FROM $wpdb->posts WHERE post_status='publish' "
+            . "AND post_type IN ('post','page')"
+        );
+        """
+        one = int(_eval(php_one, self.url))
+        self.assertGreaterEqual(totals["total"], one,
+            f"aggregated total {totals['total']} < this subsite's {one}")
+
+
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestWaybackSweepIteration(unittest.TestCase):
+    """Sweep iteration behavior with mocked network functions."""
+
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
+
+    def setUp(self):
+        _wp(["option", "delete", "op_wayback_backoff_until"],
+            url=self.url, timeout=15)
+        r = _wp(["post", "create", "--post_type=post", "--post_status=publish",
+                 "--post_title=wayback-test-" + self._testMethodName,
+                 "--porcelain"], url=self.url, timeout=15)
+        self.post_id = int(r.stdout.strip())
+        self.addCleanup(self._cleanup_post)
+
+    def _cleanup_post(self):
+        _wp(["post", "delete", str(self.post_id), "--force"],
+            url=self.url, timeout=15)
+
+    def _set_meta(self, key, value):
+        _wp(["post", "meta", "update", str(self.post_id), key, str(value)],
+            url=self.url, timeout=15)
+
+    def _get_meta(self, key):
+        r = _wp(["post", "meta", "get", str(self.post_id), key],
+                url=self.url, timeout=15)
         return r.stdout.strip()
 
-    def _delete_post(self, post_id):
-        _wp(["post", "delete", str(post_id), "--force"],
-            url=self.site_url, timeout=30)
+    def _common_mocks(self, available=40):
+        """Short-circuit reachability + user_status so the iteration
+        reaches the poll/submit phases."""
+        return f"""
+        add_filter('onionpress_wayback_self_reachable_mock',
+                   function() {{ return true; }});
+        add_filter('onionpress_wayback_user_status_mock',
+                   function() {{ return array('available' => {available}, 'processing' => 0); }});
+        """
 
-    def test_state_is_empty_after_publish(self):
-        """A fresh post has no _op_wayback_* meta yet."""
-        post_id = self._make_post("empty-state")
-        try:
-            state = _get_post_state(post_id, self.site_url)
-            self.assertEqual(state["archived_at"], "")
-            self.assertEqual(state["job_id"], "")
-            self.assertEqual(state["failed_at"], "")
-        finally:
-            self._delete_post(post_id)
+    def test_cdx_rescues_spn_error(self):
+        """SPN flips success->error; CDX still has capture -> post archived via CDX."""
+        self._set_meta("_op_wayback_job_id", "jid-cdx-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 120))
 
-    def test_advance_transitions_archived_to_skip(self):
-        """A post with archived_at set is a no-op — advance() reports 'already-archived'."""
-        post_id = self._make_post("archived-skip")
-        try:
-            _set_post_state(post_id, self.site_url,
-                            archived_at=1700000000,
-                            snapshot_ts="20231114000000")
-            code = (
-                f"$state = onionpress_wayback_post_state({post_id});"
-                f"$read = function() use ($state) {{ return $state; }};"
-                f"$writes = array();"
-                f"$write = function($s) use (&$writes) {{ $writes[] = $s; }};"
-                f"$action = onionpress_wayback_advance('http://example/', $read, $write);"
-                f"echo $action . '|' . count($writes);"
-            )
-            out = _eval_php(code, self.site_url)
-            self.assertEqual(out, "already-archived|0",
-                f"expected no writes on archived post, got: {out}")
-        finally:
-            self._delete_post(post_id)
+        php = self._common_mocks() + """
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) {
+            return array(array(
+                'job_id'     => 'jid-cdx-test',
+                'status'     => 'error',
+                'status_ext' => 'error:no-captures',
+            ));
+        }, 10, 2);
+        add_filter('onionpress_wayback_cdx_lookup_parallel_mock',
+                   function($_, $urls) {
+            $out = array();
+            foreach ($urls as $k => $v) { $out[$k] = '20260101120000'; }
+            return $out;
+        }, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo 'ok';
+        """
+        _eval(php, self.url)
+        self.assertNotEqual("", self._get_meta("_op_wayback_archived_at"),
+            "post should be archived via CDX rescue")
+        self.assertEqual("20260101120000", self._get_meta("_op_wayback_snapshot_ts"),
+            "snapshot_ts should come from the CDX timestamp")
+        self.assertEqual("", self._get_meta("_op_wayback_job_id"),
+            "job_id should be cleared after success")
 
-    def test_advance_transitions_failed_to_skip(self):
-        """A post with failed_at set is also a no-op."""
-        post_id = self._make_post("failed-skip")
-        try:
-            _set_post_state(post_id, self.site_url,
-                            failed_at=1700000000,
-                            failed_reason="error:no-captures: unreachable",
-                            retry_count=20)
-            code = (
-                f"$state = onionpress_wayback_post_state({post_id});"
-                f"$read = function() use ($state) {{ return $state; }};"
-                f"$write = function($s) {{ /* no-op */ }};"
-                f"echo onionpress_wayback_advance('http://example/', $read, $write);"
-            )
-            out = _eval_php(code, self.site_url)
-            self.assertEqual(out, "given-up")
-        finally:
-            self._delete_post(post_id)
+    def test_young_job_is_not_polled(self):
+        """A job submitted < YOUNG_JOB_SKIP_SEC ago MUST NOT be polled."""
+        self._set_meta("_op_wayback_job_id", "jid-young-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time())))
 
-    def test_advance_respects_retry_after(self):
-        """If retry_after is in the future, advance() waits."""
-        post_id = self._make_post("retry-wait")
-        try:
-            code = (
-                f"$state = array('retry_after' => time() + 600);"
-                f"$read = function() use ($state) {{ return $state; }};"
-                f"$write = function($s) {{ /* no-op */ }};"
-                f"echo onionpress_wayback_advance('http://example/', $read, $write);"
-            )
-            out = _eval_php(code, self.site_url)
-            self.assertEqual(out, "waiting")
-        finally:
-            self._delete_post(post_id)
+        php = self._common_mocks() + """
+        delete_option('op_test_wb_poll_called_with');
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) {
+            update_option('op_test_wb_poll_called_with',
+                          implode(',', $job_ids), false);
+            return array();
+        }, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo (string) get_option('op_test_wb_poll_called_with', '(unset)');
+        """
+        out = _eval(php, self.url)
+        self.assertNotIn("jid-young-test", out,
+            f"young job should not be polled; poll got: {out}")
 
-    def test_post_state_round_trip(self):
-        """post_state_set + post_state returns what we wrote (with 0/''
-        entries cleared — those delete_post_meta calls shouldn't trip us)."""
-        post_id = self._make_post("round-trip")
-        try:
-            code = (
-                f"$in = array("
-                f"  'job_id' => 'spn2-abc123',"
-                f"  'retry_count' => 2,"
-                f"  'retry_after' => 1234567890,"
-                f");"
-                f"onionpress_wayback_post_state_set({post_id}, $in);"
-                f"$out = onionpress_wayback_post_state({post_id});"
-                f"echo $out['job_id'] . '|' . $out['retry_count'] . '|' . $out['retry_after'];"
-            )
-            out = _eval_php(code, self.site_url)
-            self.assertEqual(out, "spn2-abc123|2|1234567890")
-        finally:
-            self._delete_post(post_id)
+    def test_submit_assigns_job_id(self):
+        """A fresh post (no job_id) gets one on a successful submit."""
+        php = self._common_mocks() + f"""
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) {{ return array(); }}, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {{
+            $out = array();
+            foreach ($urls as $k => $v) {{
+                $out[$k] = ($k === 'post:{self.post_id}')
+                    ? 'jid-submit-test'
+                    : '';
+            }}
+            return $out;
+        }}, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo 'ok';
+        """
+        _eval(php, self.url)
+        self.assertEqual("jid-submit-test", self._get_meta("_op_wayback_job_id"),
+            "post should have received the mocked job_id")
+        submitted_at = self._get_meta("_op_wayback_submitted_at")
+        self.assertNotEqual("", submitted_at, "submitted_at should be set")
+        self.assertGreater(int(submitted_at), int(time.time()) - 60)
 
-    def test_save_post_invalidates_home_and_feed(self):
-        """Publishing a post should clear the home+feed option state so
-        the next sweep tick re-archives them (content has changed)."""
-        # Seed home + feed as already archived.
-        for opt in ("op_wayback_home_state", "op_wayback_feed_state"):
-            code = (
-                f"update_option('{opt}', array("
-                f"  'archived_at' => 1700000000,"
-                f"  'snapshot_ts' => '20231114000000',"
-                f"), false);"
-            )
-            _eval_php(code, self.site_url)
 
-        # Confirm seeded.
-        pre = _eval_php(
-            "echo (string)(get_option('op_wayback_home_state')['archived_at'] ?? 0);",
-            self.site_url,
-        )
-        self.assertEqual(pre, "1700000000", "seed didn't stick")
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestWaybackSweepLock(unittest.TestCase):
+    """Token-lock mutex semantics for the sweep entry point."""
 
-        # Publish a post — should fire save_post → clear home+feed.
-        post_id = self._make_post("invalidate-home-feed")
-        try:
-            home_after = _eval_php(
-                "$o = get_option('op_wayback_home_state', null);"
-                "echo is_array($o) && !empty($o['archived_at']) ? 'set' : 'cleared';",
-                self.site_url,
-            )
-            feed_after = _eval_php(
-                "$o = get_option('op_wayback_feed_state', null);"
-                "echo is_array($o) && !empty($o['archived_at']) ? 'set' : 'cleared';",
-                self.site_url,
-            )
-            self.assertEqual(home_after, "cleared",
-                "save_post should have cleared op_wayback_home_state")
-            self.assertEqual(feed_after, "cleared",
-                "save_post should have cleared op_wayback_feed_state")
-        finally:
-            self._delete_post(post_id)
-            # Clean up the seeded option so later tests start fresh.
-            _eval_php("delete_option('op_wayback_home_state');"
-                     "delete_option('op_wayback_feed_state');", self.site_url)
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
 
-    def test_save_post_schedules_immediate_sweep(self):
-        """Publishing a post should log a 'scheduled immediate sweep'
-        message — proof that save_post queued a run rather than waiting
-        for the 5-min recurring cron. We inspect the log directly since
-        the scheduled event may fire and be removed from the cron array
-        before our test reads it."""
-        # Put a unique marker in the post title so we can find our own
-        # log line unambiguously, even if other posts trigger save_post.
-        marker = f"imm-sweep-{__import__('time').time_ns()}"
-        post_id = self._make_post(marker)
-        try:
-            # The plugin logs this literal string when save_post fires.
-            code = (
-                "$raw = @file_get_contents('/var/lib/onionpress/wayback.log');"
-                "echo $raw !== false && strpos($raw, 'scheduled immediate sweep') !== false ? '1' : '0';"
-            )
-            has_line = _eval_php(code, self.site_url)
-            self.assertEqual(has_line, "1",
-                "wayback.log doesn't contain 'scheduled immediate sweep' "
-                "— save_post may not be scheduling the single-event sweep")
-        finally:
-            self._delete_post(post_id)
+    def setUp(self):
+        _wp(["option", "delete", "op_wayback_sweep_lock"],
+            url=self.url, timeout=15)
 
-    def test_sweep_query_picks_up_unarchived(self):
-        """The sweep's meta_query returns published posts without
-        archived_at/failed_at set. Seed two posts — one archived, one not —
-        and verify only the un-archived one shows up."""
-        archived_id = self._make_post("sweep-archived")
-        unarchived_id = self._make_post("sweep-unarchived")
-        try:
-            _set_post_state(archived_id, self.site_url,
-                            archived_at=1700000000,
-                            snapshot_ts="20231114000000")
-            code = (
-                "$posts = get_posts(array("
-                "  'post_status' => 'publish',"
-                "  'post_type' => array('post', 'page'),"
-                "  'numberposts' => 100,"
-                "  'meta_query' => array('relation' => 'AND',"
-                "    array('key' => OP_WB_META_ARCHIVED_AT, 'compare' => 'NOT EXISTS'),"
-                "    array('key' => OP_WB_META_FAILED_AT,   'compare' => 'NOT EXISTS'),"
-                "  ),"
-                "));"
-                "$ids = array_map(function($p){return $p->ID;}, $posts);"
-                "echo implode(',', $ids);"
-            )
-            out = _eval_php(code, self.site_url)
-            ids = out.split(",") if out else []
-            self.assertIn(str(unarchived_id), ids,
-                f"unarchived post {unarchived_id} should be in sweep set, got: {ids}")
-            self.assertNotIn(str(archived_id), ids,
-                f"archived post {archived_id} should NOT be in sweep set, got: {ids}")
-        finally:
-            self._delete_post(archived_id)
-            self._delete_post(unarchived_id)
+    def tearDown(self):
+        _wp(["option", "delete", "op_wayback_sweep_lock"],
+            url=self.url, timeout=15)
+
+    def test_fresh_lock_blocks_second_invocation(self):
+        """A fresh lock (< STALE threshold) rejects a new sweep."""
+        php_seed = """
+        update_option('op_wayback_sweep_lock',
+                      'otherTok:' . time(), false);
+        echo 'seeded';
+        """
+        _eval(php_seed, self.url)
+        php = """
+        add_filter('onionpress_wayback_self_reachable_mock',
+                   function() { return true; });
+        add_filter('onionpress_wayback_user_status_mock',
+                   function() { return array('available' => 0); });
+        onionpress_wayback_sweep();
+        echo (string) get_option('op_wayback_sweep_lock', '(empty)');
+        """
+        out = _eval(php, self.url)
+        self.assertTrue(out.startswith("otherTok:"),
+            f"lock should still belong to otherTok: {out}")
 
 
 if __name__ == "__main__":
