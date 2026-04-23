@@ -276,10 +276,15 @@ function onionpress_social_archive_dashboard() {
                     $cat_term      = get_term_by( 'slug', $info['cat_slug'], 'category' );
                     $cat_url       = $cat_term ? get_term_link( $cat_term ) : '';
                     ?>
+                    <?php $home_url = onionpress_social_source_home_url( $slug ); ?>
                     <tr>
                         <td>
                             <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:<?php echo esc_attr( $info['color'] ); ?>;margin-right:6px;"></span>
-                            <strong><?php echo esc_html( $info['label'] ); ?></strong>
+                            <?php if ( $home_url ) : ?>
+                                <a href="<?php echo esc_url( $home_url ); ?>" target="_blank" rel="noopener"><strong><?php echo esc_html( $info['label'] ); ?></strong></a>
+                            <?php else : ?>
+                                <strong><?php echo esc_html( $info['label'] ); ?></strong>
+                            <?php endif; ?>
                         </td>
                         <td>
                             <?php echo intval( $count ); ?>
@@ -296,15 +301,48 @@ function onionpress_social_archive_dashboard() {
                         </td>
                     </tr>
                 <?php endforeach; ?>
+
+                <?php
+                // Wayback Machine row — not a source, but a related
+                // archival sink. Shows how many posts (across all
+                // subsites) are captured by Internet Archive's Wayback
+                // Machine via Save Page Now, driven by the sibling
+                // wayback plugin's daemon.
+                if ( function_exists( 'onionpress_wayback_queue_totals' ) ) :
+                    $wb = onionpress_wayback_queue_totals();
+                    $wb_total     = (int) $wb['total'];
+                    $wb_archived  = (int) $wb['archived'];
+                    $wb_in_flight = (int) $wb['in_flight'];
+                    $wb_pct       = $wb_total > 0 ? round( $wb_archived * 100 / $wb_total, 1 ) : 0;
+                    $wb_home      = onionpress_social_wayback_home_url();
+                    $wb_details   = admin_url( 'admin.php?page=onionpress-wayback' );
+                ?>
+                    <tr>
+                        <td>
+                            <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#7c3aed;margin-right:6px;"></span>
+                            <a href="<?php echo esc_url( $wb_home ); ?>" target="_blank" rel="noopener"><strong>Wayback Machine</strong></a>
+                            <br><small style="color:#666;">Internet Archive &middot; all subsites</small>
+                        </td>
+                        <td>
+                            <strong><?php echo number_format_i18n( $wb_archived ); ?></strong>
+                            <?php if ( $wb_total > 0 ) : ?>
+                                <small style="color:#666;">
+                                    / <?php echo number_format_i18n( $wb_total ); ?>
+                                    &middot; <?php echo esc_html( $wb_pct ); ?>%
+                                </small>
+                            <?php endif; ?>
+                            <?php if ( $wb_in_flight > 0 ) : ?>
+                                <br><small style="color:#666;">+ <?php echo number_format_i18n( $wb_in_flight ); ?> in flight</small>
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <a href="<?php echo esc_url( $wb_details ); ?>" class="button">Details</a>
+                        </td>
+                    </tr>
+                <?php endif; ?>
             </tbody>
         </table>
 
-        <h2>How this works</h2>
-        <ol>
-            <li>Request a data export from the social platform (typically Settings &rarr; Your Data &rarr; Download archive).</li>
-            <li>Wait for the platform to email the archive (hours to days).</li>
-            <li>Upload the ZIP on the matching Import page. OnionPress reads the archive, copies media into your blog's uploads, and creates one blog post per entry, tagged with the right category and dated to the original post time.</li>
-        </ol>
     </div>
     <?php
 }
@@ -317,6 +355,52 @@ function onionpress_social_archive_dashboard() {
  * time. The dashboard uses this to show an active "Import" button vs.
  * a greyed "not installed" notice.
  */
+/**
+ * Wayback Machine URL, context-aware: onion when the user is viewing
+ * this site via .onion (so their clicks don't leak to clearnet),
+ * https://web.archive.org/ otherwise.
+ */
+function onionpress_social_wayback_home_url() {
+    $host = (string) ( $_SERVER['HTTP_HOST'] ?? '' );
+    if ( substr( $host, -6 ) === '.onion' ) {
+        return 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/';
+    }
+    return 'https://web.archive.org/';
+}
+
+/**
+ * Resolve a "home" URL for a source's platform, preferring a link to
+ * the user's own profile when we know their handle, falling back to
+ * the platform homepage. Used by the dashboard to make the source
+ * names clickable.
+ */
+function onionpress_social_source_home_url( $slug ) {
+    $handle = (string) get_option( 'onionpress_social_' . $slug . '_handle', '' );
+    switch ( $slug ) {
+        case 'twitter':
+            if ( $handle !== '' ) {
+                // Twitter handles imported from archives can come with or without @.
+                return 'https://x.com/' . ltrim( $handle, '@' );
+            }
+            return 'https://x.com/';
+        case 'mastodon':
+            if ( $handle !== '' && strpos( $handle, '@' ) !== false ) {
+                // Mastodon handle is "user@server" (no leading @).
+                $parts = explode( '@', trim( $handle, '@' ) );
+                if ( count( $parts ) === 2 ) {
+                    return 'https://' . $parts[1] . '/@' . $parts[0];
+                }
+            }
+            return 'https://joinmastodon.org/';
+        case 'bluesky':
+            if ( $handle !== '' ) {
+                return 'https://bsky.app/profile/' . ltrim( $handle, '@' );
+            }
+            return 'https://bsky.app/';
+    }
+    return '';
+}
+
 function onionpress_social_importer_registered( $slug ) {
     $registered = apply_filters( 'onionpress_social_importers', array() );
     return in_array( $slug, $registered, true );
@@ -381,6 +465,104 @@ add_filter( 'widget_archives_args', function ( $args ) {
     }
     return $args;
 } );
+
+/**
+ * Rewrite the Archives widget's monthly links so clicking a month on
+ * /category/<slug>/ stays in the category instead of jumping to the
+ * global month archive. The default link is /YYYY/MM/ and the built-in
+ * archives widget emits that regardless of context.
+ *
+ * We rewrite to /YYYY/MM/?category_name=<slug>. WP honors this to
+ * narrow the main query to that category for that month — clicking a
+ * month from /category/mastodon/ now stays on Mastodon-only posts.
+ *
+ * Applied to any category archive (not just social).
+ */
+add_filter( 'get_archives_link', function ( $link_html ) {
+    if ( ! is_category() ) {
+        return $link_html;
+    }
+    $term = get_queried_object();
+    if ( ! ( $term instanceof WP_Term ) ) {
+        return $link_html;
+    }
+    $slug = $term->slug;
+    // The emitted link tag looks like: <li><a href='https://host/2026/04/'>April 2026</a>&nbsp;(80)</li>
+    // Append ?category_name=<slug> to the href.
+    return preg_replace_callback(
+        '#(<a\s[^>]*href=[\'"])([^\'"]+)([\'"])#i',
+        function ( $m ) use ( $slug ) {
+            $url = $m[2];
+            $glue = ( strpos( $url, '?' ) === false ) ? '?' : '&amp;';
+            return $m[1] . $url . $glue . 'category_name=' . rawurlencode( $slug ) . $m[3];
+        },
+        $link_html,
+        1
+    );
+} );
+
+/**
+ * Prepend the platform logo to the Archives widget title when viewing
+ * one of our social-source category archives. Turns plain "Archives"
+ * into e.g. "<mastodon-logo> Archives" so the widget obviously reflects
+ * the category it's filtered to.
+ *
+ * Covers both classic widgets (widget_title filter) and Gutenberg
+ * block themes (render_block filter on core/heading with text
+ * "Archives"). Most modern WP themes emit block widgets.
+ */
+add_filter( 'widget_title', function ( $title, $instance = array(), $id_base = '' ) {
+    if ( ! is_category() ) return $title;
+    if ( $id_base !== '' && $id_base !== 'archives' ) return $title;
+    return onionpress_social_maybe_prefix_archives_title( $title );
+}, 10, 3 );
+
+add_filter( 'render_block', function ( $block_content, $block ) {
+    if ( ! is_category() ) return $block_content;
+    if ( empty( $block['blockName'] ) || $block['blockName'] !== 'core/heading' ) return $block_content;
+    // Only match a heading whose text content (stripped of tags) is
+    // exactly "Archives" — avoid touching unrelated headings.
+    $text = trim( wp_strip_all_tags( $block_content ) );
+    if ( $text !== 'Archives' ) return $block_content;
+    $logo_html = onionpress_social_current_category_logo_html();
+    if ( ! $logo_html ) return $block_content;
+    // Insert the logo just after the opening heading tag, preserving
+    // whatever classes/attrs the theme chose.
+    return preg_replace(
+        '#(<h[1-6][^>]*>)#i',
+        '$1' . $logo_html . ' ',
+        $block_content,
+        1
+    );
+}, 10, 2 );
+
+function onionpress_social_maybe_prefix_archives_title( $title ) {
+    $logo_html = onionpress_social_current_category_logo_html();
+    if ( ! $logo_html ) return $title;
+    return '<span class="op-social-archive-widget-title">' . $logo_html . ' ' . $title . '</span>';
+}
+
+/**
+ * If the current query is a social-source category, return the inline
+ * logo HTML (wrapped in an accent-colored span); otherwise ''.
+ */
+function onionpress_social_current_category_logo_html() {
+    $term = get_queried_object();
+    if ( ! ( $term instanceof WP_Term ) ) return '';
+    if ( ! function_exists( 'onionpress_social_nav_icon_html' ) ) return '';
+    foreach ( onionpress_social_sources() as $slug => $info ) {
+        if ( $info['cat_slug'] === $term->slug ) {
+            $logo = onionpress_social_nav_icon_html( $slug );
+            if ( $logo ) {
+                return '<span class="op-social-archive-widget-title" style="--op-accent:'
+                    . esc_attr( $info['color'] ) . ';">'
+                    . $logo . '</span>';
+            }
+            return '';
+        }
+    }
+    return '';
+}
 
 add_filter( 'widget_archives_dropdown_args', function ( $args ) {
     if ( is_category() ) {
@@ -980,6 +1162,44 @@ function onionpress_social_card_styles() {
     @media (max-width: 768px) {
         .op-social-nav-icon { display: inline-flex; }
         .op-social-nav-label { display: none; }
+    }
+    /* Archives widget title on a social category: inline logo + "Archives".
+       Force the nested .op-social-nav-icon visible at all widths — the
+       nav-icon class is display:none at ≥768px (where the nav text is
+       shown instead), but inside the widget title we ALWAYS want the
+       logo visible. */
+    .op-social-archive-widget-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4em;
+        color: var(--op-accent, currentColor);
+    }
+    .op-social-archive-widget-title .op-social-nav-icon {
+        display: inline-flex !important;
+        height: 1em;
+        /* Don't cap width: the Twitter combo ("X / bird") is wider
+           than one character. Let the wrapper size to its contents. */
+    }
+    .op-social-archive-widget-title .op-social-nav-icon:not(.op-social-nav-icon--combo) {
+        width: 1em;
+    }
+    .op-social-archive-widget-title .op-social-logo {
+        width: 1em; height: 1em;
+        display: inline-block;
+    }
+    /* Combo variant: size slightly larger inside the h2 heading so the
+       two glyphs + slash are legible next to the "Archives" text. */
+    .op-social-archive-widget-title .op-social-nav-icon--combo {
+        font-size: 0.85em;
+        gap: 0.05em;
+    }
+    .op-social-archive-widget-title .op-social-nav-icon--combo .op-social-logo {
+        width: 0.95em; height: 0.95em;
+    }
+    .op-social-archive-widget-title .op-social-nav-icon--combo .op-social-nav-icon__slash {
+        opacity: 0.55;
+        padding: 0 0.05em;
+        font-weight: 600;
     }
     .op-social-card__body {
         font-size: 1.02em;

@@ -109,7 +109,18 @@ function onionpress_mastodon_import_page() {
             $notice = onionpress_mastodon_handle_save_handle_post();
         } elseif ( isset( $_POST['onionpress_mastodon_sync_now'] ) ) {
             check_admin_referer( 'onionpress_mastodon_sync_now', 'onionpress_mastodon_sync_nonce' );
-            $notice = onionpress_mastodon_run_sync_tick( true /* from_admin */ );
+            // Kick the daemon asynchronously instead of running it
+            // synchronously. The daemon runs up to 30 min, which would
+            // hang the admin request. Instead: schedule an immediate
+            // cron event and spawn a loopback to wp-cron.php so WP
+            // actually fires it right now. The admin page then re-
+            // renders with a "running" indicator that auto-refreshes.
+            delete_option( ONIONPRESS_MASTODON_DAEMON_LOCK );
+            delete_transient( 'doing_cron' );
+            wp_schedule_single_event( time(), ONIONPRESS_MASTODON_CRON_HOOK );
+            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
+            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            $notice = array( 'level' => 'success', 'message' => 'Sync started. Progress below — this page will refresh automatically.' );
         } elseif ( isset( $_POST['onionpress_mastodon_reset'] ) ) {
             check_admin_referer( 'onionpress_mastodon_reset', 'onionpress_mastodon_reset_nonce' );
             $notice = onionpress_mastodon_reset_cursors();
@@ -128,8 +139,23 @@ function onionpress_mastodon_import_page() {
 
     $backfill_done = ( $account_id !== '' ) && ( $oldest_id === '' || $oldest_id === 'done' );
 
+    // Daemon running indicator: read the daemon lock and compute age.
+    // Lock format: "<token>:<last_heartbeat_unixts>". Anything fresher
+    // than OP_WB-style stale threshold is "running."
+    $dlock_raw  = (string) get_option( ONIONPRESS_MASTODON_DAEMON_LOCK, '' );
+    $dlock_ts   = 0;
+    if ( strpos( $dlock_raw, ':' ) !== false ) {
+        list( , $dlock_ts_str ) = explode( ':', $dlock_raw, 2 );
+        $dlock_ts = (int) $dlock_ts_str;
+    }
+    $dlock_age    = $dlock_ts > 0 ? time() - $dlock_ts : 0;
+    $daemon_alive = $dlock_ts > 0 && $dlock_age < ONIONPRESS_MASTODON_DAEMON_STALE_SEC;
+
     ?>
     <div class="wrap">
+        <?php if ( $daemon_alive ) : ?>
+            <meta http-equiv="refresh" content="15">
+        <?php endif; ?>
         <h1>Import Mastodon</h1>
 
         <?php if ( $notice ) : ?>
@@ -168,9 +194,27 @@ function onionpress_mastodon_import_page() {
                 <tbody>
                     <tr><th style="width:200px;">Account</th>
                         <td><code>@<?php echo esc_html( $handle ); ?></code> <span style="color:#888;">(id <?php echo esc_html( $account_id ); ?>)</span></td></tr>
-                    <tr><th>Server reports</th><td><?php echo number_format_i18n( $total ); ?> total statuses</td></tr>
-                    <tr><th>Imported here</th><td><?php echo number_format_i18n( $imported_now ); ?></td></tr>
-                    <tr><th>Backfill</th><td><?php echo $backfill_done ? '<strong style="color:#2a7b2a;">complete</strong>' : '<em>in progress &mdash; click "Sync now" a few times until complete, or wait for the 5-minute poll</em>'; ?></td></tr>
+                    <tr><th>Server reports</th>
+                        <td><?php echo number_format_i18n( $total ); ?> total statuses
+                            <small style="color:#666;">(including replies and boosts)</small>
+                        </td></tr>
+                    <tr><th>Imported here</th>
+                        <td><?php echo number_format_i18n( $imported_now ); ?>
+                            <small style="color:#666;">
+                                (filtered by the "include replies / include boosts" options below;
+                                skipped items still count as processed so the backfill advances)
+                            </small>
+                        </td></tr>
+                    <tr><th>Backfill</th><td><?php
+                        if ( $daemon_alive ) {
+                            $age = max( 0, $dlock_age );
+                            echo '<strong style="color:#2a7b2a;">● Running</strong> — last heartbeat ' . esc_html( $age ) . 's ago. This page auto-refreshes every 15s while syncing.';
+                        } elseif ( $backfill_done ) {
+                            echo '<strong style="color:#2a7b2a;">✓ complete</strong>';
+                        } else {
+                            echo '<em>paused — click "Sync now" to start or resume.</em>';
+                        }
+                    ?></td></tr>
                     <tr><th>Last sync</th><td><?php echo $last_sync ? esc_html( human_time_diff( $last_sync ) ) . ' ago' : '&mdash;'; ?>
                         <?php if ( $last_note ) : ?><br><small style="color:#666;"><?php echo esc_html( $last_note ); ?></small><?php endif; ?></td></tr>
                 </tbody>
@@ -443,22 +487,34 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
             }
         }
 
-        // Backward backfill: walk max_id=oldest_id until empty.
+        // Backward backfill: walk max_id=oldest_id until an EMPTY page
+        // is returned. Do NOT trust "fewer than limit" to mean end of
+        // history — Mastodon returns short pages for many reasons
+        // (pinned-status filtering, rate-limit trimming, per-instance
+        // limits below our requested 40). Only an empty response is a
+        // reliable terminator.
+        //
+        // Cycle guard: if the cursor hasn't advanced after two
+        // iterations, the server is looping us — mark done rather than
+        // spin forever. Use the raw max_id input vs the max_id after
+        // the page; if they're the same we made no progress.
         $oldest_id = (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' );
         if ( $oldest_id !== 'done'
              && $stats['pages'] < ONIONPRESS_MASTODON_PAGES_PER_TICK
              && microtime( true ) < $deadline ) {
+            $no_progress_rounds = 0;
             while ( $stats['pages'] < ONIONPRESS_MASTODON_PAGES_PER_TICK
                     && microtime( true ) < $deadline ) {
                 $params = array();
                 if ( $oldest_id !== '' ) {
                     $params['max_id'] = $oldest_id;
                 }
+                $before_id = $oldest_id;
                 $page = onionpress_mastodon_fetch_statuses( $server, $account_id, $params );
                 if ( is_wp_error( $page ) ) { $errors[] = $page->get_error_message(); break; }
                 $stats['pages']++;
                 if ( empty( $page ) ) {
-                    // Walked off the start of history — mark backfill done.
+                    // Truly walked off the start of history — done.
                     update_option( ONIONPRESS_MASTODON_OLDEST_OPT, 'done' );
                     break;
                 }
@@ -467,16 +523,29 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
                     $r = onionpress_mastodon_import_status( $status, $opts );
                     $stats[ $r ] = ( $stats[ $r ] ?? 0 ) + 1;
                     $oldest_id = (string) $status['id'];
-                    // Seed newest_id on the very first imported status.
                     if ( get_option( ONIONPRESS_MASTODON_NEWEST_OPT, '' ) === '' ) {
                         update_option( ONIONPRESS_MASTODON_NEWEST_OPT, (string) $status['id'] );
                     }
                 }
                 update_option( ONIONPRESS_MASTODON_OLDEST_OPT, $oldest_id );
-                if ( count( $page ) < ONIONPRESS_MASTODON_PER_PAGE ) {
-                    update_option( ONIONPRESS_MASTODON_OLDEST_OPT, 'done' );
-                    break;
+
+                // Cycle guard: cursor didn't move → server is stuck
+                // returning the same range. After a few such rounds,
+                // give up on this tick so we don't loop forever; the
+                // next cron fire retries with fresh state.
+                if ( $oldest_id === $before_id ) {
+                    $no_progress_rounds++;
+                    if ( $no_progress_rounds >= 3 ) {
+                        $errors[] = 'cursor stuck at ' . $oldest_id . ' after short-page retries';
+                        break;
+                    }
+                } else {
+                    $no_progress_rounds = 0;
                 }
+                // Previously: count($page) < PER_PAGE → mark done. That
+                // was the bug — Mastodon returns short pages for
+                // reasons that don't mean "end of history." Keep
+                // walking until we see a truly empty page.
             }
         }
     } finally {

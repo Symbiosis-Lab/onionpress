@@ -1169,3 +1169,250 @@ add_action( 'init', function () {
         onionpress_wayback_log( 'v4 migration: stale retry-state meta cleared' );
     }
 } );
+
+// ───────────────────────── admin page ───────────────────────────────
+
+/**
+ * Register a Wayback admin submenu under the Social Archive top-level
+ * menu. Uses late priority (20) so the Social Archive plugin has
+ * registered the parent menu first.
+ */
+add_action( 'admin_menu', function () {
+    if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
+        // Social Archive plugin not loaded — fall back to a top-level menu.
+        add_menu_page(
+            'Wayback Archive',
+            'Wayback Archive',
+            'manage_options',
+            'onionpress-wayback',
+            'onionpress_wayback_admin_page',
+            'dashicons-backup',
+            26
+        );
+        return;
+    }
+    add_submenu_page(
+        ONIONPRESS_SOCIAL_ADMIN_SLUG,
+        'Wayback Archive',
+        'Wayback',
+        'manage_options',
+        'onionpress-wayback',
+        'onionpress_wayback_admin_page'
+    );
+}, 20 );
+
+/**
+ * Handle POST actions from the admin page (kick daemon, clear lock).
+ * Registered before admin_menu render so redirects fire cleanly.
+ */
+add_action( 'admin_post_onionpress_wayback_action', function () {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Forbidden', 403 );
+    }
+    check_admin_referer( 'onionpress_wayback_action' );
+
+    $action = sanitize_text_field( $_POST['op_action'] ?? '' );
+    switch ( $action ) {
+        case 'kick':
+            // Clear the lock and any backoff, then trigger the sweep
+            // directly. If the sweep is already running under a valid
+            // lock, the token-ownership check will make this invocation
+            // exit cleanly without disrupting it — but clearing the
+            // lock first breaks any truly-stuck state.
+            delete_option( 'op_wayback_sweep_lock' );
+            delete_option( OP_WB_OPT_BACKOFF_UNTIL );
+            // Clear WP's `doing_cron` lock too. If a previous wp-cron
+            // spawn died mid-run without cleaning up (container restart,
+            // pkill), this transient blocks new wp-cron fires for up to
+            // 60s from its timestamp. Each subsequent page load just
+            // refreshes it via race, so it can stay stuck for a long
+            // time in practice. Clearing it lets cron fire immediately.
+            delete_transient( 'doing_cron' );
+            // Schedule an immediate cron fire so the sweep starts in a
+            // separate request (admin page doesn't hang for the whole
+            // daemon run).
+            wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+            // Also spawn a loopback to wp-cron.php so WP actually runs
+            // scheduled events right now (WP-Cron only fires on HTTP).
+            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
+            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            $msg = 'Daemon kicked — archiving will begin within a few seconds.';
+            break;
+        case 'clear_backoff':
+            delete_option( OP_WB_OPT_BACKOFF_UNTIL );
+            $msg = 'Backoff cleared.';
+            break;
+        case 'clear_lock':
+            delete_option( 'op_wayback_sweep_lock' );
+            $msg = 'Lock cleared. A stuck daemon (if any) will exit on its next heartbeat.';
+            break;
+        default:
+            $msg = '';
+    }
+    wp_safe_redirect( add_query_arg(
+        array( 'op_msg' => rawurlencode( $msg ) ),
+        admin_url( 'admin.php?page=onionpress-wayback' )
+    ) );
+    exit;
+} );
+
+function onionpress_wayback_admin_page() {
+    $totals        = onionpress_wayback_queue_totals();
+    $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
+    $backoff_secs  = max( 0, $backoff_until - time() );
+    $lock_raw      = (string) get_option( 'op_wayback_sweep_lock', '' );
+    $lock_ts       = 0;
+    $lock_token    = '';
+    if ( strpos( $lock_raw, ':' ) !== false ) {
+        list( $lock_token, $lock_ts_str ) = explode( ':', $lock_raw, 2 );
+        $lock_ts = (int) $lock_ts_str;
+    }
+    $lock_age      = $lock_ts > 0 ? time() - $lock_ts : 0;
+    $lock_active   = $lock_age > 0 && $lock_age < OP_WB_LOOP_LOCK_STALE_SEC;
+    $next_cron     = wp_next_scheduled( 'onionpress_wayback_sweep' );
+    $msg           = isset( $_GET['op_msg'] ) ? wp_unslash( $_GET['op_msg'] ) : '';
+    $pct           = $totals['total'] > 0 ? round( $totals['archived'] * 100 / $totals['total'], 1 ) : 0;
+
+    // Pull the most recent N log lines written by error_log.
+    ?>
+    <div class="wrap">
+        <h1>Wayback Archive</h1>
+
+        <?php if ( $msg ) : ?>
+            <div class="notice notice-success is-dismissible"><p><?php echo esc_html( $msg ); ?></p></div>
+        <?php endif; ?>
+
+        <?php
+        // Context-aware Wayback link: onion when viewing via .onion,
+        // clearnet otherwise. Uses the helper from the Social Archive
+        // plugin if loaded, else builds inline.
+        if ( function_exists( 'onionpress_social_wayback_home_url' ) ) {
+            $wb_home = onionpress_social_wayback_home_url();
+        } else {
+            $host = (string) ( $_SERVER['HTTP_HOST'] ?? '' );
+            $wb_home = substr( $host, -6 ) === '.onion'
+                ? 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/'
+                : 'https://web.archive.org/';
+        }
+        ?>
+        <p>This site continuously submits its posts to the
+            <a href="<?php echo esc_url( $wb_home ); ?>" target="_blank" rel="noopener">Internet Archive's Wayback Machine</a>
+            via Save Page Now. The captures persist independent of this onion — so even if
+            this server goes offline, your posts remain publicly accessible via
+            <code>web.archive.org/web/&lt;timestamp&gt;/&lt;post-url&gt;</code>.</p>
+
+        <h2>Progress</h2>
+        <table class="wp-list-table widefat striped" style="max-width:720px;">
+            <tbody>
+                <tr>
+                    <th style="width:220px;">Total posts</th>
+                    <td><?php echo number_format_i18n( $totals['total'] ); ?></td>
+                </tr>
+                <tr>
+                    <th>Archived in Wayback</th>
+                    <td><strong><?php echo number_format_i18n( $totals['archived'] ); ?></strong>
+                        <?php if ( $totals['total'] > 0 ) : ?>
+                            &middot; <?php echo esc_html( $pct ); ?>%
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th>In flight at SPN</th>
+                    <td><?php echo number_format_i18n( $totals['in_flight'] ); ?> (submitted, awaiting capture result)</td>
+                </tr>
+                <tr>
+                    <th>Remaining</th>
+                    <td><?php echo number_format_i18n( $totals['remaining'] ); ?></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>Daemon status</h2>
+        <table class="wp-list-table widefat striped" style="max-width:720px;">
+            <tbody>
+                <tr>
+                    <th style="width:220px;">Daemon</th>
+                    <td>
+                        <?php if ( $lock_active ) : ?>
+                            <span style="color:#008000;">● Running</span>
+                            &middot; token <code><?php echo esc_html( substr( $lock_token, 0, 6 ) ); ?></code>
+                            &middot; last heartbeat <?php echo esc_html( $lock_age ); ?>s ago
+                        <?php elseif ( $lock_ts > 0 ) : ?>
+                            <span style="color:#a00;">● Stale lock</span>
+                            (<?php echo esc_html( $lock_age ); ?>s since last heartbeat;
+                            next cron fire will take over)
+                        <?php else : ?>
+                            <span style="color:#666;">● Idle</span>
+                            — waits for next cron fire or the Kick button below
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Back-off</th>
+                    <td>
+                        <?php if ( $backoff_secs > 0 ) : ?>
+                            <span style="color:#a00;">Active</span> — pauses sweeps for <?php echo esc_html( $backoff_secs ); ?> more seconds.
+                            Typically set when SPN reports <code>available=0</code> or a transport error.
+                        <?php else : ?>
+                            <span style="color:#008000;">None</span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Next scheduled cron</th>
+                    <td>
+                        <?php if ( $next_cron ) : ?>
+                            <?php echo esc_html( human_time_diff( time(), $next_cron ) ); ?>
+                            (<?php echo esc_html( date( 'H:i:s', $next_cron ) ); ?>)
+                        <?php else : ?>
+                            <em>Not scheduled — will be re-registered on next page load.</em>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>Actions</h2>
+        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline-block; margin-right:8px;">
+            <?php wp_nonce_field( 'onionpress_wayback_action' ); ?>
+            <input type="hidden" name="action" value="onionpress_wayback_action">
+            <input type="hidden" name="op_action" value="kick">
+            <?php submit_button( 'Kick the daemon now', 'primary', 'submit', false ); ?>
+        </form>
+        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline-block; margin-right:8px;">
+            <?php wp_nonce_field( 'onionpress_wayback_action' ); ?>
+            <input type="hidden" name="action" value="onionpress_wayback_action">
+            <input type="hidden" name="op_action" value="clear_backoff">
+            <?php submit_button( 'Clear backoff', 'secondary', 'submit', false ); ?>
+        </form>
+        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline-block;">
+            <?php wp_nonce_field( 'onionpress_wayback_action' ); ?>
+            <input type="hidden" name="action" value="onionpress_wayback_action">
+            <input type="hidden" name="op_action" value="clear_lock">
+            <?php submit_button( 'Clear lock (force takeover)', 'secondary', 'submit', false ); ?>
+        </form>
+
+        <h2>How it works</h2>
+        <p>A background daemon runs continuously, batching up to 40 post URLs per iteration
+            through Save Page Now. Each submission returns a <code>job_id</code>;
+            a subsequent poll tells us <code>success</code> (capture made),
+            <code>pending</code> (SPN still crawling) or <code>error</code> (SPN crawler
+            couldn't reach the URL).</p>
+        <p>On <code>error:no-captures</code> the daemon falls back to CDX (Wayback's own
+            index): if Wayback already has the URL captured (possibly from a prior attempt),
+            the post is marked archived without resubmission. Otherwise the post is requeued
+            for the next pass.</p>
+        <p>Outgoing SPN traffic is routed through a separate Tor instance
+            (<code>onionheaven</code>) so that heavy archival bursts don't starve the Tor
+            daemon serving your onion. The <strong>heartbeat</strong> to OnionHeaven keeps your
+            address registered as <em>online</em>; if heartbeats lapse for too long,
+            OnionHeaven activates a <strong>takeover redirector</strong> at your address — so
+            visitors get a polite "this site is offline, try again later" page instead of a
+            timeout. The moment your heartbeat resumes, the takeover lifts and your real
+            WordPress serves again.</p>
+        <p>If the daemon dies (crash, reboot, Mac sleep), the mutex lock goes stale after
+            5 minutes and the next WordPress page view causes wp-cron to restart the daemon
+            from the persisted cursor. No progress is lost; no duplicates are created.</p>
+    </div>
+    <?php
+}
