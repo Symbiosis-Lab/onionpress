@@ -1,14 +1,15 @@
 <?php
 /**
  * Plugin Name: OnionPress Wayback Archive
- * Description: Continuously archives the site's posts, home page, and RSS
- *              feed to the Internet Archive's Wayback Machine. Per-post
- *              archive state lives in wp_postmeta (queryable, backed up
- *              with the DB, restored on migration). Home + feed state
- *              lives in wp_options. A scheduled sweep walks anything
- *              not-yet-archived and advances each URL through a three-
- *              state SPN pipeline (submit → poll → success|retry|give-up).
- * Version:     3.0
+ * Description: Archives the site's posts, home page, and RSS feed to the
+ *              Internet Archive's Wayback Machine via Save Page Now (SPN2).
+ *              Fire-and-forget pipeline: a 60s cron tick polls outstanding
+ *              job_ids in batch, then submits fresh work up to the account's
+ *              current available-slots count. No per-URL retry counter,
+ *              no back-off chain — a failed submit is simply retried on a
+ *              later tick. Two global gates throttle the whole sweep:
+ *              (1) self-reachability of our onion, (2) SPN account slots.
+ * Version:     4.0
  * Network:     true
  */
 
@@ -18,85 +19,78 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // ───────────────────────────── tunables ─────────────────────────────
 
-if ( ! defined( 'ONIONPRESS_WAYBACK_MAX_RETRIES' ) ) {
-    // Max SPN crawl failures per URL before we give up.
-    define( 'ONIONPRESS_WAYBACK_MAX_RETRIES', 20 );
-}
-if ( ! defined( 'ONIONPRESS_WAYBACK_RETRY_INTERVAL' ) ) {
-    // Seconds to wait after an SPN error before resubmitting.
-    //
-    // Per Vangelis Banos (SPN maintainer, 2026-04-22): SPN captures
-    // average 20-30 seconds and the service is in great shape, no
-    // queues. The long 3900s (~65 min) value previously used here was
-    // based on a folklore belief about a "60-min dedup cache" that
-    // doesn't actually apply — short retries are fine.
-    //
-    // Rate-limit management is handled separately via the /save/status/
-    // user endpoint check in onionpress_wayback_user_status() below;
-    // this interval only governs the post-error backoff.
-    define( 'ONIONPRESS_WAYBACK_RETRY_INTERVAL', 120 );
-}
-if ( ! defined( 'ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT' ) ) {
-    // Seconds to wait when /save/status/user shows available=0
-    // (we've hit the 7/min patron limit). Short — a slot frees within
-    // ~10s most of the time.
-    define( 'ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT', 20 );
-}
-if ( ! defined( 'ONIONPRESS_WAYBACK_POLL_INTERVAL' ) ) {
-    // Seconds between /save/status/<job> polls while a job is pending.
-    define( 'ONIONPRESS_WAYBACK_POLL_INTERVAL', 60 );
-}
-if ( ! defined( 'ONIONPRESS_WAYBACK_URLS_PER_SWEEP' ) ) {
-    // Safety-net count cap per sweep tick. The real guardrail is the
-    // wall-clock budget below — this just prevents runaway on a blog
-    // with thousands of posts. 25 comfortably covers catchup for a
-    // normal-sized blog without breaching the time budget.
-    define( 'ONIONPRESS_WAYBACK_URLS_PER_SWEEP', 25 );
-}
-if ( ! defined( 'ONIONPRESS_WAYBACK_SWEEP_TIME_BUDGET' ) ) {
-    // Seconds a single sweep tick may spend before yielding to the next
-    // cron firing. Each URL is a Tor round-trip (CDX check + submit or
-    // poll), typically 5-30s. 90s comfortably fits 3-20 URLs depending
-    // on Tor health, well under PHP's default max_execution_time of 30
-    // (we run inside wp-cron which uses its own longer timeout).
-    define( 'ONIONPRESS_WAYBACK_SWEEP_TIME_BUDGET', 90 );
-}
+// How often the sweep fires. With boosted account capacity, a 60s tick
+// keeps the pipeline full without stressing wp-cron.
+define( 'OP_WB_CRON_INTERVAL', 60 );
 
-// Post-meta keys (leading underscore hides them from the edit-post UI).
-define( 'OP_WB_META_ARCHIVED_AT', '_op_wayback_archived_at' );
-define( 'OP_WB_META_SNAPSHOT_TS', '_op_wayback_snapshot_ts' );
-define( 'OP_WB_META_JOB_ID',      '_op_wayback_job_id' );
-define( 'OP_WB_META_RETRY_COUNT', '_op_wayback_retry_count' );
-define( 'OP_WB_META_RETRY_AFTER', '_op_wayback_retry_after' );
-define( 'OP_WB_META_FAILED_AT',   '_op_wayback_failed_at' );
-define( 'OP_WB_META_FAILED_REASON', '_op_wayback_failed_reason' );
+// Max new submissions per sweep tick. Through onionheaven SOCKS, 40
+// is the sweet spot — sweeps complete in 50-80s, leaving headroom for
+// poll/CDX. Bumping to 60 stretched elapsed to >120s (12 chunks of
+// concurrency=5) and hurt total throughput despite higher per-tick
+// submit count.
+define( 'OP_WB_SUBMIT_BATCH_MAX', 40 );
 
-// wp_options keys for home + feed (URLs not tied to a post).
-define( 'OP_WB_OPT_HOME', 'op_wayback_home_state' );
-define( 'OP_WB_OPT_FEED', 'op_wayback_feed_state' );
+// Max concurrent in-flight curl handles. Measured ceiling: 10 works
+// reliably through our onionpress-tor SOCKS but starves other Tor
+// consumers (notably the OnionHeaven heartbeat running in a sibling
+// container). Dropped to 5 so the SPN loop leaves circuit headroom
+// for the heartbeat and reachability checks. 20 saturates outright.
+define( 'OP_WB_CONCURRENT_MAX', 5 );
+
+// Max job_ids bundled into a single /save/status POST. SPN accepts
+// comma-separated lists; 20 is comfortable.
+define( 'OP_WB_STATUS_BATCH_MAX', 20 );
+
+// If a job has been "pending" for this long, something went wrong at
+// SPN — clear the job_id so the next tick resubmits fresh.
+define( 'OP_WB_STALE_PENDING_SEC', 300 );
+
+// Per-sweep wall-clock budget. Keeps a single tick well under wp-cron's
+// timeout even with Tor jitter on every request.
+define( 'OP_WB_SWEEP_BUDGET_SEC', 45 );
+
+// Don't poll a job younger than this — SPN's minimum capture time is
+// ~20s, so polling immediately wastes a Tor round-trip on a guaranteed
+// "pending" answer.
+define( 'OP_WB_YOUNG_JOB_SKIP_SEC', 15 );
+
+// Back-off durations (written to op_wayback_backoff_until option).
+define( 'OP_WB_BACKOFF_NO_SLOTS',    20 );  // SPN says available=0
+define( 'OP_WB_BACKOFF_UNREACHABLE', 120 ); // our own onion not responding
+define( 'OP_WB_BACKOFF_SPN_DOWN',     60 ); // /save/status/user call itself failed
+
+// Meta keys (kept compatible with v3 for the already-archived posts).
+define( 'OP_WB_META_ARCHIVED_AT',     '_op_wayback_archived_at' );
+define( 'OP_WB_META_SNAPSHOT_TS',     '_op_wayback_snapshot_ts' );
+define( 'OP_WB_META_JOB_ID',          '_op_wayback_job_id' );
+define( 'OP_WB_META_SUBMITTED_AT',    '_op_wayback_submitted_at' );
+define( 'OP_WB_META_ORIGINAL_URL',    '_op_wayback_original_url' );
+define( 'OP_WB_META_DURATION_SEC',    '_op_wayback_duration_sec' );
+define( 'OP_WB_META_RESOURCES_COUNT', '_op_wayback_resources_count' );
+define( 'OP_WB_META_OUTLINKS_COUNT',  '_op_wayback_outlinks_count' );
+define( 'OP_WB_META_LAST_ERROR_EXT',  '_op_wayback_last_error_ext' );
+define( 'OP_WB_META_LAST_ERROR_AT',   '_op_wayback_last_error_at' );
+
+// wp_options keys.
+define( 'OP_WB_OPT_HOME',          'op_wayback_home_state' );
+define( 'OP_WB_OPT_FEED',          'op_wayback_feed_state' );
+define( 'OP_WB_OPT_BACKOFF_UNTIL', 'op_wayback_backoff_until' );
 
 // ─────────────────────────── logging + helpers ──────────────────────
 
 function onionpress_wayback_log( $msg ) {
-    // Apache error log → container stderr → container-wordpress-*.log on
-    // the host (rotated, gzipped, shipped via analytics). No need for a
-    // separate file on disk, which would grow unbounded.
     error_log( '[OnionPress Wayback] ' . $msg );
 }
 
-function onionpress_version() {
+function onionpress_wayback_version() {
     static $ver = null;
     if ( $ver === null ) {
         $f = '/var/lib/onionpress/version';
-        $ver = file_exists( $f ) ? trim( @file_get_contents( $f ) ) : 'dev';
+        $ver = file_exists( $f ) ? trim( (string) @file_get_contents( $f ) ) : 'dev';
     }
     return $ver;
 }
 
-/**
- * Read archive.org S3 credentials from wp_options. Empty string if not
- * configured — we still try without auth (public SPN).
- */
 function onionpress_wayback_auth_header() {
     $access = get_blog_option( 1, 'onionpress_archive_s3_access', '' );
     $secret = get_blog_option( 1, 'onionpress_archive_s3_secret', '' );
@@ -106,10 +100,6 @@ function onionpress_wayback_auth_header() {
     return 'LOW ' . $access . ':' . $secret;
 }
 
-/**
- * Read this blog's .onion address from the shared volume. Empty string if
- * Tor isn't up yet.
- */
 function onionpress_wayback_onion_addr() {
     $f = '/var/lib/onionpress/onion_address';
     if ( ! file_exists( $f ) ) {
@@ -118,19 +108,13 @@ function onionpress_wayback_onion_addr() {
     return trim( (string) @file_get_contents( $f ) );
 }
 
-/**
- * Build the .onion URL for a post (trusts get_permalink's path).
- */
 function onionpress_wayback_post_url( $post_id ) {
     $onion = onionpress_wayback_onion_addr();
     if ( empty( $onion ) ) {
         return '';
     }
     $path = wp_parse_url( get_permalink( $post_id ), PHP_URL_PATH );
-    if ( ! $path ) {
-        return '';
-    }
-    return 'http://' . $onion . $path;
+    return $path ? 'http://' . $onion . $path : '';
 }
 
 function onionpress_wayback_home_url_full() {
@@ -151,633 +135,800 @@ function onionpress_wayback_feed_url_full() {
     return 'http://' . $onion . rtrim( $path, '/' ) . '/feed/';
 }
 
-// ──────────────────────────── SPN calls ─────────────────────────────
+/**
+ * Shared curl setup — all our HTTP goes through Tor SOCKS.
+ *
+ * Route chosen: onionheaven container's Tor, NOT onionpress-tor. This
+ * isolates our outgoing SPN bursts from the onion service we're trying
+ * to keep reachable. The onionpress-tor daemon does double duty — it
+ * serves our onion AND handles the heartbeat — so heavy outgoing curl
+ * bursts through it starve both inbound SPN crawls and the heartbeat,
+ * which cascades into takeover. onionheaven container has its own Tor
+ * with spare capacity, and already routes reachability probes, so
+ * layering SPN traffic through it leaves onionpress-tor focused on
+ * serving incoming traffic + keeping the heartbeat fresh.
+ */
+function onionpress_wayback_curl_common( $ch ) {
+    curl_setopt_array( $ch, array(
+        CURLOPT_RETURNTRANSFER    => true,
+        CURLOPT_FOLLOWLOCATION    => true,
+        CURLOPT_UNRESTRICTED_AUTH => true,
+        CURLOPT_MAXREDIRS         => 3,
+        CURLOPT_USERAGENT         => 'OnionPress/' . onionpress_wayback_version(),
+        CURLOPT_PROXY             => 'socks5h://onionheaven:9050',
+        CURLOPT_PROXYTYPE         => CURLPROXY_SOCKS5_HOSTNAME,
+        CURLOPT_SSL_VERIFYPEER    => false,
+        CURLOPT_SSL_VERIFYHOST    => 0,
+        CURLOPT_CONNECTTIMEOUT    => 15,
+    ) );
+}
+
+// ───────────────────── gates (self-reachability, slots) ─────────────
 
 /**
- * Check the SPN user's current rate-limit status.
+ * HEAD our own onion. SPN's crawler follows the same path a client would,
+ * so if we can't reach ourselves through Tor there's no point submitting
+ * anything to SPN — every job will come back error:no-captures.
  *
- * Archive.org's SPN allows ~7 concurrent captures per authenticated
- * patron at a time. Rather than submit blindly and learn via HTTP 429
- * or job errors, we call /save/status/user first to see how many slots
- * we have available. If available == 0 we back off for a short
- * interval instead of burning through retries on the submit path.
- *
- * Returns an associative array with keys like 'available' and
- * 'processing' (integers), or null if the call itself failed.
- * Callers treat null as "unknown — just try submitting" (falling back
- * to the pre-existing behavior).
- *
- * The endpoint is documented in SPN's internal docs (per Vangelis
- * Banos, 2026-04-22).
+ * Only 200 or 301 count. A 302 indicates the OnionHeaven takeover
+ * redirector is in front of us, NOT the real WordPress instance — we
+ * haven't fully come up yet.
+ */
+function onionpress_wayback_self_reachable( $onion ) {
+    $ch = curl_init( 'http://' . $onion . '/' );
+    onionpress_wayback_curl_common( $ch );
+    curl_setopt_array( $ch, array(
+        CURLOPT_NOBODY         => true,
+        CURLOPT_FOLLOWLOCATION => false, // a 302 means redirector, not us
+        CURLOPT_TIMEOUT        => 20,
+    ) );
+    curl_exec( $ch );
+    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    curl_close( $ch );
+    return $code === 200 || $code === 301;
+}
+
+/**
+ * GET /save/status/user. Returns the decoded body or null on failure.
  */
 function onionpress_wayback_user_status() {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return null;
-    }
     $auth = onionpress_wayback_auth_header();
     if ( empty( $auth ) ) {
-        return null; // endpoint requires auth
+        return null;
     }
-    $ch = curl_init( 'https://web.archive.org/save/status/user' );
+    $ch = curl_init( 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status/user?t=' . time() );
+    onionpress_wayback_curl_common( $ch );
     curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 15,
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 3,
-        CURLOPT_USERAGENT      => 'OnionPress/' . onionpress_version(),
-        CURLOPT_HTTPHEADER     => array(
+        CURLOPT_TIMEOUT    => 20,
+        CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Authorization: ' . $auth,
         ),
-        CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
     ) );
-    $response  = curl_exec( $ch );
-    $http_code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $response = curl_exec( $ch );
+    $code     = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
     curl_close( $ch );
-    if ( $http_code !== 200 || ! $response ) {
+    if ( $code !== 200 || ! $response ) {
         return null;
     }
     $body = @json_decode( (string) $response, true );
-    if ( ! is_array( $body ) ) {
-        return null;
-    }
-    return $body;
+    return is_array( $body ) ? $body : null;
 }
 
+// ────────────────────────── SPN submit + poll ───────────────────────
+
 /**
- * Submit a URL to SPN. Tries the .onion endpoint first, falls back to
- * clearnet. Both go through onionpress-tor:9050.
+ * Generic curl_multi runner. $setups is an array keyed by arbitrary ID,
+ * each value is a callable receiving a fresh curl handle to configure.
+ * Returns an array keyed the same way; each value is
+ *   ['code' => int, 'body' => string]
+ * regardless of success, so callers can decide what counts as an error.
  *
- * Returns:
- *   ['status' => 'ok', 'job_id' => 'spn2-…']
- *   ['status' => 'cooldown']   — SPN returned "same snapshot"
- *   ['status' => 'failed']     — all endpoints rejected us
+ * This is the heart of the throughput improvement — instead of paying
+ * ~3-5s of Tor round-trip per request serially, all requests run in
+ * parallel and the total time is roughly the slowest single request.
  */
-function onionpress_wayback_submit( $url ) {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return array( 'status' => 'failed' );
+function onionpress_wayback_curl_multi( array $setups ) {
+    if ( empty( $setups ) ) {
+        return array();
     }
-    $endpoints = array(
-        'http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
-        'https://web.archive.org/save',
-    );
-    $auth       = onionpress_wayback_auth_header();
-    $user_agent = 'OnionPress/' . onionpress_version() . ' (+https://github.com/brewsterkahle/onionpress)';
-    foreach ( $endpoints as $ep ) {
-        onionpress_wayback_log( 'Submit: ' . $url . ' via ' . $ep
-            . ( $auth ? ' (auth)' : ' (no auth)' ) );
-        $headers = array( 'Accept: application/json' );
-        if ( $auth ) {
-            $headers[] = 'Authorization: ' . $auth;
-        }
+    $mh = curl_multi_init();
+    $handles = array();
+    foreach ( $setups as $key => $configure ) {
         $ch = curl_init();
-        curl_setopt_array( $ch, array(
-            CURLOPT_URL            => $ep,
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => http_build_query( array( 'url' => $url ) ),
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 30,
-            CURLOPT_CONNECTTIMEOUT => 15,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_UNRESTRICTED_AUTH => true,
-            CURLOPT_MAXREDIRS      => 3,
-            CURLOPT_USERAGENT      => $user_agent,
-            CURLOPT_HTTPHEADER     => $headers,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_SSL_VERIFYHOST => 0,
-            CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
-            CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        ) );
-        $response  = curl_exec( $ch );
-        $http_code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-        $err       = curl_error( $ch );
-        curl_close( $ch );
-        if ( $err ) {
-            onionpress_wayback_log( 'Submit error: ' . $err );
-            continue;
-        }
-        onionpress_wayback_log( 'Submit resp: HTTP ' . $http_code . ' — '
-            . substr( (string) $response, 0, 300 ) );
-        if ( $http_code === 401 || $http_code === 403 ) {
-            continue; // next endpoint
-        }
-        if ( $http_code === 429 ) {
-            return array( 'status' => 'rate_limited' );
-        }
-        if ( $http_code >= 200 && $http_code < 400 ) {
-            $body = @json_decode( (string) $response, true );
-            if ( is_array( $body ) && isset( $body['message'] )
-                    && strpos( $body['message'], 'same snapshot' ) !== false ) {
-                return array( 'status' => 'cooldown' );
-            }
-            $job_id = ( is_array( $body ) && ! empty( $body['job_id'] ) )
-                ? $body['job_id'] : '';
-            return array( 'status' => 'ok', 'job_id' => $job_id );
-        }
+        onionpress_wayback_curl_common( $ch );
+        $configure( $ch );
+        curl_multi_add_handle( $mh, $ch );
+        $handles[ $key ] = $ch;
     }
-    return array( 'status' => 'failed' );
+    do {
+        $status = curl_multi_exec( $mh, $running );
+        if ( $running > 0 ) {
+            curl_multi_select( $mh, 1.0 );
+        }
+    } while ( $running > 0 && $status === CURLM_OK );
+
+    $results = array();
+    foreach ( $handles as $key => $ch ) {
+        $body = (string) curl_multi_getcontent( $ch );
+        $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+        curl_multi_remove_handle( $mh, $ch );
+        curl_close( $ch );
+        $results[ $key ] = array( 'code' => $code, 'body' => $body );
+    }
+    curl_multi_close( $mh );
+    return $results;
 }
 
 /**
- * Poll SPN for an in-flight job.
- *
- * Returns:
- *   ['state' => 'success', 'timestamp' => '20260419010526']
- *   ['state' => 'pending']
- *   ['state' => 'error', 'ext' => '…', 'message' => '…']
- *   ['state' => 'unknown', 'message' => '<why>']
+ * Submit many URLs to SPN in parallel. $urls is an array keyed by any
+ * stable ID (caller's choice) with values being the URL to submit.
+ * Returns an array keyed the same way; each value is a string:
+ *   - a job_id on success
+ *   - 'RATE_LIMITED' if SPN returned 429 for that URL
+ *   - '' if the submit failed
  */
-function onionpress_wayback_poll_status( $job_id ) {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return array( 'state' => 'unknown', 'message' => 'no curl' );
+function onionpress_wayback_submit_parallel( array $urls ) {
+    if ( empty( $urls ) ) {
+        return array();
     }
-    $ch = curl_init( 'https://web.archive.org/save/status/' . $job_id );
-    curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 30,
-        CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 3,
-        CURLOPT_USERAGENT      => 'OnionPress/' . onionpress_version(),
-        CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
+    $auth = onionpress_wayback_auth_header();
+    if ( empty( $auth ) ) {
+        return array_fill_keys( array_keys( $urls ), '' );
+    }
+    $headers = array( 'Accept: application/json', 'Authorization: ' . $auth );
+
+    // Speed-tuning params per SPN docs (Tips for faster captures):
+    //   skip_first_archive=1      don't compute "is this a first?"
+    //   js_behavior_timeout=0     skip JS behaviors (WP content is server-rendered)
+    // Dropped `if_not_archived_within=1h` — on retries after a failed
+    // onion crawl, SPN was returning the cached error instead of re-
+    // trying with a fresh circuit. Relying on SPN's built-in default
+    // (45 min) lets genuinely failed URLs retry sooner on new circuits.
+    //
+    // Chunk the URL list so we never fire more than OP_WB_CONCURRENT_MAX
+    // handles at once — Tor SOCKS saturates above that point and every
+    // request fails with code=0. Each chunk runs in parallel, chunks run
+    // sequentially.
+    $results = array();
+    $keys = array_keys( $urls );
+    foreach ( array_chunk( $keys, OP_WB_CONCURRENT_MAX ) as $key_chunk ) {
+        $setups = array();
+        foreach ( $key_chunk as $key ) {
+            $url = $urls[ $key ];
+            $setups[ $key ] = function ( $ch ) use ( $url, $headers ) {
+                curl_setopt_array( $ch, array(
+                    CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
+                    CURLOPT_POST       => true,
+                    CURLOPT_POSTFIELDS => http_build_query( array(
+                        'url'                 => $url,
+                        'skip_first_archive'  => 1,
+                        'js_behavior_timeout' => 0,
+                    ) ),
+                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_HTTPHEADER => $headers,
+                ) );
+            };
+        }
+        $raw = onionpress_wayback_curl_multi( $setups );
+        foreach ( $raw as $key => $r ) {
+            if ( $r['code'] === 429 ) {
+                $results[ $key ] = 'RATE_LIMITED';
+                continue;
+            }
+            if ( $r['code'] < 200 || $r['code'] >= 400 || empty( $r['body'] ) ) {
+                $results[ $key ] = '';
+                continue;
+            }
+            $data = @json_decode( $r['body'], true );
+            $results[ $key ] = ( is_array( $data ) && ! empty( $data['job_id'] ) )
+                ? (string) $data['job_id'] : '';
+        }
+    }
+    return $results;
+}
+
+/**
+ * Ask CDX for the latest Wayback capture of each URL, returning the
+ * YYYYMMDDHHMMSS timestamp on hit or '' on miss / transport failure.
+ *
+ * SPN's /save/status memory is unreliable: it flips "success" →
+ * "error:no-captures" for the same job_id a few minutes later even when
+ * the capture persists in the Wayback Machine. Before trashing a post
+ * on SPN's verdict, we verify against CDX directly.
+ *
+ * (Tried /wayback/available as a lighter primary path — it's not
+ * exposed on the archive.org onion mirror and 404s every time. CDX
+ * is what works through Tor.)
+ *
+ * One retry on transport failure (Tor circuit jitter is common; the
+ * retry catches most transient 504s without doubling traffic on good
+ * circuits).
+ */
+function onionpress_wayback_cdx_lookup_parallel( array $urls ) {
+    if ( empty( $urls ) ) {
+        return array();
+    }
+    // Single pass — no retry. Misses are acceptable: if CDX didn't see
+    // a capture this tick, SPN either really hasn't archived it yet or
+    // the rescue call itself transient-failed, and either way the URL
+    // will be re-submitted on the next sweep, with another shot at
+    // rescue later. Retrying here just doubles the Tor load on misses.
+    return onionpress_wayback_cdx_one_pass( $urls );
+}
+
+// Back-compat alias for the new name.
+function onionpress_wayback_availability_parallel( array $urls ) {
+    return onionpress_wayback_cdx_lookup_parallel( $urls );
+}
+
+/**
+ * Single CDX query pass. $urls is keyed map key → URL. Returns a
+ * same-keyed map of key → timestamp (empty string on miss).
+ */
+function onionpress_wayback_cdx_one_pass( array $urls ) {
+    $headers = array( 'Accept: application/json' );
+    $result = array_fill_keys( array_keys( $urls ), '' );
+    foreach ( array_chunk( array_keys( $urls ), OP_WB_CONCURRENT_MAX ) as $key_chunk ) {
+        $setups = array();
+        foreach ( $key_chunk as $key ) {
+            $url_no_scheme = preg_replace( '#^https?://#', '', $urls[ $key ] );
+            $endpoint = 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/cdx/search/cdx?'
+                . 'url=' . urlencode( $url_no_scheme ) . '&output=json&limit=-1';
+            $setups[ $key ] = function ( $ch ) use ( $endpoint, $headers ) {
+                curl_setopt_array( $ch, array(
+                    CURLOPT_URL        => $endpoint,
+                    CURLOPT_TIMEOUT    => 25,
+                    CURLOPT_HTTPHEADER => $headers,
+                ) );
+            };
+        }
+        $raw = onionpress_wayback_curl_multi( $setups );
+        foreach ( $raw as $key => $r ) {
+            if ( $r['code'] !== 200 || empty( $r['body'] ) ) continue;
+            $data = @json_decode( $r['body'], true );
+            if ( ! is_array( $data ) || count( $data ) < 2 ) continue;
+            // Row 0 is the CDX header; subsequent rows are capture
+            // records. Timestamp is index 1. limit=-1 sorts oldest-
+            // first so the last element is the most recent capture.
+            $last = end( $data );
+            if ( is_array( $last ) && ! empty( $last[1] ) ) {
+                $result[ $key ] = (string) $last[1];
+            }
+        }
+    }
+    return $result;
+}
+
+/**
+ * Poll SPN for many job_ids in parallel. $job_ids is a flat list; this
+ * function chunks them into batches of OP_WB_STATUS_BATCH_MAX, fires
+ * one POST per batch concurrently, and returns the flattened response
+ * objects. Each object is the raw SPN status dict (with 'job_id',
+ * 'status', and on success 'timestamp', 'original_url', 'duration_sec',
+ * 'resources', 'outlinks').
+ */
+function onionpress_wayback_poll_parallel( array $job_ids ) {
+    if ( empty( $job_ids ) ) {
+        return array();
+    }
+    $auth = onionpress_wayback_auth_header();
+    $headers = array( 'Accept: application/json' );
+    if ( $auth ) {
+        $headers[] = 'Authorization: ' . $auth;
+    }
+    // Same chunking discipline as submit_parallel: cap concurrent handles
+    // at OP_WB_CONCURRENT_MAX through the shared Tor SOCKS.
+    $all = array();
+    $id_chunks = array_chunk( $job_ids, OP_WB_STATUS_BATCH_MAX );
+    foreach ( array_chunk( $id_chunks, OP_WB_CONCURRENT_MAX ) as $parallel_group ) {
+        $setups = array();
+        foreach ( $parallel_group as $i => $chunk ) {
+            $setups[ $i ] = function ( $ch ) use ( $chunk, $headers ) {
+                curl_setopt_array( $ch, array(
+                    CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status',
+                    CURLOPT_POST       => true,
+                    CURLOPT_POSTFIELDS => http_build_query( array( 'job_ids' => implode( ',', $chunk ) ) ),
+                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_HTTPHEADER => $headers,
+                ) );
+            };
+        }
+        $raw = onionpress_wayback_curl_multi( $setups );
+        foreach ( $raw as $r ) {
+            if ( $r['code'] !== 200 || empty( $r['body'] ) ) continue;
+            $data = @json_decode( $r['body'], true );
+            if ( ! is_array( $data ) ) continue;
+            foreach ( $data as $item ) {
+                if ( is_array( $item ) ) $all[] = $item;
+            }
+        }
+    }
+    return $all;
+}
+
+// ───────────────── finalize: write outcomes into storage ────────────
+
+/**
+ * Record a successful capture. $data is one element from the
+ * /save/status batch response. Generic over storage: the caller
+ * supplies read/write callables so this works for both postmeta and
+ * wp_options (home + feed).
+ */
+function onionpress_wayback_finalize_success( callable $write, $url, array $data ) {
+    $state = array(
+        'archived_at'     => time(),
+        'snapshot_ts'     => (string) ( $data['timestamp'] ?? '' ),
+        'original_url'    => (string) ( $data['original_url'] ?? '' ),
+        'duration_sec'    => (float) ( $data['duration_sec'] ?? 0 ),
+        'resources_count' => is_array( $data['resources'] ?? null ) ? count( $data['resources'] ) : 0,
+        'outlinks_count'  => is_array( $data['outlinks']  ?? null ) ? count( $data['outlinks']  ) : 0,
+    );
+    // Only store original_url if it actually differs from what we submitted,
+    // to avoid 4kB of duplicated URLs in postmeta.
+    if ( $state['original_url'] === $url ) {
+        unset( $state['original_url'] );
+    }
+    $write( $state );
+}
+
+function onionpress_wayback_finalize_error( callable $write, $ext ) {
+    $write( array(
+        'last_error_ext' => (string) $ext,
+        'last_error_at'  => time(),
     ) );
-    $response  = curl_exec( $ch );
-    $http_code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    $err       = curl_error( $ch );
-    curl_close( $ch );
-    if ( $err || $http_code !== 200 || ! $response ) {
-        return array( 'state' => 'unknown',
-                      'message' => $err ?: ( 'HTTP ' . $http_code ) );
+}
+
+// ────────────────────── state read/write helpers ────────────────────
+
+function onionpress_wayback_post_read( $post_id ) {
+    return array(
+        'archived_at' => (int)    get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ),
+        'job_id'      => (string) get_post_meta( $post_id, OP_WB_META_JOB_ID,       true ),
+        'submitted_at'=> (int)    get_post_meta( $post_id, OP_WB_META_SUBMITTED_AT, true ),
+    );
+}
+
+/**
+ * Write a patch of fields to a post's wayback meta. Only keys present in
+ * $patch are touched; the rest are preserved. An empty string deletes.
+ */
+function onionpress_wayback_post_write( $post_id, array $patch ) {
+    $mapping = array(
+        'archived_at'     => OP_WB_META_ARCHIVED_AT,
+        'snapshot_ts'     => OP_WB_META_SNAPSHOT_TS,
+        'job_id'          => OP_WB_META_JOB_ID,
+        'submitted_at'    => OP_WB_META_SUBMITTED_AT,
+        'original_url'    => OP_WB_META_ORIGINAL_URL,
+        'duration_sec'    => OP_WB_META_DURATION_SEC,
+        'resources_count' => OP_WB_META_RESOURCES_COUNT,
+        'outlinks_count'  => OP_WB_META_OUTLINKS_COUNT,
+        'last_error_ext'  => OP_WB_META_LAST_ERROR_EXT,
+        'last_error_at'   => OP_WB_META_LAST_ERROR_AT,
+    );
+    foreach ( $patch as $key => $val ) {
+        if ( ! isset( $mapping[ $key ] ) ) continue;
+        if ( $val === '' || $val === 0 || $val === 0.0 ) {
+            delete_post_meta( $post_id, $mapping[ $key ] );
+        } else {
+            update_post_meta( $post_id, $mapping[ $key ], $val );
+        }
     }
-    $body = @json_decode( (string) $response, true );
-    if ( ! is_array( $body ) || empty( $body['status'] ) ) {
-        return array( 'state' => 'unknown', 'message' => 'malformed SPN response' );
+}
+
+function onionpress_wayback_opt_read( $option_key ) {
+    $raw = get_option( $option_key, array() );
+    return is_array( $raw ) ? $raw : array();
+}
+
+function onionpress_wayback_opt_write( $option_key, array $patch ) {
+    $raw = onionpress_wayback_opt_read( $option_key );
+    foreach ( $patch as $k => $v ) {
+        if ( $v === '' || $v === 0 || $v === 0.0 ) {
+            unset( $raw[ $k ] );
+        } else {
+            $raw[ $k ] = $v;
+        }
     }
-    if ( $body['status'] === 'success' ) {
-        return array( 'state'     => 'success',
-                      'timestamp' => $body['timestamp'] ?? '' );
-    }
-    if ( $body['status'] === 'error' ) {
-        return array(
-            'state'   => 'error',
-            'ext'     => $body['status_ext'] ?? 'error',
-            'message' => $body['message'] ?? '',
+    update_option( $option_key, $raw, false /* no autoload */ );
+}
+
+// ───────────────────── work queue (posts + home/feed) ───────────────
+
+/**
+ * Unified record for one URL under management. Each is an associative
+ * array with at minimum 'url', 'read' callable (returns current state),
+ * 'write' callable (applies a patch). Used by the sweep so posts and
+ * home/feed go through the same code path.
+ */
+function onionpress_wayback_posts_needing_submit( $limit ) {
+    $posts = get_posts( array(
+        'post_status'      => 'publish',
+        'post_type'        => array( 'post', 'page' ),
+        'numberposts'      => (int) $limit,
+        'orderby'          => 'date',
+        'order'            => 'DESC',
+        'meta_query'       => array(
+            'relation' => 'AND',
+            array( 'key' => OP_WB_META_ARCHIVED_AT, 'compare' => 'NOT EXISTS' ),
+            array( 'key' => OP_WB_META_JOB_ID,      'compare' => 'NOT EXISTS' ),
+        ),
+        'fields'           => 'ids',
+        'suppress_filters' => false,
+    ) );
+    $records = array();
+    foreach ( $posts as $post_id ) {
+        $url = onionpress_wayback_post_url( $post_id );
+        if ( empty( $url ) ) continue;
+        $records[] = array(
+            'key'   => 'post:' . $post_id,
+            'url'   => $url,
+            'read'  => function() use ( $post_id ) {
+                return onionpress_wayback_post_read( $post_id );
+            },
+            'write' => function( $patch ) use ( $post_id ) {
+                onionpress_wayback_post_write( $post_id, $patch );
+            },
         );
     }
-    return array( 'state' => 'pending' );
+    return $records;
 }
 
-/**
- * Ask CDX (the Wayback index) for the latest capture timestamp of a URL,
- * or an empty string if none. CDX is the ground truth — SPN's
- * /save/status/ endpoint has been observed to flip from "success" to
- * "error:no-captures" for the same job_id over time, while the capture
- * in CDX persists. Trust CDX over SPN status.
- */
-function onionpress_wayback_cdx_latest( $url ) {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return '';
-    }
-    $url_no_scheme = preg_replace( '#^https?://#', '', $url );
-    $ch = curl_init( 'https://web.archive.org/cdx/search/cdx?'
-        . 'url=' . urlencode( $url_no_scheme )
-        . '&output=json&limit=1' );
-    curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 45,
-        CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 3,
-        CURLOPT_USERAGENT      => 'OnionPress/' . onionpress_version(),
-        CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
+function onionpress_wayback_posts_with_in_flight() {
+    $posts = get_posts( array(
+        'post_status'      => 'publish',
+        'post_type'        => array( 'post', 'page' ),
+        'numberposts'      => -1,
+        'meta_query'       => array(
+            array( 'key' => OP_WB_META_JOB_ID, 'compare' => 'EXISTS' ),
+        ),
+        'fields'           => 'ids',
+        'suppress_filters' => false,
     ) );
-    $response  = curl_exec( $ch );
-    $http_code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    curl_close( $ch );
-    if ( $http_code !== 200 || ! $response ) {
-        return '';
+    $records = array();
+    foreach ( $posts as $post_id ) {
+        $job_id = (string) get_post_meta( $post_id, OP_WB_META_JOB_ID, true );
+        if ( empty( $job_id ) ) continue;
+        $url = onionpress_wayback_post_url( $post_id );
+        $records[ $job_id ] = array(
+            'key'          => 'post:' . $post_id,
+            'url'          => $url,
+            'submitted_at' => (int) get_post_meta( $post_id, OP_WB_META_SUBMITTED_AT, true ),
+            'write'        => function( $patch ) use ( $post_id ) {
+                onionpress_wayback_post_write( $post_id, $patch );
+            },
+        );
     }
-    $data = @json_decode( (string) $response, true );
-    if ( ! is_array( $data ) || count( $data ) < 2 ) {
-        return '';
-    }
-    // CDX JSON format: first row is header, subsequent rows are captures.
-    // Row schema: urlkey, timestamp, original, mimetype, statuscode,
-    //             digest, length. Timestamp is index 1.
-    $last = end( $data );
-    return is_array( $last ) && ! empty( $last[1] ) ? (string) $last[1] : '';
-}
-
-// ─────────────────────── state read/write helpers ───────────────────
-
-/**
- * Read a post's wayback state as an associative array.
- */
-function onionpress_wayback_post_state( $post_id ) {
-    return array(
-        'archived_at'   => (int) get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ),
-        'snapshot_ts'   => (string) get_post_meta( $post_id, OP_WB_META_SNAPSHOT_TS, true ),
-        'job_id'        => (string) get_post_meta( $post_id, OP_WB_META_JOB_ID, true ),
-        'retry_count'   => (int) get_post_meta( $post_id, OP_WB_META_RETRY_COUNT, true ),
-        'retry_after'   => (int) get_post_meta( $post_id, OP_WB_META_RETRY_AFTER, true ),
-        'failed_at'     => (int) get_post_meta( $post_id, OP_WB_META_FAILED_AT, true ),
-        'failed_reason' => (string) get_post_meta( $post_id, OP_WB_META_FAILED_REASON, true ),
-    );
+    return $records;
 }
 
 /**
- * Write a post's wayback state. Keys absent from $state are DELETED from
- * postmeta — callers pass the full state they want stored.
+ * Home + feed as work records, matching the shape used for posts.
+ * Returns a mixed list: some awaiting submission, some in-flight. The
+ * sweep checks each record's state to decide what to do.
  */
-function onionpress_wayback_post_state_set( $post_id, $state ) {
-    $mapping = array(
-        'archived_at'   => OP_WB_META_ARCHIVED_AT,
-        'snapshot_ts'   => OP_WB_META_SNAPSHOT_TS,
-        'job_id'        => OP_WB_META_JOB_ID,
-        'retry_count'   => OP_WB_META_RETRY_COUNT,
-        'retry_after'   => OP_WB_META_RETRY_AFTER,
-        'failed_at'     => OP_WB_META_FAILED_AT,
-        'failed_reason' => OP_WB_META_FAILED_REASON,
-    );
-    foreach ( $mapping as $key => $meta ) {
-        if ( array_key_exists( $key, $state ) && $state[ $key ] !== '' && $state[ $key ] !== 0 ) {
-            update_post_meta( $post_id, $meta, $state[ $key ] );
-        } else {
-            delete_post_meta( $post_id, $meta );
-        }
+function onionpress_wayback_sitewide_records() {
+    $records = array();
+    $home = onionpress_wayback_home_url_full();
+    $feed = onionpress_wayback_feed_url_full();
+    $items = array();
+    if ( $home ) $items[ OP_WB_OPT_HOME ] = $home;
+    if ( $feed ) $items[ OP_WB_OPT_FEED ] = $feed;
+    foreach ( $items as $opt_key => $url ) {
+        $records[] = array(
+            'key'   => 'opt:' . $opt_key,
+            'url'   => $url,
+            'read'  => function() use ( $opt_key ) {
+                return onionpress_wayback_opt_read( $opt_key );
+            },
+            'write' => function( $patch ) use ( $opt_key ) {
+                onionpress_wayback_opt_write( $opt_key, $patch );
+            },
+        );
     }
+    return $records;
 }
 
-/**
- * Read the state for a non-post URL (home or feed) from wp_options.
- */
-function onionpress_wayback_opt_state( $option_key ) {
-    $raw = get_option( $option_key, array() );
-    if ( ! is_array( $raw ) ) {
-        $raw = array();
-    }
-    return array(
-        'archived_at'   => (int) ( $raw['archived_at'] ?? 0 ),
-        'snapshot_ts'   => (string) ( $raw['snapshot_ts'] ?? '' ),
-        'job_id'        => (string) ( $raw['job_id'] ?? '' ),
-        'retry_count'   => (int) ( $raw['retry_count'] ?? 0 ),
-        'retry_after'   => (int) ( $raw['retry_after'] ?? 0 ),
-        'failed_at'     => (int) ( $raw['failed_at'] ?? 0 ),
-        'failed_reason' => (string) ( $raw['failed_reason'] ?? '' ),
-    );
-}
+// ──────────────────────────── sweep ─────────────────────────────────
 
-function onionpress_wayback_opt_state_set( $option_key, $state ) {
-    update_option( $option_key, $state, false /* autoload */ );
-}
-
-// ─────────────────────────── state machine ──────────────────────────
-
-/**
- * Advance one URL through the state machine, reading/writing state via
- * the provided callables. Returns the action label, for logging.
- */
-function onionpress_wayback_advance( $url, callable $read, callable $write ) {
-    $state = $read();
-
-    if ( ! empty( $state['archived_at'] ) ) {
-        return 'already-archived';
-    }
-    if ( ! empty( $state['failed_at'] ) ) {
-        return 'given-up';
-    }
-    $now = time();
-    if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > $now ) {
-        return 'waiting';
-    }
-
-    // State 2: in-flight job — poll SPN.
-    if ( ! empty( $state['job_id'] ) ) {
-        $status = onionpress_wayback_poll_status( $state['job_id'] );
-        if ( $status['state'] === 'success' ) {
-            $write( array(
-                'archived_at' => $now,
-                'snapshot_ts' => $status['timestamp'],
-                'job_id'      => $state['job_id'],
-            ) );
-            onionpress_wayback_log( 'Archived ' . $url
-                . ' (job ' . $state['job_id']
-                . ', ts ' . $status['timestamp'] . ')' );
-            return 'success';
-        }
-        if ( $status['state'] === 'error' ) {
-            // SPN said "no capture" — but SPN's job-status memory is
-            // unreliable (we've seen jobs flip success→error hours later
-            // even when the actual capture persists in CDX). Before
-            // bumping retry_count, ask CDX directly; if it has a capture
-            // we're done, regardless of what SPN claims.
-            $cdx_ts = onionpress_wayback_cdx_latest( $url );
-            if ( ! empty( $cdx_ts ) ) {
-                $write( array(
-                    'archived_at' => $now,
-                    'snapshot_ts' => $cdx_ts,
-                ) );
-                onionpress_wayback_log( 'CDX has capture for ' . $url
-                    . ' (ts ' . $cdx_ts . ') despite SPN '
-                    . $status['ext'] . ' — marking archived' );
-                return 'cdx-hit';
-            }
-            $retry = (int) ( $state['retry_count'] ?? 0 ) + 1;
-            $max   = ONIONPRESS_WAYBACK_MAX_RETRIES;
-            if ( $retry >= $max ) {
-                $write( array(
-                    'failed_at'     => $now,
-                    'failed_reason' => $status['ext'] . ': ' . $status['message'],
-                    'retry_count'   => $retry,
-                ) );
-                onionpress_wayback_log( 'Giving up on ' . $url . ' after '
-                    . $retry . ' SPN crawl failures: ' . $status['ext'] );
-                return 'given-up';
-            }
-            $write( array(
-                'retry_count' => $retry,
-                'retry_after' => $now + ONIONPRESS_WAYBACK_RETRY_INTERVAL,
-                // clear job_id so next sweep submits fresh
-            ) );
-            onionpress_wayback_log( 'SPN error for ' . $url
-                . ' (' . $status['ext'] . '), will retry in '
-                . round( ONIONPRESS_WAYBACK_RETRY_INTERVAL / 60 )
-                . ' min (attempt ' . $retry . '/' . $max . ')' );
-            return 'retry-scheduled';
-        }
-        // pending / unknown
-        $write( array_merge( $state, array(
-            'retry_after' => $now + ONIONPRESS_WAYBACK_POLL_INTERVAL,
-        ) ) );
-        return 'polling';
-    }
-
-    // State 1: no job_id — check CDX first (free dedup; also catches
-    // URLs that SPN successfully archived on a previous machine or run
-    // where we didn't track it). If already captured, skip submission.
-    $cdx_ts = onionpress_wayback_cdx_latest( $url );
-    if ( ! empty( $cdx_ts ) ) {
-        $write( array(
-            'archived_at' => $now,
-            'snapshot_ts' => $cdx_ts,
-        ) );
-        onionpress_wayback_log( 'CDX has capture for ' . $url
-            . ' (ts ' . $cdx_ts . ') — no submission needed' );
-        return 'cdx-hit';
-    }
-    // Before submitting, ask SPN how many capture slots we have
-    // available. The patron rate limit is ~7/min; bursting past that
-    // causes the subsequent submits to return HTTP 429 or job errors
-    // that we'd otherwise misread as "this URL can't be archived."
-    // If user_status tells us we're out of slots, back off for a
-    // short interval and let the next sweep retry — no retry-count
-    // bump, no long cooldown.
-    $user_status = onionpress_wayback_user_status();
-    if ( is_array( $user_status )
-         && isset( $user_status['available'] )
-         && (int) $user_status['available'] < 1 ) {
-        $write( array_merge( $state, array(
-            'retry_after' => $now + ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT,
-        ) ) );
-        onionpress_wayback_log( 'Rate-limited (available=0, processing='
-            . ( $user_status['processing'] ?? '?' ) . '), back off '
-            . ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT . 's' );
-        return 'rate-limited-wait';
-    }
-
-    $result = onionpress_wayback_submit( $url );
-    if ( $result['status'] === 'ok' && ! empty( $result['job_id'] ) ) {
-        $write( array_merge( $state, array(
-            'job_id'      => $result['job_id'],
-            'retry_after' => $now + ONIONPRESS_WAYBACK_POLL_INTERVAL,
-        ) ) );
-        return 'submitted';
-    }
-    if ( $result['status'] === 'cooldown' ) {
-        $write( array_merge( $state, array(
-            'retry_after' => $now + ONIONPRESS_WAYBACK_RETRY_INTERVAL,
-        ) ) );
-        return 'cooldown';
-    }
-    if ( $result['status'] === 'rate_limited' ) {
-        // HTTP 429 despite user_status saying we had slots — happens
-        // under burst racing with other concurrent submitters on the
-        // same auth. Short wait, no retry-count bump.
-        $write( array_merge( $state, array(
-            'retry_after' => $now + ONIONPRESS_WAYBACK_RATE_LIMIT_WAIT,
-        ) ) );
-        return 'rate-limited-429';
-    }
-    // submission failed — retry in 5 min (next sweep tick)
-    $write( array_merge( $state, array(
-        'retry_after' => $now + 300,
-    ) ) );
-    return 'submit-failed';
-}
-
-// ───────────────────────── sweep (cron tick) ────────────────────────
-
-/**
- * Every 5 minutes, pick up to N URLs that are neither archived nor given-
- * up-on, and advance each by one state machine step. The wp_postmeta
- * query lets the DB do the "what needs work" lookup — no JSON queue.
- */
 function onionpress_wayback_sweep() {
+    $now = time();
+
+    // Global back-off gate — either we recently saw available=0, failed
+    // a self-reachability check, or SPN status was unreachable.
+    $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
+    if ( $backoff_until > $now ) {
+        return;
+    }
+
     $onion = onionpress_wayback_onion_addr();
     if ( empty( $onion ) ) {
         onionpress_wayback_log( 'Sweep skipped: onion address not ready' );
         return;
     }
 
-    $budget = ONIONPRESS_WAYBACK_URLS_PER_SWEEP;
-    $deadline = microtime( true ) + ONIONPRESS_WAYBACK_SWEEP_TIME_BUDGET;
-    $processed = 0;
-
-    // 1) Home and feed first. These are one-shot catchup URLs: once each
-    //    is successfully archived (or given up on), advance() short-
-    //    circuits to 'already-archived' or 'given-up' without doing any
-    //    work — they don't consume budget in subsequent ticks. Running
-    //    them first avoids the starvation bug where a blog with many
-    //    posts would never archive its homepage.
-    $url_map = array();
-    $home = onionpress_wayback_home_url_full();
-    $feed = onionpress_wayback_feed_url_full();
-    if ( $home ) { $url_map[ OP_WB_OPT_HOME ] = $home; }
-    if ( $feed ) { $url_map[ OP_WB_OPT_FEED ] = $feed; }
-    foreach ( $url_map as $opt_key => $url ) {
-        $state = onionpress_wayback_opt_state( $opt_key );
-        if ( ! empty( $state['archived_at'] ) || ! empty( $state['failed_at'] ) ) {
-            continue; // no-op, doesn't count against budget
-        }
-        if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > time() ) {
-            continue; // waiting, doesn't count against budget
-        }
-        if ( $processed >= $budget || microtime( true ) >= $deadline ) {
-            break;
-        }
-        $action = onionpress_wayback_advance(
-            $url,
-            function () use ( $opt_key ) { return onionpress_wayback_opt_state( $opt_key ); },
-            function ( $state ) use ( $opt_key ) { onionpress_wayback_opt_state_set( $opt_key, $state ); }
-        );
-        onionpress_wayback_log( 'Sweep: ' . $opt_key . ' → ' . $action );
-        $processed++;
+    // Gate: do we have SPN slots? If the check itself fails (Tor
+    // jitter, SPN briefly unreachable), assume we have slots and
+    // proceed. The worst case is one wasted submit batch — better
+    // than a 60-120s global backoff starving every sweep while we
+    // wait for Tor to recover. If the account is genuinely at
+    // capacity, the submits will return 429 and we'll back off then.
+    $user = onionpress_wayback_user_status();
+    $available = ( $user === null )
+        ? OP_WB_SUBMIT_BATCH_MAX // optimistic default
+        : (int) ( $user['available'] ?? 0 );
+    if ( $user !== null && $available <= 0 ) {
+        update_option( OP_WB_OPT_BACKOFF_UNTIL, $now + OP_WB_BACKOFF_NO_SLOTS, false );
+        onionpress_wayback_log( 'Sweep paused: available=0 processing='
+            . ( $user['processing'] ?? '?' ) . ', backing off ' . OP_WB_BACKOFF_NO_SLOTS . 's' );
+        return;
     }
 
-    // 2) Posts. Two queries joined by a 2:1 interleave so retries
-    //    aren't starved behind never-attempted posts (which vastly
-    //    outnumber them after a bulk import).
-    //
-    //    fresh: never-attempted posts, newest first. Gives a just-
-    //      published post its shot before we chew through the
-    //      backlog of older retries.
-    //
-    //    retrying: previously-attempted posts that aren't archived
-    //      or given-up-on, oldest-retry_after first so whoever has
-    //      been waiting longest goes next.
-    //
-    //    Interleave: 2 fresh, 1 retry, repeat. Retries get a
-    //      guaranteed ≥1/3 of the budget; fresh still dominates in
-    //      the common case of "just published something new."
-    $q_fresh = get_posts( array(
-        'post_status' => 'publish',
-        'post_type'   => array( 'post', 'page' ),
-        'numberposts' => 100,
-        'orderby'     => 'date',
-        'order'       => 'DESC',
-        'meta_query'  => array(
-            'relation' => 'AND',
-            array( 'key' => OP_WB_META_ARCHIVED_AT, 'compare' => 'NOT EXISTS' ),
-            array( 'key' => OP_WB_META_FAILED_AT,   'compare' => 'NOT EXISTS' ),
-            array( 'key' => OP_WB_META_RETRY_COUNT, 'compare' => 'NOT EXISTS' ),
-        ),
-        'suppress_filters' => false,
-    ) );
-    $q_retry = get_posts( array(
-        'post_status' => 'publish',
-        'post_type'   => array( 'post', 'page' ),
-        'numberposts' => 100,
-        'meta_key'    => OP_WB_META_RETRY_AFTER,
-        'orderby'     => 'meta_value_num',
-        'order'       => 'ASC',
-        'meta_query'  => array(
-            'relation' => 'AND',
-            array( 'key' => OP_WB_META_ARCHIVED_AT, 'compare' => 'NOT EXISTS' ),
-            array( 'key' => OP_WB_META_FAILED_AT,   'compare' => 'NOT EXISTS' ),
-            array( 'key' => OP_WB_META_RETRY_COUNT, 'compare' => 'EXISTS' ),
-        ),
-        'suppress_filters' => false,
-    ) );
-    $fi = new ArrayIterator( $q_fresh );
-    $ri = new ArrayIterator( $q_retry );
-    $tick = 0;
-    while ( $processed < $budget && microtime( true ) < $deadline ) {
-        $take_retry = ( $tick % 3 === 2 ) && $ri->valid();
-        if ( $take_retry ) {
-            $post = $ri->current(); $ri->next();
-        } elseif ( $fi->valid() ) {
-            $post = $fi->current(); $fi->next();
-        } elseif ( $ri->valid() ) {
-            $post = $ri->current(); $ri->next();
+    $deadline = microtime( true ) + OP_WB_SWEEP_BUDGET_SEC;
+
+    // ---- Step A: poll all outstanding job_ids in batches ----
+    $in_flight = onionpress_wayback_posts_with_in_flight();
+    // Add home + feed in-flight jobs
+    foreach ( onionpress_wayback_sitewide_records() as $rec ) {
+        $state = $rec['read']();
+        if ( ! empty( $state['job_id'] ) && empty( $state['archived_at'] ) ) {
+            $in_flight[ $state['job_id'] ] = array(
+                'key'          => $rec['key'],
+                'url'          => $rec['url'],
+                'submitted_at' => (int) ( $state['submitted_at'] ?? 0 ),
+                'write'        => $rec['write'],
+            );
+        }
+    }
+
+    // Skip jobs younger than OP_WB_YOUNG_JOB_SKIP_SEC — SPN's minimum
+    // capture time is ~20s, so polling any sooner is a wasted round-trip.
+    $ripe_job_ids = array();
+    foreach ( $in_flight as $jid => $rec ) {
+        $age = $rec['submitted_at'] ? ( $now - $rec['submitted_at'] ) : PHP_INT_MAX;
+        if ( $age >= OP_WB_YOUNG_JOB_SKIP_SEC ) {
+            $ripe_job_ids[] = $jid;
+        }
+    }
+
+    $polled_success = 0;
+    $polled_error   = 0;
+    $polled_pending = 0;
+    $polled_cdx_hit = 0;
+    $results        = onionpress_wayback_poll_parallel( $ripe_job_ids );
+
+    // First pass: finalize successes and pending; collect error-jobs for
+    // a CDX fallback check. SPN's job memory is unreliable — it flips
+    // success→error after a few minutes even when the capture persists
+    // in CDX. Before trashing a post we verify against CDX directly.
+    $cdx_check_urls  = array();
+    $cdx_check_recs  = array();
+    $cdx_check_exts  = array();
+    foreach ( $results as $res ) {
+        if ( ! is_array( $res ) ) continue;
+        $jid = (string) ( $res['job_id'] ?? '' );
+        if ( ! isset( $in_flight[ $jid ] ) ) continue;
+        $rec    = $in_flight[ $jid ];
+        $status = (string) ( $res['status'] ?? '' );
+
+        if ( $status === 'success' ) {
+            onionpress_wayback_finalize_success( $rec['write'], $rec['url'], $res );
+            $rec['write']( array( 'job_id' => '', 'submitted_at' => '', 'last_error_ext' => '', 'last_error_at' => '' ) );
+            $polled_success++;
+            onionpress_wayback_log( 'Archived ' . $rec['key'] . ' ts=' . (string) ( $res['timestamp'] ?? '' )
+                . ' dur=' . (string) ( $res['duration_sec'] ?? '' ) );
+        } elseif ( $status === 'error' ) {
+            $ext = (string) ( $res['status_ext'] ?? 'error' );
+            // Queue for CDX verification before deciding this is a real loss.
+            $cdx_check_urls[ $jid ] = $rec['url'];
+            $cdx_check_recs[ $jid ] = $rec;
+            $cdx_check_exts[ $jid ] = $ext;
         } else {
-            break;
+            // Clear job_id if either:
+            //  (a) submitted_at is set and older than STALE_PENDING_SEC — SPN
+            //      should have resolved by now, something's stuck.
+            //  (b) submitted_at is missing — v3-era zombie with a job_id SPN
+            //      no longer remembers; it will poll "pending" forever.
+            $age    = $rec['submitted_at'] ? ( $now - $rec['submitted_at'] ) : null;
+            $stale  = $age !== null && $age > OP_WB_STALE_PENDING_SEC;
+            $zombie = $age === null;
+            if ( $stale || $zombie ) {
+                $rec['write']( array( 'job_id' => '', 'submitted_at' => '' ) );
+                onionpress_wayback_log( 'SPN stale-pending ' . $rec['key']
+                    . ( $zombie ? ' (zombie, no submitted_at)' : ' (age=' . $age . 's)' )
+                    . ', clearing for resubmit' );
+            } else {
+                $polled_pending++;
+            }
         }
-        $tick++;
-        $url = onionpress_wayback_post_url( $post->ID );
-        if ( empty( $url ) ) continue;
-        $state = onionpress_wayback_post_state( $post->ID );
-        if ( ! empty( $state['retry_after'] ) && $state['retry_after'] > time() ) {
-            continue;  // backoff window still open; doesn't count vs budget
-        }
-        $action = onionpress_wayback_advance(
-            $url,
-            function () use ( $post ) { return onionpress_wayback_post_state( $post->ID ); },
-            function ( $state ) use ( $post ) { onionpress_wayback_post_state_set( $post->ID, $state ); }
-        );
-        onionpress_wayback_log( 'Sweep: post ' . $post->ID . ' → ' . $action );
-        $processed++;
     }
+
+    // Second pass: for each SPN-errored job, verify against Wayback's
+    // /wayback/available (with CDX fallback). If there's a capture,
+    // mark archived; otherwise resubmit next tick.
+    //
+    // Cap the rescue burst so Tor SOCKS stays responsive to other
+    // consumers (heartbeat, reachability). Jobs beyond the cap get
+    // their error recorded and job_id cleared immediately — they'll
+    // run through rescue on a later sweep when they're re-errored.
+    $cdx_do_now  = array_slice( $cdx_check_urls, 0, 5, true );
+    $cdx_defer   = array_slice( $cdx_check_urls, 5, null, true );
+    foreach ( $cdx_defer as $jid => $url ) {
+        $rec = $cdx_check_recs[ $jid ];
+        onionpress_wayback_finalize_error( $rec['write'], $cdx_check_exts[ $jid ] );
+        $rec['write']( array( 'job_id' => '', 'submitted_at' => '' ) );
+        $polled_error++;
+    }
+    if ( ! empty( $cdx_do_now ) ) {
+        $cdx = onionpress_wayback_cdx_lookup_parallel( $cdx_do_now );
+        foreach ( $cdx_do_now as $jid => $url ) {
+            $rec = $cdx_check_recs[ $jid ];
+            $ts  = (string) ( $cdx[ $jid ] ?? '' );
+            if ( $ts !== '' ) {
+                $rec['write']( array(
+                    'archived_at'    => time(),
+                    'snapshot_ts'    => $ts,
+                    'job_id'         => '',
+                    'submitted_at'   => '',
+                    'last_error_ext' => '',
+                    'last_error_at'  => '',
+                ) );
+                $polled_cdx_hit++;
+                onionpress_wayback_log( 'CDX rescued ' . $rec['key'] . ' ts=' . $ts
+                    . ' (SPN said ' . $cdx_check_exts[ $jid ] . ')' );
+            } else {
+                onionpress_wayback_finalize_error( $rec['write'], $cdx_check_exts[ $jid ] );
+                $rec['write']( array( 'job_id' => '', 'submitted_at' => '' ) );
+                $polled_error++;
+            }
+        }
+    }
+
+    // ---- Step B: submit fresh work up to available slots, in parallel ----
+    // SPN's `available` is already net of `processing`, so we use it as
+    // the submission budget directly. Sites-wide (home + feed) first so
+    // they never starve, then fresh post URLs.
+    $budget = max( 0, min( OP_WB_SUBMIT_BATCH_MAX, $available ) );
+    $to_submit = array();      // map: key → url
+    $records_by_key = array(); // map: key → record (for write-back)
+
+    foreach ( onionpress_wayback_sitewide_records() as $rec ) {
+        if ( count( $to_submit ) >= $budget ) break;
+        $state = $rec['read']();
+        if ( ! empty( $state['archived_at'] ) ) continue;
+        if ( ! empty( $state['job_id'] ) ) continue;
+        $to_submit[ $rec['key'] ] = $rec['url'];
+        $records_by_key[ $rec['key'] ] = $rec;
+    }
+
+    if ( count( $to_submit ) < $budget ) {
+        $posts = onionpress_wayback_posts_needing_submit( $budget - count( $to_submit ) );
+        foreach ( $posts as $rec ) {
+            if ( count( $to_submit ) >= $budget ) break;
+            $to_submit[ $rec['key'] ] = $rec['url'];
+            $records_by_key[ $rec['key'] ] = $rec;
+        }
+    }
+
+    $submitted = 0;
+    $hit_429   = false;
+    if ( ! empty( $to_submit ) ) {
+        $submit_results = onionpress_wayback_submit_parallel( $to_submit );
+        foreach ( $submit_results as $key => $result ) {
+            $rec = $records_by_key[ $key ] ?? null;
+            if ( $rec === null ) continue;
+            if ( $result === 'RATE_LIMITED' ) {
+                $hit_429 = true;
+                continue;
+            }
+            if ( $result !== '' ) {
+                $rec['write']( array( 'job_id' => $result, 'submitted_at' => time() ) );
+                $submitted++;
+            }
+        }
+        if ( $hit_429 ) {
+            update_option( OP_WB_OPT_BACKOFF_UNTIL, time() + OP_WB_BACKOFF_NO_SLOTS, false );
+            onionpress_wayback_log( 'Submit batch hit 429, backing off ' . OP_WB_BACKOFF_NO_SLOTS . 's' );
+        }
+    }
+
+    $elapsed = round( microtime( true ) - ( $deadline - OP_WB_SWEEP_BUDGET_SEC ), 2 );
+    onionpress_wayback_log( sprintf(
+        'Sweep: avail=%d polled(success=%d cdx-hit=%d err=%d pending=%d skipped-young=%d) submitted=%d elapsed=%ss',
+        $available, $polled_success, $polled_cdx_hit, $polled_error, $polled_pending,
+        count( $in_flight ) - count( $ripe_job_ids ), $submitted, $elapsed
+    ) );
 }
 add_action( 'onionpress_wayback_sweep', 'onionpress_wayback_sweep' );
 
-/**
- * When a post is published (or updated), the home page and RSS feed now
- * list different content, so their previous Wayback snapshot is stale.
- * Invalidate their per-blog option state so the next sweep tick picks
- * them up and submits fresh captures. The post itself enters the sweep
- * naturally (it has no archived_at meta yet).
- *
- * Scoped to publish-status posts/pages only — autosaves, revisions,
- * trashed-and-restored actions don't count.
- */
+// ────────────── save_post hook: invalidate home/feed + retry post ───
+
 add_action( 'save_post', function ( $post_id, $post, $update ) {
-    if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
-        return;
-    }
-    if ( wp_is_post_revision( $post_id ) ) {
-        return;
-    }
-    if ( $post->post_status !== 'publish' ) {
-        return;
-    }
-    if ( ! in_array( $post->post_type, array( 'post', 'page' ), true ) ) {
-        return;
-    }
+    if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
+    if ( wp_is_post_revision( $post_id ) ) return;
+    if ( $post->post_status !== 'publish' ) return;
+    if ( ! in_array( $post->post_type, array( 'post', 'page' ), true ) ) return;
+
+    // Home page + feed content just changed — invalidate their captures.
     delete_option( OP_WB_OPT_HOME );
     delete_option( OP_WB_OPT_FEED );
-    // If the edited post was previously archived, re-archive it too —
-    // its content may have materially changed since the old snapshot.
+
+    // If the post was previously archived, re-archive its current content.
     if ( $update && get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ) ) {
-        onionpress_wayback_post_state_set( $post_id, array() );
+        onionpress_wayback_post_write( $post_id, array(
+            'archived_at'     => '',
+            'snapshot_ts'     => '',
+            'job_id'          => '',
+            'submitted_at'    => '',
+            'original_url'    => '',
+            'duration_sec'    => '',
+            'resources_count' => '',
+            'outlinks_count'  => '',
+            'last_error_ext'  => '',
+            'last_error_at'   => '',
+        ) );
     }
-    // Kick a sweep immediately so the new/updated post gets archived
-    // without waiting for the next 5-min cron tick. The author may put
-    // their laptop to sleep right after hitting Publish — we want SPN
-    // to have received the submission before that happens. This single-
-    // event cron queues behind whatever request is already in flight
-    // (almost always the admin's own post-save redirect), so it runs
-    // within a second or two of the publish.
+
+    // Also clear any site-wide back-off so the immediate sweep runs.
+    delete_option( OP_WB_OPT_BACKOFF_UNTIL );
+
     wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
-    onionpress_wayback_log( 'save_post: post ' . $post_id . ' — cleared home/feed state'
-        . ( $update ? ' and post meta' : '' ) . ', scheduled immediate sweep' );
+    onionpress_wayback_log( 'save_post ' . $post_id . ': cleared home/feed'
+        . ( $update ? ' + post meta' : '' ) . ', scheduled immediate sweep' );
 }, 10, 3 );
 
 // ────────────────────────────── cron ────────────────────────────────
 
 add_filter( 'cron_schedules', function ( $schedules ) {
-    $schedules['onionpress_every_5_minutes'] = array(
-        'interval' => 300,
-        'display'  => 'Every 5 minutes',
+    $schedules['onionpress_every_60_seconds'] = array(
+        'interval' => OP_WB_CRON_INTERVAL,
+        'display'  => 'Every 60 seconds (OnionPress Wayback)',
     );
     return $schedules;
 } );
 
 add_action( 'init', function () {
-    if ( ! wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
-        wp_schedule_event( time(), 'onionpress_every_5_minutes',
-            'onionpress_wayback_sweep' );
+    // (Re)schedule the sweep. If a v3 5-minute event is still pending,
+    // drop it first so we don't end up with both.
+    $existing = wp_next_scheduled( 'onionpress_wayback_sweep' );
+    if ( $existing ) {
+        $cron = _get_cron_array();
+        foreach ( (array) $cron as $ts => $hooks ) {
+            if ( isset( $hooks['onionpress_wayback_sweep'] ) ) {
+                foreach ( $hooks['onionpress_wayback_sweep'] as $sig => $entry ) {
+                    if ( ( $entry['schedule'] ?? '' ) !== 'onionpress_every_60_seconds' ) {
+                        wp_unschedule_event( $ts, 'onionpress_wayback_sweep', $entry['args'] ?? array() );
+                    }
+                }
+            }
+        }
     }
-    // One-time cleanup: the 2.x plugin used JSON-file queue and ledger.
-    // Remove them so users don't get confused when looking at the
-    // filesystem and seeing stale state files.
-    if ( get_option( 'op_wayback_v3_migrated' ) !== 'yes' ) {
+    if ( ! wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
+        wp_schedule_event( time(), 'onionpress_every_60_seconds', 'onionpress_wayback_sweep' );
+    }
+
+    // One-time v3 → v4 migration: drop the retry-machine postmeta we no
+    // longer use. Preserve archived_at + snapshot_ts (the only real
+    // outcome record) and job_id (active in-flight work).
+    if ( get_option( 'op_wayback_v4_migrated' ) !== 'yes' ) {
+        global $wpdb;
+        $stale_keys = array(
+            '_op_wayback_retry_count',
+            '_op_wayback_retry_after',
+            '_op_wayback_failed_at',
+            '_op_wayback_failed_reason',
+        );
+        foreach ( $stale_keys as $k ) {
+            $wpdb->delete( $wpdb->postmeta, array( 'meta_key' => $k ) );
+        }
         @unlink( '/var/lib/onionpress/wayback-queue.json' );
         @unlink( '/var/lib/onionpress/wayback-archived.json' );
-        update_option( 'op_wayback_v3_migrated', 'yes' );
-    }
-    // Retire the legacy drain cron hook if it's still scheduled.
-    $legacy_ts = wp_next_scheduled( 'onionpress_drain_wayback_queue' );
-    if ( $legacy_ts ) {
-        wp_unschedule_event( $legacy_ts, 'onionpress_drain_wayback_queue' );
+
+        $legacy_ts = wp_next_scheduled( 'onionpress_drain_wayback_queue' );
+        if ( $legacy_ts ) {
+            wp_unschedule_event( $legacy_ts, 'onionpress_drain_wayback_queue' );
+        }
+        update_option( 'op_wayback_v4_migrated', 'yes' );
+        onionpress_wayback_log( 'v4 migration: stale retry-state meta cleared' );
     }
 } );

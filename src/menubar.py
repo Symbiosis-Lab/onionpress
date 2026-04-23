@@ -391,6 +391,7 @@ class OnionPressApp(rumps.App):
         self._last_bootstrap_pct = 0       # Last observed Tor bootstrap percentage
         self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
         self._yellow_since = None          # Timestamp when entered yellow state
+        self._last_check_complete_ts = time.time()  # Last time check_status finished a full pass
         self._was_ready = False            # Were we ever ready this session?
         self._tor_internally_ready = False # Checks 1-4 passed (Arti+WordPress up)
         # Reclaim fields kept for compatibility (notify_onionheaven_online still sets them)
@@ -415,13 +416,6 @@ class OnionPressApp(rumps.App):
         self._stopping = False                 # True while Stop button is in progress
         self._run_generation = 0               # Incremented on stop/start; stale threads check this
         self._consecutive_fail_count = 0       # Require 2 consecutive failures before flipping to yellow
-
-        # Wayback queue state
-        self._wayback_queue = []
-        self._wayback_queue_lock = threading.Lock()
-        self._wayback_last_drain = 0
-        self._wayback_queue_item = rumps.MenuItem("", callback=None)
-        self._wayback_queue_in_menu = False
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -1481,9 +1475,14 @@ class OnionPressApp(rumps.App):
     @property
     def display_state(self):
         """Compute the display state from current variables.
-        Returns one of: 'stopped', 'available', 'offline', 'stuck', 'starting'."""
+        Returns one of: 'stopped', 'available', 'offline', 'stalled', 'stuck', 'starting'."""
         if not self.is_running:
             return "stopped"
+        # If check_status hasn't completed in 3+ minutes (e.g. subprocess hang
+        # under memory pressure), don't trust is_ready — show yellow instead
+        # of a stale green.
+        if time.time() - self._last_check_complete_ts > 180:
+            return "stalled"
         if self.is_ready:
             return "available"
         if not self._has_internet:
@@ -1782,11 +1781,6 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.poll_onionheaven_messages()
 
-                # Poll and drain Wayback queue
-                self.poll_wayback_queue()
-                if self.is_ready:
-                    self.drain_wayback_queue()
-
                 # Fire a deferred Share Now click once we're online.
                 if self.is_ready and self._pending_manual_upload:
                     self._pending_manual_upload = False
@@ -1930,6 +1924,7 @@ class OnionPressApp(rumps.App):
             import traceback
             self.log(traceback.format_exc())
         finally:
+            self._last_check_complete_ts = time.time()
             self.checking = False
 
     def update_menu(self):
@@ -1973,20 +1968,6 @@ class OnionPressApp(rumps.App):
             if self._quitting:
                 return  # Don't update icon/menu during shutdown
 
-            # Show/hide Wayback queue status
-            with self._wayback_queue_lock:
-                wq_count = len(self._wayback_queue)
-            if wq_count > 0:
-                if not self._wayback_queue_in_menu:
-                    self._wayback_queue_item.title = "Pending Wayback Saves"
-                    self.menu.insert_after("Copy Onion Address", self._wayback_queue_item)
-                    self._wayback_queue_in_menu = True
-            else:
-                if self._wayback_queue_in_menu:
-                    if "Pending Wayback Saves" in self.menu:
-                        del self.menu["Pending Wayback Saves"]
-                    self._wayback_queue_in_menu = False
-
             if state == "available":
                 self.icon = self.icon_running
                 onionname = self.read_config_value("ONIONNAME", "").strip()
@@ -2004,7 +1985,7 @@ class OnionPressApp(rumps.App):
                 self.browser_menu_item.set_callback(self.open_tor_browser)
                 self.local_site_item.title = f"Open Local Site ({self.local_url})"
                 self.local_site_item.set_callback(self.open_local_site)
-            elif state in ("starting", "offline", "stuck"):
+            elif state in ("starting", "offline", "stuck", "stalled"):
                 if state == "starting":
                     self.icon = self.icon_starting
                     pct = self._last_bootstrap_pct
@@ -2015,6 +1996,9 @@ class OnionPressApp(rumps.App):
                 elif state == "offline":
                     self.icon = self.icon_stopped
                     self.menu["Starting..."].title = "Status: Offline — no internet connection"
+                elif state == "stalled":
+                    self.icon = self.icon_starting
+                    self.menu["Starting..."].title = "Status: Health check stalled (system busy)"
                 else:  # stuck
                     self.icon = self.icon_starting
                     self.menu["Starting..."].title = "Status: Slow to connect — try Restart"
@@ -2360,6 +2344,29 @@ class OnionPressApp(rumps.App):
 
         thread = threading.Thread(target=checker, daemon=True)
         thread.start()
+
+        # Separate watchdog: repaint the menu/icon every 30s regardless of
+        # whether check_status is making progress. If check_status is hung
+        # (e.g. docker exec stalled under memory pressure), display_state
+        # will flip to "stalled" once 3 minutes pass, and this thread
+        # ensures the icon actually updates.
+        def watchdog():
+            logged_stalled = False
+            while True:
+                time.sleep(30)
+                try:
+                    if time.time() - self._last_check_complete_ts > 180:
+                        if not logged_stalled:
+                            stale_s = int(time.time() - self._last_check_complete_ts)
+                            self.log(f"check_status has not completed in {stale_s}s — showing stalled state")
+                            logged_stalled = True
+                        self.update_menu()
+                    else:
+                        logged_stalled = False
+                except Exception:
+                    pass
+
+        threading.Thread(target=watchdog, daemon=True).start()
 
     def start_thumbnail_generator(self):
         """Background thread to generate thumbnails for Creations files using qlmanage.
@@ -4651,14 +4658,6 @@ License: AGPL v3"""
             if self.is_ready:
                 bootstrap_pct = 100
 
-            # Wayback queue count
-            wq_count = 0
-            try:
-                with self._wayback_queue_lock:
-                    wq_count = len(self._wayback_queue)
-            except Exception:
-                pass
-
             # OnionHeaven stats
             oh_server_active = getattr(self, 'is_onionheaven', False)
             oh_stats = {'server_active': oh_server_active, 'client_registered': False,
@@ -4727,7 +4726,6 @@ License: AGPL v3"""
                 'uptime_seconds': uptime_seconds,
                 'bootstrap_pct': bootstrap_pct,
                 'containers': containers,
-                'wayback_queue_count': wq_count,
                 'updated_at': datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 'platform': 'macos',
                 'load_avg': load_avg,
@@ -5214,89 +5212,6 @@ License: AGPL v3"""
             self.log(f"Settings page: action '{action}' failed: {e}")
 
     # ── Wayback Queue ──────────────────────────────────────────────
-
-    def poll_wayback_queue(self):
-        """Read the Wayback queue from the WordPress container's shared volume."""
-        try:
-            result = subprocess.run(
-                ["docker", "exec", "onionpress-wordpress",
-                 "cat", "/var/lib/onionpress/wayback-queue.json"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace',
-                timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                queue = json.loads(result.stdout.strip())
-                with self._wayback_queue_lock:
-                    self._wayback_queue = queue if isinstance(queue, list) else []
-            else:
-                with self._wayback_queue_lock:
-                    self._wayback_queue = []
-        except Exception:
-            pass  # Container may not be running
-
-    def drain_wayback_queue(self):
-        """Process one item from the Wayback queue (rate-limited to 1 per 30s)."""
-        now = time.time()
-        if now - self._wayback_last_drain < 30:
-            return
-
-        with self._wayback_queue_lock:
-            if not self._wayback_queue:
-                return
-            item = self._wayback_queue[0]
-
-        url = item.get("url", "")
-        if not url:
-            self._remove_wayback_queue_item(url)
-            return
-
-        self._wayback_last_drain = now
-        self.log(f"Wayback queue: archiving {url}")
-
-        # .onion first, clearnet-via-Tor fallback. Never direct clearnet.
-        endpoints = [
-            ("http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save",
-             ["--socks5-hostname", "127.0.0.1:9050"]),
-            ("https://web.archive.org/save",
-             ["--socks5-hostname", "127.0.0.1:9050"]),
-        ]
-
-        for save_url, proxy_args in endpoints:
-            try:
-                result = subprocess.run(
-                    ["docker", "exec", "onionpress-tor",
-                     "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                     "--max-time", "30"] + proxy_args + [
-                     "--data-urlencode", f"url={url}",
-                     save_url],
-                    capture_output=True, text=True, encoding='utf-8', errors='replace',
-                    timeout=45
-                )
-                http_code = result.stdout.strip()
-
-                if http_code and 200 <= int(http_code) < 500:
-                    self.log(f"Wayback queue: archived {url} (HTTP {http_code})")
-                    self._remove_wayback_queue_item(url)
-                    return
-            except Exception as e:
-                self.log(f"Wayback queue: failed for {url} via {save_url}: {e}")
-
-        self.log(f"Wayback queue: all endpoints failed for {url}")
-
-    def _remove_wayback_queue_item(self, url):
-        """Remove a URL from the Wayback queue in the container."""
-        with self._wayback_queue_lock:
-            self._wayback_queue = [i for i in self._wayback_queue if i.get("url") != url]
-            updated = json.dumps(self._wayback_queue)
-        try:
-            subprocess.run(
-                ["docker", "exec", "-i", "onionpress-wordpress",
-                 "tee", "/var/lib/onionpress/wayback-queue.json"],
-                input=updated, capture_output=True, text=True,
-                encoding='utf-8', errors='replace', timeout=5
-            )
-        except Exception:
-            pass
 
     @rumps.clicked("Quit")
     def quit_app(self, _):
