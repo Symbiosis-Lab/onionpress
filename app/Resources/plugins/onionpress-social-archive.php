@@ -630,8 +630,23 @@ function onionpress_social_wrap_as_card( $content ) {
     $header .= $badge_element;
     $header .= '</div>';
 
+    // Link the timestamp to the post's own permalink when we're rendering
+    // in a listing (archive/index/search), so readers have a visible way
+    // to reach the single-post view. On the single-post page itself, keep
+    // the plain span — linking to the current page is pointless.
+    $permalink = get_permalink( $post_id );
+    $is_self   = $permalink && is_singular() && (int) get_queried_object_id() === (int) $post_id;
+
     $footer  = '<div class="op-social-card__foot">';
-    $footer .= '<span class="op-social-card__ts">' . $ts_display . '</span>';
+    if ( $permalink && ! $is_self ) {
+        $footer .= sprintf(
+            '<a class="op-social-card__ts" href="%s" title="Permalink">%s</a>',
+            esc_url( $permalink ),
+            $ts_display
+        );
+    } else {
+        $footer .= '<span class="op-social-card__ts">' . $ts_display . '</span>';
+    }
     if ( $source_url ) {
         $footer .= sprintf(
             ' <span class="op-social-card__sep">&middot;</span> '
