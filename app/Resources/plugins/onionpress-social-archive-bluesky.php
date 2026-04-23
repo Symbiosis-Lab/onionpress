@@ -27,6 +27,14 @@ const ONIONPRESS_BLUESKY_DID_OPT      = 'onionpress_social_bluesky_did';        
 const ONIONPRESS_BLUESKY_DISPLAY_OPT  = 'onionpress_social_bluesky_display_name';
 const ONIONPRESS_BLUESKY_NEWEST_OPT   = 'onionpress_social_bluesky_newest_uri';  // top marker for incremental
 const ONIONPRESS_BLUESKY_CURSOR_OPT   = 'onionpress_social_bluesky_backfill_cursor'; // opaque; 'done' when finished
+// Owner markers for the above. Each cursor/newest value is only valid
+// if its owner matches the current DID — if the DID has been swapped
+// out from under us (e.g. a test harness poking production options, or
+// a user switching accounts without going through save_handle) the
+// cursor is implicitly invalidated and we re-walk. See also
+// onionpress_bluesky_get_cursor_for() / _set_cursor_for().
+const ONIONPRESS_BLUESKY_CURSOR_OWNER_OPT = 'onionpress_social_bluesky_cursor_owner';
+const ONIONPRESS_BLUESKY_NEWEST_OWNER_OPT = 'onionpress_social_bluesky_newest_owner';
 const ONIONPRESS_BLUESKY_POSTS_OPT    = 'onionpress_social_bluesky_total_posts';
 const ONIONPRESS_BLUESKY_LAST_SYNC    = 'onionpress_social_bluesky_last_sync';
 const ONIONPRESS_BLUESKY_LAST_NOTE    = 'onionpress_social_bluesky_last_note';
@@ -55,6 +63,48 @@ const ONIONPRESS_BLUESKY_DAEMON_LOCK      = 'onionpress_social_bluesky_daemon_lo
 const ONIONPRESS_BLUESKY_DAEMON_MAX_SEC   = 1800; // 30 min
 const ONIONPRESS_BLUESKY_DAEMON_STALE_SEC = 300;
 const ONIONPRESS_BLUESKY_DAEMON_IDLE_SEC  = 3;
+
+/**
+ * Owner-aware accessors for the backfill cursor and the newest-uri top
+ * marker. Each value carries a DID marker noting whose feed it was
+ * derived from. When the current DID doesn't match the stored owner,
+ * the value is treated as empty, forcing a fresh walk rather than
+ * silently continuing against the wrong account.
+ *
+ * This is a structural guard against an entire class of bugs: tests,
+ * manual wp-cli pokes, or buggy save_handle paths that swap the DID
+ * in production options without also clearing the cursor. The cursor
+ * isn't "sticky across DIDs" anymore — it's implicitly invalid as
+ * soon as the DID it belongs to changes.
+ */
+function onionpress_bluesky_get_cursor_for( $did ) {
+    $owner = (string) get_option( ONIONPRESS_BLUESKY_CURSOR_OWNER_OPT, '' );
+    if ( $owner !== '' && $owner !== $did ) {
+        return '';
+    }
+    return (string) get_option( ONIONPRESS_BLUESKY_CURSOR_OPT, '' );
+}
+function onionpress_bluesky_set_cursor_for( $did, $value ) {
+    update_option( ONIONPRESS_BLUESKY_CURSOR_OPT, $value );
+    update_option( ONIONPRESS_BLUESKY_CURSOR_OWNER_OPT, $did );
+}
+function onionpress_bluesky_get_newest_for( $did ) {
+    $owner = (string) get_option( ONIONPRESS_BLUESKY_NEWEST_OWNER_OPT, '' );
+    if ( $owner !== '' && $owner !== $did ) {
+        return '';
+    }
+    return (string) get_option( ONIONPRESS_BLUESKY_NEWEST_OPT, '' );
+}
+function onionpress_bluesky_set_newest_for( $did, $uri ) {
+    update_option( ONIONPRESS_BLUESKY_NEWEST_OPT, $uri );
+    update_option( ONIONPRESS_BLUESKY_NEWEST_OWNER_OPT, $did );
+}
+function onionpress_bluesky_clear_cursors() {
+    delete_option( ONIONPRESS_BLUESKY_CURSOR_OPT );
+    delete_option( ONIONPRESS_BLUESKY_CURSOR_OWNER_OPT );
+    delete_option( ONIONPRESS_BLUESKY_NEWEST_OPT );
+    delete_option( ONIONPRESS_BLUESKY_NEWEST_OWNER_OPT );
+}
 
 add_action( 'admin_menu', function () {
     if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
@@ -121,7 +171,7 @@ function onionpress_bluesky_import_page() {
     $total        = (int) get_option( ONIONPRESS_BLUESKY_POSTS_OPT, 0 );
     $last_sync    = (int) get_option( ONIONPRESS_BLUESKY_LAST_SYNC, 0 );
     $last_note    = (string) get_option( ONIONPRESS_BLUESKY_LAST_NOTE, '' );
-    $cursor_state = (string) get_option( ONIONPRESS_BLUESKY_CURSOR_OPT, '' );
+    $cursor_state = onionpress_bluesky_get_cursor_for( $did );
     // Default include_replies=ON, include_reposts=OFF.
     $opts         = (array) get_option( ONIONPRESS_BLUESKY_OPTS_OPT, array( 'include_replies' => 1 ) );
 
@@ -181,7 +231,30 @@ function onionpress_bluesky_import_page() {
             </table>
         </form>
 
-        <?php if ( $did ) : ?>
+        <?php if ( $did ) :
+            // Drift warning: if backfill claims "done" but we've
+            // imported far fewer posts than Bluesky says exist, the
+            // cursor landed in a bad state (e.g. test pollution or an
+            // interrupted walk). Threshold is 50% of the server's
+            // reported postsCount — leaves room for users who opt out
+            // of reposts (which Bluesky counts toward the total), while
+            // still catching obvious drift like "43 imported of 102".
+            $drift_warn = ( $cursor_state === 'done'
+                            && $total > 0
+                            && $imported_now > 0
+                            && $imported_now < (int) ( $total * 0.5 ) );
+            if ( $drift_warn ) : ?>
+                <div class="notice notice-warning">
+                    <p><strong>Backfill ended early.</strong> Imported
+                        <strong><?php echo number_format_i18n( $imported_now ); ?></strong>
+                        posts but Bluesky reports <strong><?php echo number_format_i18n( $total ); ?></strong>.
+                        The backfill cursor says "done" but probably landed in a
+                        bad state (test pollution, interrupted walk, or an account
+                        swap). Click <strong>Reset cursors</strong> below and then
+                        <strong>Sync now</strong> — already-imported posts will be
+                        deduplicated automatically.</p>
+                </div>
+            <?php endif; ?>
             <h2>Step 2 &mdash; Sync</h2>
             <table class="wp-list-table widefat" style="max-width:620px;">
                 <tbody>
@@ -285,10 +358,12 @@ function onionpress_bluesky_handle_save_handle_post() {
     }
 
     // Reset cursors if we're pointing at a different DID than before.
+    // (The owner-aware cursor accessors below also defend against
+    // someone writing DID_OPT directly without going through this
+    // path — e.g. a test harness.)
     $prev_did = (string) get_option( ONIONPRESS_BLUESKY_DID_OPT, '' );
     if ( $prev_did !== '' && $prev_did !== $did ) {
-        delete_option( ONIONPRESS_BLUESKY_NEWEST_OPT );
-        delete_option( ONIONPRESS_BLUESKY_CURSOR_OPT );
+        onionpress_bluesky_clear_cursors();
     }
 
     update_option( ONIONPRESS_BLUESKY_HANDLE_OPT,  $handle );
@@ -310,8 +385,7 @@ function onionpress_bluesky_handle_save_handle_post() {
 }
 
 function onionpress_bluesky_reset_cursors() {
-    delete_option( ONIONPRESS_BLUESKY_NEWEST_OPT );
-    delete_option( ONIONPRESS_BLUESKY_CURSOR_OPT );
+    onionpress_bluesky_clear_cursors();
     return array( 'level' => 'success', 'message' => 'Cursors cleared. Next sync will rescan from scratch (but will skip already-imported posts).' );
 }
 
@@ -424,7 +498,7 @@ function onionpress_bluesky_sync_one_tick( $did ) {
         // Phase 1 — forward catch-up. Fetch from the top (no cursor) and
         // stop at the first known AT-URI. Only meaningful once we have a
         // newest_uri marker (first run: skip to backfill directly).
-        $newest_uri = (string) get_option( ONIONPRESS_BLUESKY_NEWEST_OPT, '' );
+        $newest_uri = onionpress_bluesky_get_newest_for( $did );
         if ( $newest_uri !== '' ) {
             $cursor = '';
             $top_uri_seen = '';
@@ -451,13 +525,13 @@ function onionpress_bluesky_sync_one_tick( $did ) {
                 if ( $cursor === '' ) break; // hit end of feed without finding newest
             }
             if ( $top_uri_seen !== '' ) {
-                update_option( ONIONPRESS_BLUESKY_NEWEST_OPT, $top_uri_seen );
+                onionpress_bluesky_set_newest_for( $did, $top_uri_seen );
             }
         }
 
         // Phase 2 — backfill. Walk older posts via the persisted cursor
         // until the API omits `cursor` (signals end of history).
-        $backfill_cursor = (string) get_option( ONIONPRESS_BLUESKY_CURSOR_OPT, '' );
+        $backfill_cursor = onionpress_bluesky_get_cursor_for( $did );
         if ( $backfill_cursor !== 'done'
              && $stats['pages'] < ONIONPRESS_BLUESKY_PAGES_PER_TICK
              && microtime( true ) < $deadline ) {
@@ -475,15 +549,15 @@ function onionpress_bluesky_sync_one_tick( $did ) {
                     if ( $uri === '' ) { $stats['errors']++; continue; }
                     // First ever item seen becomes the top marker so
                     // subsequent runs have something to stop at.
-                    if ( (string) get_option( ONIONPRESS_BLUESKY_NEWEST_OPT, '' ) === '' ) {
-                        update_option( ONIONPRESS_BLUESKY_NEWEST_OPT, $uri );
+                    if ( onionpress_bluesky_get_newest_for( $did ) === '' ) {
+                        onionpress_bluesky_set_newest_for( $did, $uri );
                     }
                     $r = onionpress_bluesky_import_post( $item, $opts );
                     $stats[ $r ] = ( $stats[ $r ] ?? 0 ) + 1;
                 }
                 $new_cursor = (string) ( $resp['cursor'] ?? '' );
                 if ( $new_cursor === '' ) {
-                    update_option( ONIONPRESS_BLUESKY_CURSOR_OPT, 'done' );
+                    onionpress_bluesky_set_cursor_for( $did, 'done' );
                     break;
                 }
                 if ( $new_cursor === $before ) {
@@ -499,7 +573,7 @@ function onionpress_bluesky_sync_one_tick( $did ) {
                     $no_progress = 0;
                 }
                 $backfill_cursor = $new_cursor;
-                update_option( ONIONPRESS_BLUESKY_CURSOR_OPT, $backfill_cursor );
+                onionpress_bluesky_set_cursor_for( $did, $backfill_cursor );
             }
         }
     } finally {
@@ -513,7 +587,7 @@ function onionpress_bluesky_sync_one_tick( $did ) {
         intval( $stats['errors'] ),   intval( $stats['pages'] )
     );
     if ( $errors ) { $note .= ' — last error: ' . $errors[ count( $errors ) - 1 ]; }
-    $done = ( (string) get_option( ONIONPRESS_BLUESKY_CURSOR_OPT, '' ) === 'done' );
+    $done = ( onionpress_bluesky_get_cursor_for( $did ) === 'done' );
     return array(
         'stats'  => $stats,
         'errors' => $errors,

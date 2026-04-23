@@ -74,6 +74,35 @@ def _eval(php, url):
     return r.stdout.strip()
 
 
+_SAFE_TEST_ACCOUNT_ID = "1"
+_SAFE_TEST_SERVER     = "example.test"
+
+
+def _assert_test_sandbox(url):
+    """Refuse to run if the Mastodon server or account_id option points
+    at something other than the sandbox fixtures. Prevents tests from
+    clobbering a real account's cursors when accidentally pointed at a
+    production subsite — exact mechanism that burned the Bluesky side."""
+    r = _wp(["option", "get", "onionpress_social_mastodon_server"],
+            url=url, timeout=10)
+    server = (r.stdout or "").strip()
+    if server and server != _SAFE_TEST_SERVER:
+        raise RuntimeError(
+            f"Refusing to run Mastodon tests against {url!r}: "
+            f"onionpress_social_mastodon_server is {server!r} (real server). "
+            f"Clear it first: wp option delete onionpress_social_mastodon_server --url={url}"
+        )
+    r = _wp(["option", "get", "onionpress_social_mastodon_account_id"],
+            url=url, timeout=10)
+    acct = (r.stdout or "").strip()
+    if acct and acct != _SAFE_TEST_ACCOUNT_ID:
+        raise RuntimeError(
+            f"Refusing to run Mastodon tests against {url!r}: "
+            f"onionpress_social_mastodon_account_id is {acct!r} (real account). "
+            f"Clear it first: wp option delete onionpress_social_mastodon_account_id --url={url}"
+        )
+
+
 def _cleanup_test_posts(url):
     """Delete any posts whose content is '<p>hi</p>' (our canned test
     status content) AND which have a _source_id. Tests that import
@@ -120,6 +149,7 @@ class TestMastodonImporterBackfill(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         # Fresh cursors + minimal config so the sync has a valid target.
         _wp(["option", "update", "onionpress_social_mastodon_server",
              "example.test"], url=self.url, timeout=15)
@@ -219,6 +249,7 @@ class TestMastodonImporterStatus(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         self.addCleanup(_cleanup_test_posts, self.url)
 
     def _import(self, status, opts):
@@ -272,6 +303,7 @@ class TestMastodonDaemonLock(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         _wp(["option", "update", "onionpress_social_mastodon_server",
              "example.test"], url=self.url, timeout=15)
         _wp(["option", "update", "onionpress_social_mastodon_account_id",

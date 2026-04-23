@@ -27,6 +27,13 @@ const ONIONPRESS_MASTODON_USER_OPT    = 'onionpress_social_mastodon_username';
 const ONIONPRESS_MASTODON_ACCT_ID_OPT = 'onionpress_social_mastodon_account_id';
 const ONIONPRESS_MASTODON_OLDEST_OPT  = 'onionpress_social_mastodon_oldest_id';
 const ONIONPRESS_MASTODON_NEWEST_OPT  = 'onionpress_social_mastodon_newest_id';
+// Owner markers for the above. Each oldest/newest value is only valid
+// when its owner matches the current account_id — if someone swapped
+// the account_id out from under us (tests, manual wp-cli, buggy save
+// path) the stored cursors are implicitly invalidated and we re-walk.
+// See onionpress_mastodon_get_oldest_for() / _set_oldest_for().
+const ONIONPRESS_MASTODON_OLDEST_OWNER_OPT = 'onionpress_social_mastodon_oldest_owner';
+const ONIONPRESS_MASTODON_NEWEST_OWNER_OPT = 'onionpress_social_mastodon_newest_owner';
 const ONIONPRESS_MASTODON_STATUSES_OPT = 'onionpress_social_mastodon_total_statuses';
 const ONIONPRESS_MASTODON_LAST_SYNC   = 'onionpress_social_mastodon_last_sync';
 const ONIONPRESS_MASTODON_LAST_NOTE   = 'onionpress_social_mastodon_last_note';
@@ -97,6 +104,42 @@ add_filter( 'cron_schedules', function ( $schedules ) {
 
 add_action( ONIONPRESS_MASTODON_CRON_HOOK, 'onionpress_mastodon_run_sync_tick' );
 
+/**
+ * Owner-aware accessors for the oldest/newest cursors. Structural
+ * guard: if the stored owner doesn't match the current account_id,
+ * return empty — the cursor was set against a different account and
+ * is implicitly invalid. Makes cross-account cursor drift (tests,
+ * manual option pokes, interrupted save_handle flow) impossible.
+ */
+function onionpress_mastodon_get_oldest_for( $acct_id ) {
+    $owner = (string) get_option( ONIONPRESS_MASTODON_OLDEST_OWNER_OPT, '' );
+    if ( $owner !== '' && $owner !== $acct_id ) {
+        return '';
+    }
+    return (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' );
+}
+function onionpress_mastodon_set_oldest_for( $acct_id, $value ) {
+    update_option( ONIONPRESS_MASTODON_OLDEST_OPT, $value );
+    update_option( ONIONPRESS_MASTODON_OLDEST_OWNER_OPT, $acct_id );
+}
+function onionpress_mastodon_get_newest_for( $acct_id ) {
+    $owner = (string) get_option( ONIONPRESS_MASTODON_NEWEST_OWNER_OPT, '' );
+    if ( $owner !== '' && $owner !== $acct_id ) {
+        return '';
+    }
+    return (string) get_option( ONIONPRESS_MASTODON_NEWEST_OPT, '' );
+}
+function onionpress_mastodon_set_newest_for( $acct_id, $value ) {
+    update_option( ONIONPRESS_MASTODON_NEWEST_OPT, $value );
+    update_option( ONIONPRESS_MASTODON_NEWEST_OWNER_OPT, $acct_id );
+}
+function onionpress_mastodon_clear_cursors() {
+    delete_option( ONIONPRESS_MASTODON_OLDEST_OPT );
+    delete_option( ONIONPRESS_MASTODON_OLDEST_OWNER_OPT );
+    delete_option( ONIONPRESS_MASTODON_NEWEST_OPT );
+    delete_option( ONIONPRESS_MASTODON_NEWEST_OWNER_OPT );
+}
+
 function onionpress_mastodon_import_page() {
     if ( ! current_user_can( 'manage_options' ) ) {
         wp_die( 'Unauthorized' );
@@ -134,7 +177,7 @@ function onionpress_mastodon_import_page() {
     $imported_now  = onionpress_social_count_for_source( 'mastodon' );
     $last_sync     = (int) get_option( ONIONPRESS_MASTODON_LAST_SYNC, 0 );
     $last_note     = (string) get_option( ONIONPRESS_MASTODON_LAST_NOTE, '' );
-    $oldest_id     = (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' );
+    $oldest_id     = onionpress_mastodon_get_oldest_for( $account_id );
     $opts          = (array) get_option( ONIONPRESS_MASTODON_OPTS_OPT, array( 'include_replies' => 1 ) );
 
     $backfill_done = ( $account_id !== '' ) && ( $oldest_id === '' || $oldest_id === 'done' );
@@ -188,7 +231,29 @@ function onionpress_mastodon_import_page() {
             </table>
         </form>
 
-        <?php if ( $account_id ) : ?>
+        <?php if ( $account_id ) :
+            // Drift warning: backfill claims done but imported count
+            // is far below what the server said existed. Catches test
+            // pollution and interrupted walks. 50% threshold leaves
+            // room for users opting out of boosts (which count toward
+            // the server's total) and for ordinary edits/deletions,
+            // while still flagging "1,417 reported, 12 imported."
+            $drift_warn = ( $backfill_done
+                            && $total > 0
+                            && $imported_now > 0
+                            && $imported_now < (int) ( $total * 0.5 ) );
+            if ( $drift_warn ) : ?>
+                <div class="notice notice-warning">
+                    <p><strong>Backfill ended early.</strong> Imported
+                        <strong><?php echo number_format_i18n( $imported_now ); ?></strong>
+                        of <strong><?php echo number_format_i18n( $total ); ?></strong>
+                        statuses reported by the server. The cursor is in a bad
+                        state (test pollution, interrupted walk, or account
+                        swap). Click <strong>Reset cursors</strong> below then
+                        <strong>Sync now</strong> — already-imported statuses
+                        will be deduplicated automatically.</p>
+                </div>
+            <?php endif; ?>
             <h2>Step 2 &mdash; Sync</h2>
             <table class="wp-list-table widefat" style="max-width:620px;">
                 <tbody>
@@ -293,11 +358,12 @@ function onionpress_mastodon_handle_save_handle_post() {
     $total      = isset( $lookup['json']['statuses_count'] ) ? (int) $lookup['json']['statuses_count'] : 0;
 
     // If the user is switching to a different account, reset cursors so
-    // a fresh backfill walks the new account's history.
+    // a fresh backfill walks the new account's history. The owner-aware
+    // accessors below also defend against someone writing ACCT_ID_OPT
+    // directly (tests, manual wp-cli) without going through this path.
     $prev_id = (string) get_option( ONIONPRESS_MASTODON_ACCT_ID_OPT, '' );
     if ( $prev_id !== '' && $prev_id !== $account_id ) {
-        delete_option( ONIONPRESS_MASTODON_OLDEST_OPT );
-        delete_option( ONIONPRESS_MASTODON_NEWEST_OPT );
+        onionpress_mastodon_clear_cursors();
     }
 
     update_option( ONIONPRESS_MASTODON_HANDLE_OPT,  $acct_full );
@@ -322,8 +388,7 @@ function onionpress_mastodon_handle_save_handle_post() {
  * Useful if a previous import was interrupted in a bad state.
  */
 function onionpress_mastodon_reset_cursors() {
-    delete_option( ONIONPRESS_MASTODON_OLDEST_OPT );
-    delete_option( ONIONPRESS_MASTODON_NEWEST_OPT );
+    onionpress_mastodon_clear_cursors();
     return array( 'level' => 'success', 'message' => 'Cursors cleared. Next sync will rescan from scratch (but will skip already-imported statuses).' );
 }
 
@@ -459,7 +524,7 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
 
     try {
         // Forward catch-up: fetch since_id=newest_id until empty.
-        $newest_id = (string) get_option( ONIONPRESS_MASTODON_NEWEST_OPT, '' );
+        $newest_id = onionpress_mastodon_get_newest_for( $account_id );
         if ( $newest_id !== '' ) {
             $rounds = 0;
             while ( $stats['pages'] < ONIONPRESS_MASTODON_PAGES_PER_TICK
@@ -482,7 +547,7 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
                         $newest_id = (string) $status['id'];
                     }
                 }
-                update_option( ONIONPRESS_MASTODON_NEWEST_OPT, $newest_id );
+                onionpress_mastodon_set_newest_for( $account_id, $newest_id );
                 if ( count( $page ) < ONIONPRESS_MASTODON_PER_PAGE ) break;
             }
         }
@@ -498,7 +563,7 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
         // iterations, the server is looping us — mark done rather than
         // spin forever. Use the raw max_id input vs the max_id after
         // the page; if they're the same we made no progress.
-        $oldest_id = (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' );
+        $oldest_id = onionpress_mastodon_get_oldest_for( $account_id );
         if ( $oldest_id !== 'done'
              && $stats['pages'] < ONIONPRESS_MASTODON_PAGES_PER_TICK
              && microtime( true ) < $deadline ) {
@@ -515,7 +580,7 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
                 $stats['pages']++;
                 if ( empty( $page ) ) {
                     // Truly walked off the start of history — done.
-                    update_option( ONIONPRESS_MASTODON_OLDEST_OPT, 'done' );
+                    onionpress_mastodon_set_oldest_for( $account_id, 'done' );
                     break;
                 }
                 foreach ( $page as $status ) {
@@ -523,11 +588,11 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
                     $r = onionpress_mastodon_import_status( $status, $opts );
                     $stats[ $r ] = ( $stats[ $r ] ?? 0 ) + 1;
                     $oldest_id = (string) $status['id'];
-                    if ( get_option( ONIONPRESS_MASTODON_NEWEST_OPT, '' ) === '' ) {
-                        update_option( ONIONPRESS_MASTODON_NEWEST_OPT, (string) $status['id'] );
+                    if ( onionpress_mastodon_get_newest_for( $account_id ) === '' ) {
+                        onionpress_mastodon_set_newest_for( $account_id, (string) $status['id'] );
                     }
                 }
-                update_option( ONIONPRESS_MASTODON_OLDEST_OPT, $oldest_id );
+                onionpress_mastodon_set_oldest_for( $account_id, $oldest_id );
 
                 // Cycle guard: cursor didn't move → server is stuck
                 // returning the same range. After a few such rounds,
@@ -562,7 +627,7 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
     );
     if ( $errors ) { $note .= ' — last error: ' . $errors[ count($errors) - 1 ]; }
 
-    $done = ( (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' ) === 'done' );
+    $done = ( onionpress_mastodon_get_oldest_for( $account_id ) === 'done' );
     return array(
         'stats'  => array(
             'imported' => intval( $stats['imported'] ?? 0 ),

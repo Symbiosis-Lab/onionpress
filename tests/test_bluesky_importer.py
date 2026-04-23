@@ -75,6 +75,29 @@ def _eval(php, url):
     return r.stdout.strip()
 
 
+_SAFE_TEST_DID = "did:plc:testactor"
+
+
+def _assert_test_sandbox(url):
+    """Refuse to run if the Bluesky DID option is set to something other
+    than the sandbox DID (`did:plc:testactor`) or empty. Prevents tests
+    from clobbering a real account's state when accidentally pointed at
+    a production subsite — which is exactly how the real-account drift
+    bug happened. Also acts as forward-pressure: anyone who wants to
+    run tests against a real subsite has to manually clear the DID
+    option first, which makes the risk explicit."""
+    r = _wp(["option", "get", "onionpress_social_bluesky_did"],
+            url=url, timeout=10)
+    current = (r.stdout or "").strip()
+    if current and current != _SAFE_TEST_DID:
+        raise RuntimeError(
+            f"Refusing to run Bluesky tests against {url!r}: "
+            f"onionpress_social_bluesky_did is {current!r} (real account). "
+            "Run against a clean subsite, or clear the option first: "
+            f"wp option delete onionpress_social_bluesky_did --url={url}"
+        )
+
+
 def _cleanup_test_posts(url):
     """Delete any posts created by our test fixture. Matches by the
     test-only DID `did:plc:testactor` embedded in the _source_id —
@@ -145,6 +168,7 @@ class TestBlueskyBackfill(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         _wp(["option", "update", "onionpress_social_bluesky_did",
              "did:plc:testactor"], url=self.url, timeout=15)
         _wp(["option", "delete", "onionpress_social_bluesky_newest_uri"],
@@ -235,6 +259,7 @@ class TestBlueskyImportFilters(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         _wp(["option", "update", "onionpress_social_bluesky_did",
              "did:plc:testactor"], url=self.url, timeout=15)
         self.addCleanup(_cleanup_test_posts, self.url)
@@ -302,6 +327,7 @@ class TestBlueskyQuotePostRendering(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         self.addCleanup(_cleanup_test_posts, self.url)
 
     def _render_embed(self, embed):
@@ -388,6 +414,7 @@ class TestBlueskyHandleResolution(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         _wp(["option", "delete", "onionpress_social_bluesky_handle"],
             url=self.url, timeout=15)
         _wp(["option", "delete", "onionpress_social_bluesky_did"],
@@ -430,6 +457,7 @@ class TestBlueskyDaemonLock(unittest.TestCase):
         cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
+        _assert_test_sandbox(self.url)
         _wp(["option", "update", "onionpress_social_bluesky_did",
              "did:plc:testactor"], url=self.url, timeout=15)
         _wp(["option", "delete", "onionpress_social_bluesky_daemon_lock"],
