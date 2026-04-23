@@ -387,6 +387,18 @@ function onionpress_mastodon_run_sync_tick( $from_admin = false ) {
     if ( $errors ) { $note .= ' — last error: ' . $errors[ count($errors) - 1 ]; }
     update_option( ONIONPRESS_MASTODON_LAST_NOTE, $note );
 
+    // Greedy self-reschedule while backfill is in progress: as long as we
+    // still have history to walk and the tick didn't error out, queue the
+    // next tick for the next HTTP request instead of waiting for the 5-min
+    // cron. Collapses a ~10-hour background backfill into whatever-you-can-
+    // browse wall-clock, at the same total cost. Once the backward walk
+    // hits the start-of-history sentinel, the greedy re-queue stops and
+    // the plain 5-min recurring poll takes over.
+    $current_oldest = (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' );
+    if ( $current_oldest !== 'done' && empty( $errors ) ) {
+        wp_schedule_single_event( time(), ONIONPRESS_MASTODON_CRON_HOOK );
+    }
+
     if ( ! $from_admin ) {
         return; // cron path
     }
