@@ -19,9 +19,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // ───────────────────────────── tunables ─────────────────────────────
 
-// How often the sweep fires. With boosted account capacity, a 60s tick
-// keeps the pipeline full without stressing wp-cron.
-define( 'OP_WB_CRON_INTERVAL', 60 );
+// How often wp-cron fires the entry point. The entry point runs a
+// daemon-style inner loop for up to OP_WB_LOOP_MAX_SEC, so cron only
+// has to fire as a watchdog that restarts the loop if it died. 5 min
+// is plenty — if the loop is still running, cron is a no-op (mutex).
+define( 'OP_WB_CRON_INTERVAL', 300 );
 
 // Max new submissions per sweep tick. Through onionheaven SOCKS, 40
 // is the sweet spot — sweeps complete in 50-80s, leaving headroom for
@@ -53,6 +55,18 @@ define( 'OP_WB_SWEEP_BUDGET_SEC', 45 );
 // ~20s, so polling immediately wastes a Tor round-trip on a guaranteed
 // "pending" answer.
 define( 'OP_WB_YOUNG_JOB_SKIP_SEC', 15 );
+
+// Continuous-loop tuning. On a cron tick, the sweep enters a while
+// loop and runs indefinitely until the queue is drained, then exits.
+// A mutex prevents overlapping invocations; the lock timestamp is
+// heartbeated every iteration so a crashed process becomes unstuck
+// quickly rather than holding the lock until MAX_SEC expires.
+//
+// If the loop crashes partway, the next cron tick (whenever a page
+// view wakes wp-cron) sees a stale lock and restarts.
+define( 'OP_WB_LOOP_IDLE_SLEEP',    30 );  // between iterations when work was done
+define( 'OP_WB_LOOP_NOWORK_SLEEP',  90 );  // when iteration found nothing to submit
+define( 'OP_WB_LOOP_LOCK_STALE_SEC', 300 );// lock not heartbeated in this long = dead
 
 // Back-off durations (written to op_wayback_backoff_until option).
 define( 'OP_WB_BACKOFF_NO_SLOTS',    20 );  // SPN says available=0
@@ -631,7 +645,222 @@ function onionpress_wayback_sitewide_records() {
 
 // ──────────────────────────── sweep ─────────────────────────────────
 
+/**
+ * Entry point wired to wp-cron. Runs a continuous inner loop for up
+ * to OP_WB_LOOP_MAX_SEC, so one cron invocation can drive many sweep
+ * iterations. Exits early when:
+ *   - queue fully drained (no posts with job_id=null, archived_at=null)
+ *   - a gate tells us to back off for longer than remaining budget
+ *
+ * Next cron tick restarts us. This is the "daemon with cron watchdog"
+ * pattern — cron only has to fire occasionally to keep the process
+ * alive; all the real pacing is inside the inner loop.
+ */
 function onionpress_wayback_sweep() {
+    // Single-process mutex. The lock value is "<token>:<last_heartbeat_ts>".
+    // - token: unique per invocation; lets each daemon verify ownership
+    //   on each iteration and gracefully exit if another has taken over.
+    // - last_heartbeat_ts: updated every iteration; a stale ts means
+    //   the prior process is dead and we take over.
+    $lock_key = 'op_wayback_sweep_lock';
+    $raw      = (string) get_option( $lock_key, '' );
+    $now      = time();
+    if ( $raw !== '' && strpos( $raw, ':' ) !== false ) {
+        list( , $lock_ts_str ) = explode( ':', $raw, 2 );
+        $lock_ts = (int) $lock_ts_str;
+        if ( $lock_ts > 0 && ( $now - $lock_ts ) < OP_WB_LOOP_LOCK_STALE_SEC ) {
+            return; // another invocation is still alive
+        }
+    } elseif ( $raw !== '' ) {
+        // Legacy lock value (plain ts). Treat like the new format.
+        $lock_ts = (int) $raw;
+        if ( $lock_ts > 0 && ( $now - $lock_ts ) < OP_WB_LOOP_LOCK_STALE_SEC ) {
+            return;
+        }
+    }
+
+    // Claim the lock with our own unique token.
+    $token = wp_generate_password( 16, false, false );
+    update_option( $lock_key, $token . ':' . $now, false );
+
+    @set_time_limit( 0 );
+    @ignore_user_abort( true );
+
+    try {
+        onionpress_wayback_sweep_loop( $token );
+    } finally {
+        // Only clear the lock if it's still ours — otherwise another
+        // daemon has taken over and needs its lock preserved.
+        $cur = (string) get_option( $lock_key, '' );
+        if ( strpos( $cur, $token . ':' ) === 0 ) {
+            delete_option( $lock_key );
+        }
+    }
+}
+
+/**
+ * Sum queue totals across every subsite in the network. Returns an
+ * array with 'archived', 'in_flight', 'remaining', and 'total' post
+ * counts (counting publish posts + pages only).
+ */
+function onionpress_wayback_queue_totals() {
+    $out = array( 'archived' => 0, 'in_flight' => 0, 'remaining' => 0, 'total' => 0 );
+    $sites = function_exists( 'get_sites' ) ? get_sites() : array();
+    if ( empty( $sites ) ) {
+        $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
+    }
+    foreach ( $sites as $site ) {
+        $bid = (int) $site->blog_id;
+        if ( function_exists( 'switch_to_blog' ) ) switch_to_blog( $bid );
+        try {
+            global $wpdb;
+            $prefix = $wpdb->get_blog_prefix( $bid );
+            $posts_table = $prefix . 'posts';
+            $meta_table  = $prefix . 'postmeta';
+            $total     = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$posts_table} WHERE post_status='publish' AND post_type IN ('post','page')" );
+            $archived  = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(DISTINCT m.post_id) FROM {$meta_table} m JOIN {$posts_table} p ON p.ID=m.post_id "
+                . "WHERE m.meta_key=%s AND p.post_status='publish' AND p.post_type IN ('post','page')",
+                OP_WB_META_ARCHIVED_AT
+            ) );
+            $in_flight = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(DISTINCT m.post_id) FROM {$meta_table} m JOIN {$posts_table} p ON p.ID=m.post_id "
+                . "WHERE m.meta_key=%s AND p.post_status='publish' AND p.post_type IN ('post','page')",
+                OP_WB_META_JOB_ID
+            ) );
+            $out['total']     += $total;
+            $out['archived']  += $archived;
+            $out['in_flight'] += $in_flight;
+        } finally {
+            if ( function_exists( 'restore_current_blog' ) ) restore_current_blog();
+        }
+    }
+    $out['remaining'] = max( 0, $out['total'] - $out['archived'] - $out['in_flight'] );
+    return $out;
+}
+
+function onionpress_wayback_sweep_loop( $token ) {
+    $lock_key     = 'op_wayback_sweep_lock';
+    $loop_start   = microtime( true );
+    $totals       = array( 'submitted' => 0, 'success' => 0, 'cdx' => 0, 'error' => 0 );
+    $last_progress = $loop_start;
+
+    onionpress_wayback_log( 'Loop: starting daemon sweep (token=' . substr( $token, 0, 6 ) . ')' );
+    $iter = 0;
+    while ( true ) {
+        $iter++;
+        // Lock ownership check — if another daemon has claimed the
+        // lock (possible if our heartbeat lapsed past stale threshold),
+        // exit gracefully. Also heartbeats the ts if we still own it.
+        $cur = (string) get_option( $lock_key, '' );
+        if ( strpos( $cur, $token . ':' ) !== 0 ) {
+            onionpress_wayback_log( 'Loop: lock taken by another daemon, exiting (token=' . substr( $token, 0, 6 ) . ', iter=' . $iter . ')' );
+            return;
+        }
+        update_option( $lock_key, $token . ':' . time(), false );
+
+        // Visit every subsite in the network. The daemon may have been
+        // invoked from any site's cron; we need to do work on whichever
+        // subsite actually has unarchived posts. Skip subsites whose
+        // queue is fully drained — they exit the iteration for free.
+        $sites = function_exists( 'get_sites' ) ? get_sites() : array();
+        if ( empty( $sites ) ) {
+            // Not multisite — fall back to single-site check.
+            $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
+        }
+
+        $any_work = false;
+        foreach ( $sites as $site ) {
+            $bid = (int) $site->blog_id;
+            if ( function_exists( 'switch_to_blog' ) ) {
+                switch_to_blog( $bid );
+            }
+            try {
+                $remaining = get_posts( array(
+                    'post_status' => 'publish',
+                    'post_type'   => array( 'post', 'page' ),
+                    'numberposts' => 1,
+                    'meta_query'  => array(
+                        'relation' => 'AND',
+                        array( 'key' => OP_WB_META_ARCHIVED_AT, 'compare' => 'NOT EXISTS' ),
+                        array( 'key' => OP_WB_META_JOB_ID,      'compare' => 'NOT EXISTS' ),
+                    ),
+                    'fields' => 'ids',
+                ) );
+                $in_flight = get_posts( array(
+                    'post_status' => 'publish',
+                    'post_type'   => array( 'post', 'page' ),
+                    'numberposts' => 1,
+                    'meta_query'  => array(
+                        array( 'key' => OP_WB_META_JOB_ID, 'compare' => 'EXISTS' ),
+                    ),
+                    'fields' => 'ids',
+                ) );
+                if ( empty( $remaining ) && empty( $in_flight ) ) {
+                    // No work on this subsite — skip.
+                    continue;
+                }
+                $any_work = true;
+                $stats = onionpress_wayback_sweep_iteration();
+                if ( is_array( $stats ) ) {
+                    foreach ( $totals as $k => $_ ) {
+                        $totals[ $k ] += (int) ( $stats[ $k ] ?? 0 );
+                    }
+                }
+            } finally {
+                if ( function_exists( 'restore_current_blog' ) ) {
+                    restore_current_blog();
+                }
+            }
+        }
+
+        if ( ! $any_work ) {
+            $runtime = (int) ( microtime( true ) - $loop_start );
+            onionpress_wayback_log( sprintf(
+                'Loop: drained — %d iterations, %dm%02ds, submitted=%d archived=%d cdx-hit=%d errors=%d',
+                $iter, intdiv( $runtime, 60 ), $runtime % 60,
+                $totals['submitted'], $totals['success'], $totals['cdx'], $totals['error']
+            ) );
+            return;
+        }
+
+        // Periodic progress line — every 2 min of wall clock so the log
+        // shows captures/min reliably without waiting for drain.
+        // Includes queue-wide archived/remaining totals across all
+        // subsites for a complete snapshot in one line.
+        if ( microtime( true ) - $last_progress >= 120 ) {
+            $last_progress = microtime( true );
+            $runtime = max( 1, (int) ( microtime( true ) - $loop_start ) );
+            $caps    = $totals['success'] + $totals['cdx'];
+            $cap_per_min = round( ( $caps * 60 ) / $runtime, 1 );
+            $sub_per_min = round( ( $totals['submitted'] * 60 ) / $runtime, 1 );
+            $qstats = onionpress_wayback_queue_totals();
+            onionpress_wayback_log( sprintf(
+                'Loop progress: %dm%02ds iter=%d | archived=%d/%d (%s/min captured, %s remaining) | submitted=%d (%s/min) cdx=%d errors=%d',
+                intdiv( $runtime, 60 ), $runtime % 60, $iter,
+                $qstats['archived'], $qstats['total'],
+                $cap_per_min, $qstats['remaining'],
+                $totals['submitted'], $sub_per_min,
+                $totals['cdx'], $totals['error']
+            ) );
+        }
+
+        // Pace between iterations. Also respect any backoff set by a
+        // gate inside the iteration (available=0, 429, etc.).
+        $now = time();
+        $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
+        $sleep = ( $backoff_until > $now )
+            ? ( $backoff_until - $now )
+            : OP_WB_LOOP_IDLE_SLEEP;
+        sleep( max( 5, $sleep ) );
+    }
+}
+
+/**
+ * One sweep iteration. Formerly the body of onionpress_wayback_sweep;
+ * called in a loop from the new entry point above.
+ */
+function onionpress_wayback_sweep_iteration() {
     $now = time();
 
     // Global back-off gate — either we recently saw available=0, failed
@@ -838,6 +1067,13 @@ function onionpress_wayback_sweep() {
         $available, $polled_success, $polled_cdx_hit, $polled_error, $polled_pending,
         count( $in_flight ) - count( $ripe_job_ids ), $submitted, $elapsed
     ) );
+
+    return array(
+        'submitted' => $submitted,
+        'success'   => $polled_success,
+        'cdx'       => $polled_cdx_hit,
+        'error'     => $polled_error,
+    );
 }
 add_action( 'onionpress_wayback_sweep', 'onionpress_wayback_sweep' );
 
@@ -880,23 +1116,24 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
 // ────────────────────────────── cron ────────────────────────────────
 
 add_filter( 'cron_schedules', function ( $schedules ) {
-    $schedules['onionpress_every_60_seconds'] = array(
+    $schedules['onionpress_wayback_watchdog'] = array(
         'interval' => OP_WB_CRON_INTERVAL,
-        'display'  => 'Every 60 seconds (OnionPress Wayback)',
+        'display'  => 'OnionPress Wayback watchdog',
     );
     return $schedules;
 } );
 
 add_action( 'init', function () {
-    // (Re)schedule the sweep. If a v3 5-minute event is still pending,
-    // drop it first so we don't end up with both.
+    // (Re)schedule the sweep on the current watchdog schedule. Unschedule
+    // any prior-schedule instances so we don't end up with two cron
+    // entries for the same hook under different intervals.
     $existing = wp_next_scheduled( 'onionpress_wayback_sweep' );
     if ( $existing ) {
         $cron = _get_cron_array();
         foreach ( (array) $cron as $ts => $hooks ) {
             if ( isset( $hooks['onionpress_wayback_sweep'] ) ) {
                 foreach ( $hooks['onionpress_wayback_sweep'] as $sig => $entry ) {
-                    if ( ( $entry['schedule'] ?? '' ) !== 'onionpress_every_60_seconds' ) {
+                    if ( ( $entry['schedule'] ?? '' ) !== 'onionpress_wayback_watchdog' ) {
                         wp_unschedule_event( $ts, 'onionpress_wayback_sweep', $entry['args'] ?? array() );
                     }
                 }
@@ -904,7 +1141,7 @@ add_action( 'init', function () {
         }
     }
     if ( ! wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
-        wp_schedule_event( time(), 'onionpress_every_60_seconds', 'onionpress_wayback_sweep' );
+        wp_schedule_event( time(), 'onionpress_wayback_watchdog', 'onionpress_wayback_sweep' );
     }
 
     // One-time v3 → v4 migration: drop the retry-machine postmeta we no
