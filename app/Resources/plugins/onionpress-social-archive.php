@@ -30,25 +30,28 @@ const ONIONPRESS_SOCIAL_ADMIN_SLUG = 'onionpress-social-archive';
 function onionpress_social_sources() {
     $sources = array(
         'twitter'  => array(
-            'label'     => 'Twitter / X',
-            'cat_name'  => 'Twitter',
-            'cat_slug'  => 'twitter',
-            'color'     => '#1da1f2',
-            'nav_label' => 'My Tweets',
+            'label'       => 'Twitter / X',
+            'cat_name'    => 'Twitter',
+            'cat_slug'    => 'twitter',
+            'color'       => '#1da1f2',
+            'nav_label'   => 'My Tweets',
+            'brand_label' => 'X-Twitter',
         ),
         'mastodon' => array(
-            'label'     => 'Mastodon',
-            'cat_name'  => 'Mastodon',
-            'cat_slug'  => 'mastodon',
-            'color'     => '#6364ff',
-            'nav_label' => 'My Toots',
+            'label'       => 'Mastodon',
+            'cat_name'    => 'Mastodon',
+            'cat_slug'    => 'mastodon',
+            'color'       => '#6364ff',
+            'nav_label'   => 'My Toots',
+            'brand_label' => 'Mastodon',
         ),
         'bluesky'  => array(
-            'label'     => 'Bluesky',
-            'cat_name'  => 'Bluesky',
-            'cat_slug'  => 'bluesky',
-            'color'     => '#0085ff',
-            'nav_label' => 'My Skeets',
+            'label'       => 'Bluesky',
+            'cat_name'    => 'Bluesky',
+            'cat_slug'    => 'bluesky',
+            'color'       => '#0085ff',
+            'nav_label'   => 'My Skeets',
+            'brand_label' => 'Bluesky',
         ),
     );
     return apply_filters( 'onionpress_social_sources', $sources );
@@ -467,6 +470,21 @@ function onionpress_social_render_profile_header( $source_slug, $info, $term ) {
     ob_start();
     ?>
     <section class="op-social-profile" style="--op-accent:<?php echo esc_attr( $info['color'] ); ?>;">
+        <?php
+        // Brand mark in the top-right: "X-Twitter" + X/bird logo,
+        // "Mastodon" + mastodon logo, etc. Shows which platform the
+        // category was imported from at a glance. Only on the profile
+        // card at the top of the category — individual post cards
+        // already have the per-source badge in their own header.
+        $brand_label = $info['brand_label'] ?? $info['label'];
+        $brand_logo  = function_exists( 'onionpress_social_nav_icon_html' )
+            ? onionpress_social_nav_icon_html( $source_slug )
+            : '';
+        ?>
+        <div class="op-social-profile__brand" aria-hidden="true">
+            <span class="op-social-profile__brand-label"><?php echo esc_html( $brand_label ); ?></span>
+            <?php echo $brand_logo; ?>
+        </div>
         <?php if ( $avatar_url ) : ?>
             <img class="op-social-profile__avatar" src="<?php echo esc_url( $avatar_url ); ?>" alt="">
         <?php endif; ?>
@@ -570,6 +588,7 @@ add_action( 'wp_footer', function () {
     </script>
     <style id="op-social-profile-styles">
     .op-social-profile {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 1.25em;
@@ -581,6 +600,33 @@ add_action( 'wp_footer', function () {
         border-radius: 14px;
         background: #fff;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    /* Brand mark top-right: "X-Twitter" + X/bird, "Mastodon" + logo, etc.
+       Uses the --op-accent CSS variable for the logo color. */
+    .op-social-profile__brand {
+        position: absolute;
+        top: 0.9em;
+        right: 1.1em;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3em;
+        color: var(--op-accent, #1da1f2);
+        font-weight: 600;
+        font-size: 0.9em;
+        line-height: 1;
+    }
+    .op-social-profile__brand .op-social-logo {
+        width: 1.15em; height: 1.15em;
+        display: inline-block;
+    }
+    .op-social-profile__brand .op-social-nav-icon,
+    .op-social-profile__brand .op-social-nav-icon--combo {
+        display: inline-flex;
+        font-weight: inherit;
+    }
+    .op-social-profile__brand .op-social-nav-icon__slash {
+        opacity: 0.55;
+        padding: 0 0.1em;
     }
     .op-social-profile__avatar {
         flex: 0 0 auto; width: 80px; height: 80px;
@@ -931,7 +977,7 @@ function onionpress_social_card_styles() {
         opacity: 0.55;
         font-size: 0.9em;
     }
-    @media (max-width: 480px) {
+    @media (max-width: 768px) {
         .op-social-nav-icon { display: inline-flex; }
         .op-social-nav-label { display: none; }
     }

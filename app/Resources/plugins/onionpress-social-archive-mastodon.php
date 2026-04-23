@@ -48,6 +48,16 @@ const ONIONPRESS_MASTODON_SOCKS_PROXY = 'onionheaven:9050';
 const ONIONPRESS_MASTODON_TICK_BUDGET_SEC = 25;
 const ONIONPRESS_MASTODON_PAGES_PER_TICK  = 8;
 const ONIONPRESS_MASTODON_PER_PAGE        = 40;
+
+// Daemon-style outer loop: one wp-cron fire drives the whole backfill
+// to completion rather than stopping after a tick and hoping wp-cron
+// fires again soon. Lock lives in wp_options and is heartbeated every
+// tick; a stale lock (no heartbeat for this long) means the prior
+// daemon died and the next cron fire can take over.
+const ONIONPRESS_MASTODON_DAEMON_LOCK      = 'onionpress_social_mastodon_daemon_lock';
+const ONIONPRESS_MASTODON_DAEMON_MAX_SEC   = 1800; // 30 min per invocation, enough for ~45k statuses
+const ONIONPRESS_MASTODON_DAEMON_STALE_SEC = 300;  // heartbeat older than this = dead process
+const ONIONPRESS_MASTODON_DAEMON_IDLE_SEC  = 3;    // politeness pause between ticks (API rate-limit hygiene)
 const ONIONPRESS_MASTODON_HTTP_TIMEOUT    = 45;
 
 add_action( 'admin_menu', function () {
@@ -274,13 +284,19 @@ function onionpress_mastodon_reset_cursors() {
 }
 
 /**
- * One sync tick: catch up forward from newest_id, then walk backward
- * from oldest_id for up to PAGES_PER_TICK pages. Idempotent — posts
- * whose source_id is already present are skipped silently. Takes a
- * mutex via a transient so overlapping cron ticks don't duplicate work.
+ * Entry point wired to wp-cron and the admin button. Daemon-style:
+ * one invocation runs the inner loop until the backfill is fully
+ * drained (oldest_id === 'done'), then exits. If the loop crashes or
+ * the container restarts, the next wp-cron fire detects the stale
+ * heartbeat and takes over — so "does wp-cron eventually fire?" is
+ * the only requirement for recovery.
  *
- * Returns an admin-notice-shaped array when called from the admin page;
- * ignored by the cron invocation.
+ * A token-based mutex in wp_options prevents overlapping daemons:
+ * whoever claims the lock first runs; any other invocation sees the
+ * fresh heartbeat and exits without entering the loop.
+ *
+ * Returns an admin-notice-shaped array when called from admin UI so
+ * the page can render the result inline; ignored by cron.
  */
 function onionpress_mastodon_run_sync_tick( $from_admin = false ) {
     $server     = (string) get_option( ONIONPRESS_MASTODON_SERVER_OPT, '' );
@@ -289,9 +305,100 @@ function onionpress_mastodon_run_sync_tick( $from_admin = false ) {
         return array( 'level' => 'error', 'message' => 'Enter your Mastodon address first.' );
     }
 
+    // --- Daemon mutex (token-based with heartbeat) --------------------
+    $now    = time();
+    $raw    = (string) get_option( ONIONPRESS_MASTODON_DAEMON_LOCK, '' );
+    if ( $raw !== '' && strpos( $raw, ':' ) !== false ) {
+        list( $other_tok, $ts_str ) = explode( ':', $raw, 2 );
+        $lock_ts = (int) $ts_str;
+        if ( $lock_ts > 0 && ( $now - $lock_ts ) < ONIONPRESS_MASTODON_DAEMON_STALE_SEC ) {
+            if ( $from_admin ) {
+                return array( 'level' => 'warning', 'message' => 'Another sync is already running. Try again in a few minutes.' );
+            }
+            return; // cron path: silent no-op
+        }
+    }
+    $token = function_exists( 'wp_generate_password' ) ? wp_generate_password( 16, false, false ) : bin2hex( random_bytes( 8 ) );
+    update_option( ONIONPRESS_MASTODON_DAEMON_LOCK, $token . ':' . $now, false );
+
+    // Long-running: don't let PHP kill us.
+    @set_time_limit( ONIONPRESS_MASTODON_DAEMON_MAX_SEC + 60 );
+    @ignore_user_abort( true );
+
+    $loop_deadline = microtime( true ) + ONIONPRESS_MASTODON_DAEMON_MAX_SEC;
+    $total = array( 'imported' => 0, 'skipped' => 0, 'errors' => 0, 'pages' => 0 );
+    $last_note = '';
+
+    try {
+        while ( microtime( true ) < $loop_deadline ) {
+            // Lock ownership check — another daemon may have taken over
+            // if our heartbeat lapsed. If so, exit gracefully.
+            $cur = (string) get_option( ONIONPRESS_MASTODON_DAEMON_LOCK, '' );
+            if ( strpos( $cur, $token . ':' ) !== 0 ) {
+                break;
+            }
+            update_option( ONIONPRESS_MASTODON_DAEMON_LOCK, $token . ':' . time(), false );
+
+            // Run one tick (the old tick body, now a helper). Returns the
+            // same stats + errors + completion hint.
+            $result = onionpress_mastodon_sync_one_tick( $server, $account_id );
+            foreach ( array( 'imported', 'skipped', 'errors', 'pages' ) as $k ) {
+                $total[ $k ] += (int) ( $result['stats'][ $k ] ?? 0 );
+            }
+            $last_note = $result['note'];
+
+            if ( $result['done'] || ! empty( $result['errors'] ) ) {
+                break; // backfill complete OR tick errored; let next cron fire retry on errors
+            }
+
+            // Be polite to the Mastodon server between ticks.
+            sleep( ONIONPRESS_MASTODON_DAEMON_IDLE_SEC );
+        }
+    } finally {
+        // Release the lock only if it's still ours.
+        $cur = (string) get_option( ONIONPRESS_MASTODON_DAEMON_LOCK, '' );
+        if ( strpos( $cur, $token . ':' ) === 0 ) {
+            delete_option( ONIONPRESS_MASTODON_DAEMON_LOCK );
+        }
+    }
+
+    $summary = sprintf(
+        '%d imported, %d skipped, %d errors across %d pages (daemon run)',
+        $total['imported'], $total['skipped'], $total['errors'], $total['pages']
+    );
+    update_option( ONIONPRESS_MASTODON_LAST_NOTE, $summary );
+
+    if ( ! $from_admin ) {
+        return; // cron path
+    }
+    $level = ( $total['errors'] > 0 && $total['imported'] === 0 ) ? 'error' : 'success';
+    return array( 'level' => $level, 'message' => 'Sync: ' . esc_html( $summary ) );
+}
+
+/**
+ * One sync tick: catch up forward from newest_id, then walk backward
+ * from oldest_id for up to PAGES_PER_TICK pages. Idempotent — posts
+ * whose source_id is already present are skipped silently. Takes a
+ * transient mutex for the tick itself (separate from the outer daemon
+ * lock) so nothing else can interleave inside a single tick.
+ *
+ * Returns:
+ *   array(
+ *     'stats'  => array(imported, skipped, errors, pages),
+ *     'errors' => array<string>,
+ *     'note'   => string summary,
+ *     'done'   => bool  // true when oldest_id sentinel reached
+ *   )
+ */
+function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
     $lock = get_transient( ONIONPRESS_MASTODON_LOCK );
     if ( $lock ) {
-        return array( 'level' => 'warning', 'message' => 'Another sync is already running. Try again in a minute.' );
+        return array(
+            'stats'  => array( 'imported' => 0, 'skipped' => 0, 'errors' => 0, 'pages' => 0 ),
+            'errors' => array( 'tick mutex held' ),
+            'note'   => 'tick mutex held',
+            'done'   => false,
+        );
     }
     set_transient( ONIONPRESS_MASTODON_LOCK, time(), 10 * MINUTE_IN_SECONDS );
 
@@ -385,25 +492,19 @@ function onionpress_mastodon_run_sync_tick( $from_admin = false ) {
         intval( $stats['pages']    ?? 0 )
     );
     if ( $errors ) { $note .= ' — last error: ' . $errors[ count($errors) - 1 ]; }
-    update_option( ONIONPRESS_MASTODON_LAST_NOTE, $note );
 
-    // Greedy self-reschedule while backfill is in progress: as long as we
-    // still have history to walk and the tick didn't error out, queue the
-    // next tick for the next HTTP request instead of waiting for the 5-min
-    // cron. Collapses a ~10-hour background backfill into whatever-you-can-
-    // browse wall-clock, at the same total cost. Once the backward walk
-    // hits the start-of-history sentinel, the greedy re-queue stops and
-    // the plain 5-min recurring poll takes over.
-    $current_oldest = (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' );
-    if ( $current_oldest !== 'done' && empty( $errors ) ) {
-        wp_schedule_single_event( time(), ONIONPRESS_MASTODON_CRON_HOOK );
-    }
-
-    if ( ! $from_admin ) {
-        return; // cron path
-    }
-    $level = ( ! empty( $errors ) && ( $stats['imported'] ?? 0 ) === 0 ) ? 'error' : 'success';
-    return array( 'level' => $level, 'message' => 'Sync tick: ' . esc_html( $note ) );
+    $done = ( (string) get_option( ONIONPRESS_MASTODON_OLDEST_OPT, '' ) === 'done' );
+    return array(
+        'stats'  => array(
+            'imported' => intval( $stats['imported'] ?? 0 ),
+            'skipped'  => intval( $stats['skipped']  ?? 0 ),
+            'errors'   => intval( $stats['errors']   ?? 0 ),
+            'pages'    => intval( $stats['pages']    ?? 0 ),
+        ),
+        'errors' => $errors,
+        'note'   => $note,
+        'done'   => $done,
+    );
 }
 
 /**
