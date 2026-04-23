@@ -93,8 +93,15 @@
                 if ($term && !is_wp_error($term) && $term->count > 0) {
                     $cat_url = get_term_link($term);
                     if (!is_wp_error($cat_url)) {
-                        echo '<li><a href="' . esc_url($cat_url) . '">'
-                            . esc_html($info['nav_label']) . '</a></li>';
+                        $logo = function_exists('onionpress_social_source_logo_svg')
+                            ? onionpress_social_source_logo_svg($slug)
+                            : '';
+                        echo '<li><a class="op-social-nav op-social-nav--' . esc_attr($slug) . '" '
+                            . 'href="' . esc_url($cat_url) . '" '
+                            . 'style="--op-accent:' . esc_attr($info['color']) . ';">'
+                            . ($logo ? '<span class="op-social-nav-icon" aria-hidden="true">' . $logo . '</span>' : '')
+                            . '<span class="op-social-nav-label">' . esc_html($info['nav_label']) . '</span>'
+                            . '</a></li>';
                     }
                 }
             }

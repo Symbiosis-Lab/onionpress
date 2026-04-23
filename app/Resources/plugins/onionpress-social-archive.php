@@ -55,11 +55,37 @@ function onionpress_social_sources() {
 }
 
 /**
+ * Inline brand-logo SVG for a source slug. Sized to 1em × 1em,
+ * `fill="currentColor"` so the caller controls color via CSS.
+ * Returns '' for unknown slugs so callers can fall back gracefully.
+ *
+ * Logos are simplified single-path marks — enough to read as the
+ * platform's brand at small sizes (20-24px) without pulling in a
+ * whole icon font dependency.
+ */
+function onionpress_social_source_logo_svg( $slug ) {
+    static $paths = array(
+        // X (new Twitter) — two crossed strokes.
+        'twitter'  => 'M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z',
+        // Mastodon — the "M" mark inside rounded rectangle.
+        'mastodon' => 'M23.193 7.88c0-5.207-3.411-6.733-3.411-6.733C18.062.357 15.108.1 12.041.078h-.076c-3.068.022-6.02.279-7.74 1.069 0 0-3.412 1.526-3.412 6.733 0 1.193-.023 2.619.015 4.13.124 5.092.933 10.109 5.637 11.354 2.168.574 4.03.695 5.528.612 2.717-.151 4.242-.97 4.242-.97l-.09-1.974s-1.94.613-4.12.538c-2.16-.075-4.436-.232-4.786-2.88a5.43 5.43 0 0 1-.048-.744s2.118.517 4.801.64c1.641.075 3.18-.096 4.742-.283 2.996-.357 5.607-2.2 5.937-3.884.52-2.652.477-6.472.477-6.472zm-4.03 6.72h-2.504V8.47c0-1.29-.543-1.944-1.628-1.944-1.2 0-1.802.776-1.802 2.312v3.349h-2.49V8.836c0-1.536-.602-2.312-1.802-2.312-1.085 0-1.628.655-1.628 1.945V14.6H4.805V8.283c0-1.289.328-2.313.987-3.07.68-.758 1.569-1.147 2.674-1.147 1.278 0 2.246.491 2.886 1.474l.622 1.042.623-1.042c.64-.983 1.608-1.474 2.886-1.474 1.104 0 1.994.389 2.674 1.146.658.758.986 1.782.986 3.071z',
+        // Bluesky — the butterfly mark.
+        'bluesky'  => 'M5.064 3.843c2.671 2.006 5.546 6.075 6.603 8.258.17.35.17.549 0 .898-1.057 2.184-3.932 6.252-6.603 8.259C3.495 22.45 1 20.41 1 19.124c0-1.286.725-4.06 1.176-5.006.45-.946 3.226-2.183 4.706-2.183-1.48 0-4.256-1.237-4.706-2.183C1.725 8.806 1 6.032 1 4.747c0-1.286 2.495-3.327 4.064-.904zm13.872 0c-2.671 2.006-5.546 6.075-6.603 8.258-.17.35-.17.549 0 .898 1.057 2.184 3.932 6.252 6.603 8.259C20.505 22.45 23 20.41 23 19.124c0-1.286-.725-4.06-1.176-5.006-.45-.946-3.226-2.183-4.706-2.183 1.48 0 4.256-1.237 4.706-2.183.451-.946 1.176-3.72 1.176-5.006 0-1.286-2.495-3.327-4.064-.904z',
+    );
+    if ( ! isset( $paths[ $slug ] ) ) return '';
+    return '<svg class="op-social-logo" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="' . $paths[ $slug ] . '"/></svg>';
+}
+
+/**
  * Inject per-source nav items into a custom primary nav menu via
  * the `wp_nav_menu_items` filter. Only applies when the user has
  * configured a primary menu AND has imported posts for that source;
  * sites without configured menus use the theme's fallback nav,
  * which has parallel logic in header.php.
+ *
+ * Each item is icon + text label; the text collapses to visually-
+ * hidden on narrow screens via the CSS below, leaving just the
+ * platform logo.
  */
 function onionpress_social_inject_nav_items( $items, $args ) {
     if ( ! is_object( $args ) || ( isset( $args->theme_location ) && $args->theme_location !== 'primary' ) ) {
@@ -76,8 +102,11 @@ function onionpress_social_inject_nav_items( $items, $args ) {
             continue;
         }
         $extra .= sprintf(
-            '<li class="menu-item"><a href="%s">%s</a></li>',
+            '<li class="menu-item"><a class="op-social-nav op-social-nav--%s" href="%s" style="--op-accent:%s;"><span class="op-social-nav-icon" aria-hidden="true">%s</span><span class="op-social-nav-label">%s</span></a></li>',
+            esc_attr( $slug ),
             esc_url( $url ),
+            esc_attr( $info['color'] ),
+            onionpress_social_source_logo_svg( $slug ),
             esc_html( $info['nav_label'] )
         );
     }
@@ -592,23 +621,32 @@ function onionpress_social_wrap_as_card( $content ) {
 
     // The source badge in the header links to the per-source category
     // archive (e.g. /category/twitter/) so it's a usable filter, not
-    // just decoration. Falls back to a span if the category term is
-    // missing or the user lacks permission to see it.
-    $badge_inner = esc_html( $info['label'] );
+    // just decoration. Renders as a circular brand-logo pill; falls
+    // back to the platform name if we don't have a logo path for that
+    // slug (e.g. a third-party importer that added itself via the
+    // `onionpress_social_sources` filter).
+    $badge_logo  = onionpress_social_source_logo_svg( $source_slug );
+    $has_logo    = $badge_logo !== '';
+    $badge_inner = $has_logo ? $badge_logo : esc_html( $info['label'] );
+    $badge_class = 'op-social-card__badge' . ( $has_logo ? ' op-social-card__badge--icon' : '' );
     $cat_term    = get_term_by( 'slug', $info['cat_slug'], 'category' );
     $cat_url     = ( $cat_term && ! is_wp_error( $cat_term ) ) ? get_term_link( $cat_term ) : '';
     if ( $cat_url && ! is_wp_error( $cat_url ) ) {
         $badge_element = sprintf(
-            '<a class="op-social-card__badge" href="%s" style="background:%s;" title="Browse all imported %s posts">%s</a>',
+            '<a class="%s" href="%s" style="background:%s;" title="Browse all imported %s posts" aria-label="Imported from %s">%s</a>',
+            esc_attr( $badge_class ),
             esc_url( $cat_url ),
             esc_attr( $info['color'] ),
+            esc_attr( $info['label'] ),
             esc_attr( $info['label'] ),
             $badge_inner
         );
     } else {
         $badge_element = sprintf(
-            '<span class="op-social-card__badge" style="background:%s;" title="Imported from %s">%s</span>',
+            '<span class="%s" style="background:%s;" title="Imported from %s" aria-label="Imported from %s">%s</span>',
+            esc_attr( $badge_class ),
             esc_attr( $info['color'] ),
+            esc_attr( $info['label'] ),
             esc_attr( $info['label'] ),
             $badge_inner
         );
@@ -794,7 +832,54 @@ function onionpress_social_card_styles() {
         opacity: 0.85;
         text-decoration: none;
     }
+    /* Icon-mode badge: circular, logo-only, slightly larger than the
+       old text pill so the brand mark is actually readable. */
+    .op-social-card__badge--icon {
+        padding: 0;
+        width: 26px; height: 26px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 1;
+    }
+    .op-social-card__badge--icon .op-social-logo {
+        width: 60%; height: 60%;
+        display: block;
+    }
     a.op-social-card__badge:hover { opacity: 1; text-decoration: none; }
+    a.op-social-card__badge--icon:hover { transform: scale(1.08); transition: transform 0.15s; }
+
+    /* Primary-nav Social Archive links: icon + text label. On narrow
+       screens the label is visually hidden (still read by screen
+       readers) so phone users see just the brand logo. */
+    .op-social-nav {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4em;
+    }
+    .op-social-nav-icon {
+        display: inline-flex;
+        width: 1.15em;
+        height: 1.15em;
+        color: var(--op-accent, currentColor);
+    }
+    .op-social-nav-icon .op-social-logo {
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+    @media (max-width: 480px) {
+        .op-social-nav-label {
+            position: absolute;
+            width: 1px; height: 1px;
+            padding: 0; margin: -1px;
+            overflow: hidden;
+            clip: rect(0,0,0,0);
+            white-space: nowrap;
+            border: 0;
+        }
+        .op-social-nav-icon { width: 1.4em; height: 1.4em; }
+    }
     .op-social-card__body {
         font-size: 1.02em;
         color: #0f1419;
