@@ -65,15 +65,61 @@ function onionpress_social_sources() {
  */
 function onionpress_social_source_logo_svg( $slug ) {
     static $paths = array(
-        // X (new Twitter) — two crossed strokes.
-        'twitter'  => 'M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z',
+        // X (post-2023 Twitter) — two crossed strokes.
+        'twitter-x'    => 'M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z',
+        // Classic Twitter bird.
+        'twitter-bird' => 'M23 3a10.9 10.9 0 0 1-3.14 1.53 4.48 4.48 0 0 0-7.86 3v1A10.66 10.66 0 0 1 3 4s-4 9 5 13a11.64 11.64 0 0 1-7 2c9 5 20 0 20-11.5a4.5 4.5 0 0 0-.08-.83A7.72 7.72 0 0 0 23 3z',
+        // Default Twitter slug → X (current branding).
+        'twitter'      => 'M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z',
         // Mastodon — the "M" mark inside rounded rectangle.
-        'mastodon' => 'M23.193 7.88c0-5.207-3.411-6.733-3.411-6.733C18.062.357 15.108.1 12.041.078h-.076c-3.068.022-6.02.279-7.74 1.069 0 0-3.412 1.526-3.412 6.733 0 1.193-.023 2.619.015 4.13.124 5.092.933 10.109 5.637 11.354 2.168.574 4.03.695 5.528.612 2.717-.151 4.242-.97 4.242-.97l-.09-1.974s-1.94.613-4.12.538c-2.16-.075-4.436-.232-4.786-2.88a5.43 5.43 0 0 1-.048-.744s2.118.517 4.801.64c1.641.075 3.18-.096 4.742-.283 2.996-.357 5.607-2.2 5.937-3.884.52-2.652.477-6.472.477-6.472zm-4.03 6.72h-2.504V8.47c0-1.29-.543-1.944-1.628-1.944-1.2 0-1.802.776-1.802 2.312v3.349h-2.49V8.836c0-1.536-.602-2.312-1.802-2.312-1.085 0-1.628.655-1.628 1.945V14.6H4.805V8.283c0-1.289.328-2.313.987-3.07.68-.758 1.569-1.147 2.674-1.147 1.278 0 2.246.491 2.886 1.474l.622 1.042.623-1.042c.64-.983 1.608-1.474 2.886-1.474 1.104 0 1.994.389 2.674 1.146.658.758.986 1.782.986 3.071z',
+        'mastodon'     => 'M23.193 7.88c0-5.207-3.411-6.733-3.411-6.733C18.062.357 15.108.1 12.041.078h-.076c-3.068.022-6.02.279-7.74 1.069 0 0-3.412 1.526-3.412 6.733 0 1.193-.023 2.619.015 4.13.124 5.092.933 10.109 5.637 11.354 2.168.574 4.03.695 5.528.612 2.717-.151 4.242-.97 4.242-.97l-.09-1.974s-1.94.613-4.12.538c-2.16-.075-4.436-.232-4.786-2.88a5.43 5.43 0 0 1-.048-.744s2.118.517 4.801.64c1.641.075 3.18-.096 4.742-.283 2.996-.357 5.607-2.2 5.937-3.884.52-2.652.477-6.472.477-6.472zm-4.03 6.72h-2.504V8.47c0-1.29-.543-1.944-1.628-1.944-1.2 0-1.802.776-1.802 2.312v3.349h-2.49V8.836c0-1.536-.602-2.312-1.802-2.312-1.085 0-1.628.655-1.628 1.945V14.6H4.805V8.283c0-1.289.328-2.313.987-3.07.68-.758 1.569-1.147 2.674-1.147 1.278 0 2.246.491 2.886 1.474l.622 1.042.623-1.042c.64-.983 1.608-1.474 2.886-1.474 1.104 0 1.994.389 2.674 1.146.658.758.986 1.782.986 3.071z',
         // Bluesky — the butterfly mark.
-        'bluesky'  => 'M5.064 3.843c2.671 2.006 5.546 6.075 6.603 8.258.17.35.17.549 0 .898-1.057 2.184-3.932 6.252-6.603 8.259C3.495 22.45 1 20.41 1 19.124c0-1.286.725-4.06 1.176-5.006.45-.946 3.226-2.183 4.706-2.183-1.48 0-4.256-1.237-4.706-2.183C1.725 8.806 1 6.032 1 4.747c0-1.286 2.495-3.327 4.064-.904zm13.872 0c-2.671 2.006-5.546 6.075-6.603 8.258-.17.35-.17.549 0 .898 1.057 2.184 3.932 6.252 6.603 8.259C20.505 22.45 23 20.41 23 19.124c0-1.286-.725-4.06-1.176-5.006-.45-.946-3.226-2.183-4.706-2.183 1.48 0 4.256-1.237 4.706-2.183.451-.946 1.176-3.72 1.176-5.006 0-1.286-2.495-3.327-4.064-.904z',
+        'bluesky'      => 'M5.064 3.843c2.671 2.006 5.546 6.075 6.603 8.258.17.35.17.549 0 .898-1.057 2.184-3.932 6.252-6.603 8.259C3.495 22.45 1 20.41 1 19.124c0-1.286.725-4.06 1.176-5.006.45-.946 3.226-2.183 4.706-2.183-1.48 0-4.256-1.237-4.706-2.183C1.725 8.806 1 6.032 1 4.747c0-1.286 2.495-3.327 4.064-.904zm13.872 0c-2.671 2.006-5.546 6.075-6.603 8.258-.17.35-.17.549 0 .898 1.057 2.184 3.932 6.252 6.603 8.259C20.505 22.45 23 20.41 23 19.124c0-1.286-.725-4.06-1.176-5.006-.45-.946-3.226-2.183-4.706-2.183 1.48 0 4.256-1.237 4.706-2.183.451-.946 1.176-3.72 1.176-5.006 0-1.286-2.495-3.327-4.064-.904z',
     );
     if ( ! isset( $paths[ $slug ] ) ) return '';
     return '<svg class="op-social-logo" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="' . $paths[ $slug ] . '"/></svg>';
+}
+
+/**
+ * Era-correct badge logo for one imported post. Twitter is a moving
+ * target: posts created before the 2023-07-23 X rebrand announcement
+ * show the classic bird; posts after that date show the X. Other
+ * sources just get their single brand mark.
+ *
+ * Why announcement-date (July 23 2023) rather than domain-cutover
+ * (May 2024): we want "era the person posted under," not "when the
+ * backend domain flipped." The name change was immediate and
+ * culturally visible the day of the announcement.
+ */
+function onionpress_social_post_badge_logo_svg( $source_slug, $post_id ) {
+    if ( $source_slug !== 'twitter' ) {
+        return onionpress_social_source_logo_svg( $source_slug );
+    }
+    static $cutoff = null;
+    if ( $cutoff === null ) { $cutoff = strtotime( '2023-07-23 00:00:00 UTC' ); }
+    $post_gmt = get_post_field( 'post_date_gmt', $post_id, 'raw' );
+    $ts       = $post_gmt ? strtotime( $post_gmt . ' UTC' ) : 0;
+    $variant  = ( $ts && $ts < $cutoff ) ? 'bird' : 'x';
+    return onionpress_social_source_logo_svg( 'twitter-' . $variant );
+}
+
+/**
+ * Nav-tab icon HTML for a source. Twitter gets a small composite of
+ * X and bird separated by a slash to signal the account spans both
+ * eras; other sources get their single mark. Callers wrap this in
+ * the .op-social-nav-icon span; Twitter returns its own composite
+ * wrapper so the "X / bird" alignment is self-contained.
+ */
+function onionpress_social_nav_icon_html( $source_slug ) {
+    if ( $source_slug === 'twitter' ) {
+        return '<span class="op-social-nav-icon op-social-nav-icon--combo" aria-hidden="true">'
+             . onionpress_social_source_logo_svg( 'twitter-x' )
+             . '<span class="op-social-nav-icon__slash">/</span>'
+             . onionpress_social_source_logo_svg( 'twitter-bird' )
+             . '</span>';
+    }
+    $logo = onionpress_social_source_logo_svg( $source_slug );
+    return $logo ? '<span class="op-social-nav-icon" aria-hidden="true">' . $logo . '</span>' : '';
 }
 
 /**
@@ -102,11 +148,12 @@ function onionpress_social_inject_nav_items( $items, $args ) {
             continue;
         }
         $extra .= sprintf(
-            '<li class="menu-item"><a class="op-social-nav op-social-nav--%s" href="%s" style="--op-accent:%s;"><span class="op-social-nav-icon" aria-hidden="true">%s</span><span class="op-social-nav-label">%s</span></a></li>',
+            '<li class="menu-item"><a class="op-social-nav op-social-nav--%s" href="%s" style="--op-accent:%s;" aria-label="%s">%s<span class="op-social-nav-label">%s</span></a></li>',
             esc_attr( $slug ),
             esc_url( $url ),
             esc_attr( $info['color'] ),
-            onionpress_social_source_logo_svg( $slug ),
+            esc_attr( $info['nav_label'] ),
+            onionpress_social_nav_icon_html( $slug ),
             esc_html( $info['nav_label'] )
         );
     }
@@ -625,7 +672,7 @@ function onionpress_social_wrap_as_card( $content ) {
     // back to the platform name if we don't have a logo path for that
     // slug (e.g. a third-party importer that added itself via the
     // `onionpress_social_sources` filter).
-    $badge_logo  = onionpress_social_source_logo_svg( $source_slug );
+    $badge_logo  = onionpress_social_post_badge_logo_svg( $source_slug, $post_id );
     $has_logo    = $badge_logo !== '';
     $badge_inner = $has_logo ? $badge_logo : esc_html( $info['label'] );
     $badge_class = 'op-social-card__badge' . ( $has_logo ? ' op-social-card__badge--icon' : '' );
@@ -849,36 +896,44 @@ function onionpress_social_card_styles() {
     a.op-social-card__badge:hover { opacity: 1; text-decoration: none; }
     a.op-social-card__badge--icon:hover { transform: scale(1.08); transition: transform 0.15s; }
 
-    /* Primary-nav Social Archive links: icon + text label. On narrow
-       screens the label is visually hidden (still read by screen
-       readers) so phone users see just the brand logo. */
+    /* Primary-nav Social Archive links: wide screens get the text
+       label only ("My Tweets"), narrow (≤480px) swaps to the brand
+       logo only. The <a> itself carries an aria-label so screen
+       readers hear the full name regardless of which visual state
+       renders. Twitter uses the X / bird composite to signal the
+       account spans both eras. */
     .op-social-nav {
         display: inline-flex;
         align-items: center;
-        gap: 0.4em;
     }
     .op-social-nav-icon {
-        display: inline-flex;
-        width: 1.15em;
-        height: 1.15em;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        width: 1.4em; height: 1.4em;
         color: var(--op-accent, currentColor);
     }
     .op-social-nav-icon .op-social-logo {
-        width: 100%;
-        height: 100%;
+        width: 100%; height: 100%;
         display: block;
     }
+    .op-social-nav-icon--combo {
+        width: auto;
+        gap: 1px;
+        font-weight: 600;
+    }
+    .op-social-nav-icon--combo .op-social-logo {
+        width: 1em; height: 1em;
+    }
+    .op-social-nav-icon__slash {
+        display: inline-block;
+        padding: 0 0.15em;
+        opacity: 0.55;
+        font-size: 0.9em;
+    }
     @media (max-width: 480px) {
-        .op-social-nav-label {
-            position: absolute;
-            width: 1px; height: 1px;
-            padding: 0; margin: -1px;
-            overflow: hidden;
-            clip: rect(0,0,0,0);
-            white-space: nowrap;
-            border: 0;
-        }
-        .op-social-nav-icon { width: 1.4em; height: 1.4em; }
+        .op-social-nav-icon { display: inline-flex; }
+        .op-social-nav-label { display: none; }
     }
     .op-social-card__body {
         font-size: 1.02em;
