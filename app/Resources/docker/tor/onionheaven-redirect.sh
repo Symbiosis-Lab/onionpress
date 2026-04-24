@@ -79,7 +79,12 @@ handle_request() {
     body="${body}</body></html>"
     local len=${#body}
 
-    printf "HTTP/1.0 302 Found\r\nLocation: %s\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" "$wayback_url" "$len" "$body"
+    # X-OnionHeaven-Takeover is an explicit, version-independent marker
+    # of "this response is the takeover, not the real site." Clients use
+    # it as defense-in-depth alongside the 302 status check, so a future
+    # change to status code / redirect shape doesn't silently flip
+    # takeover responses past client reachability gates.
+    printf "HTTP/1.0 302 Found\r\nLocation: %s\r\nContent-Type: text/html\r\nContent-Length: %d\r\nX-OnionHeaven-Takeover: 1\r\nConnection: close\r\n\r\n%s" "$wayback_url" "$len" "$body"
 
     # Record redirect timestamp in DB (best-effort, don't block response)
     # Updates all rows for this content_address since the redirect applies to the address, not a specific instance.

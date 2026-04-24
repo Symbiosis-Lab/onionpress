@@ -1315,7 +1315,9 @@ class OnionPressApp(rumps.App):
             reachable, http_code = self._health_checker.check_external_reachability(self.onion_address)
             if not reachable:
                 if log_result:
-                    if http_code == "302":
+                    if http_code == "takeover":
+                        self.log("✗ Onion service flagged OnionHeaven takeover (X-OnionHeaven-Takeover header set)")
+                    elif http_code == "302":
                         self.log("✗ Onion service returning 302 (OnionHeaven takeover active)")
                     elif http_code.startswith("000"):
                         # Decode curl exit code for debugging
@@ -4220,25 +4222,27 @@ class OnionPressApp(rumps.App):
         install_path = os.path.dirname(self.contents_dir)
 
         # No notification toasts — the download-progress splash and the
-        # "Update Installed — Restart Now?" modal below already tell the
-        # user what's happening. Using rumps.notification() would import
-        # Foundation's NSUserNotificationCenter, which on newer macOS can
-        # trigger an unsolicited "Would you like to allow notifications?"
-        # prompt the very first time the app launches — confusing during
-        # setup.
+        # "Update Installed — Restart OnionPress?" modal below already
+        # tell the user what's happening. Using rumps.notification()
+        # would import Foundation's NSUserNotificationCenter, which on
+        # newer macOS can trigger an unsolicited "Would you like to
+        # allow notifications?" prompt the very first time the app
+        # launches — confusing during setup.
         try:
             updater.download_and_install(
                 release_data, latest_version, install_path,
                 log=self.log, notify=None,
             )
 
-            # Prompt user to restart
+            # Prompt user to restart. Button text is explicitly
+            # "Restart OnionPress" (not "Restart Now") so it doesn't
+            # read as "restart the Mac" in the modal.
             response = self.show_native_alert(
                 "Update Installed",
-                f"OnionPress v{latest_version} has been installed.\n\nRestart now to use the new version.\n\nThis will briefly stop and restart all containers to pick up any changes. Your onion address stays the same.",
-                buttons=["Restart Now", "Later"]
+                f"OnionPress v{latest_version} has been installed.\n\nRestart OnionPress to use the new version.\n\nThis will briefly stop and restart all containers to pick up any changes. Your onion address stays the same.",
+                buttons=["Restart OnionPress", "Later"]
             )
-            if response == 0:  # Restart Now
+            if response == 0:  # Restart OnionPress
                 self._relaunch_app(install_path)
 
         except PermissionError as e:

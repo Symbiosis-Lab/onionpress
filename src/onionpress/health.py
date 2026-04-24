@@ -245,18 +245,29 @@ class HealthChecker:
     def _probe_onion_via(self, container: str, onion_address: str) -> tuple[bool, str]:
         """Curl an onion address through `container`'s local SOCKS (127.0.0.1:9050).
 
-        Returns (reachable, http_code) with the same semantics as the old
-        check_external_reachability: 200/301 count as reachable, anything
-        else doesn't. Curl failure returns "000:rc=<exit>".
+        Returns (reachable, http_code). 200/301 from the real site counts
+        as reachable; anything else (including 302 from the OnionHeaven
+        takeover redirector) does not. Also inspects response headers
+        for `X-OnionHeaven-Takeover: 1` — if present, we're talking to
+        the hub's takeover replica regardless of status code, and we
+        return reachable=False with the sentinel http_code "takeover"
+        so the caller can log + account for it cleanly. Curl transport
+        failure returns "000:rc=<exit>".
         """
         if not onion_address:
             return False, ""
+        # -D - dumps response headers to stdout; -o /dev/null suppresses
+        # the body; -w appends "---<code>" at the very end so we can
+        # split headers from status. The delimiter must be something
+        # that can't appear in an RFC-compliant HTTP header.
         result = self.docker.exec(
             container,
             [
                 "curl", "-s", "--max-time", "30",
                 "--socks5-hostname", "127.0.0.1:9050",
-                "-o", "/dev/null", "-w", "%{http_code}",
+                "-o", "/dev/null",
+                "-D", "-",
+                "-w", "\n---STATUS---%{http_code}",
                 "-H", "User-Agent: OnionPress-HealthCheck",
                 f"http://{onion_address}/",
             ],
@@ -264,7 +275,15 @@ class HealthChecker:
         )
         if not result.ok:
             return False, f"000:rc={result.returncode}"
-        http_code = result.output.strip()
+        raw = result.output or ""
+        headers_part, _, tail = raw.rpartition("---STATUS---")
+        http_code = tail.strip() if headers_part else raw.strip()
+        # Case-insensitive header match; curl echoes headers verbatim.
+        if headers_part:
+            for line in headers_part.splitlines():
+                name, _, value = line.partition(":")
+                if name.strip().lower() == "x-onionheaven-takeover" and value.strip() == "1":
+                    return False, "takeover"
         return http_code in ("200", "301"), http_code
 
     def check_self_reachability(self, onion_address: str) -> tuple[bool, str]:
