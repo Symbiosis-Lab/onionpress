@@ -736,7 +736,6 @@
     var counterAPI = '/wp-content/plugins/onionpress-hit-counter/standalone-counter.php';
     var hasIncremented = false;
     var currentCount = 0;
-    var pollingInterval = null;
 
     function updateDisplay(formattedCount, animate) {
         var digits = formattedCount.split('');
@@ -783,19 +782,6 @@
                 updateDisplay(d.formatted, true);
                 currentCount = d.count;
                 hasIncremented = true;
-                if (!pollingInterval) pollingInterval = setInterval(poll, 2000);
-            }
-        })
-        .catch(function() {});
-    }
-
-    function poll() {
-        fetch(counterAPI + '?action=get')
-        .then(function(r) { return r.json(); })
-        .then(function(d) {
-            if (d.success && d.count > currentCount) {
-                updateDisplay(d.formatted, true);
-                currentCount = d.count;
             }
         })
         .catch(function() {});
