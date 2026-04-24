@@ -2526,22 +2526,32 @@ main() {
             if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
                 log "quit: asking MenubarApp (pid $MENUBAR_PID) to quit via trigger file"
                 : > "$DATA_DIR/.quit"
-                # Poll up to 30s at 0.5s intervals for the MenubarApp to exit.
+                # Short window for the MenubarApp's check_status poller
+                # to pick up the trigger (interval is 30s max, but we
+                # don't want to burn 30s waiting when SIGTERM works just
+                # as well). If it doesn't react in 5s, escalate.
                 WAITED=0
-                while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 60 ]; do
+                while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 10 ]; do
                     sleep 0.5
                     WAITED=$((WAITED + 1))
                 done
                 if kill -0 "$MENUBAR_PID" 2>/dev/null; then
-                    log "quit: MenubarApp did not exit after 30s, sending SIGTERM"
+                    log "quit: trigger not picked up in 5s, sending SIGTERM"
                     kill -TERM "$MENUBAR_PID" 2>/dev/null || true
+                    # SIGTERM fires NSApplicationWillTerminateNotification,
+                    # which drives _handle_terminate through its full
+                    # cleanup (containers, Colima, PID file). That runs
+                    # up to ~90s in the worst case — 30s for
+                    # `launcher stop` + 60s for `colima stop`. Give it
+                    # that long before we escalate, or we SIGKILL mid-
+                    # cleanup and leave things wedged.
                     WAITED=0
-                    while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 20 ]; do
+                    while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 120 ]; do
                         sleep 0.5
                         WAITED=$((WAITED + 1))
                     done
                     if kill -0 "$MENUBAR_PID" 2>/dev/null; then
-                        log "quit: MenubarApp still alive, sending SIGKILL"
+                        log "quit: MenubarApp still alive after 60s, sending SIGKILL"
                         kill -9 "$MENUBAR_PID" 2>/dev/null || true
                         FAILED_STEPS="$FAILED_STEPS menubar-app"
                     fi
