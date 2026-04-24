@@ -1546,6 +1546,21 @@ class OnionPressApp(rumps.App):
                     pass
                 self.handle_reopen()
 
+            # Check for quit trigger (from `onionpress quit` CLI). We
+            # handle this *before* everything else in the poll loop so a
+            # requested quit takes effect even if later steps are slow.
+            # The trigger is removed before quit_app runs so a crash
+            # loop can't get pinned on a stale file.
+            quit_trigger = os.path.join(self.app_support, ".quit")
+            if os.path.exists(quit_trigger):
+                try:
+                    os.remove(quit_trigger)
+                except OSError:
+                    pass
+                self.log("Quit trigger detected (onionpress quit CLI)")
+                _main_thread(lambda: self.quit_app(None))
+                return
+
             # Check for upload-analytics trigger (host file from CLI,
             # or Docker volume file from WordPress "Share Now" button)
             upload_trigger = os.path.join(self.app_support, ".upload-analytics")

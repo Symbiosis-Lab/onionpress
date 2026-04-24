@@ -2490,6 +2490,100 @@ main() {
             stop_containers
             ;;
 
+        quit)
+            # CLI-equivalent of the menubar Quit button: take the app
+            # fully off — MenubarApp, containers, Colima VM, PID lock.
+            # Hybrid strategy: if the MenubarApp is alive, ask it to
+            # quit itself via ~/.onionpress/.quit (reuses the in-process
+            # quit_app path for onion proxy + caffeinate + onionheaven
+            # offline signal). Fall back to doing the process-
+            # independent steps ourselves if the app is missing or
+            # unresponsive — so this command is always a reliable
+            # teardown for scripting / CI / pre-update / pre-scrub.
+
+            FAILED_STEPS=""
+            mkdir -p "$DATA_DIR"
+
+            # Capture MenubarApp PID (if any) *before* dropping the trigger
+            # so the removal check is race-safe.
+            MENUBAR_PID=""
+            if [ -f "$PIDFILE" ]; then
+                MENUBAR_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
+            fi
+
+            if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
+                log "quit: asking MenubarApp (pid $MENUBAR_PID) to quit via trigger file"
+                : > "$DATA_DIR/.quit"
+                # Poll up to 30s at 0.5s intervals for the MenubarApp to exit.
+                WAITED=0
+                while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 60 ]; do
+                    sleep 0.5
+                    WAITED=$((WAITED + 1))
+                done
+                if kill -0 "$MENUBAR_PID" 2>/dev/null; then
+                    log "quit: MenubarApp did not exit after 30s, sending SIGTERM"
+                    kill -TERM "$MENUBAR_PID" 2>/dev/null || true
+                    WAITED=0
+                    while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 20 ]; do
+                        sleep 0.5
+                        WAITED=$((WAITED + 1))
+                    done
+                    if kill -0 "$MENUBAR_PID" 2>/dev/null; then
+                        log "quit: MenubarApp still alive, sending SIGKILL"
+                        kill -9 "$MENUBAR_PID" 2>/dev/null || true
+                        FAILED_STEPS="$FAILED_STEPS menubar-app"
+                    fi
+                fi
+                # Clean up stray trigger file if still there (MenubarApp
+                # removes it on successful pickup; SIGTERM/SIGKILL path
+                # may have left it).
+                rm -f "$DATA_DIR/.quit"
+            else
+                log "quit: MenubarApp not running; skipping trigger-file wait"
+            fi
+
+            # Now do the process-independent cleanup. These steps run
+            # whether the MenubarApp quit cleanly or not — belt and
+            # suspenders.
+            log "quit: stopping containers"
+            setup_db_passwords
+            if ! stop_containers; then
+                FAILED_STEPS="$FAILED_STEPS containers"
+            fi
+
+            log "quit: stopping Colima VM"
+            COLIMA_BIN="$BIN_DIR/colima"
+            if [ -x "$COLIMA_BIN" ]; then
+                # The three env vars are already exported at script-top
+                # (lines 144-146) so this invocation uses the OnionPress-
+                # specific Colima profile.
+                if ! "$COLIMA_BIN" stop >> "$LOG_FILE" 2>&1; then
+                    FAILED_STEPS="$FAILED_STEPS colima"
+                fi
+            else
+                log "quit: colima binary not found at $COLIMA_BIN — skipping"
+                FAILED_STEPS="$FAILED_STEPS colima-missing"
+            fi
+
+            # Remove the PID file, but only if it still matches the PID
+            # we saw at the top (mirrors _remove_pid_file safety in
+            # src/menubar.py:1349-1357 — avoids nuking a freshly-started
+            # OnionPress instance that raced in between).
+            if [ -f "$PIDFILE" ]; then
+                STORED_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
+                if [ -z "$MENUBAR_PID" ] || [ "$STORED_PID" = "$MENUBAR_PID" ]; then
+                    rm -f "$PIDFILE"
+                fi
+            fi
+
+            if [ -n "$FAILED_STEPS" ]; then
+                log "quit: completed with issues in:$FAILED_STEPS"
+                echo "onionpress quit: some steps failed:$FAILED_STEPS" >&2
+                exit 1
+            fi
+            log "quit: clean"
+            ;;
+
         restart)
             # Adaptive restart: if Docker is reachable, just bounce the
             # containers (fast, ~30s). If it isn't, the Lima VM is most
@@ -2846,7 +2940,7 @@ main() {
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs|setup|backup|restore|reset|scrub}"
+            echo "Usage: $0 {start|stop|quit|restart|status|address|start-tor|import-key|launch|logs|setup|backup|restore|reset|scrub}"
             exit 1
             ;;
     esac

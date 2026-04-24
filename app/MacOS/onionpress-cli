@@ -14,6 +14,10 @@ case "${1:-help}" in
         echo "Stopping OnionPress..."
         "$LAUNCHER" stop
         ;;
+    quit)
+        echo "Quitting OnionPress (containers + Colima VM + MenubarApp)..."
+        "$LAUNCHER" quit
+        ;;
     restart)
         echo "Restarting OnionPress..."
         "$LAUNCHER" restart
@@ -140,7 +144,9 @@ Usage: onionpress-cli [command]
 
 Commands:
   start     - Start WordPress and Tor containers
-  stop      - Stop all containers
+  stop      - Stop all containers (leaves MenubarApp + VM running)
+  quit      - Fully shut down: containers + Colima VM + MenubarApp
+              (equivalent of clicking Quit in the menubar)
   restart   - Restart all containers
   status    - Show container status
   address   - Show your .onion address
