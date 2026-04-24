@@ -43,6 +43,9 @@ services:
       - WORDPRESS_DB_USER=wordpress
       - WORDPRESS_DB_PASSWORD=${WORDPRESS_DB_PASSWORD}
       - WORDPRESS_DB_NAME=wordpress
+      # Only request-derived constants belong here (they need $_SERVER). Static
+      # constants live in wp-config.php's custom-values block — keeping both in
+      # sync would cause duplicate-define warnings on every request.
       - WORDPRESS_CONFIG_EXTRA=
           $$scheme = 'http';
           if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') $$scheme = 'https';
@@ -50,8 +53,6 @@ services:
           define('WP_SITEURL', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
           define('FORCE_SSL_ADMIN', false);
           define('COOKIE_DOMAIN', preg_replace('/:\d+$$/', '', $$_SERVER['HTTP_HOST']));
-          define('AUTOMATIC_UPDATER_DISABLED', true);
-          define('WP_AUTO_UPDATE_CORE', false);
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost/wp-cron.php"]
       interval: 5m

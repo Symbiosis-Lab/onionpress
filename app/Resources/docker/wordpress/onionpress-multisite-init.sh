@@ -131,8 +131,11 @@ trap restore_urls EXIT
 wp core multisite-convert --url=http://localhost --allow-root
 log "multisite-convert done"
 
-# Set multisite constants in wp-config.php. These must match the wp_site
-# row we just created (domain=localhost, path=/).
+# Set constants in wp-config.php. Multisite constants must match the wp_site
+# row we just created (domain=localhost, path=/). Auto-update constants live
+# here too (not in WORDPRESS_CONFIG_EXTRA) to avoid duplicate-define warnings
+# on every request — CONFIG_EXTRA is eval'd and any overlap with wp-config.php
+# lines triggers PHP warnings.
 for const_val in \
     "MULTISITE:true" \
     "SUBDOMAIN_INSTALL:false" \
@@ -140,7 +143,9 @@ for const_val in \
     "PATH_CURRENT_SITE:'/'" \
     "SITE_ID_CURRENT_SITE:1" \
     "BLOG_ID_CURRENT_SITE:1" \
-    "SUNRISE:true"; do
+    "SUNRISE:true" \
+    "AUTOMATIC_UPDATER_DISABLED:true" \
+    "WP_AUTO_UPDATE_CORE:false"; do
     name="${const_val%%:*}"
     value="${const_val#*:}"
     wp config set "$name" "$value" --raw --type=constant --allow-root
