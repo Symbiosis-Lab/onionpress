@@ -2505,10 +2505,22 @@ main() {
             mkdir -p "$DATA_DIR"
 
             # Capture MenubarApp PID (if any) *before* dropping the trigger
-            # so the removal check is race-safe.
+            # so the removal check is race-safe. Prefer the PID file
+            # (authoritative), but fall back to pgrep — the PID file
+            # can be missing after a prior unclean shutdown, manual rm,
+            # or a MenubarApp code path that never wrote it, and we
+            # still need to find and stop the running MenubarApp in
+            # that case. `-u $(whoami)` restricts to this user's
+            # processes per the multi-user rule in CLAUDE.md.
             MENUBAR_PID=""
             if [ -f "$PIDFILE" ]; then
                 MENUBAR_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
+            fi
+            if [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; then
+                # Match the py2app-frozen MenubarApp binary path — narrow
+                # enough that we don't collide with other OnionPress
+                # processes (launcher, shell scripts).
+                MENUBAR_PID=$(pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" 2>/dev/null | head -1)
             fi
 
             if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
