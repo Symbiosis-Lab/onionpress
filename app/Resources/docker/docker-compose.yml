@@ -53,11 +53,25 @@ services:
           define('WP_SITEURL', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
           define('FORCE_SSL_ADMIN', false);
           define('COOKIE_DOMAIN', preg_replace('/:\d+$$/', '', $$_SERVER['HTTP_HOST']));
+    # Healthcheck + autoheal label: if Apache wedges (the 2026-04-23 incident
+    # pattern — worker pool saturated, requests queuing past timeout), the
+    # autoheal sidecar restarts this container automatically. /wp-login.php
+    # is a lightweight, always-available endpoint; the previous /wp-cron.php
+    # could itself be slow under load.
+    #
+    # Tuning is deliberately conservative: OnionPress runs on laptops that
+    # sleep/wake, so short-lived unreachability after resume is normal.
+    # 60s interval × 15 retries ≈ 15 min of sustained failure before restart.
+    # The 2026-04-23 outage was 3h45m; 15-min self-heal is a huge improvement
+    # without misfiring on wake transients.
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost/wp-cron.php"]
-      interval: 5m
-      timeout: 30s
-      start_period: 60s
+      test: ["CMD", "curl", "-sf", "--max-time", "10", "http://localhost/wp-login.php"]
+      interval: 60s
+      timeout: 15s
+      retries: 15
+      start_period: 300s
+    labels:
+      - autoheal=true
     volumes:
       - wordpress-data:/var/www/html
       - onionpress-data:/var/lib/onionpress
@@ -90,6 +104,29 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
+
+  # Auto-restart any container labeled autoheal=true when its HEALTHCHECK
+  # reports unhealthy. Prevents wedge-until-manual-reboot scenarios like
+  # the 2026-04-23 incident. Polling interval is 60s so autoheal itself
+  # doesn't thrash; the actual decision to restart is governed by the
+  # target container's healthcheck retries (conservative — see wordpress
+  # service above for the ~15-minute sustained-failure threshold).
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: onionpress-autoheal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - TZ=${TZ:-UTC}
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=60
+      - AUTOHEAL_START_PERIOD=0
+    volumes:
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+    restart: unless-stopped
 
   onionheaven:
     image: ${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}
