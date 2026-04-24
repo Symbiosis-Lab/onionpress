@@ -901,6 +901,125 @@ configure_ia_plugin() {
     return 0
 }
 
+# Install and activate Cache Enabler page-caching plugin.
+# Same shape as install_ia_plugin — download from wordpress.org, verify,
+# docker cp into the container, activate via wp-cli.
+install_cache_enabler() {
+    local install_plugin="yes"
+    if [ -f "$DATA_DIR/config" ]; then
+        local config_value=$(grep "^INSTALL_CACHE_ENABLER=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ ! -z "$config_value" ]; then
+            install_plugin="$config_value"
+        fi
+    fi
+
+    if [ "$install_plugin" != "yes" ]; then
+        log "Cache Enabler plugin installation disabled in config"
+        return 0
+    fi
+
+    if [ ! -d "$SCRIPTS_DIR" ] || [ ! -f "$SCRIPTS_DIR/install_plugin.sh" ]; then
+        log "Plugin installation scripts not available, skipping Cache Enabler"
+        return 0
+    fi
+
+    log "Checking Cache Enabler plugin..."
+
+    cd "$DOCKER_DIR"
+
+    if docker compose exec -T wordpress test -f /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php 2>/dev/null; then
+        log "Cache Enabler already installed, checking activation..."
+        if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
+            "cache-enabler/cache-enabler.php" >>"$LOG_FILE" 2>&1; then
+            log "✓ Cache Enabler plugin is active"
+        else
+            log "Cache Enabler will auto-activate after WordPress setup"
+        fi
+        return 0
+    fi
+
+    log "Installing Cache Enabler plugin..."
+    local temp_dir=$(mktemp -d)
+
+    if "$SCRIPTS_DIR/install_plugin.sh" "cache-enabler" "$temp_dir" >>"$LOG_FILE" 2>&1; then
+        if docker cp "$temp_dir/cache-enabler" onionpress-wordpress:/var/www/html/wp-content/plugins/ 2>>"$LOG_FILE" && \
+            cd "$DOCKER_DIR" && \
+            docker compose exec -T wordpress chown -R www-data:www-data /var/www/html/wp-content/plugins/cache-enabler 2>>"$LOG_FILE"; then
+            log "✓ Cache Enabler plugin installed"
+
+            if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
+                "cache-enabler/cache-enabler.php" >>"$LOG_FILE" 2>&1; then
+                log "✓ Cache Enabler automatically activated"
+            else
+                log "Cache Enabler will auto-activate after WordPress setup"
+            fi
+        else
+            log "Failed to copy Cache Enabler plugin to container"
+        fi
+    else
+        log "Failed to download and verify Cache Enabler plugin"
+    fi
+
+    rm -rf "$temp_dir"
+    return 0
+}
+
+# Configure Cache Enabler: 1-hour TTL, auto-purge on publish/comment/term changes.
+# Idempotent — skips if onionpress_cache_enabler_configured=1.
+# Keeping defaults for query-string/cookie exclusions (they're sensible: bypass
+# cache for any non-tracking query string and for wp-postpass/wordpress_logged_in
+# cookies). See cache_enabler_engine.class.php::is_excluded() for the regexes.
+configure_cache_enabler() {
+    local install_plugin="yes"
+    if [ -f "$DATA_DIR/config" ]; then
+        local config_value=$(grep "^INSTALL_CACHE_ENABLER=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ ! -z "$config_value" ]; then
+            install_plugin="$config_value"
+        fi
+    fi
+
+    if [ "$install_plugin" != "yes" ]; then
+        return 0
+    fi
+
+    if ! wp_is_installed; then
+        return 0
+    fi
+
+    if ! docker exec onionpress-wordpress test -f /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php 2>/dev/null; then
+        return 0
+    fi
+
+    local configured
+    configured=$(docker exec onionpress-wordpress wp option get onionpress_cache_enabler_configured --allow-root 2>/dev/null || echo "")
+    if [ "$configured" = "1" ]; then
+        return 0
+    fi
+
+    log "Configuring Cache Enabler: 1h TTL, auto-purge on content changes..."
+
+    # Ensure FS_METHOD=direct before the settings update triggers Cache
+    # Enabler's on_update_option hook, which calls WP_Filesystem to write
+    # its per-hostname settings file. Without this, WP_Filesystem falls
+    # back to FTP mode when wp-cli runs as root (ownership mismatch vs.
+    # www-data) and throws "FTP hostname is required". Idempotent.
+    docker exec onionpress-wordpress wp config set FS_METHOD direct --type=constant --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to set FS_METHOD=direct"
+
+    # Pass the full settings array as JSON — wp-cli converts to a PHP array
+    # for storage. on_update_option() hooks this and syncs to disk.
+    local settings_json='{"cache_expires":1,"cache_expiry_time":1,"clear_site_cache_on_saved_post":1,"clear_site_cache_on_saved_comment":1,"clear_site_cache_on_saved_term":1,"clear_site_cache_on_saved_user":0,"clear_site_cache_on_changed_plugin":1,"convert_image_urls_to_webp":0,"mobile_cache":0,"compress_cache":0,"minify_html":0,"minify_inline_css_js":0,"excluded_post_ids":"","excluded_page_paths":"","excluded_query_strings":"","excluded_cookies":""}'
+
+    docker exec onionpress-wordpress wp option update cache_enabler "$settings_json" --format=json --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to set cache_enabler option"
+
+    docker exec onionpress-wordpress wp option update onionpress_cache_enabler_configured 1 --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to mark Cache Enabler as configured"
+
+    log "✓ Cache Enabler configured (1h TTL, auto-purge enabled)"
+    return 0
+}
+
 # Ensure archive.org S3 keys are set for Wayback Machine archiving.
 # Runs on every startup — fetches keys only when the WP options are empty.
 ensure_archive_s3_keys() {
@@ -1875,6 +1994,10 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 
     # Configure IA plugin options (link fixer, wizard completion)
     configure_ia_plugin
+
+    # Install and configure Cache Enabler page-caching plugin
+    install_cache_enabler
+    configure_cache_enabler
 
     # Ensure archive.org S3 keys are set for Wayback Machine archiving
     # Run in background — network call to archive.org via Tor can be slow
