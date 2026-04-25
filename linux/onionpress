@@ -1116,16 +1116,22 @@ start_containers() {
 
     # Handle pending key import
     if [ -f "$DATA_DIR/.import-key-pending" ]; then
-        log "Pending key import detected -- removing old arti-state volume..."
-        docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
-        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
-            log "Volume still in use -- force-removing containers using it..."
-            docker rm -f $(docker ps -aq --filter volume=onionpress-arti-state) >> "$LOG_FILE" 2>&1 || true
-            docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
-            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
-                log "ERROR: Could not remove old arti-state volume"
+        log "Pending key import detected -- removing old arti-state and tor-state volumes..."
+        # Both keystores must be wiped: arti-state holds the Arti key, tor-state
+        # holds C Tor's /var/lib/tor/hidden_service/<name>/ pair. The entrypoint
+        # only converts Arti->C Tor when CTOR_SECRET is missing, so a stale
+        # tor-state would silently override the imported identity.
+        for vol in onionpress-arti-state onionpress-tor-state; do
+            docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
+            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
+                log "Volume $vol still in use -- force-removing containers using it..."
+                docker rm -f $(docker ps -aq --filter "volume=$vol") >> "$LOG_FILE" 2>&1 || true
+                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
+                if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
+                    log "ERROR: Could not remove old $vol volume"
+                fi
             fi
-        fi
+        done
         docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
         rm -f "$DATA_DIR/.import-key-pending"
     fi
