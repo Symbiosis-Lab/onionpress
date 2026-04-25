@@ -10,7 +10,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from onionpress import key_manager
@@ -24,6 +26,123 @@ def _default_data_dir() -> str:
     imports and the first use of backup functions.
     """
     return os.path.expanduser("~/.onionpress")
+
+
+# ─── Instrumentation helpers (issue #214) ───────────────────────────────
+# Phase 1: log workload inputs and per-phase wall times so we can later
+# fit an ETA formula and surface estimates in the dialogs. Lines use a
+# stable grep prefix and key=value format:
+#   BACKUP_STATS: db_bytes=… wp_posts_rows=… …
+#   BACKUP_PHASE: name=db_dump elapsed_s=12.3
+# Same shape for RESTORE_STATS / RESTORE_PHASE / RESTORE_STATS_POST.
+
+
+@contextmanager
+def _phase_timer(log_func, prefix, name):
+    """Wall-time the enclosed block and log one PHASE line on exit.
+
+    Re-raises any exception so existing error handling still runs;
+    the elapsed line is logged either way.
+    """
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - start
+        log_func(f"{prefix}_PHASE: name={name} elapsed_s={elapsed:.2f}")
+
+
+def _query_workload_stats(db_creds):
+    """Return DB stats dict (bytes + per-table approximate row counts).
+
+    Uses INFORMATION_SCHEMA.TABLE_ROWS — approximate for InnoDB but
+    cheap and good enough for ETA fitting. Multisite has per-blog
+    tables (wp_<n>_posts etc.); we sum across them so the figure
+    reflects total content volume.
+    """
+    sql = (
+        "SELECT "
+        "COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0), "
+        "COALESCE(SUM(IF(TABLE_NAME LIKE 'wp%posts' AND TABLE_NAME NOT LIKE '%postmeta', TABLE_ROWS, 0)), 0), "
+        "COALESCE(SUM(IF(TABLE_NAME LIKE 'wp%postmeta', TABLE_ROWS, 0)), 0), "
+        "COALESCE(SUM(IF(TABLE_NAME LIKE 'wp%options', TABLE_ROWS, 0)), 0), "
+        "COALESCE(SUM(IF(TABLE_NAME='wp_users', TABLE_ROWS, 0)), 0), "
+        "COALESCE(SUM(IF(TABLE_NAME='wp_blogs', TABLE_ROWS, 0)), 0) "
+        "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE();"
+    )
+    result = subprocess.run(
+        ['docker', 'exec', 'onionpress-db',
+         'mariadb', '-B', '-N',
+         '-u', db_creds['user'],
+         '-p' + db_creds['password'],
+         '-D', db_creds['name'],
+         '-e', sql],
+        capture_output=True, text=True, encoding='utf-8',
+        errors='replace', timeout=10,
+    )
+    if result.returncode != 0:
+        raise Exception(result.stderr.strip() or 'mariadb query failed')
+    parts = result.stdout.strip().split('\t')
+    if len(parts) != 6:
+        raise Exception(f'expected 6 columns, got {len(parts)}')
+    keys = ('db_bytes', 'wp_posts_rows', 'wp_postmeta_rows',
+            'wp_options_rows', 'wp_users_rows', 'wp_blogs_rows')
+    return {k: int(v) for k, v in zip(keys, parts)}
+
+
+def _du_bytes(container, path, excludes=()):
+    """`du -sb` inside a container; return int bytes, 0 on any failure."""
+    excl = ' '.join(f'--exclude={e}' for e in excludes)
+    cmd = f"du -sb {excl} {path} 2>/dev/null | cut -f1"
+    try:
+        result = subprocess.run(
+            ['docker', 'exec', container, 'sh', '-c', cmd],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=30,
+        )
+        out = result.stdout.strip()
+        return int(out) if out.isdigit() else 0
+    except Exception:
+        return 0
+
+
+def _dir_size_bytes(path):
+    """Recursive sum of file sizes under path; tolerant of read errors."""
+    total = 0
+    for dirpath, _, filenames in os.walk(path):
+        for f in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                pass
+    return total
+
+
+def _log_workload_stats(log_func, label, db_creds):
+    """Emit a single STATS line. Never raises — instrumentation must
+    not break the operation it's measuring."""
+    try:
+        stats = _query_workload_stats(db_creds)
+        wpcontent_bytes = _du_bytes(
+            'onionpress-wordpress', '/var/www/html/wp-content',
+            excludes=('creations', '.thumbs', '.DS_Store'),
+        )
+        onionheaven_bytes = _du_bytes(
+            'onionpress-wordpress', '/var/lib/onionpress/onionheaven',
+        )
+        kvs = [
+            f"db_bytes={stats['db_bytes']}",
+            f"wp_posts_rows={stats['wp_posts_rows']}",
+            f"wp_postmeta_rows={stats['wp_postmeta_rows']}",
+            f"wp_options_rows={stats['wp_options_rows']}",
+            f"wp_users_rows={stats['wp_users_rows']}",
+            f"wp_blogs_rows={stats['wp_blogs_rows']}",
+            f"wpcontent_bytes={wpcontent_bytes}",
+            f"onionheaven_bytes={onionheaven_bytes}",
+        ]
+        log_func(f"{label}: " + ' '.join(kvs))
+    except Exception as e:
+        log_func(f"{label}: error={e}")
 
 
 # Multisite constants that WordPress needs in wp-config.php for a network install.
@@ -137,38 +256,46 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         version: OnionPress version string
         log_func: Callable for progress logging
     """
+    backup_start = time.monotonic()
     staging = tempfile.mkdtemp(prefix='onionpress-backup-')
     try:
-        # 1. Extract Tor keys (Arti OpenSSH keystore format)
-        log_func("Backup: extracting Tor keys...")
-        tor_dir = os.path.join(staging, 'tor-keys')
-        os.makedirs(tor_dir)
+        # 0. Workload stats — log once up front (issue #214). Read DB
+        #    creds here so we can reuse them for the dump phase below
+        #    without paying for two round trips through wp-cli.
+        db_creds = _get_db_credentials()
+        _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
 
-        priv = key_manager.extract_private_key()
-        pub = key_manager.extract_public_key()
-        pem_data = key_manager.build_openssh_key(priv, pub)
-        with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
-            f.write(pem_data)
+        # 1. Extract Tor keys (Arti OpenSSH keystore format)
+        with _phase_timer(log_func, 'BACKUP', 'tor_keys'):
+            log_func("Backup: extracting Tor keys...")
+            tor_dir = os.path.join(staging, 'tor-keys')
+            os.makedirs(tor_dir)
+
+            priv = key_manager.extract_private_key()
+            pub = key_manager.extract_public_key()
+            pem_data = key_manager.build_openssh_key(priv, pub)
+            with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
+                f.write(pem_data)
 
         # 2. Dump WordPress database via mariadb-dump in the db container
         # (wp db export uses mysqldump which isn't in the WordPress container)
-        log_func("Backup: exporting database...")
-        db_dir = os.path.join(staging, 'database')
-        os.makedirs(db_dir)
+        with _phase_timer(log_func, 'BACKUP', 'db_dump'):
+            log_func("Backup: exporting database...")
+            db_dir = os.path.join(staging, 'database')
+            os.makedirs(db_dir)
 
-        db_creds = _get_db_credentials()
-        result = subprocess.run(
-            ['docker', 'exec', 'onionpress-db',
-             'mariadb-dump',
-             '-u', db_creds['user'],
-             '-p' + db_creds['password'],
-             db_creds['name']],
-            capture_output=True, timeout=120
-        )
-        if result.returncode != 0:
-            raise Exception(f"Database export failed: {result.stderr.decode(errors='replace')}")
-        with open(os.path.join(db_dir, 'wordpress.sql'), 'wb') as f:
-            f.write(result.stdout)
+            result = subprocess.run(
+                ['docker', 'exec', 'onionpress-db',
+                 'mariadb-dump',
+                 '-u', db_creds['user'],
+                 '-p' + db_creds['password'],
+                 db_creds['name']],
+                capture_output=True, timeout=120
+            )
+            if result.returncode != 0:
+                raise Exception(f"Database export failed: {result.stderr.decode(errors='replace')}")
+            with open(os.path.join(db_dir, 'wordpress.sql'), 'wb') as f:
+                f.write(result.stdout)
 
         # 3. Copy wp-content from container, excluding:
         #    - creations/: bind-mounted from ~/Documents/OnionPress/Creations,
@@ -182,26 +309,27 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    Stream via `docker exec tar -cf - | tar -xf -` instead of
         #    docker cp so the excludes apply at read time (no wasted IO
         #    pulling Creations across the VM boundary).
-        log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
-        wpcontent_dir = os.path.join(staging, 'wp-content')
-        os.makedirs(wpcontent_dir, exist_ok=True)
-        docker_tar = subprocess.Popen(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'tar', '-cf', '-',
-             '--exclude=./creations',
-             '--exclude=.thumbs',
-             '--exclude=.DS_Store',
-             '-C', '/var/www/html/wp-content', '.'],
-            stdout=subprocess.PIPE
-        )
-        host_tar = subprocess.run(
-            ['tar', '-xf', '-', '-C', wpcontent_dir],
-            stdin=docker_tar.stdout, timeout=300
-        )
-        docker_tar.stdout.close()
-        docker_rc = docker_tar.wait(timeout=10)
-        if docker_rc != 0 or host_tar.returncode != 0:
-            raise Exception(f"wp-content tar failed: docker={docker_rc} host={host_tar.returncode}")
+        with _phase_timer(log_func, 'BACKUP', 'wpcontent_tar'):
+            log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
+            wpcontent_dir = os.path.join(staging, 'wp-content')
+            os.makedirs(wpcontent_dir, exist_ok=True)
+            docker_tar = subprocess.Popen(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'tar', '-cf', '-',
+                 '--exclude=./creations',
+                 '--exclude=.thumbs',
+                 '--exclude=.DS_Store',
+                 '-C', '/var/www/html/wp-content', '.'],
+                stdout=subprocess.PIPE
+            )
+            host_tar = subprocess.run(
+                ['tar', '-xf', '-', '-C', wpcontent_dir],
+                stdin=docker_tar.stdout, timeout=300
+            )
+            docker_tar.stdout.close()
+            docker_rc = docker_tar.wait(timeout=10)
+            if docker_rc != 0 or host_tar.returncode != 0:
+                raise Exception(f"wp-content tar failed: docker={docker_rc} host={host_tar.returncode}")
 
         # 4. Backup OnionHeaven data if this is OnionHeaven instance
         #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
@@ -212,19 +340,20 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             capture_output=True, timeout=10
         )
         if onionheaven_check.returncode == 0:
-            log_func("Backup: copying OnionHeaven data (encrypted keys, registry)...")
-            is_onionheaven = True
-            onionheaven_dir = os.path.join(staging, 'onionheaven')
-            subprocess.run(
-                ['docker', 'cp',
-                 'onionpress-wordpress:/var/lib/onionpress/onionheaven/.',
-                 onionheaven_dir],
-                capture_output=True, timeout=60, check=True
-            )
-            # Remove the ephemeral unlock file if it was copied
-            unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
-            if os.path.exists(unlocked_file):
-                os.unlink(unlocked_file)
+            with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
+                log_func("Backup: copying OnionHeaven data (encrypted keys, registry)...")
+                is_onionheaven = True
+                onionheaven_dir = os.path.join(staging, 'onionheaven')
+                subprocess.run(
+                    ['docker', 'cp',
+                     'onionpress-wordpress:/var/lib/onionpress/onionheaven/.',
+                     onionheaven_dir],
+                    capture_output=True, timeout=60, check=True
+                )
+                # Remove the ephemeral unlock file if it was copied
+                unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
+                if os.path.exists(unlocked_file):
+                    os.unlink(unlocked_file)
 
         # 4b. Backup OnionHome name registry if this is an OnionHome instance.
         #     The DB is tiny (KB) but losing it strands every inbound
@@ -237,15 +366,16 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             capture_output=True, timeout=10
         )
         if onionhome_check.returncode == 0:
-            log_func("Backup: copying OnionHome name registry...")
-            is_onionhome = True
-            onionhome_dir = os.path.join(staging, 'onionhome')
-            subprocess.run(
-                ['docker', 'cp',
-                 'onionpress-wordpress:/var/lib/onionpress/onionhome/.',
-                 onionhome_dir],
-                capture_output=True, timeout=60, check=True
-            )
+            with _phase_timer(log_func, 'BACKUP', 'onionhome_copy'):
+                log_func("Backup: copying OnionHome name registry...")
+                is_onionhome = True
+                onionhome_dir = os.path.join(staging, 'onionhome')
+                subprocess.run(
+                    ['docker', 'cp',
+                     'onionpress-wordpress:/var/lib/onionpress/onionhome/.',
+                     onionhome_dir],
+                    capture_output=True, timeout=60, check=True
+                )
 
         # 5. Save non-default config values
         _data_dir = data_dir if data_dir is not None else _default_data_dir()
@@ -277,25 +407,27 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             json.dump(metadata, f, indent=2)
 
         # 8. Create password-protected zip using macOS system zip
-        log_func("Backup: creating encrypted zip archive...")
-        # Remove target if it already exists (zip would append otherwise)
-        if os.path.exists(output_path):
-            os.unlink(output_path)
+        with _phase_timer(log_func, 'BACKUP', 'zip_encrypt'):
+            log_func("Backup: creating encrypted zip archive...")
+            # Remove target if it already exists (zip would append otherwise)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
 
-        # -n skips deflate for already-compressed formats (images, video,
-        # audio, PDFs, archives). Encryption + CRC still run, but we don't
-        # waste CPU running deflate on bytes that won't shrink.
-        result = subprocess.run(
-            ['zip', '-r', '-P', password,
-             '-n', '.mov:.mp4:.m4v:.webm:.jpg:.jpeg:.png:.gif:.heic:.heif'
-                   ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz',
-             output_path, '.'],
-            cwd=staging,
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600
-        )
-        if result.returncode != 0:
-            raise Exception(f"zip failed: {result.stderr}")
+            # -n skips deflate for already-compressed formats (images, video,
+            # audio, PDFs, archives). Encryption + CRC still run, but we don't
+            # waste CPU running deflate on bytes that won't shrink.
+            result = subprocess.run(
+                ['zip', '-r', '-P', password,
+                 '-n', '.mov:.mp4:.m4v:.webm:.jpg:.jpeg:.png:.gif:.heic:.heif'
+                       ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz',
+                 output_path, '.'],
+                cwd=staging,
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600
+            )
+            if result.returncode != 0:
+                raise Exception(f"zip failed: {result.stderr}")
 
+        log_func(f"BACKUP_PHASE: name=total elapsed_s={time.monotonic() - backup_start:.2f}")
         log_func("Backup: complete")
 
     finally:
@@ -341,12 +473,14 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
     Returns:
         metadata dict from the backup
     """
+    restore_start = time.monotonic()
     staging = tempfile.mkdtemp(prefix='onionpress-restore-')
     try:
         # Extract zip
-        log_func("Restore: extracting backup archive...")
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(staging, pwd=password.encode())
+        with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
+            log_func("Restore: extracting backup archive...")
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(staging, pwd=password.encode())
 
         # Normalize paths -- zip may have ./ prefix
         metadata_path = os.path.join(staging, 'metadata.json')
@@ -360,112 +494,134 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         db_dir = _find_dir(staging, 'database')
         wpcontent_dir = _find_dir(staging, 'wp-content')
 
+        # Workload stats — what we know up front (issue #214). The
+        # post-import stats line below records DB row counts after the
+        # SQL has been ingested.
+        try:
+            zip_bytes = os.path.getsize(zip_path)
+        except OSError:
+            zip_bytes = 0
+        extracted_bytes = _dir_size_bytes(staging)
+        sql_path_for_size = os.path.join(db_dir, 'wordpress.sql') if db_dir else ''
+        sql_bytes = (os.path.getsize(sql_path_for_size)
+                     if sql_path_for_size and os.path.exists(sql_path_for_size) else 0)
+        log_func(f"RESTORE_STATS: zip_bytes={zip_bytes} "
+                 f"extracted_bytes={extracted_bytes} sql_bytes={sql_bytes}")
+
         # 1. Restore Tor keys (Arti OpenSSH keystore format)
-        log_func("Restore: writing Tor keys...")
-        key_path = os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private')
-        if not os.path.exists(key_path):
-            raise Exception("Backup is missing ks_hs_id.ed25519_expanded_private")
+        with _phase_timer(log_func, 'RESTORE', 'tor_keys'):
+            log_func("Restore: writing Tor keys...")
+            key_path = os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private')
+            if not os.path.exists(key_path):
+                raise Exception("Backup is missing ks_hs_id.ed25519_expanded_private")
 
-        with open(key_path, 'rb') as f:
-            pem_data = f.read()
-        priv, pub = key_manager.parse_openssh_key(pem_data)
-        key_manager.write_private_key(priv, pub)
+            with open(key_path, 'rb') as f:
+                pem_data = f.read()
+            priv, pub = key_manager.parse_openssh_key(pem_data)
+            key_manager.write_private_key(priv, pub)
 
-        # Remove arti-state volume so it gets recreated from vanity-keys
-        # on next launch. This avoids stale key mismatches.
-        log_func("Restore: removing arti-state volume for clean restart...")
-        subprocess.run(
-            ['docker', 'volume', 'rm', 'onionpress-arti-state'],
-            capture_output=True, timeout=15
-        )
+            # Remove arti-state volume so it gets recreated from vanity-keys
+            # on next launch. This avoids stale key mismatches.
+            log_func("Restore: removing arti-state volume for clean restart...")
+            subprocess.run(
+                ['docker', 'volume', 'rm', 'onionpress-arti-state'],
+                capture_output=True, timeout=15
+            )
 
         # Sync vanity-keys directory on host so OnionHeaven detection and
         # prefix mismatch logic can see the restored onion address.
         onion_address = metadata.get('onion_address', '')
         _data_dir = data_dir if data_dir is not None else _default_data_dir()
         if onion_address:
-            vanity_dir = os.path.join(_data_dir, 'shared', 'vanity-keys')
-            addr_dir = os.path.join(vanity_dir, onion_address)
-            # Clear only this address's cache — sibling address dirs (e.g.
-            # other vanity prefixes the user has generated) are preserved.
-            if os.path.isdir(addr_dir):
-                shutil.rmtree(addr_dir)
-            os.makedirs(addr_dir, exist_ok=True)
-            # Copy the key file so generate_vanity_address isn't needed
-            shutil.copy2(key_path, os.path.join(addr_dir, 'ks_hs_id.ed25519_expanded_private'))
-            # Write hostname file
-            with open(os.path.join(addr_dir, 'hostname'), 'w') as hf:
-                hf.write(onion_address + '\n')
-            log_func(f"Restore: synced vanity-keys for {onion_address}")
+            with _phase_timer(log_func, 'RESTORE', 'vanity_sync'):
+                vanity_dir = os.path.join(_data_dir, 'shared', 'vanity-keys')
+                addr_dir = os.path.join(vanity_dir, onion_address)
+                # Clear only this address's cache — sibling address dirs (e.g.
+                # other vanity prefixes the user has generated) are preserved.
+                if os.path.isdir(addr_dir):
+                    shutil.rmtree(addr_dir)
+                os.makedirs(addr_dir, exist_ok=True)
+                # Copy the key file so generate_vanity_address isn't needed
+                shutil.copy2(key_path, os.path.join(addr_dir, 'ks_hs_id.ed25519_expanded_private'))
+                # Write hostname file
+                with open(os.path.join(addr_dir, 'hostname'), 'w') as hf:
+                    hf.write(onion_address + '\n')
+                log_func(f"Restore: synced vanity-keys for {onion_address}")
 
-            # Update ADDRESS_PREFIX in config to match restored address
-            # so the prefix mismatch detector doesn't regenerate on next start
-            addr_base = onion_address.replace('.onion', '')
-            config_path = os.path.join(_data_dir, 'config')
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as cf:
-                    lines = cf.readlines()
-                found = False
-                for i, line in enumerate(lines):
-                    if line.strip().startswith('ADDRESS_PREFIX='):
-                        old_prefix = line.strip().split('=', 1)[1]
-                        if not addr_base.startswith(old_prefix):
-                            plen = min(max(len(old_prefix), 3), 6)
-                            new_prefix = addr_base[:plen]
-                            lines[i] = f'ADDRESS_PREFIX={new_prefix}\n'
-                            log_func(f"Restore: updated ADDRESS_PREFIX to {new_prefix}")
-                        found = True
-                        break
-                if not found:
-                    lines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
-                with open(config_path, 'w', encoding='utf-8') as cf:
-                    cf.writelines(lines)
+                # Update ADDRESS_PREFIX in config to match restored address
+                # so the prefix mismatch detector doesn't regenerate on next start
+                addr_base = onion_address.replace('.onion', '')
+                config_path = os.path.join(_data_dir, 'config')
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as cf:
+                        lines = cf.readlines()
+                    found = False
+                    for i, line in enumerate(lines):
+                        if line.strip().startswith('ADDRESS_PREFIX='):
+                            old_prefix = line.strip().split('=', 1)[1]
+                            if not addr_base.startswith(old_prefix):
+                                plen = min(max(len(old_prefix), 3), 6)
+                                new_prefix = addr_base[:plen]
+                                lines[i] = f'ADDRESS_PREFIX={new_prefix}\n'
+                                log_func(f"Restore: updated ADDRESS_PREFIX to {new_prefix}")
+                            found = True
+                            break
+                    if not found:
+                        lines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
+                    with open(config_path, 'w', encoding='utf-8') as cf:
+                        cf.writelines(lines)
 
         # 2. Restore database via mariadb CLI in the db container
-        log_func("Restore: importing database...")
-        sql_path = os.path.join(db_dir, 'wordpress.sql')
-        if not os.path.exists(sql_path):
-            raise Exception("Backup is missing wordpress.sql")
+        with _phase_timer(log_func, 'RESTORE', 'db_import'):
+            log_func("Restore: importing database...")
+            sql_path = os.path.join(db_dir, 'wordpress.sql')
+            if not os.path.exists(sql_path):
+                raise Exception("Backup is missing wordpress.sql")
 
-        db_creds = _get_db_credentials()
+            db_creds = _get_db_credentials()
 
-        # Copy SQL into db container then import
-        subprocess.run(
-            ['docker', 'cp', sql_path, 'onionpress-db:/tmp/wordpress.sql'],
-            capture_output=True, timeout=30, check=True
-        )
-        result = subprocess.run(
-            ['docker', 'exec', 'onionpress-db',
-             'mariadb',
-             '-u', db_creds['user'],
-             '-p' + db_creds['password'],
-             db_creds['name'],
-             '-e', 'source /tmp/wordpress.sql'],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
-        )
-        if result.returncode != 0:
-            raise Exception(f"Database import failed: {result.stderr}")
+            # Copy SQL into db container then import
+            subprocess.run(
+                ['docker', 'cp', sql_path, 'onionpress-db:/tmp/wordpress.sql'],
+                capture_output=True, timeout=30, check=True
+            )
+            result = subprocess.run(
+                ['docker', 'exec', 'onionpress-db',
+                 'mariadb',
+                 '-u', db_creds['user'],
+                 '-p' + db_creds['password'],
+                 db_creds['name'],
+                 '-e', 'source /tmp/wordpress.sql'],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
+            )
+            if result.returncode != 0:
+                raise Exception(f"Database import failed: {result.stderr}")
 
-        # Clean up SQL file in container
-        subprocess.run(
-            ['docker', 'exec', 'onionpress-db', 'rm', '-f', '/tmp/wordpress.sql'],
-            capture_output=True, timeout=10
-        )
+            # Clean up SQL file in container
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-db', 'rm', '-f', '/tmp/wordpress.sql'],
+                capture_output=True, timeout=10
+            )
+
+        # Post-import workload snapshot — row counts now reflect the
+        # restored DB, so we can correlate ingest time with content size.
+        _log_workload_stats(log_func, 'RESTORE_STATS_POST', db_creds)
 
         # 3. Restore wp-content
         if wpcontent_dir and os.path.isdir(wpcontent_dir):
-            log_func("Restore: copying wp-content (themes, plugins, uploads)...")
-            subprocess.run(
-                ['docker', 'cp',
-                 wpcontent_dir + '/.',
-                 'onionpress-wordpress:/var/www/html/wp-content/'],
-                capture_output=True, timeout=300, check=True
-            )
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'chown', '-R', 'www-data:www-data', '/var/www/html/wp-content/'],
-                capture_output=True, timeout=60
-            )
+            with _phase_timer(log_func, 'RESTORE', 'wpcontent_extract'):
+                log_func("Restore: copying wp-content (themes, plugins, uploads)...")
+                subprocess.run(
+                    ['docker', 'cp',
+                     wpcontent_dir + '/.',
+                     'onionpress-wordpress:/var/www/html/wp-content/'],
+                    capture_output=True, timeout=300, check=True
+                )
+                subprocess.run(
+                    ['docker', 'exec', 'onionpress-wordpress',
+                     'chown', '-R', 'www-data:www-data', '/var/www/html/wp-content/'],
+                    capture_output=True, timeout=60
+                )
 
         # Surface Creations-exclusion reminder. The backup intentionally
         # skips wp-content/creations (it's the host-side bind mount of
@@ -481,29 +637,30 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         # 4. Restore OnionHeaven data if present in backup
         onionheaven_dir = _find_dir(staging, 'onionheaven')
         if os.path.isdir(onionheaven_dir) and os.path.exists(os.path.join(onionheaven_dir, 'master-key.json')):
-            log_func("Restore: restoring OnionHeaven data (encrypted keys, registry)...")
-            # Remove ephemeral unlock file if it somehow exists in the backup
-            unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
-            if os.path.exists(unlocked_file):
-                os.unlink(unlocked_file)
-            # Ensure OnionHeaven directory exists in container
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'mkdir', '-p', '/var/lib/onionpress/onionheaven'],
-                capture_output=True, timeout=10
-            )
-            subprocess.run(
-                ['docker', 'cp',
-                 onionheaven_dir + '/.',
-                 'onionpress-wordpress:/var/lib/onionpress/onionheaven/'],
-                capture_output=True, timeout=60, check=True
-            )
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/onionheaven/'],
-                capture_output=True, timeout=30
-            )
-            log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
+            with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
+                log_func("Restore: restoring OnionHeaven data (encrypted keys, registry)...")
+                # Remove ephemeral unlock file if it somehow exists in the backup
+                unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
+                if os.path.exists(unlocked_file):
+                    os.unlink(unlocked_file)
+                # Ensure OnionHeaven directory exists in container
+                subprocess.run(
+                    ['docker', 'exec', 'onionpress-wordpress',
+                     'mkdir', '-p', '/var/lib/onionpress/onionheaven'],
+                    capture_output=True, timeout=10
+                )
+                subprocess.run(
+                    ['docker', 'cp',
+                     onionheaven_dir + '/.',
+                     'onionpress-wordpress:/var/lib/onionpress/onionheaven/'],
+                    capture_output=True, timeout=60, check=True
+                )
+                subprocess.run(
+                    ['docker', 'exec', 'onionpress-wordpress',
+                     'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/onionheaven/'],
+                    capture_output=True, timeout=30
+                )
+                log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
 
         # 4b. Restore OnionHome name registry if present in backup.
         #     Kept root-owned — the tor container reads/writes these files
@@ -511,38 +668,42 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         #     alongside the www-data restore target above.
         onionhome_dir = _find_dir(staging, 'onionhome')
         if os.path.isdir(onionhome_dir) and os.path.exists(os.path.join(onionhome_dir, 'onionnames.db')):
-            log_func("Restore: restoring OnionHome name registry...")
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'mkdir', '-p', '/var/lib/onionpress/onionhome'],
-                capture_output=True, timeout=10
-            )
-            subprocess.run(
-                ['docker', 'cp',
-                 onionhome_dir + '/.',
-                 'onionpress-wordpress:/var/lib/onionpress/onionhome/'],
-                capture_output=True, timeout=60, check=True
-            )
-            log_func("Restore: OnionHome name registry restored")
+            with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):
+                log_func("Restore: restoring OnionHome name registry...")
+                subprocess.run(
+                    ['docker', 'exec', 'onionpress-wordpress',
+                     'mkdir', '-p', '/var/lib/onionpress/onionhome'],
+                    capture_output=True, timeout=10
+                )
+                subprocess.run(
+                    ['docker', 'cp',
+                     onionhome_dir + '/.',
+                     'onionpress-wordpress:/var/lib/onionpress/onionhome/'],
+                    capture_output=True, timeout=60, check=True
+                )
+                log_func("Restore: OnionHome name registry restored")
 
         # 5. Re-add multisite constants to wp-config.php
         # WordPress Docker image generates a fresh wp-config.php without multisite
         # constants when the container is recreated. Without these, wp core
         # is-installed --network fails and ensure_multisite skips conversion.
-        _ensure_multisite_constants(log_func)
+        with _phase_timer(log_func, 'RESTORE', 'multisite_constants'):
+            _ensure_multisite_constants(log_func)
 
         # 6. Restore config overrides (non-default user preferences)
         overrides_path = os.path.join(staging, 'config-overrides.json')
         if not os.path.exists(overrides_path):
             overrides_path = os.path.join(staging, '.', 'config-overrides.json')
         if os.path.exists(overrides_path):
-            with open(overrides_path, 'r') as f:
-                overrides = json.load(f)
-            config_path = os.path.join(_data_dir, 'config')
-            for key, value in overrides.items():
-                write_value(config_path, key, value)
-            log_func(f"Restore: applied {len(overrides)} config override(s)")
+            with _phase_timer(log_func, 'RESTORE', 'config_overrides'):
+                with open(overrides_path, 'r') as f:
+                    overrides = json.load(f)
+                config_path = os.path.join(_data_dir, 'config')
+                for key, value in overrides.items():
+                    write_value(config_path, key, value)
+                log_func(f"Restore: applied {len(overrides)} config override(s)")
 
+        log_func(f"RESTORE_PHASE: name=total elapsed_s={time.monotonic() - restore_start:.2f}")
         log_func("Restore: files restored successfully")
         return metadata
 
