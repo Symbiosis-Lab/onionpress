@@ -1548,21 +1548,6 @@ class OnionPressApp(rumps.App):
                     pass
                 self.handle_reopen()
 
-            # Check for quit trigger (from `onionpress quit` CLI). We
-            # handle this *before* everything else in the poll loop so a
-            # requested quit takes effect even if later steps are slow.
-            # The trigger is removed before quit_app runs so a crash
-            # loop can't get pinned on a stale file.
-            quit_trigger = os.path.join(self.app_support, ".quit")
-            if os.path.exists(quit_trigger):
-                try:
-                    os.remove(quit_trigger)
-                except OSError:
-                    pass
-                self.log("Quit trigger detected (onionpress quit CLI)")
-                _main_thread(lambda: self.quit_app(None))
-                return
-
             # Check for upload-analytics trigger (host file from CLI,
             # or Docker volume file from WordPress "Share Now" button)
             upload_trigger = os.path.join(self.app_support, ".upload-analytics")
@@ -2266,6 +2251,52 @@ class OnionPressApp(rumps.App):
                     pass
             self.caffeine.stop()
 
+    def _perform_quit_cleanup(self):
+        """Stop services, Colima, and clean up. Shared by Quit button,
+        Apple Event quit, and SIGTERM paths so they all produce the
+        same end state. Order: notify hub → release proxy port →
+        let Mac sleep → stop containers → stop VM → remove PID file."""
+        # Notify OnionHeaven before stopping services (containers needed
+        # for curl). Skip if restarting for an update — we're coming
+        # right back, and skip if we're the hub itself.
+        if (self._onionheaven_registration_succeeded
+                and not self.is_onionheaven
+                and not getattr(self, '_updating', False)):
+            try:
+                onionheaven.notify_onionheaven_offline(self)
+            except Exception:
+                pass
+
+        self.stop_onion_proxy()
+        self.caffeine.stop()
+
+        try:
+            self.log("Stopping services...")
+            subprocess.run([self.launcher_script, "stop"],
+                           capture_output=True, timeout=90)
+            self.log("Services stopped")
+        except subprocess.TimeoutExpired:
+            self.log("Warning: Stop command timed out")
+        except Exception as e:
+            self.log(f"Warning: Stop failed: {e}")
+
+        try:
+            colima_bin = os.path.join(self.bin_dir, "colima")
+            self.log("Stopping Colima VM...")
+            env = os.environ.copy()
+            env["COLIMA_HOME"] = self.colima_home
+            env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
+            env["LIMA_INSTANCE"] = "onionpress"
+            subprocess.run([colima_bin, "stop"],
+                           capture_output=True, timeout=60, env=env)
+            self.log("Colima stopped")
+        except subprocess.TimeoutExpired:
+            self.log("Warning: Colima stop timed out")
+        except Exception as e:
+            self.log(f"Warning: Colima stop failed: {e}")
+
+        self._remove_pid_file()
+
     def _handle_terminate(self):
         """Handle app termination (osascript quit, Apple Event, etc.).
         Runs synchronously before the app exits to ensure proper cleanup."""
@@ -2275,38 +2306,7 @@ class OnionPressApp(rumps.App):
         self.log("="*60)
         self.log("APP TERMINATING (Apple Event / osascript quit)")
         self.log("="*60)
-
-        # Notify OnionHeaven before stopping services
-        if self._onionheaven_registration_succeeded and not self.is_onionheaven:
-            try:
-                onionheaven.notify_onionheaven_offline(self)
-            except Exception:
-                pass
-
-        # Stop services
-        try:
-            self.log("Stopping services...")
-            subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
-            self.log("Services stopped")
-        except Exception as e:
-            self.log(f"Warning: Stop failed: {e}")
-
-        self.caffeine.stop()
-        self.stop_onion_proxy()
-
-        try:
-            colima_bin = os.path.join(self.bin_dir, "colima")
-            self.log("Stopping Colima VM...")
-            env = os.environ.copy()
-            env["COLIMA_HOME"] = self.colima_home
-            env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
-            env["LIMA_INSTANCE"] = "onionpress"
-            subprocess.run([colima_bin, "stop"], capture_output=True, timeout=60, env=env)
-            self.log("Colima stopped")
-        except Exception as e:
-            self.log(f"Warning: Colima stop failed: {e}")
-
-        self._remove_pid_file()
+        self._perform_quit_cleanup()
         self.log("Cleanup complete")
 
     def handle_wake(self):
@@ -5299,50 +5299,8 @@ License: AGPL v3"""
         def cleanup_and_quit():
             # Small delay to ensure UI updates
             time.sleep(0.5)
-
-            # Stop onion proxy first (release port 9077 immediately)
-            self.stop_onion_proxy()
-
-            # Stop caffeinate to allow Mac to sleep
-            self.caffeine.stop()
-
-            # Notify OnionHeaven before stopping services (containers needed for curl)
-            # Skip if restarting for an update — we're coming right back
-            if self._onionheaven_registration_succeeded and not self.is_onionheaven and not getattr(self, '_updating', False):
-                try:
-                    onionheaven.notify_onionheaven_offline(self)
-                except Exception:
-                    pass
-
-            # Now run cleanup — 90s timeout for OnionHeaven farm containers
-            try:
-                self.log("Stopping services...")
-                subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=90)
-                self.log("Services stopped")
-            except subprocess.TimeoutExpired:
-                self.log("Warning: Stop command timed out")
-            except Exception as e:
-                self.log(f"Warning: Stop failed: {e}")
-
-            try:
-                colima_bin = os.path.join(self.bin_dir, "colima")
-                self.log("Stopping Colima VM...")
-                env = os.environ.copy()
-                env["COLIMA_HOME"] = self.colima_home
-                env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
-                env["LIMA_INSTANCE"] = "onionpress"
-                subprocess.run([colima_bin, "stop"], capture_output=True, timeout=60, env=env)
-                self.log("Colima stopped")
-            except subprocess.TimeoutExpired:
-                self.log("Warning: Colima stop timed out")
-            except Exception as e:
-                self.log(f"Warning: Colima stop failed: {e}")
-
-            # Remove PID file
-            self._remove_pid_file()
-
+            self._perform_quit_cleanup()
             self.log("Cleanup complete, exiting")
-
             # Now quit (must dispatch to main thread)
             _main_thread(rumps.quit_application)
 

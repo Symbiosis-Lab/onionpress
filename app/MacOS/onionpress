@@ -2622,19 +2622,17 @@ main() {
         quit)
             # CLI-equivalent of the menubar Quit button: take the app
             # fully off — MenubarApp, containers, Colima VM, PID lock.
-            # Hybrid strategy: if the MenubarApp is alive, ask it to
-            # quit itself via ~/.onionpress/.quit (reuses the in-process
-            # quit_app path for onion proxy + caffeinate + onionheaven
-            # offline signal). Fall back to doing the process-
-            # independent steps ourselves if the app is missing or
-            # unresponsive — so this command is always a reliable
-            # teardown for scripting / CI / pre-update / pre-scrub.
+            # If the MenubarApp is alive, SIGTERM it: that fires
+            # NSApplicationWillTerminateNotification → _handle_terminate
+            # which runs the full cleanup synchronously. Then we run
+            # the process-independent steps as belt-and-suspenders so
+            # this command is always a reliable teardown for scripting,
+            # CI, pre-update, and pre-scrub — even if the MenubarApp
+            # was already gone or got SIGKILLed.
 
             FAILED_STEPS=""
-            mkdir -p "$DATA_DIR"
 
-            # Capture MenubarApp PID (if any) *before* dropping the trigger
-            # so the removal check is race-safe. Prefer the PID file
+            # Capture MenubarApp PID. Prefer the PID file
             # (authoritative), but fall back to pgrep — the PID file
             # can be missing after a prior unclean shutdown, manual rm,
             # or a MenubarApp code path that never wrote it, and we
@@ -2653,44 +2651,25 @@ main() {
             fi
 
             if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
-                log "quit: asking MenubarApp (pid $MENUBAR_PID) to quit via trigger file"
-                : > "$DATA_DIR/.quit"
-                # Short window for the MenubarApp's check_status poller
-                # to pick up the trigger (interval is 30s max, but we
-                # don't want to burn 30s waiting when SIGTERM works just
-                # as well). If it doesn't react in 5s, escalate.
+                log "quit: SIGTERM to MenubarApp (pid $MENUBAR_PID)"
+                kill -TERM "$MENUBAR_PID" 2>/dev/null || true
+                # Wait up to 60s for graceful exit. _handle_terminate
+                # runs ~90s in the worst case (30s launcher stop + 60s
+                # colima stop) but in practice exits well before that.
+                # We need to stay under ~90s total or we SIGKILL mid-
+                # cleanup and leave things wedged.
                 WAITED=0
-                while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 10 ]; do
+                while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 120 ]; do
                     sleep 0.5
                     WAITED=$((WAITED + 1))
                 done
                 if kill -0 "$MENUBAR_PID" 2>/dev/null; then
-                    log "quit: trigger not picked up in 5s, sending SIGTERM"
-                    kill -TERM "$MENUBAR_PID" 2>/dev/null || true
-                    # SIGTERM fires NSApplicationWillTerminateNotification,
-                    # which drives _handle_terminate through its full
-                    # cleanup (containers, Colima, PID file). That runs
-                    # up to ~90s in the worst case — 30s for
-                    # `launcher stop` + 60s for `colima stop`. Give it
-                    # that long before we escalate, or we SIGKILL mid-
-                    # cleanup and leave things wedged.
-                    WAITED=0
-                    while kill -0 "$MENUBAR_PID" 2>/dev/null && [ "$WAITED" -lt 120 ]; do
-                        sleep 0.5
-                        WAITED=$((WAITED + 1))
-                    done
-                    if kill -0 "$MENUBAR_PID" 2>/dev/null; then
-                        log "quit: MenubarApp still alive after 60s, sending SIGKILL"
-                        kill -9 "$MENUBAR_PID" 2>/dev/null || true
-                        FAILED_STEPS="$FAILED_STEPS menubar-app"
-                    fi
+                    log "quit: MenubarApp still alive after 60s, sending SIGKILL"
+                    kill -9 "$MENUBAR_PID" 2>/dev/null || true
+                    FAILED_STEPS="$FAILED_STEPS menubar-app"
                 fi
-                # Clean up stray trigger file if still there (MenubarApp
-                # removes it on successful pickup; SIGTERM/SIGKILL path
-                # may have left it).
-                rm -f "$DATA_DIR/.quit"
             else
-                log "quit: MenubarApp not running; skipping trigger-file wait"
+                log "quit: MenubarApp not running"
             fi
 
             # Now do the process-independent cleanup. These steps run
