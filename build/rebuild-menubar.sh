@@ -64,4 +64,21 @@ fi
 # Remove broken .pyo symlinks
 find "$MENUBAR_APP_DIR" -name '*.pyo' -type l -delete 2>/dev/null || true
 
+# Sync the parent app's Info.plist version with the freshly-built MenubarApp.
+# self.version in menubar.py reads from $APP_PATH/Contents/Info.plist (the
+# parent), and that's what gets written to /var/lib/onionpress/version for
+# the WP settings page. Without this sync, the parent plist stays at whatever
+# version it was when the DMG was last built, even though the MenubarApp
+# code is newer — so the WP page shows a stale version.
+PARENT_PLIST="$APP_PATH/Contents/Info.plist"
+MENUBAR_PLIST="$MENUBAR_APP_DIR/Contents/Info.plist"
+if [ -f "$PARENT_PLIST" ] && [ -f "$MENUBAR_PLIST" ]; then
+    NEW_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$MENUBAR_PLIST" 2>/dev/null || true)
+    OLD_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PARENT_PLIST" 2>/dev/null || true)
+    if [ -n "$NEW_VERSION" ] && [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
+        /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString $NEW_VERSION" "$PARENT_PLIST"
+        echo "=== Synced parent Info.plist: $OLD_VERSION -> $NEW_VERSION"
+    fi
+fi
+
 echo "=== Done! Quit and relaunch OnionPress.app to pick up changes."
