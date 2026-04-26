@@ -226,6 +226,76 @@ class OnionPressCLI:
         from .wayback_smoke import smoke_test_wayback
         return smoke_test_wayback(self.log)
 
+    def cmd_check_for_update(self, json_output: bool = False,
+                              current: str = None) -> int:
+        """Check GitHub for a newer release. Always exits 0.
+
+        On any failure (network down, GitHub rate-limited, parse error)
+        the JSON output carries an ``error`` field and ``update_available``
+        is false — callers render that to the user instead of crashing.
+        """
+        from datetime import datetime, timezone
+        from . import updater
+
+        if not current:
+            current = __version__
+
+        # ``updater.check_for_update`` conflates "up to date" and "error":
+        # both return ``None``. Capture the log to recover the distinction
+        # without touching updater.py.
+        error_msg = None
+
+        def capture_log(msg: str) -> None:
+            nonlocal error_msg
+            if "failed" in msg.lower():
+                error_msg = msg
+            self.log(msg)
+
+        result = updater.check_for_update(current, log=capture_log)
+
+        if result is not None:
+            release_data, latest = result
+            update_available = True
+            release_url = f"https://github.com/brewsterkahle/onionpress/releases/tag/v{latest}"
+            release_notes = (release_data.get("body") or "").strip()
+            published_at = release_data.get("published_at")
+        else:
+            update_available = False
+            release_url = None
+            release_notes = None
+            published_at = None
+            latest = None if error_msg else current
+
+        report = {
+            "current": current,
+            "latest": latest,
+            "update_available": update_available,
+            "release_url": release_url,
+            "release_notes": release_notes,
+            "published_at": published_at,
+            "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "error": error_msg,
+        }
+
+        if json_output:
+            print(json.dumps(report, indent=2))
+            return 0
+
+        print(f"Installed: {current}")
+        if error_msg:
+            print(f"Update check failed: {error_msg}")
+            return 0
+        if update_available:
+            print(f"Update available: {latest}  (published {published_at or '?'})")
+            if release_notes:
+                snippet = (release_notes if len(release_notes) <= 800
+                           else release_notes[:800] + "\n... (truncated)")
+                print()
+                print(snippet)
+        else:
+            print("Already up to date.")
+        return 0
+
     def cmd_reset(self, yes: bool = False) -> int:
         """Reset OnionPress — wipe all data and start fresh."""
         if not yes:
@@ -338,6 +408,14 @@ def main(argv: list[str] = None) -> int:
     p_reset = sub.add_parser("reset", help="Wipe all data and start fresh")
     p_reset.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
+    p_cfu = sub.add_parser(
+        "check-for-update",
+        help="Check GitHub for a newer release (always exits 0)",
+    )
+    p_cfu.add_argument("--json", action="store_true",
+                       help="Emit canonical JSON report on stdout")
+    p_cfu.add_argument("--current", help="Override detected current version")
+
     sub.add_parser(
         "smoke-test-wayback",
         help="Publish a throwaway post and verify it got archived to the Wayback Machine",
@@ -369,6 +447,8 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_reset(yes=args.yes)
     elif args.command == "smoke-test-wayback":
         return cli.cmd_smoke_test_wayback()
+    elif args.command == "check-for-update":
+        return cli.cmd_check_for_update(json_output=args.json, current=args.current)
     else:
         parser.print_help()
         return 1

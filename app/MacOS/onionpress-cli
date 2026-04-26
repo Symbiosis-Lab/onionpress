@@ -72,10 +72,15 @@ EOF
             esac
         done
 
+        # --check: delegate to the canonical CLI verb (single source of truth
+        # for update-check presentation). The install path below stays as-is.
+        if [[ "$CHECK_ONLY" == "1" ]]; then
+            exec env PYTHONPATH="$BUNDLED_PYTHONPATH" "$PYTHON_BIN" -m onionpress.cli check-for-update
+        fi
+
         PYTHONPATH="$BUNDLED_PYTHONPATH" \
         ONIONPRESS_APP_PATH="$APP_PATH" \
         ONIONPRESS_YES="$YES_FLAG" \
-        ONIONPRESS_CHECK_ONLY="$CHECK_ONLY" \
             "$PYTHON_BIN" - <<'PY'
 import os, sys, plistlib
 for p in os.environ["PYTHONPATH"].split(":"):
@@ -110,9 +115,6 @@ if notes:
     snippet = notes if len(notes) <= 800 else notes[:800] + "\n... (truncated)"
     print(snippet)
     print()
-
-if os.environ.get("ONIONPRESS_CHECK_ONLY") == "1":
-    sys.exit(0)
 
 others = updater.detect_other_instances()
 if others:

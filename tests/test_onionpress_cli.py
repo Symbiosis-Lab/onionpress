@@ -95,6 +95,24 @@ class TestCLIArgParsing(unittest.TestCase):
         instance.cmd_reset.assert_called_once_with(yes=True)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_check_for_update_default(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_check_for_update.return_value = 0
+        result = main(["check-for-update"])
+        self.assertEqual(result, 0)
+        instance.cmd_check_for_update.assert_called_once_with(
+            json_output=False, current=None)
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_check_for_update_json(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_check_for_update.return_value = 0
+        result = main(["check-for-update", "--json", "--current", "1.2.3"])
+        self.assertEqual(result, 0)
+        instance.cmd_check_for_update.assert_called_once_with(
+            json_output=True, current="1.2.3")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
     def test_default_is_start(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_start.return_value = 0
