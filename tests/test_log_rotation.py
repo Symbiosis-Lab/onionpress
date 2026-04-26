@@ -143,8 +143,9 @@ class TestRotatingLogCompression(unittest.TestCase):
         # Force several rotations + compressions
         for i in range(200):
             log.write(f"line {i:04d} " + ("x" * 80) + "\n")
-        # Let background compression catch up
-        time.sleep(2.0)
+        # Let background compression catch up. Slow CI runners need
+        # noticeably more than the 2s that's plenty on a Mac.
+        time.sleep(5.0)
         # Artificially backdate files so enforce_total_size's 60s guard
         # doesn't protect them all.
         for f in os.listdir(self.tmpdir):
@@ -161,8 +162,11 @@ class TestRotatingLogCompression(unittest.TestCase):
         )
         if rolled:
             lr.mark_shipped(self.tmpdir, "testlog", rolled[-1])
-        log.write("trigger enforcement\n")
-        time.sleep(0.5)
+        # Drive enforcement directly. The original test piggy-backed on
+        # log.write() (which only calls _enforce_total_size when a roll
+        # happens), but whether the trigger-write happens to push the
+        # active file over max_size is racy and was failing on Linux CI.
+        log._enforce_total_size()
         total = sum(
             os.path.getsize(os.path.join(self.tmpdir, f))
             for f in os.listdir(self.tmpdir)
