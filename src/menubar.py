@@ -4976,6 +4976,46 @@ License: AGPL v3"""
                     "message": "OnionPress stopped", "completed_at": now_iso
                 })
 
+            elif action == "update":
+                self.log("Settings page: install update requested")
+                try:
+                    update_info = updater.check_for_update(
+                        self.version, log=self.log)
+                    if not update_info:
+                        _write_result("update-result.json", {
+                            "success": False,
+                            "error": "Already up to date or update check failed",
+                            "completed_at": now_iso,
+                        })
+                    else:
+                        release_data, latest_version = update_info
+                        install_path = os.path.dirname(self.contents_dir)
+                        updater.download_and_install(
+                            release_data, latest_version, install_path,
+                            log=self.log, notify=None,
+                        )
+                        _write_result("update-result.json", {
+                            "success": True,
+                            "version": latest_version,
+                            "message": f"Installed v{latest_version}. OnionPress is restarting to apply the update.",
+                            "completed_at": now_iso,
+                        })
+                        self.log(f"Settings page: installed v{latest_version}, relaunching")
+                        # Give the polling page a moment to see the result
+                        # before the WP container goes down for relaunch.
+                        import time
+                        time.sleep(2)
+                        self._relaunch_app(install_path)
+                except Exception as e:
+                    self.log(f"Settings page: update install failed: {e}")
+                    import traceback
+                    self.log(traceback.format_exc())
+                    _write_result("update-result.json", {
+                        "success": False,
+                        "error": str(e),
+                        "completed_at": now_iso,
+                    })
+
             elif action == "check-reachability":
                 self.log("Settings page: running reachability test...")
                 onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
