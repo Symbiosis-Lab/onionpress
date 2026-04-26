@@ -255,6 +255,38 @@ class OnionPressApp(rumps.App):
         colima_bin = os.path.join(self.bin_dir, "colima")
         op_config.stop_stale_colima(colima_bin, self.colima_home, self.pid_file)
 
+        # If our previous instance just quit, wait briefly for its port
+        # to free before detecting offset. Without this, the new
+        # menubar starts up while the old Colima VM is still releasing
+        # port forwarding for 8080, sees the port as bound, and bumps
+        # to +10000 — leaving the user on 18080/19050/19077 for the
+        # rest of the session even after the old port is freed.
+        # The sentinel only carries info about *our own* previous quit
+        # (it lives in our per-user data dir) so it doesn't interfere
+        # with multi-user setups where another account legitimately
+        # holds 8080.
+        prev_offset_sentinel = os.path.join(self.app_support, ".previous-port-offset")
+        try:
+            if os.path.exists(prev_offset_sentinel):
+                # Stale sentinels (>60s) are ignored — likely from a
+                # crash or kill -9 where we never actually started up.
+                if time.time() - os.path.getmtime(prev_offset_sentinel) < 60:
+                    with open(prev_offset_sentinel) as f:
+                        prev_offset = int(f.read().strip())
+                    desired_port = 8080 + prev_offset
+                    for _ in range(30):  # up to 15s, 0.5s each
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        try:
+                            s.bind(("127.0.0.1", desired_port))
+                            s.close()
+                            break  # port is free, proceed to detection
+                        except OSError:
+                            s.close()
+                            time.sleep(0.5)
+                os.remove(prev_offset_sentinel)
+        except (OSError, ValueError):
+            pass  # corrupt or unreadable — proceed to normal detection
+
         # Detect port offset for multi-user support
         _port_config = op_config.detect_port_offset()
         self.wp_port = _port_config.wp_port
@@ -2256,6 +2288,20 @@ class OnionPressApp(rumps.App):
         Apple Event quit, and SIGTERM paths so they all produce the
         same end state. Order: notify hub → release proxy port →
         let Mac sleep → stop containers → stop VM → remove PID file."""
+        # Drop a sentinel so the next menubar (e.g. install-and-relaunch)
+        # knows what port we had and waits for it to free before
+        # detecting offset. Avoids self-relaunch port-detection races
+        # where Colima/Docker port forwarding outlasts the menubar
+        # process. Best-effort — if write fails, next launch falls
+        # through to plain detection (current behavior).
+        try:
+            sentinel = os.path.join(self.app_support, ".previous-port-offset")
+            offset = int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0"))
+            with open(sentinel, "w") as f:
+                f.write(str(offset))
+        except Exception:
+            pass
+
         # Notify OnionHeaven before stopping services (containers needed
         # for curl). Skip if restarting for an update — we're coming
         # right back, and skip if we're the hub itself.
