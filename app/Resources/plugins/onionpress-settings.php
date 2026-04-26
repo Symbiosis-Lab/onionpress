@@ -993,6 +993,13 @@ function onionpress_settings_page() {
     ?>
     <div class="wrap">
         <h1>OnionPress Settings</h1>
+        <?php
+        $op_current_version = trim( @file_get_contents( '/var/lib/onionpress/version' ) ?: 'unknown' );
+        $op_current_display = 'v' . ltrim( $op_current_version, 'v' );
+        ?>
+        <div id="op-update-status" style="margin: 0 0 12px 0; font-size: 13px; color: #555;">
+            <span class="description">version: <?php echo esc_html( $op_current_display ); ?>, checking for updates...</span>
+        </div>
 
         <p style="margin-bottom: 16px; font-size: 14px;">
             <span class="onionpress-state-dot" style="background:<?php echo esc_attr( $state_color ); ?>"></span>
@@ -1239,11 +1246,6 @@ function onionpress_settings_page() {
             <br>To start after a full stop, use SSH: <code>sudo systemctl start onionpress</code>
             <?php endif; ?>
         </p>
-
-        <!-- Update -->
-        <hr>
-        <h2>Updates</h2>
-        <div id="op-update-status"><p class="description">Checking for updates...</p></div>
 
         <!-- Tor Reachability Test -->
         <hr>
@@ -1559,26 +1561,44 @@ function onionpress_settings_page() {
         (function() {
             var el = document.getElementById('op-update-status');
             if (!el) return;
-            fetch(ajaxurl + '?action=onionpress_check_update')
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    var current = data.current || 'unknown';
-                    if (data.update && data.latest) {
-                        el.innerHTML = '<form method="post" style="display:inline;">' +
-                            '<input type="hidden" name="onionpress_action_nonce" value="<?php echo wp_create_nonce( "onionpress_action" ); ?>">' +
-                            '<input type="hidden" name="onionpress_action" value="update">' +
-                            '<p><strong>Update available:</strong> ' + data.latest + ' (you are on ' + current + ')</p>' +
-                            '<button type="submit" class="button button-primary">Update to ' + data.latest + '</button>' +
-                            '</form>';
-                    } else if (data.latest) {
-                        el.innerHTML = '<p class="description">You are on the latest version (' + current + ').</p>';
-                    } else {
-                        el.innerHTML = '<p class="description">Version ' + current + '. ' + (data.error || 'Could not check for updates.') + '</p>';
-                    }
-                })
-                .catch(function() {
-                    el.innerHTML = '<p class="description">Could not check for updates.</p>';
-                });
+            var nonce = '<?php echo esc_js( wp_create_nonce( "onionpress_action" ) ); ?>';
+            function vTag(s) {
+                if (!s) return '';
+                return /^v/i.test(s) ? s : 'v' + s;
+            }
+            function render() {
+                el.innerHTML = '<span class="description">version: <?php echo esc_js( $op_current_display ); ?>, checking for updates...</span>';
+                fetch(ajaxurl + '?action=onionpress_check_update')
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        var cur = vTag(data.current || '<?php echo esc_js( $op_current_display ); ?>');
+                        if (data.update && data.latest) {
+                            el.innerHTML =
+                                '<span class="description">version: ' + cur + ', update available: ' + vTag(data.latest) + '</span>' +
+                                ' <form method="post" style="display:inline;margin-left:8px;">' +
+                                '<input type="hidden" name="onionpress_action_nonce" value="' + nonce + '">' +
+                                '<input type="hidden" name="onionpress_action" value="update">' +
+                                '<button type="submit" class="button button-primary button-small">Update Now</button>' +
+                                '</form>';
+                        } else if (data.latest) {
+                            el.innerHTML = '<span class="description">version: ' + cur + ", you're on the latest</span>";
+                        } else {
+                            el.innerHTML =
+                                '<span class="description">version: ' + cur + ", couldn't check for updates</span>" +
+                                ' <button type="button" class="button button-small" id="op-update-retry" style="margin-left:8px;">Retry</button>';
+                            var btn = document.getElementById('op-update-retry');
+                            if (btn) btn.addEventListener('click', render);
+                        }
+                    })
+                    .catch(function() {
+                        el.innerHTML =
+                            '<span class="description">version: <?php echo esc_js( $op_current_display ); ?>, couldn\'t check for updates</span>' +
+                            ' <button type="button" class="button button-small" id="op-update-retry" style="margin-left:8px;">Retry</button>';
+                        var btn = document.getElementById('op-update-retry');
+                        if (btn) btn.addEventListener('click', render);
+                    });
+            }
+            render();
         })();
     </script>
     <?php
