@@ -408,6 +408,7 @@ add_action( 'admin_init', function () {
         $resolved_name = '';
         $feed_url = '';
 
+        $addr = '';
         if ( preg_match( '/([a-z2-7]{56}\.onion)/i', $raw, $m ) ) {
             $addr = strtolower( $m[1] );
             // Extract onionname from URL path: ...onion/NAME or ...onion/NAME/
@@ -419,17 +420,34 @@ add_action( 'admin_init', function () {
             $addr = $raw;
             $feed_url = $raw;
         } elseif ( function_exists( 'onionpress_directory_lookup' ) ) {
-            // Treat as onionname — resolve to .onion via local registry
+            // Treat as onionname — resolve to .onion via local registry.
+            // If the name isn't registered, reject the input rather than
+            // saving the unresolved string as a fake "address" (that
+            // produced ghost follow entries with no actual onion target).
             $raw_lower = strtolower( $raw );
             $info = onionpress_directory_lookup( $raw_lower );
-            $addr = $info ? ( $info['onionaddress'] ?? '' ) : '';
-            if ( $addr ) {
+            if ( $info && ! empty( $info['onionaddress'] ) ) {
+                $addr = $info['onionaddress'];
                 $resolved_name = $raw_lower;
             } else {
-                $addr = $raw_lower;
+                add_action( 'admin_notices', function () use ( $raw_lower ) {
+                    echo '<div class="notice notice-error"><p>Onionname <code>'
+                        . esc_html( $raw_lower )
+                        . '</code> is not registered. Try a full <code>.onion</code> address or feed URL instead.</p></div>';
+                } );
+                return;
             }
-        } else {
-            $addr = strtolower( $raw );
+        }
+        // If we got here without an $addr, the input was unrecognisable
+        // (not a .onion, not a URL, no directory available) — bail
+        // rather than save garbage.
+        if ( $addr === '' ) {
+            add_action( 'admin_notices', function () use ( $raw ) {
+                echo '<div class="notice notice-error"><p>Could not interpret <code>'
+                    . esc_html( $raw )
+                    . '</code> as an onion address, feed URL, or registered onionname.</p></div>';
+            } );
+            return;
         }
         if ( $addr ) {
             if ( ! in_array( $addr, $following, true ) ) {
