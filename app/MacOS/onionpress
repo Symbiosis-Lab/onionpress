@@ -1918,12 +1918,12 @@ start_containers() {
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d wordpress db onionheaven >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d wordpress db onionheaven autoheal >> "$LOG_FILE" 2>&1; then
             break
         fi
-        log "WARNING: 'docker compose up -d wordpress db onionheaven' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
+        log "WARNING: 'docker compose up -d wordpress db onionheaven autoheal' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
         if [ $attempt -eq $max_attempts ]; then
-            log "ERROR: 'docker compose up -d wordpress db onionheaven' failed after $max_attempts attempts."
+            log "ERROR: 'docker compose up -d wordpress db onionheaven autoheal' failed after $max_attempts attempts."
             return 1
         fi
         attempt=$((attempt + 1))

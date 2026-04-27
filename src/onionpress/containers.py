@@ -18,8 +18,8 @@ from .config import (
 from .platform import OnionPressPaths
 
 
-CORE_SERVICES = ["wordpress", "db", "onionheaven"]
-ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven"]
+CORE_SERVICES = ["wordpress", "db", "onionheaven", "autoheal"]
+ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
 ONIONHEAVEN_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 
 

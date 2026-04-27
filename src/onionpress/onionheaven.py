@@ -698,6 +698,17 @@ def start_online_notification_thread(app):
 # IS the hub (separate from which hub we register with).
 _KNOWN_ONIONHEAVEN_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 
+# Addresses where the deployment owner wants PREVENT_SLEEP=never auto-set on
+# first launch. Always includes the OnionHeaven hub (must stay awake to run
+# takeover decisions). Other entries are deployment-pinned home instances
+# where the 2026-04-26 sleep+wedge failure mode is unacceptable.
+# The marker file in menubar.py ensures the auto-set fires only once per
+# install; the user can flip PREVENT_SLEEP back via the menubar at any time.
+_ALWAYS_AWAKE_ADDRESSES = frozenset([
+    _KNOWN_ONIONHEAVEN_ADDRESS,
+    "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
+])
+
 
 def is_onionheaven_instance(onion_address):
     """Check if this instance is the OnionHeaven hub.
@@ -708,5 +719,12 @@ def is_onionheaven_instance(onion_address):
     if not onion_address or not onion_address.endswith('.onion'):
         return False
     return onion_address.strip() == _KNOWN_ONIONHEAVEN_ADDRESS
+
+
+def should_auto_prevent_sleep(onion_address):
+    """Check if this instance should auto-set PREVENT_SLEEP=never on first launch."""
+    if not onion_address or not onion_address.endswith('.onion'):
+        return False
+    return onion_address.strip() in _ALWAYS_AWAKE_ADDRESSES
 
 

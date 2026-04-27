@@ -448,6 +448,7 @@ class OnionPressApp(rumps.App):
         self._stopping = False                 # True while Stop button is in progress
         self._run_generation = 0               # Incremented on stop/start; stale threads check this
         self._consecutive_fail_count = 0       # Require 2 consecutive failures before flipping to yellow
+        self._wedge_warning_fired = False      # One-shot wedge-recovery hint per wedge episode
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -1571,6 +1572,25 @@ class OnionPressApp(rumps.App):
             self.checking = True
 
         try:
+            # One-shot loud wedge-recovery hint: if we've been yellow for 10+ min,
+            # autoheal should be about to fire (15-min threshold) or already has.
+            # If neither helps, the Colima docker socket is likely wedged. Surface
+            # the manual recovery so a human reading the log knows what to type.
+            # See feedback_colima_wedge_recovery.md for context.
+            if (not self._wedge_warning_fired
+                    and self._yellow_since
+                    and (time.time() - self._yellow_since) > 600):
+                self.log(
+                    "WEDGE WARNING: WordPress unreachable for 10+ min. "
+                    "Autoheal sidecar will restart wordpress at the 15-min mark. "
+                    "If still wedged after that, the Colima docker socket may be "
+                    "stuck. Manual recovery: "
+                    "`pgrep -fl 'lima.*onionpress' | head -1 | awk '{print $1}' | xargs kill -9` "
+                    "to nuke the Colima VM, then quit and restart OnionPress from the menubar. "
+                    "Recovery takes 40-60s."
+                )
+                self._wedge_warning_fired = True
+
             # Check for reopen signal from launcher
             reopen_file = os.path.join(self.app_support, ".reopen")
             if os.path.exists(reopen_file):
@@ -1678,6 +1698,7 @@ class OnionPressApp(rumps.App):
                         self._bootstrap_stall_count = 0
                         self._yellow_since = None
                         self._consecutive_fail_count = 0
+                        self._wedge_warning_fired = False
                         elapsed = int(time.time() - self.startup_time)
                         self.log(f"✓ System fully operational (launched in {elapsed}s)")
                         self.last_status_logged = current_status
@@ -1740,6 +1761,7 @@ class OnionPressApp(rumps.App):
                         self._bootstrap_stall_count = 0
                         self._yellow_since = None
                         self._consecutive_fail_count = 0
+                        self._wedge_warning_fired = False
                         self.last_status_logged = current_status
                     elif previous_ready and not ready_now:
                         # Was ready, now failing — require 2 consecutive failures
@@ -1834,8 +1856,11 @@ class OnionPressApp(rumps.App):
                     if onionheaven.is_onionheaven_instance(self.onion_address):
                         self.is_onionheaven = True
                         self.log("OnionHeaven mode activated (heartbeat monitor runs in onionheaven container)")
-                        # One-shot: auto-set PREVENT_SLEEP=never on first OnionHeaven detection
-                        # Uses a marker file so we never override the user's later choice
+
+                    # Auto-set PREVENT_SLEEP=never for always-awake instances
+                    # (OnionHeaven hub plus deployment-pinned home addresses).
+                    # Marker file ensures this fires only once per install.
+                    if onionheaven.should_auto_prevent_sleep(self.onion_address):
                         sleep_marker = os.path.join(self.app_support, ".onionheaven_sleep_set")
                         if not os.path.exists(sleep_marker):
                             self.write_config_value("PREVENT_SLEEP", "never")
@@ -1844,7 +1869,7 @@ class OnionPressApp(rumps.App):
                                     f.write("1")
                             except OSError:
                                 pass
-                            self.log("Auto-set PREVENT_SLEEP=never for OnionHeaven machine (first detection)")
+                            self.log("Auto-set PREVENT_SLEEP=never for always-awake machine (first detection)")
                         # Restart caffeinate with the (now-updated) config
                         self.caffeine.stop()
                         self.caffeine.start()
@@ -1930,6 +1955,7 @@ class OnionPressApp(rumps.App):
                 self._bootstrap_stall_count = 0
                 self._yellow_since = None
                 self._consecutive_fail_count = 0
+                self._wedge_warning_fired = False
                 self.healthcheck_address = None
                 self.onionheaven_messages = []
                 self._onionheaven_alert_shown = False
@@ -3740,6 +3766,7 @@ class OnionPressApp(rumps.App):
             self._last_bootstrap_pct = 0
             self._bootstrap_stall_count = 0
             self._yellow_since = None
+            self._wedge_warning_fired = False
             self.auto_opened_browser = False  # Re-open browser after restart
 
             # Check if address prefix changed before restarting
