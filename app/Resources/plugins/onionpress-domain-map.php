@@ -6,8 +6,10 @@
  *              used. Lets a single WP install be served from .onion,
  *              clearnet (e.g. onionpress.org via Cloudflare tunnel), and
  *              localhost simultaneously without WP's canonical-host
- *              redirect kicking visitors over to siteurl.
- * Version:     2.0
+ *              redirect kicking visitors over to siteurl. Also emits the
+ *              Onion-Location response header on clearnet requests so
+ *              Tor Browser shows the purple ".onion available" pill.
+ * Version:     2.1
  * Network:     true
  */
 
@@ -93,6 +95,33 @@ add_filter( 'wp_redirect', 'onionpress_rewrite_url' );
 
 // Admin ajax URL.
 add_filter( 'admin_url', 'onionpress_rewrite_url' );
+
+// Onion-Location header: when a clearnet visitor (e.g. via Cloudflare
+// tunnel) hits this site and we have a valid onion address on disk,
+// advertise it so Tor Browser / Brave Tor can show the ".onion available"
+// pill. Tor Browser only honors the header on HTTPS responses from a
+// non-.onion host, so emitting unconditionally on every public request is
+// safe — onion and direct-localhost responses just ignore it.
+function onionpress_send_onion_location_header() {
+    if ( is_admin() ) {
+        return;
+    }
+    $request_host = strtolower( (string) ( $_SERVER['HTTP_HOST'] ?? '' ) );
+    if ( $request_host === '' || strpos( $request_host, '.onion' ) !== false ) {
+        return;
+    }
+    $addr_file = '/var/lib/onionpress/onion_address';
+    if ( ! is_readable( $addr_file ) ) {
+        return;
+    }
+    $addr = strtolower( trim( (string) @file_get_contents( $addr_file ) ) );
+    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+        return;
+    }
+    $request_uri = $_SERVER['REQUEST_URI'] ?? '/';
+    header( 'Onion-Location: http://' . $addr . $request_uri );
+}
+add_action( 'send_headers', 'onionpress_send_onion_location_header' );
 
 // Responsive image srcset URLs. Without this, hand-authored posts with
 // uploaded images render `srcset="http://localhost/..."` (no port,
