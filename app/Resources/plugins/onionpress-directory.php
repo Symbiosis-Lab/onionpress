@@ -43,9 +43,32 @@ function onionpress_directory_is_onionhome_host( $host ) {
 }
 
 /**
- * Look up NAME in the registry via the tor container's internal API.
- * Returns an associative array on success (onionname, onionaddress, url,
- * registered_at, last_seen_at) or null on miss / error.
+ * Read this instance's own .onion address from the shared volume the
+ * launcher populates. Returns lower-case .onion or null.
+ */
+function onionpress_directory_own_address() {
+    $addr_file = '/var/lib/onionpress/onion_address';
+    if ( ! is_readable( $addr_file ) ) {
+        return null;
+    }
+    $addr = strtolower( trim( (string) @file_get_contents( $addr_file ) ) );
+    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+        return null;
+    }
+    return $addr;
+}
+
+/**
+ * Look up NAME in the registry. Returns associative array on success
+ * (onionname, onionaddress, url, registered_at, last_seen_at) or null
+ * on miss / error.
+ *
+ * On OnionHome itself the registry lives in the local tor container,
+ * so we curl onionpress-tor:8083 directly. On every OTHER instance the
+ * local web-server.py refuses /api/name/* by design, so we have to
+ * reach the canonical OnionHome over Tor (via SOCKS through the local
+ * tor container). Without this branch, every off-OnionHome follow-by-
+ * name attempt 404'd silently.
  *
  * Direct curl (not wp_remote_*) so onionpress-tor-proxy's SOCKS routing
  * doesn't try to tunnel a docker-internal hop through Tor.
@@ -54,16 +77,28 @@ function onionpress_directory_lookup( $name ) {
     if ( ! is_string( $name ) || $name === '' ) {
         return null;
     }
-    $url = 'http://onionpress-tor:8083/api/name/lookup/' . rawurlencode( $name );
-    $ch  = curl_init( $url );
+    if ( onionpress_directory_own_address() === ONIONPRESS_ONIONHOME_ADDRESS ) {
+        $url  = 'http://onionpress-tor:8083/api/name/lookup/' . rawurlencode( $name );
+        $opts = array(
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 5,
+            CURLOPT_CONNECTTIMEOUT => 2,
+        );
+    } else {
+        $url  = 'http://' . ONIONPRESS_ONIONHOME_ADDRESS
+              . ':8083/api/name/lookup/' . rawurlencode( $name );
+        $opts = array(
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
+        );
+    }
+    $ch = curl_init( $url );
     if ( ! $ch ) {
         return null;
     }
-    curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 5,
-        CURLOPT_CONNECTTIMEOUT => 2,
-    ) );
+    curl_setopt_array( $ch, $opts );
     $body = curl_exec( $ch );
     $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
     curl_close( $ch );
