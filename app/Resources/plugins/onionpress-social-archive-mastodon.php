@@ -75,6 +75,15 @@ const ONIONPRESS_MASTODON_HTTP_TIMEOUT    = 45;
 // end of each tick converts them once the parent shows up.
 const ONIONPRESS_MASTODON_THREADS_MIGRATED_OPT = 'onionpress_mastodon_threads_v1_migrated';
 
+// Conversation context: when WE reply to someone else's toot, the parent
+// (and its parents, until we find one of our own toots or hit a depth
+// cap) gets fetched from Mastodon and imported too — marked with
+// _is_context=1 so themes can render them with author attribution. This
+// turns "your fragmentary reply alone" into "the full conversation
+// hanging off your original toot."
+const ONIONPRESS_MASTODON_CONTEXT_DEPTH_MAX     = 6;
+const ONIONPRESS_MASTODON_CONTEXT_BATCH_PER_TICK = 10; // ancestor fetches per backfill tick (Tor-routed, slow)
+
 add_action( 'admin_menu', function () {
     if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
         return;
@@ -676,6 +685,17 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
         if ( $reattached > 0 ) {
             $stats['reattached'] = ( $stats['reattached'] ?? 0 ) + $reattached;
         }
+        // End-of-tick: walk a small batch of existing reply posts whose
+        // parent isn't here yet, fetch the parent (and its chain) from
+        // Mastodon, and re-thread. Each call is one Tor-routed API hit
+        // per ancestor — strictly capped so a backlog of hundreds gets
+        // chipped at across many ticks instead of blowing one budget.
+        if ( microtime( true ) < $deadline ) {
+            $context_done = onionpress_mastodon_backfill_context();
+            if ( $context_done > 0 ) {
+                $stats['context'] = ( $stats['context'] ?? 0 ) + $context_done;
+            }
+        }
     } finally {
         delete_transient( ONIONPRESS_MASTODON_LOCK );
     }
@@ -698,6 +718,7 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
             'errors'     => intval( $stats['errors']     ?? 0 ),
             'pages'      => intval( $stats['pages']      ?? 0 ),
             'reattached' => intval( $stats['reattached'] ?? 0 ),
+            'context'    => intval( $stats['context']    ?? 0 ),
         ),
         'errors' => $errors,
         'note'   => $note,
@@ -854,6 +875,61 @@ function onionpress_mastodon_find_attachable_post( $parent_source_id ) {
         if ( $c ) return (int) $c->comment_post_ID;
     }
     return 0;
+}
+
+/**
+ * Fetch a single status by ID from the configured Mastodon server.
+ * Returns the parsed status array, or null on failure (404, network
+ * error, malformed response). Cheap test mock via the
+ * `onionpress_mastodon_fetch_status_mock` filter — same shape as the
+ * fetch_statuses mock.
+ */
+function onionpress_mastodon_fetch_status_by_id( $server, $status_id ) {
+    $mock = apply_filters( 'onionpress_mastodon_fetch_status_mock', null, $status_id );
+    if ( $mock !== null ) {
+        return is_array( $mock ) ? $mock : null;
+    }
+    if ( $server === '' || $status_id === '' ) return null;
+    $r = onionpress_mastodon_api_get(
+        'https://' . $server . '/api/v1/statuses/' . rawurlencode( $status_id )
+    );
+    if ( is_wp_error( $r ) ) return null;
+    if ( (int) $r['code'] !== 200 ) return null;
+    return is_array( $r['json'] ) ? $r['json'] : null;
+}
+
+/**
+ * Ensure a toot is in our DB, fetching it (and recursively, its parent
+ * chain) from Mastodon if necessary. Returns the post ID we should
+ * attach a child reply to (post itself, or the post a comment-form
+ * version of this toot was attached to), or 0 on failure.
+ *
+ * Walks at most CONTEXT_DEPTH_MAX hops up. Each hop is one Tor-routed
+ * API call, so the cap matters for budget. A return of 0 means: parent
+ * couldn't be imported (404, depth exhausted, or transport failure) —
+ * the caller should fall back to importing as a top-level post with
+ * _pending_reattach=1 in case the parent shows up later.
+ */
+function onionpress_mastodon_ensure_imported_with_ancestry( $status_id, $opts, $depth = 0 ) {
+    if ( $depth > ONIONPRESS_MASTODON_CONTEXT_DEPTH_MAX ) return 0;
+    $source_id = 'mastodon:' . $status_id;
+    $existing  = onionpress_mastodon_find_attachable_post( $source_id );
+    if ( $existing ) return $existing;
+    $server = (string) get_option( ONIONPRESS_MASTODON_SERVER_OPT, '' );
+    $status = onionpress_mastodon_fetch_status_by_id( $server, $status_id );
+    if ( ! is_array( $status ) ) return 0;
+    // Recurse to ensure ancestor chain is in place BEFORE this one is
+    // imported — that way when import_status processes this status it
+    // sees the parent and threads correctly in one pass.
+    if ( ! empty( $status['in_reply_to_id'] ) ) {
+        onionpress_mastodon_ensure_imported_with_ancestry(
+            (string) $status['in_reply_to_id'], $opts, $depth + 1
+        );
+    }
+    $our_id = (string) get_option( ONIONPRESS_MASTODON_ACCT_ID_OPT, '' );
+    $is_ours = ( (string) ( $status['account']['id'] ?? '' ) === $our_id );
+    onionpress_mastodon_import_status( $status, $opts, ! $is_ours );
+    return onionpress_mastodon_find_attachable_post( $source_id );
 }
 
 /**
@@ -1023,6 +1099,54 @@ function onionpress_mastodon_convert_post_to_comment( $post_id, $parent_post_id 
 }
 
 /**
+ * Find existing reply posts whose parent toot isn't in our DB, fetch
+ * the parent (and chain) from Mastodon, and re-thread the reply as a
+ * comment on it. Capped per call so a single tick can't blow its
+ * Tor-call budget — leftovers carry over to the next tick.
+ *
+ * Returns the number of replies successfully threaded.
+ */
+function onionpress_mastodon_backfill_context( $limit = null ) {
+    if ( $limit === null ) $limit = ONIONPRESS_MASTODON_CONTEXT_BATCH_PER_TICK;
+    global $wpdb;
+    $candidates = $wpdb->get_results( $wpdb->prepare(
+        "SELECT p.ID, m2.meta_value AS reply_to_id
+         FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} m1 ON m1.post_id=p.ID AND m1.meta_key='_source_id'
+         JOIN {$wpdb->postmeta} m2 ON m2.post_id=p.ID AND m2.meta_key='_reply_to_id'
+         JOIN {$wpdb->postmeta} m4 ON m4.post_id=p.ID AND m4.meta_key='_is_reply' AND m4.meta_value='1'
+         WHERE m1.meta_value LIKE 'mastodon:%' AND m2.meta_value <> ''
+           AND p.post_status='publish'
+           AND NOT EXISTS (
+             SELECT 1 FROM {$wpdb->postmeta} pm
+             WHERE pm.meta_key='_source_id'
+               AND pm.meta_value = CONCAT('mastodon:', m2.meta_value)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM {$wpdb->commentmeta} cm
+             WHERE cm.meta_key='_source_id'
+               AND cm.meta_value = CONCAT('mastodon:', m2.meta_value)
+           )
+         ORDER BY p.post_date DESC
+         LIMIT %d",
+        (int) $limit
+    ) );
+    if ( empty( $candidates ) ) return 0;
+    $opts = (array) get_option( ONIONPRESS_MASTODON_OPTS_OPT, array() );
+    $threaded = 0;
+    foreach ( $candidates as $c ) {
+        $parent_pid = onionpress_mastodon_ensure_imported_with_ancestry(
+            (string) $c->reply_to_id, $opts, 1
+        );
+        if ( ! $parent_pid ) continue;
+        if ( onionpress_mastodon_convert_post_to_comment( (int) $c->ID, $parent_pid ) ) {
+            $threaded++;
+        }
+    }
+    return $threaded;
+}
+
+/**
  * One-time migration for installs that imported self-reply toots as
  * top-level posts before threading was wired up. Finds existing posts
  * with `_is_reply=1` whose `_reply_to_id` matches a known `_source_id`
@@ -1089,12 +1213,21 @@ function onionpress_mastodon_migrate_self_replies_to_comments() {
  *
  * Mastodon's `reblog` field holds the boosted status; when it's set,
  * the outer status is a boost shell with no original content. Replies
- * are detected by `in_reply_to_id`; self-replies (to the same account)
- * form threads — they're folded into the parent post's comments when
- * the parent is already imported, otherwise they land as a top-level
- * post flagged _pending_reattach for the end-of-tick sweep to convert.
+ * are detected by `in_reply_to_id` and are folded into the parent
+ * post's comment thread — for self-replies the parent is from our own
+ * timeline, for replies-to-others the parent is fetched from Mastodon
+ * via ensure_imported_with_ancestry() and stored as context (marked
+ * _is_context=1 if it's not our own toot). When a parent fetch fails
+ * (404, depth cap, transport error) the reply lands as a top-level
+ * post with _pending_reattach=1 so the end-of-tick sweep can convert
+ * it later if the parent shows up.
+ *
+ * $as_context=true marks the imported post (top-level only — comments
+ * are inherently attributed to their author) with `_is_context=1` so
+ * the theme can render it with a "@author said:" wrapper. Set by
+ * ensure_imported_with_ancestry when fetching foreign ancestors.
  */
-function onionpress_mastodon_import_status( $status, $opts ) {
+function onionpress_mastodon_import_status( $status, $opts, $as_context = false ) {
     $status_id = isset( $status['id'] ) ? (string) $status['id'] : '';
     if ( $status_id === '' ) return 'errors';
 
@@ -1122,17 +1255,25 @@ function onionpress_mastodon_import_status( $status, $opts ) {
         return 'skipped';
     }
 
-    // Self-reply with parent already imported → fold into the parent's
-    // comment thread instead of creating a fragmentary top-level post.
-    // If the parent isn't here yet (typical during backward backfill,
-    // since replies are newer than what they reply to), fall through and
-    // create as a top-level post flagged _pending_reattach=1; the
-    // end-of-tick sweep converts it once the parent shows up.
+    // Any reply (self OR to someone else) → fold into the parent's
+    // comment thread. For self-replies the parent comes from our own
+    // timeline; for replies-to-others we fetch the parent (and its
+    // ancestor chain) from Mastodon so the conversation reads in
+    // context. If parent fetch fails (404, depth cap, transport),
+    // fall through with _pending_reattach=1 — the end-of-tick sweep
+    // converts later if the parent eventually arrives.
     $pending_reattach = false;
-    if ( $is_self_reply ) {
-        $parent_pid = onionpress_mastodon_find_attachable_post(
-            'mastodon:' . (string) $status['in_reply_to_id']
-        );
+    if ( $in_reply ) {
+        $reply_to_source = 'mastodon:' . (string) $status['in_reply_to_id'];
+        $parent_pid = onionpress_mastodon_find_attachable_post( $reply_to_source );
+        if ( ! $parent_pid ) {
+            // Recurse one hop into ensure_imported_with_ancestry — start
+            // at depth 1 so total chain (this status + ancestors) stays
+            // within CONTEXT_DEPTH_MAX.
+            $parent_pid = onionpress_mastodon_ensure_imported_with_ancestry(
+                (string) $status['in_reply_to_id'], $opts, 1
+            );
+        }
         if ( $parent_pid ) {
             return onionpress_mastodon_create_self_reply_comment( $status, $parent_pid );
         }
@@ -1171,6 +1312,7 @@ function onionpress_mastodon_import_status( $status, $opts ) {
             '_reply_to_id'      => $in_reply  ? (string) $status['in_reply_to_id'] : '',
             '_thread_root_id'   => $is_self_reply ? '' : $status_id,
             '_pending_reattach' => $pending_reattach ? '1' : '0',
+            '_is_context'       => $as_context ? '1' : '0',
             '_raw'              => wp_json_encode( $status ),
         ),
     ), true );

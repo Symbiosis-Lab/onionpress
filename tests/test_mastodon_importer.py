@@ -93,6 +93,7 @@ _TOUCHED_OPTIONS = (
     "onionpress_mastodon_threads_v1_migrated",
     "op_test_mastodon_mock_idx",
     "op_test_mastodon_mock_pages",
+    "op_test_mastodon_status_mocks",
 )
 
 
@@ -586,19 +587,21 @@ class TestMastodonThreading(unittest.TestCase):
         self.assertEqual(self._post_count(reply_id), "0")
         self.assertNotEqual(self._comments_for(reply_id), "")
 
-    def test_reply_to_other_account_stays_top_level(self):
-        """A reply to someone ELSE's toot has no parent in our DB and
-        isn't a self-reply — it's a normal top-level post (gated by
-        include_replies, which we set true here)."""
+    def test_reply_with_unfetchable_parent_falls_back_to_pending(self):
+        """A reply whose parent can't be fetched (no API mock here, and
+        the live API would 404 in a unit-test container) must still
+        import — as a top-level post flagged _pending_reattach=1, the
+        same fallback used when self-reply backfill outpaces parents.
+        Threading kicks in later if the parent ever shows up."""
         reply_id = "r-" + uuid.uuid4().hex
         reply = _status(reply_id, in_reply_to_id="external-toot",
                         in_reply_to_account_id="999")
         self.assertEqual(self._import(reply), "imported")
         self.assertEqual(self._post_count(reply_id), "1")
-        # Not self-reply → not pending.
-        self.assertEqual(self._pending_count(), 0)
-        # No comment created (it's a top-level post, not a thread item).
-        self.assertEqual(self._comments_for(reply_id), "")
+        self.assertEqual(self._pending_count(), 1,
+                         "context fetch failed → flagged for later reattach")
+        self.assertEqual(self._comments_for(reply_id), "",
+                         "still top-level (not yet threaded under any parent)")
 
     def test_self_reply_dedup_on_re_import(self):
         """Re-importing the same self-reply must not create a duplicate
@@ -812,6 +815,254 @@ class TestMastodonThreading(unittest.TestCase):
         # Other-account reply should NOT have been converted.
         self.assertEqual(self._post_count(reply_id), "1")
         self.assertEqual(self._comments_for(reply_id), "")
+
+
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestMastodonContextFetch(unittest.TestCase):
+    """When we reply to someone else's toot, the parent (and ancestor
+    chain back to one of our own toots, or up to the depth cap) is
+    fetched from Mastodon and imported as context — so the
+    conversation reads in full instead of as a fragmentary reply."""
+
+    @classmethod
+    def setUpClass(cls):
+        url = _get_or_create_test_subsite()
+        if url is None:
+            raise unittest.SkipTest("could not get/create test subsite")
+        cls.url = url
+
+    def setUp(self):
+        _assert_test_sandbox(self.url)
+        _wp(["option", "update", "onionpress_social_mastodon_account_id",
+             _SAFE_TEST_ACCOUNT_ID], url=self.url, timeout=15)
+        _wp(["option", "update", "onionpress_social_mastodon_server",
+             _SAFE_TEST_SERVER], url=self.url, timeout=15)
+        self.addCleanup(_cleanup_test_posts, self.url)
+        self.addCleanup(_delete_test_comments, self.url)
+        self.addCleanup(_clear_all_options, self.url)
+
+    def _register_status_mock(self, statuses_by_id):
+        """Install a PHP filter that returns a specific status for any
+        single-status fetch. Tests stash the dict in a wp_option so the
+        closure can read it without PHP/JSON brace-escaping pain."""
+        by_id_json = json.dumps(statuses_by_id).replace("'", "\\'")
+        return f"""
+        update_option('op_test_mastodon_status_mocks', '{by_id_json}', false);
+        add_filter('onionpress_mastodon_fetch_status_mock', function($_, $sid) {{
+            $by_id = json_decode((string) get_option('op_test_mastodon_status_mocks', '{{}}'), true);
+            return is_array($by_id) && isset($by_id[$sid]) ? $by_id[$sid] : null;
+        }}, 10, 2);
+        """
+
+    def _import(self, status, opts=None, mock_setup=""):
+        if opts is None:
+            opts = {"include_boosts": False, "include_replies": True}
+        s = json.dumps(status).replace("'", "\\'")
+        o = json.dumps(opts).replace("'", "\\'")
+        php = mock_setup + f"""
+        $s = json_decode('{s}', true);
+        $o = json_decode('{o}', true);
+        echo onionpress_mastodon_import_status($s, $o);
+        """
+        return _eval(php, self.url)
+
+    def _meta(self, source_id, key):
+        return _eval(f"""
+        $ps = get_posts(array(
+            'post_type' => 'post',
+            'meta_key' => '_source_id',
+            'meta_value' => 'mastodon:{source_id}',
+            'post_status' => 'any',
+            'posts_per_page' => 1,
+            'fields' => 'ids',
+        ));
+        if (empty($ps)) {{ echo '(no post)'; return; }}
+        echo (string) get_post_meta((int)$ps[0], '{key}', true);
+        """, self.url)
+
+    def _comment_post_id(self, source_id):
+        """Return the comment_post_ID of the comment with this source_id,
+        or '0' if no such comment."""
+        return _eval(f"""
+        $cs = get_comments(array(
+            'meta_key' => '_source_id',
+            'meta_value' => 'mastodon:{source_id}',
+            'number' => 1,
+        ));
+        echo empty($cs) ? '0' : (int) $cs[0]->comment_post_ID;
+        """, self.url)
+
+    def _other_account_status(self, id_str, in_reply_to_id=None,
+                              in_reply_to_account_id=None,
+                              foreign_acct_id="999"):
+        """Build a status from a NON-test account id (foreign user)."""
+        s = _status(id_str, in_reply_to_id=in_reply_to_id,
+                    in_reply_to_account_id=in_reply_to_account_id)
+        s["account"]["id"] = foreign_acct_id
+        s["account"]["username"] = "egonw"
+        s["account"]["display_name"] = "Egon"
+        return s
+
+    def test_external_reply_fetches_parent_as_context(self):
+        """We reply to @egonw's toot. The parent isn't in our DB.
+        Importer fetches @egonw's toot via the API mock, marks it
+        _is_context=1, and threads our reply under it."""
+        ours_id   = "ours-" + uuid.uuid4().hex
+        egonw_id  = "egonw-" + uuid.uuid4().hex
+        # @egonw's toot — what gets fetched from Mastodon when we reply.
+        egonw_status = self._other_account_status(egonw_id)
+        mock = self._register_status_mock({egonw_id: egonw_status})
+        # Now import OUR reply to @egonw's toot.
+        our_reply = _status(ours_id, in_reply_to_id=egonw_id,
+                            in_reply_to_account_id="999")  # not us
+        result = self._import(our_reply, mock_setup=mock)
+        self.assertEqual(result, "imported")
+        # @egonw's parent toot is now in our DB as a top-level post.
+        self.assertEqual(self._meta(egonw_id, "_source_id"),
+                         f"mastodon:{egonw_id}")
+        # Marked as context.
+        self.assertEqual(self._meta(egonw_id, "_is_context"), "1")
+        # Our reply landed as a comment on egonw's post.
+        self.assertNotEqual(self._comment_post_id(ours_id), "0")
+        self.assertEqual(self._meta(ours_id, "_source_id"), "(no post)",
+                         "our reply should be a comment, not a top-level post")
+
+    def test_external_reply_with_self_grandparent_threads_under_us(self):
+        """The egonw scenario from the field: our reply → @egonw's
+        reply → our original. Walking up the ancestor chain finds our
+        original, imports @egonw's middle hop as context (folded as a
+        comment under our original), and threads our reply as a deeper
+        nested comment. Whole conversation hangs off our toot."""
+        our_root_id  = "root-" + uuid.uuid4().hex   # already in DB
+        egonw_id     = "egonw-" + uuid.uuid4().hex  # to be fetched
+        our_reply_id = "rep-"   + uuid.uuid4().hex
+        # Seed our original (no mock needed).
+        self.assertEqual(self._import(_status(our_root_id)), "imported")
+        # @egonw replies to our root — fetched on demand.
+        egonw_status = self._other_account_status(egonw_id, in_reply_to_id=our_root_id,
+                                                  in_reply_to_account_id="1")
+        mock = self._register_status_mock({egonw_id: egonw_status})
+        # Our reply to @egonw.
+        our_reply = _status(our_reply_id, in_reply_to_id=egonw_id,
+                            in_reply_to_account_id="999")
+        self.assertEqual(self._import(our_reply, mock_setup=mock), "imported")
+        # @egonw's middle hop became a comment on our root.
+        egonw_post_id = self._comment_post_id(egonw_id)
+        self.assertNotEqual(egonw_post_id, "0",
+                            "@egonw's reply should thread under our root")
+        # And our reply nests under it (same root post).
+        self.assertEqual(self._comment_post_id(our_reply_id), egonw_post_id,
+                         "our reply threads under the same root post as @egonw's middle hop")
+
+    def test_failed_parent_fetch_falls_back_to_pending(self):
+        """If the API mock returns nothing for the parent (e.g. parent
+        deleted on the source server), the reply lands as a top-level
+        post with _pending_reattach=1 — same fallback as before."""
+        reply_id = "r-" + uuid.uuid4().hex
+        # No mock entries → fetch returns null.
+        mock = self._register_status_mock({})
+        our_reply = _status(reply_id, in_reply_to_id="9999",
+                            in_reply_to_account_id="999")
+        self.assertEqual(self._import(our_reply, mock_setup=mock), "imported")
+        # Top-level, pending_reattach.
+        self.assertEqual(self._meta(reply_id, "_pending_reattach"), "1")
+
+    def test_context_flag_not_set_for_our_own_toots(self):
+        """When walking ancestors, a toot whose account.id matches
+        ours is imported normally (not flagged _is_context). Used by
+        the egonw-with-self-grandparent path to avoid mis-marking our
+        own ancestors."""
+        ours_id   = "ours-" + uuid.uuid4().hex
+        # ours_id has account.id="1" (the test sandbox account).
+        ours_status = _status(ours_id)
+        mock = self._register_status_mock({ours_id: ours_status})
+        # Import via ensure (simulates ancestor walk).
+        _eval(mock + f"""
+        $opts = array('include_replies' => true);
+        echo onionpress_mastodon_ensure_imported_with_ancestry('{ours_id}', $opts);
+        """, self.url)
+        self.assertEqual(self._meta(ours_id, "_is_context"), "0",
+                         "our own toot should not be flagged _is_context")
+
+    def test_depth_cap_stops_unbounded_chain(self):
+        """A pathological chain (each toot replies to another) must
+        stop fetching at CONTEXT_DEPTH_MAX. Build a chain of 20 →
+        only the first ~6 should land in our DB."""
+        ids = ["d-" + uuid.uuid4().hex + "-" + str(i) for i in range(20)]
+        # Each toot replies to the previous one, all foreign.
+        statuses = {}
+        for i, sid in enumerate(ids):
+            parent = ids[i - 1] if i > 0 else None
+            statuses[sid] = self._other_account_status(
+                sid, in_reply_to_id=parent, in_reply_to_account_id="999"
+            )
+        mock = self._register_status_mock(statuses)
+        # Trigger ancestor walk starting from the LAST (deepest) toot.
+        _eval(mock + f"""
+        $opts = array('include_replies' => true);
+        echo onionpress_mastodon_ensure_imported_with_ancestry('{ids[-1]}', $opts);
+        """, self.url)
+        # Count how many of the chain made it in.
+        in_db = int(_eval(f"""
+        $ids = {json.dumps(ids)};
+        $count = 0;
+        foreach ($ids as $sid) {{
+            $ps = get_posts(array(
+                'post_type' => 'post',
+                'meta_key' => '_source_id',
+                'meta_value' => 'mastodon:' . $sid,
+                'posts_per_page' => 1,
+                'fields' => 'ids',
+            ));
+            if (!empty($ps)) $count++;
+        }}
+        echo $count;
+        """, self.url))
+        # Should be at most CONTEXT_DEPTH_MAX+1 (the starting status counts as depth 0).
+        self.assertLessEqual(in_db, 7,
+                             f"depth cap should bound chain — got {in_db}")
+        self.assertGreater(in_db, 0,
+                           "at least the starting status should be in DB")
+
+    def test_backfill_context_threads_existing_replies(self):
+        """An existing reply post with parent missing from our DB.
+        The backfill sweep finds it, fetches the parent via API, and
+        re-threads the reply as a comment."""
+        our_root_id  = "br-root-" + uuid.uuid4().hex
+        foreign_id   = "br-fp-"   + uuid.uuid4().hex
+        our_reply_id = "br-rep-"  + uuid.uuid4().hex
+        # Seed our root.
+        self._import(_status(our_root_id))
+        # Pre-seed our reply as a legacy top-level post (simulating
+        # the state of brewsterkahle's existing data — _is_reply=1
+        # but parent not in DB).
+        legacy_pid = int(_eval(f"""
+        $pid = wp_insert_post(array(
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'post_title' => 'legacy reply',
+            'post_content' => '<p>hi</p>',
+            'meta_input' => array(
+                '_source_id'   => 'mastodon:{our_reply_id}',
+                '_is_reply'    => '1',
+                '_reply_to_id' => '{foreign_id}',
+                '_source_url'  => 'https://example.test/x',
+            ),
+        ));
+        echo (int) $pid;
+        """, self.url))
+        self.assertGreater(legacy_pid, 0)
+        # Foreign middle-hop available via API mock; replies to our root.
+        foreign_status = self._other_account_status(
+            foreign_id, in_reply_to_id=our_root_id, in_reply_to_account_id="1"
+        )
+        mock = self._register_status_mock({foreign_id: foreign_status})
+        # Run backfill_context.
+        n = int(_eval(mock + "echo onionpress_mastodon_backfill_context();", self.url))
+        self.assertGreaterEqual(n, 1)
+        # Original legacy post is gone, our reply is now a comment.
+        self.assertEqual(self._meta(our_reply_id, "_source_id"), "(no post)")
+        self.assertNotEqual(self._comment_post_id(our_reply_id), "0")
 
 
 @unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
