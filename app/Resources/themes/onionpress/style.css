@@ -338,6 +338,16 @@ a.header-avatar-add:hover {
 
 .post-thread-reply-body {
     line-height: 1.45;
+    word-break: break-word;
+}
+
+.post-thread-reply-body a {
+    color: #5b21b6;
+    text-decoration: underline;
+}
+
+.post-thread-reply-body a:hover {
+    color: #7c3aed;
 }
 
 .post-thread-more {

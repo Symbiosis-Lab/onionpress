@@ -40,10 +40,43 @@
                     <?php foreach ($thread_top as $c) :
                         $author     = $c->comment_author ?: 'someone';
                         $author_url = (string) $c->comment_author_url;
-                        $body       = wp_trim_words(
-                            wp_strip_all_tags($c->comment_content),
-                            45, '…'
+                        // Build a clean plain-text body for word-trimming
+                        // while preserving link semantics. Mastodon wraps
+                        // long URLs in nested spans for visual truncation
+                        // (`<a href="full"><span>https://</span><span>www</span>...`),
+                        // so naive tag-stripping turns one URL into several
+                        // disconnected fragments. We special-case <a> first:
+                        // replace the whole anchor with its href (or the
+                        // inner text for @mentions, which look better than
+                        // pasting their profile URL). Then strip everything
+                        // else with spaces so word boundaries survive.
+                        $with_links = preg_replace_callback(
+                            '/<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)<\/a>/is',
+                            function ($m) {
+                                $inner = preg_replace('/<[^>]+>/', '', $m[2]);
+                                $inner = trim(html_entity_decode(
+                                    $inner, ENT_QUOTES | ENT_HTML5, 'UTF-8'
+                                ));
+                                // @mentions read more naturally as their handle than
+                                // as a bare profile URL — keep the visible text.
+                                if ($inner !== '' && $inner[0] === '@') {
+                                    return ' ' . $inner . ' ';
+                                }
+                                return ' ' . $m[1] . ' ';
+                            },
+                            (string) $c->comment_content
                         );
+                        $plain = preg_replace('/<[^>]+>/', ' ', (string) $with_links);
+                        $plain = html_entity_decode(
+                            $plain, ENT_QUOTES | ENT_HTML5, 'UTF-8'
+                        );
+                        $plain = trim(preg_replace('/\s+/', ' ', $plain));
+                        $body  = wp_trim_words($plain, 45, '…');
+                        // esc_html first → make_clickable only matches the
+                        // (now-safe) text and wraps http(s)/ftp URLs in <a>.
+                        // It deliberately does NOT match javascript: or other
+                        // exotic schemes, so output is XSS-safe.
+                        $body_html = make_clickable(esc_html($body));
                         ?>
                         <div class="post-thread-reply">
                             <div class="post-thread-reply-meta">
@@ -58,7 +91,7 @@
                                     <?php echo esc_html(human_time_diff(strtotime($c->comment_date_gmt))); ?> ago
                                 </span>
                             </div>
-                            <div class="post-thread-reply-body"><?php echo esc_html($body); ?></div>
+                            <div class="post-thread-reply-body"><?php echo $body_html; ?></div>
                         </div>
                     <?php endforeach;
                     $shown = count($thread_top);
