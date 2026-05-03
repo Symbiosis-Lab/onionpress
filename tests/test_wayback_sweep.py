@@ -281,5 +281,113 @@ class TestWaybackSweepLock(unittest.TestCase):
             f"lock should still belong to otherTok: {out}")
 
 
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestWaybackCommentResnapshot(unittest.TestCase):
+    """`wp_insert_comment` triggers exactly one re-archive of the parent
+    post — and only for imported posts that already have a snapshot.
+    Caps the social-importer-threading SPN cost at one extra snapshot
+    per parent (instead of one per comment)."""
+
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
+
+    def _make_imported_post(self, archived=True):
+        """Insert a publish-state imported post with the wayback metadata
+        we'd expect after a successful capture (or empty if archived=False)."""
+        archived_at = "2026-04-01 12:00:00" if archived else ""
+        snapshot_ts = "20260401120000" if archived else ""
+        pid = int(_eval(f"""
+        $pid = wp_insert_post(array(
+            'post_type'=>'post','post_status'=>'publish',
+            'post_title'=>'imported parent','post_content'=>'<p>parent</p>',
+            'meta_input'=>array(
+                '_source_id'=>'mastodon:wbresnap-{int(time.time()*1000)}',
+                '_op_wayback_archived_at'=>'{archived_at}',
+                '_op_wayback_snapshot_ts'=>'{snapshot_ts}',
+            ),
+        ));
+        echo (int)$pid;
+        """, self.url))
+        self.addCleanup(_eval, f"wp_delete_post({pid}, true);", self.url)
+        return pid
+
+    def _add_comment(self, post_id):
+        cid = int(_eval(f"""
+        $cid = wp_insert_comment(array(
+            'comment_post_ID'=>{post_id},
+            'comment_author'=>'me',
+            'comment_content'=>'<p>thread reply</p>',
+            'comment_approved'=>1,
+        ));
+        echo (int)$cid;
+        """, self.url))
+        return cid
+
+    def _meta(self, post_id, key):
+        return _eval(
+            f"echo (string) get_post_meta({post_id}, '{key}', true);",
+            self.url,
+        )
+
+    def test_first_comment_clears_snapshot_and_marks_resnapshot_done(self):
+        pid = self._make_imported_post(archived=True)
+        self.assertEqual(self._meta(pid, "_op_wayback_archived_at"),
+                         "2026-04-01 12:00:00")
+        self.assertEqual(self._meta(pid, "_op_wayback_resnapshot_done"), "")
+        self._add_comment(pid)
+        # Snapshot fields cleared → post will re-enter the queue.
+        self.assertEqual(self._meta(pid, "_op_wayback_archived_at"), "")
+        self.assertEqual(self._meta(pid, "_op_wayback_snapshot_ts"), "")
+        self.assertEqual(self._meta(pid, "_op_wayback_resnapshot_done"), "1")
+
+    def test_second_comment_is_noop(self):
+        """Once flagged, further comments don't re-trigger — caps total
+        comment-driven re-archives at one per parent."""
+        pid = self._make_imported_post(archived=True)
+        self._add_comment(pid)
+        # Manually re-archive it (simulate the sweep completing).
+        _eval(f"""
+        update_post_meta({pid}, '_op_wayback_archived_at', '2026-04-02 00:00:00');
+        update_post_meta({pid}, '_op_wayback_snapshot_ts', '20260402000000');
+        """, self.url)
+        # Adding a second comment should NOT clear the new snapshot.
+        self._add_comment(pid)
+        self.assertEqual(self._meta(pid, "_op_wayback_archived_at"),
+                         "2026-04-02 00:00:00")
+
+    def test_unarchived_post_is_skipped(self):
+        """A post without a prior snapshot has nothing to invalidate —
+        save_post will queue it through the normal path. The hook
+        should not flip resnapshot_done in that case."""
+        pid = self._make_imported_post(archived=False)
+        self._add_comment(pid)
+        self.assertEqual(self._meta(pid, "_op_wayback_resnapshot_done"), "")
+
+    def test_original_post_is_skipped(self):
+        """Posts without _source_id are 'original' — re-archive is
+        already handled by save_post on actual edits, not by this hook."""
+        pid = int(_eval(f"""
+        $pid = wp_insert_post(array(
+            'post_type'=>'post','post_status'=>'publish',
+            'post_title'=>'original','post_content'=>'<p>original</p>',
+            'meta_input'=>array(
+                '_op_wayback_archived_at'=>'2026-04-01 12:00:00',
+                '_op_wayback_snapshot_ts'=>'20260401120000',
+            ),
+        ));
+        echo (int)$pid;
+        """, self.url))
+        self.addCleanup(_eval, f"wp_delete_post({pid}, true);", self.url)
+        self._add_comment(pid)
+        # No re-archive triggered — original posts go through save_post.
+        self.assertEqual(self._meta(pid, "_op_wayback_archived_at"),
+                         "2026-04-01 12:00:00")
+        self.assertEqual(self._meta(pid, "_op_wayback_resnapshot_done"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

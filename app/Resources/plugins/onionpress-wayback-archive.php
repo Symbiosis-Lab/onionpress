@@ -84,6 +84,14 @@ define( 'OP_WB_META_RESOURCES_COUNT', '_op_wayback_resources_count' );
 define( 'OP_WB_META_OUTLINKS_COUNT',  '_op_wayback_outlinks_count' );
 define( 'OP_WB_META_LAST_ERROR_EXT',  '_op_wayback_last_error_ext' );
 define( 'OP_WB_META_LAST_ERROR_AT',   '_op_wayback_last_error_at' );
+// Set when the post has been re-archived once due to a comment being
+// added (i.e. social-importer threading folded a reply into this post).
+// Caps the comment-driven re-archive at one snapshot per post — without
+// this, every comment a thread accumulates would re-trigger SPN, which
+// is the budget waste the once-only policy was originally designed to
+// avoid. With it: a thread of 12 self-replies re-archives the parent
+// exactly once after the first reply lands.
+define( 'OP_WB_META_RESNAPSHOT_DONE',  '_op_wayback_resnapshot_done' );
 
 // wp_options keys.
 define( 'OP_WB_OPT_HOME',          'op_wayback_home_state' );
@@ -1152,6 +1160,51 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     onionpress_wayback_log( 'save_post ' . $post_id . ': cleared home/feed'
         . ( $update && ! $is_imported ? ' + post meta' : '' ) . ', scheduled immediate sweep' );
 }, 10, 3 );
+
+// ───── wp_insert_comment hook: one re-archive per post after threading ─
+// Social-importer threading folds replies into comments on parent posts.
+// The parent's rendered HTML changes (now shows the conversation), so
+// the existing SPN snapshot becomes stale — but our save_post policy
+// keeps imported posts at "archive once" to avoid the importer-fix-up
+// re-archive loop. The fix: invalidate the parent's snapshot exactly
+// once when the FIRST comment lands, then never again. A thread of 12
+// self-replies re-archives the parent one time; further comments are a
+// no-op. Original posts (no _source_id) follow the existing edit-aware
+// save_post path and don't need this hook.
+add_action( 'wp_insert_comment', function ( $comment_id, $comment ) {
+    $post_id = (int) $comment->comment_post_ID;
+    if ( ! $post_id ) return;
+    $post = get_post( $post_id );
+    if ( ! $post || $post->post_status !== 'publish' ) return;
+    if ( ! in_array( $post->post_type, array( 'post', 'page' ), true ) ) return;
+    // Only matters for imported posts. Originals get re-archived via
+    // save_post when actually edited, which doesn't fire on comment add.
+    if ( (string) get_post_meta( $post_id, '_source_id', true ) === '' ) return;
+    // Already re-snapshotted once after threading → skip.
+    if ( (string) get_post_meta( $post_id, OP_WB_META_RESNAPSHOT_DONE, true ) === '1' ) return;
+    // No prior snapshot exists yet → save_post will pick it up the
+    // normal way; no need to re-snapshot something that hasn't been
+    // captured at all.
+    if ( (string) get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ) === '' ) return;
+
+    update_post_meta( $post_id, OP_WB_META_RESNAPSHOT_DONE, '1' );
+    onionpress_wayback_post_write( $post_id, array(
+        'archived_at'     => '',
+        'snapshot_ts'     => '',
+        'job_id'          => '',
+        'submitted_at'    => '',
+        'original_url'    => '',
+        'duration_sec'    => '',
+        'resources_count' => '',
+        'outlinks_count'  => '',
+        'last_error_ext'  => '',
+        'last_error_at'   => '',
+    ) );
+    delete_option( OP_WB_OPT_BACKOFF_UNTIL );
+    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+    onionpress_wayback_log( 'wp_insert_comment ' . $comment_id
+        . ' on post ' . $post_id . ': cleared snapshot for re-archive (one-shot)' );
+}, 10, 2 );
 
 // ────────────────────────────── cron ────────────────────────────────
 
