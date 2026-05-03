@@ -60,14 +60,60 @@ def _docker_available():
     return r.returncode == 0 and "true" in r.stdout
 
 
-def _pick_site():
+_SAFE_TEST_DID    = "did:plc:testactor"
+_SAFE_TEST_HANDLE = "testuser.bsky.social"
+_TEST_SUBSITE_SLUG = "op-bluesky-test"
+
+_TOUCHED_OPTIONS = (
+    "onionpress_social_bluesky_handle",
+    "onionpress_social_bluesky_did",
+    "onionpress_social_bluesky_display_name",
+    "onionpress_social_bluesky_newest_uri",
+    "onionpress_social_bluesky_newest_owner",
+    "onionpress_social_bluesky_backfill_cursor",
+    "onionpress_social_bluesky_cursor_owner",
+    "onionpress_social_bluesky_total_posts",
+    "onionpress_social_bluesky_last_sync",
+    "onionpress_social_bluesky_last_note",
+    "onionpress_social_bluesky_daemon_lock",
+    "onionpress_social_bluesky_opts",
+    "onionpress_bluesky_threads_v1_migrated",
+    "op_test_bluesky_mock_idx",
+    "op_test_bluesky_mock_pages",
+    "op_test_bluesky_post_mocks",
+)
+
+
+def _get_or_create_test_subsite():
+    """Return the dedicated test subsite URL, creating it on first call.
+    Earlier this file used _pick_site() — fine on a CI checkout, but on
+    a real machine it picked whatever subsite happened to come first
+    and silently overwrote its DID. Same trap as the Mastodon side."""
     r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
             timeout=15)
     if r.returncode != 0 or not r.stdout.strip():
         return None
     sites = json.loads(r.stdout)
-    sub = [s for s in sites if s.get("path") != "/"]
-    return sub[0] if sub else (sites[0] if sites else None)
+    needle = "/" + _TEST_SUBSITE_SLUG + "/"
+    for s in sites:
+        if s.get("path") == needle:
+            return s["url"].rstrip("/") + "/"
+    create = _wp(
+        ["site", "create",
+         "--slug=" + _TEST_SUBSITE_SLUG,
+         "--title=Bluesky Importer Test Sandbox",
+         "--porcelain"],
+        timeout=30,
+    )
+    if create.returncode != 0:
+        return None
+    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
+            timeout=15)
+    sites = json.loads(r.stdout) if r.stdout.strip() else []
+    for s in sites:
+        if s.get("path") == needle:
+            return s["url"].rstrip("/") + "/"
+    return None
 
 
 def _eval(php, url):
@@ -75,27 +121,49 @@ def _eval(php, url):
     return r.stdout.strip()
 
 
-_SAFE_TEST_DID = "did:plc:testactor"
-
-
 def _assert_test_sandbox(url):
-    """Refuse to run if the Bluesky DID option is set to something other
-    than the sandbox DID (`did:plc:testactor`) or empty. Prevents tests
-    from clobbering a real account's state when accidentally pointed at
-    a production subsite — which is exactly how the real-account drift
-    bug happened. Also acts as forward-pressure: anyone who wants to
-    run tests against a real subsite has to manually clear the DID
-    option first, which makes the risk explicit."""
-    r = _wp(["option", "get", "onionpress_social_bluesky_did"],
-            url=url, timeout=10)
-    current = (r.stdout or "").strip()
-    if current and current != _SAFE_TEST_DID:
-        raise RuntimeError(
-            f"Refusing to run Bluesky tests against {url!r}: "
-            f"onionpress_social_bluesky_did is {current!r} (real account). "
-            "Run against a clean subsite, or clear the option first: "
-            f"wp option delete onionpress_social_bluesky_did --url={url}"
-        )
+    """Refuse to run if any of _did / _handle look real. The handle
+    check is load-bearing: _did is written by setUp before any guard
+    notices, but _handle is only set by the live save flow or a real
+    user. A non-empty, non-sandbox handle means we're on someone's blog."""
+    pairs = (
+        ("onionpress_social_bluesky_did",    _SAFE_TEST_DID),
+        ("onionpress_social_bluesky_handle", _SAFE_TEST_HANDLE),
+    )
+    for opt, sandbox_value in pairs:
+        r = _wp(["option", "get", opt], url=url, timeout=10)
+        actual = (r.stdout or "").strip()
+        if actual and actual != sandbox_value:
+            raise RuntimeError(
+                f"Refusing to run Bluesky tests against {url!r}: "
+                f"{opt} is {actual!r} (looks real, not sandbox). "
+                f"Only the dedicated test subsite "
+                f"({_TEST_SUBSITE_SLUG!r}) should be the target."
+            )
+
+
+def _clear_all_options(url):
+    """Wipe every option key the suite touches so a crashed test can't
+    leak state into the next."""
+    for opt in _TOUCHED_OPTIONS:
+        _wp(["option", "delete", opt], url=url, timeout=10)
+    _wp(["transient", "delete", "onionpress_social_bluesky_lock"],
+        url=url, timeout=10)
+
+
+def _delete_test_comments(url):
+    """Defensive sweep for orphan comments left after a test crashes
+    before its parent post is deleted."""
+    _eval("""
+    global $wpdb;
+    $ids = $wpdb->get_col(
+      "SELECT c.comment_ID FROM {$wpdb->comments} c
+       JOIN {$wpdb->commentmeta} m ON m.comment_id=c.comment_ID
+        AND m.meta_key='_source_id' AND m.meta_value LIKE 'bluesky:%'"
+    );
+    foreach ($ids as $id) { wp_delete_comment((int)$id, true); }
+    echo count($ids);
+    """, url)
 
 
 def _cleanup_test_posts(url):
@@ -162,10 +230,10 @@ class TestBlueskyBackfill(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
+        url = _get_or_create_test_subsite()
+        if url is None:
+            raise unittest.SkipTest("could not get/create test subsite")
+        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -184,6 +252,8 @@ class TestBlueskyBackfill(unittest.TestCase):
              json.dumps({"include_replies": True, "include_reposts": False}),
              "--format=json"], url=self.url, timeout=15)
         self.addCleanup(_cleanup_test_posts, self.url)
+        self.addCleanup(_delete_test_comments, self.url)
+        self.addCleanup(_clear_all_options, self.url)
 
     def _register_mock(self, pages_json):
         """Install a PHP filter that returns canned responses in order.
@@ -253,16 +323,18 @@ class TestBlueskyImportFilters(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
+        url = _get_or_create_test_subsite()
+        if url is None:
+            raise unittest.SkipTest("could not get/create test subsite")
+        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
         _wp(["option", "update", "onionpress_social_bluesky_did",
              "did:plc:testactor"], url=self.url, timeout=15)
         self.addCleanup(_cleanup_test_posts, self.url)
+        self.addCleanup(_delete_test_comments, self.url)
+        self.addCleanup(_clear_all_options, self.url)
 
     def _import(self, item, opts):
         s = json.dumps(item).replace("'", "\\'")
@@ -321,14 +393,16 @@ class TestBlueskyQuotePostRendering(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
+        url = _get_or_create_test_subsite()
+        if url is None:
+            raise unittest.SkipTest("could not get/create test subsite")
+        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
         self.addCleanup(_cleanup_test_posts, self.url)
+        self.addCleanup(_delete_test_comments, self.url)
+        self.addCleanup(_clear_all_options, self.url)
 
     def _render_embed(self, embed):
         e = json.dumps(embed).replace("'", "\\'")
@@ -408,10 +482,10 @@ class TestBlueskyHandleResolution(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
+        url = _get_or_create_test_subsite()
+        if url is None:
+            raise unittest.SkipTest("could not get/create test subsite")
+        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -451,10 +525,10 @@ class TestBlueskyDaemonLock(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
+        url = _get_or_create_test_subsite()
+        if url is None:
+            raise unittest.SkipTest("could not get/create test subsite")
+        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -496,6 +570,234 @@ class TestBlueskyDaemonLock(unittest.TestCase):
         """
         out = _eval(php, self.url)
         self.assertNotIn("deadTok", out)
+
+
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestBlueskyThreading(unittest.TestCase):
+    """Self- and external-replies fold into the parent post's comment
+    thread. External replies trigger a context fetch via getPosts so
+    the conversation reads in full instead of as a fragmentary reply."""
+
+    @classmethod
+    def setUpClass(cls):
+        url = _get_or_create_test_subsite()
+        if url is None:
+            raise unittest.SkipTest("could not get/create test subsite")
+        cls.url = url
+
+    def setUp(self):
+        _assert_test_sandbox(self.url)
+        _wp(["option", "update", "onionpress_social_bluesky_did",
+             _SAFE_TEST_DID], url=self.url, timeout=15)
+        _wp(["option", "delete", "onionpress_bluesky_threads_v1_migrated"],
+            url=self.url, timeout=15)
+        self.addCleanup(_cleanup_test_posts, self.url)
+        self.addCleanup(_delete_test_comments, self.url)
+        self.addCleanup(_clear_all_options, self.url)
+
+    def _register_post_mock(self, posts_by_uri):
+        """Install a filter that returns canned items for getPosts
+        single-URI fetches. Each value should be a feed-item-shaped
+        array `{post: PostView}` (NOT a getPosts envelope) — the
+        production wrapper unpacks it before calling the filter."""
+        by_uri_json = json.dumps(posts_by_uri).replace("'", "\\'")
+        return f"""
+        update_option('op_test_bluesky_post_mocks', '{by_uri_json}', false);
+        add_filter('onionpress_bluesky_fetch_post_mock', function($_, $uri) {{
+            $by = json_decode((string) get_option('op_test_bluesky_post_mocks', '{{}}'), true);
+            return is_array($by) && isset($by[$uri]) ? $by[$uri] : null;
+        }}, 10, 2);
+        """
+
+    def _import(self, item, opts=None, mock_setup=""):
+        if opts is None:
+            opts = {"include_replies": True, "include_reposts": False}
+        i = json.dumps(item).replace("'", "\\'")
+        o = json.dumps(opts).replace("'", "\\'")
+        return _eval(mock_setup + f"""
+        $i = json_decode('{i}', true);
+        $o = json_decode('{o}', true);
+        echo onionpress_bluesky_import_post($i, $o);
+        """, self.url)
+
+    def _post_count(self, uri):
+        return _eval(f"""
+        $ps = get_posts(array(
+            'post_type' => 'post',
+            'meta_key' => '_source_id',
+            'meta_value' => 'bluesky:' . '{uri}',
+            'post_status' => 'any',
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+        ));
+        echo count($ps);
+        """, self.url)
+
+    def _comment_post_id(self, uri):
+        return _eval(f"""
+        $cs = get_comments(array(
+            'meta_key' => '_source_id',
+            'meta_value' => 'bluesky:' . '{uri}',
+            'number' => 1,
+        ));
+        echo empty($cs) ? '0' : (int) $cs[0]->comment_post_ID;
+        """, self.url)
+
+    def _meta(self, uri, key):
+        return _eval(f"""
+        $ps = get_posts(array(
+            'post_type' => 'post',
+            'meta_key' => '_source_id',
+            'meta_value' => 'bluesky:' . '{uri}',
+            'post_status' => 'any',
+            'posts_per_page' => 1,
+            'fields' => 'ids',
+        ));
+        if (empty($ps)) {{ echo '(no post)'; return; }}
+        echo (string) get_post_meta((int)$ps[0], '{key}', true);
+        """, self.url)
+
+    def _foreign_item(self, uri, reply_parent_uri=None,
+                       author_did="did:plc:foreigner",
+                       author_handle="egonw.bsky.social"):
+        return _feed_item(uri=uri, reply_parent_uri=reply_parent_uri,
+                          author_did=author_did, author_handle=author_handle)
+
+    def test_self_reply_with_present_parent_becomes_comment(self):
+        parent_uri = _at_uri()
+        reply_uri  = _at_uri()
+        self.assertEqual(self._import(_feed_item(uri=parent_uri)), "imported")
+        self.assertEqual(
+            self._import(_feed_item(uri=reply_uri, reply_parent_uri=parent_uri)),
+            "imported",
+        )
+        self.assertEqual(self._post_count(parent_uri), "1")
+        self.assertEqual(self._post_count(reply_uri), "0")
+        self.assertNotEqual(self._comment_post_id(reply_uri), "0")
+
+    def test_self_reply_without_parent_marks_pending(self):
+        reply_uri = _at_uri()
+        self.assertEqual(
+            self._import(_feed_item(uri=reply_uri,
+                                    reply_parent_uri=_at_uri()),
+                         mock_setup=self._register_post_mock({})),
+            "imported",
+        )
+        self.assertEqual(self._meta(reply_uri, "_pending_reattach"), "1")
+
+    def test_reattach_sweep_threads_pending(self):
+        parent_uri = _at_uri()
+        reply_uri  = _at_uri()
+        self.assertEqual(
+            self._import(_feed_item(uri=reply_uri,
+                                    reply_parent_uri=parent_uri),
+                         mock_setup=self._register_post_mock({})),
+            "imported",
+        )
+        self._import(_feed_item(uri=parent_uri))
+        n = int(_eval("echo onionpress_bluesky_reattach_pending();", self.url))
+        self.assertGreaterEqual(n, 1)
+        self.assertEqual(self._post_count(reply_uri), "0")
+        self.assertNotEqual(self._comment_post_id(reply_uri), "0")
+
+    def test_external_reply_fetches_parent_as_context(self):
+        egonw_uri = "at://did:plc:foreigner/app.bsky.feed.post/abc"
+        ours_uri  = _at_uri()
+        egonw_item = self._foreign_item(egonw_uri)
+        mock = self._register_post_mock({egonw_uri: egonw_item})
+        our_reply = _feed_item(uri=ours_uri, reply_parent_uri=egonw_uri)
+        self.assertEqual(self._import(our_reply, mock_setup=mock), "imported")
+        self.assertEqual(self._meta(egonw_uri, "_is_context"), "1")
+        self.assertNotEqual(self._comment_post_id(ours_uri), "0")
+        self.assertEqual(self._post_count(ours_uri), "0")
+
+    def test_external_reply_with_self_grandparent_threads_under_us(self):
+        our_root = _at_uri()
+        egonw    = "at://did:plc:foreigner/app.bsky.feed.post/mid"
+        our_rep  = _at_uri()
+        self._import(_feed_item(uri=our_root))
+        egonw_item = self._foreign_item(egonw, reply_parent_uri=our_root)
+        mock = self._register_post_mock({egonw: egonw_item})
+        self._import(_feed_item(uri=our_rep, reply_parent_uri=egonw),
+                     mock_setup=mock)
+        egonw_post_id = self._comment_post_id(egonw)
+        self.assertNotEqual(egonw_post_id, "0")
+        self.assertEqual(self._comment_post_id(our_rep), egonw_post_id)
+
+    def test_depth_cap_stops_unbounded_chain(self):
+        uris = [f"at://did:plc:foreigner/app.bsky.feed.post/d{i}" for i in range(20)]
+        posts = {}
+        for i, u in enumerate(uris):
+            parent = uris[i - 1] if i > 0 else None
+            posts[u] = self._foreign_item(u, reply_parent_uri=parent)
+        mock = self._register_post_mock(posts)
+        _eval(mock + f"""
+        $opts = array('include_replies' => true);
+        echo onionpress_bluesky_ensure_imported_with_ancestry('{uris[-1]}', $opts);
+        """, self.url)
+        in_db = sum(int(self._post_count(u)) for u in uris)
+        self.assertLessEqual(in_db, 7,
+                             f"depth cap should bound chain — got {in_db}")
+        self.assertGreater(in_db, 0)
+
+    def test_backfill_context_threads_existing_replies(self):
+        our_root = _at_uri()
+        foreign  = "at://did:plc:foreigner/app.bsky.feed.post/back"
+        our_rep  = _at_uri()
+        self._import(_feed_item(uri=our_root))
+        legacy_pid = int(_eval(f"""
+        $pid = wp_insert_post(array(
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'post_title' => 'legacy reply',
+            'post_content' => '<p>hi</p>',
+            'meta_input' => array(
+                '_source_id'   => 'bluesky:{our_rep}',
+                '_is_reply'    => '1',
+                '_reply_to_id' => '{foreign}',
+                '_source_url'  => 'https://bsky.app/x',
+            ),
+        ));
+        echo (int) $pid;
+        """, self.url))
+        self.assertGreater(legacy_pid, 0)
+        foreign_item = self._foreign_item(foreign, reply_parent_uri=our_root)
+        mock = self._register_post_mock({foreign: foreign_item})
+        n = int(_eval(mock + "echo onionpress_bluesky_backfill_context();", self.url))
+        self.assertGreaterEqual(n, 1)
+        self.assertEqual(self._post_count(our_rep), "0")
+        self.assertNotEqual(self._comment_post_id(our_rep), "0")
+
+    def test_migration_converts_existing_reply_posts(self):
+        parent_uri = _at_uri()
+        reply_uri  = _at_uri()
+        self._import(_feed_item(uri=parent_uri))
+        legacy_pid = int(_eval(f"""
+        $pid = wp_insert_post(array(
+            'post_type' => 'post', 'post_status' => 'publish',
+            'post_title' => 't', 'post_content' => '<p>hi</p>',
+            'meta_input' => array(
+                '_source_id'   => 'bluesky:{reply_uri}',
+                '_is_reply'    => '1',
+                '_reply_to_id' => '{parent_uri}',
+                '_source_url'  => 'https://bsky.app/y',
+            ),
+        ));
+        echo (int) $pid;
+        """, self.url))
+        self.assertGreater(legacy_pid, 0)
+        n = int(_eval(
+            "echo onionpress_bluesky_migrate_replies_to_comments();",
+            self.url,
+        ))
+        self.assertEqual(n, 1)
+        self.assertEqual(self._post_count(reply_uri), "0")
+        self.assertNotEqual(self._comment_post_id(reply_uri), "0")
+        self.assertEqual(
+            _eval("echo get_option('onionpress_bluesky_threads_v1_migrated', '');",
+                  self.url),
+            "yes",
+        )
 
 
 if __name__ == "__main__":

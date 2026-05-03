@@ -64,6 +64,18 @@ const ONIONPRESS_BLUESKY_DAEMON_MAX_SEC   = 1800; // 30 min
 const ONIONPRESS_BLUESKY_DAEMON_STALE_SEC = 300;
 const ONIONPRESS_BLUESKY_DAEMON_IDLE_SEC  = 3;
 
+// Threading: replies are imported as WP comments on the parent's post.
+// Backfill walks newest→oldest (cursor-based), so a reply usually
+// arrives before its parent — those land top-level with
+// _pending_reattach=1 and an end-of-tick sweep converts them.
+// Replies to other accounts trigger a context fetch (the parent +
+// ancestor chain are pulled from the AT Protocol API and imported,
+// foreign ancestors marked _is_context=1) so the conversation reads
+// in full instead of a fragmentary reply.
+const ONIONPRESS_BLUESKY_THREADS_MIGRATED_OPT  = 'onionpress_bluesky_threads_v1_migrated';
+const ONIONPRESS_BLUESKY_CONTEXT_DEPTH_MAX     = 6;
+const ONIONPRESS_BLUESKY_CONTEXT_BATCH_PER_TICK = 10;
+
 /**
  * Owner-aware accessors for the backfill cursor and the newest-uri top
  * marker. Each value carries a DID marker noting whose feed it was
@@ -124,6 +136,12 @@ add_action( 'admin_init', function () {
     if ( ! wp_next_scheduled( ONIONPRESS_BLUESKY_CRON_HOOK )
          && get_option( ONIONPRESS_BLUESKY_DID_OPT ) ) {
         wp_schedule_event( time() + 60, 'onionpress_bluesky_5min', ONIONPRESS_BLUESKY_CRON_HOOK );
+    }
+    // One-shot migration of pre-threading reply posts into comments.
+    // Self-gates on its own option flag, so this is a no-op once done.
+    if ( get_option( ONIONPRESS_BLUESKY_THREADS_MIGRATED_OPT ) !== 'yes'
+         && get_option( ONIONPRESS_BLUESKY_DID_OPT ) ) {
+        onionpress_bluesky_migrate_replies_to_comments();
     }
 } );
 
@@ -576,6 +594,22 @@ function onionpress_bluesky_sync_one_tick( $did ) {
                 onionpress_bluesky_set_cursor_for( $did, $backfill_cursor );
             }
         }
+
+        // End-of-tick threading sweeps. Same shape as the Mastodon
+        // importer: reattach folds pending self-replies into freshly-
+        // arrived parents; backfill_context walks the AT API for any
+        // legacy reply whose parent isn't here yet. Both are capped so
+        // a single tick can't blow its budget — leftovers carry over.
+        $reattached = onionpress_bluesky_reattach_pending();
+        if ( $reattached > 0 ) {
+            $stats['reattached'] = ( $stats['reattached'] ?? 0 ) + $reattached;
+        }
+        if ( microtime( true ) < $deadline ) {
+            $context_done = onionpress_bluesky_backfill_context();
+            if ( $context_done > 0 ) {
+                $stats['context'] = ( $stats['context'] ?? 0 ) + $context_done;
+            }
+        }
     } finally {
         delete_transient( ONIONPRESS_BLUESKY_LOCK );
     }
@@ -742,7 +776,318 @@ function onionpress_bluesky_feed_item_uri( $item ) {
 /**
  * Import one feed-view item. Returns 'imported' | 'skipped' | 'errors'.
  */
-function onionpress_bluesky_import_post( $item, $opts ) {
+/**
+ * Look up a post by its `_source_id` postmeta. Returns post ID or 0.
+ */
+function onionpress_bluesky_find_post_by_source_id( $source_id ) {
+    $posts = get_posts( array(
+        'post_type'      => 'post',
+        'meta_key'       => '_source_id',
+        'meta_value'     => $source_id,
+        'post_status'    => 'any',
+        'posts_per_page' => 1,
+        'fields'         => 'ids',
+    ) );
+    return ! empty( $posts ) ? (int) $posts[0] : 0;
+}
+
+/**
+ * Look up a comment by its `_source_id` commentmeta. Used for dedup
+ * and for nesting a reply under another reply that's already been
+ * folded into a thread.
+ */
+function onionpress_bluesky_find_comment_by_source_id( $source_id ) {
+    $ids = get_comments( array(
+        'meta_key'   => '_source_id',
+        'meta_value' => $source_id,
+        'number'     => 1,
+        'fields'     => 'ids',
+    ) );
+    return ! empty( $ids ) ? (int) $ids[0] : 0;
+}
+
+/**
+ * Find the post a reply should attach to, given the source_id of the
+ * post it replies to. Returns the post ID (its own, or the post a
+ * comment-form ancestor was attached to), or 0 when the parent isn't
+ * yet imported.
+ */
+function onionpress_bluesky_find_attachable_post( $parent_source_id ) {
+    $pid = onionpress_bluesky_find_post_by_source_id( $parent_source_id );
+    if ( $pid ) return $pid;
+    $cid = onionpress_bluesky_find_comment_by_source_id( $parent_source_id );
+    if ( $cid ) {
+        $c = get_comment( $cid );
+        if ( $c ) return (int) $c->comment_post_ID;
+    }
+    return 0;
+}
+
+/**
+ * Fetch a single AT-URI from the Bluesky public AppView. Wraps the
+ * `getPosts` endpoint (plural-uris is the cheapest single-post lookup).
+ * Returns a feed-item-shaped array `{post: PostView}` so it can flow
+ * straight into import_post(), or null on failure (404, network, etc.).
+ *
+ * Test mock: `onionpress_bluesky_fetch_post_mock` filter receives
+ * (null, $uri) and may return either a feed-item array, null, or a
+ * WP_Error.
+ */
+function onionpress_bluesky_fetch_post_by_uri( $uri ) {
+    $mock = apply_filters( 'onionpress_bluesky_fetch_post_mock', null, $uri );
+    if ( $mock !== null ) {
+        if ( is_array( $mock ) ) return $mock;
+        return null;
+    }
+    if ( $uri === '' ) return null;
+    $url = 'https://' . ONIONPRESS_BLUESKY_API_HOST
+         . '/xrpc/app.bsky.feed.getPosts?uris=' . rawurlencode( $uri );
+    $r = onionpress_bluesky_api_get( $url );
+    if ( is_wp_error( $r ) ) return null;
+    if ( (int) $r['code'] !== 200 ) return null;
+    $posts = (array) ( $r['json']['posts'] ?? array() );
+    if ( empty( $posts[0] ) ) return null;
+    // import_post() expects a feed-view item with `post` wrapping a
+    // PostView. getPosts returns bare PostViews — wrap to match shape.
+    return array( 'post' => $posts[0] );
+}
+
+/**
+ * Ensure an AT-URI is in our DB, fetching it (and its ancestor chain
+ * via record.reply.parent) on demand. Returns the post ID a child
+ * reply should attach to, or 0 on failure (404, depth cap, transport).
+ *
+ * Walks at most CONTEXT_DEPTH_MAX hops up. Each hop is a single
+ * Tor-routed `getPosts` call.
+ */
+function onionpress_bluesky_ensure_imported_with_ancestry( $uri, $opts, $depth = 0 ) {
+    if ( $depth > ONIONPRESS_BLUESKY_CONTEXT_DEPTH_MAX ) return 0;
+    $source_id = 'bluesky:' . $uri;
+    $existing  = onionpress_bluesky_find_attachable_post( $source_id );
+    if ( $existing ) return $existing;
+    $item = onionpress_bluesky_fetch_post_by_uri( $uri );
+    if ( ! is_array( $item ) ) return 0;
+    // Recurse upward FIRST so the parent is in DB before we import this
+    // ancestor — that way import_post can thread it correctly in one pass.
+    $parent_uri = (string) ( $item['post']['record']['reply']['parent']['uri'] ?? '' );
+    if ( $parent_uri !== '' ) {
+        onionpress_bluesky_ensure_imported_with_ancestry( $parent_uri, $opts, $depth + 1 );
+    }
+    $our_did = (string) get_option( ONIONPRESS_BLUESKY_DID_OPT, '' );
+    $author_did = (string) ( $item['post']['author']['did'] ?? '' );
+    $is_ours = ( $our_did !== '' && $author_did === $our_did );
+    onionpress_bluesky_import_post( $item, $opts, ! $is_ours );
+    return onionpress_bluesky_find_attachable_post( $source_id );
+}
+
+/**
+ * Create a WP comment on $parent_post_id from a Bluesky feed item.
+ * Idempotent on _source_id commentmeta. If the parent reply (the URI
+ * this item replies to) is itself a comment in our DB, the new comment
+ * nests under it via comment_parent — preserving thread depth.
+ */
+function onionpress_bluesky_create_reply_comment( $item, $parent_post_id ) {
+    $uri = onionpress_bluesky_feed_item_uri( $item );
+    if ( $uri === '' ) return 'errors';
+    $source_id = 'bluesky:' . $uri;
+    if ( onionpress_bluesky_find_comment_by_source_id( $source_id ) ) {
+        return 'skipped';
+    }
+    $post = $item['post'] ?? array();
+    $record = $post['record'] ?? array();
+    $ts = strtotime( (string) ( $record['createdAt'] ?? '' ) );
+    if ( ! $ts ) return 'errors';
+    list( $content_html, ) = onionpress_bluesky_render_content( $item );
+    $author = (string) ( $post['author']['displayName'] ?? $post['author']['handle'] ?? 'me' );
+    $author_url = onionpress_bluesky_at_uri_to_web_url(
+        (string) ( $post['uri'] ?? '' ), (string) ( $post['author']['handle'] ?? '' )
+    );
+    $comment_parent = 0;
+    $reply_to_uri = (string) ( $record['reply']['parent']['uri'] ?? '' );
+    if ( $reply_to_uri !== '' ) {
+        $comment_parent = onionpress_bluesky_find_comment_by_source_id( 'bluesky:' . $reply_to_uri );
+    }
+    $gmt = gmdate( 'Y-m-d H:i:s', $ts );
+    $comment_id = wp_insert_comment( array(
+        'comment_post_ID'    => $parent_post_id,
+        'comment_author'     => $author,
+        'comment_author_url' => $author_url,
+        'comment_content'    => $content_html,
+        'comment_date'       => get_date_from_gmt( $gmt ),
+        'comment_date_gmt'   => $gmt,
+        'comment_approved'   => 1,
+        'comment_parent'     => $comment_parent,
+        'comment_type'       => 'comment',
+        'comment_meta'       => array(
+            '_source_id'  => $source_id,
+            '_source_url' => $author_url,
+            '_raw'        => wp_json_encode( $item ),
+        ),
+    ) );
+    return $comment_id ? 'imported' : 'errors';
+}
+
+/**
+ * Convert a top-level reply post into a comment on $parent_post_id.
+ * Reads from post fields + postmeta (no dependence on _raw being
+ * decodeable). Idempotent on _source_id; deletes the placeholder post
+ * on success.
+ */
+function onionpress_bluesky_convert_post_to_comment( $post_id, $parent_post_id ) {
+    $post = get_post( $post_id );
+    if ( ! $post ) return false;
+    $source_id = (string) get_post_meta( $post_id, '_source_id', true );
+    if ( $source_id === '' ) return false;
+    if ( onionpress_bluesky_find_comment_by_source_id( $source_id ) ) {
+        wp_delete_post( $post_id, true );
+        return true;
+    }
+    $reply_to_uri = (string) get_post_meta( $post_id, '_reply_to_id', true );
+    $comment_parent = 0;
+    if ( $reply_to_uri !== '' ) {
+        $comment_parent = onionpress_bluesky_find_comment_by_source_id( 'bluesky:' . $reply_to_uri );
+    }
+    $author = (string) get_option( ONIONPRESS_BLUESKY_DISPLAY_OPT, '' );
+    if ( $author === '' ) $author = (string) get_option( ONIONPRESS_BLUESKY_HANDLE_OPT, 'me' );
+    $author_url = (string) get_post_meta( $post_id, '_source_url', true );
+    $gmt = $post->post_date_gmt ?: gmdate( 'Y-m-d H:i:s' );
+    $comment_id = wp_insert_comment( array(
+        'comment_post_ID'    => $parent_post_id,
+        'comment_author'     => $author,
+        'comment_author_url' => $author_url,
+        'comment_content'    => (string) $post->post_content,
+        'comment_date'       => get_date_from_gmt( $gmt ),
+        'comment_date_gmt'   => $gmt,
+        'comment_approved'   => 1,
+        'comment_parent'     => $comment_parent,
+        'comment_type'       => 'comment',
+        'comment_meta'       => array(
+            '_source_id'  => $source_id,
+            '_source_url' => $author_url,
+        ),
+    ) );
+    if ( ! $comment_id ) return false;
+    wp_delete_post( $post_id, true );
+    return true;
+}
+
+/**
+ * Convert _pending_reattach=1 posts into comments once their parent
+ * has arrived. Run at the end of each sync tick; oldest first so a
+ * chain A→B→C ends up with B as a comment before C tries to attach.
+ */
+function onionpress_bluesky_reattach_pending( $limit = 200 ) {
+    $pending = get_posts( array(
+        'post_type'      => 'post',
+        'meta_key'       => '_pending_reattach',
+        'meta_value'     => '1',
+        'post_status'    => 'publish',
+        'posts_per_page' => (int) $limit,
+        'orderby'        => 'date',
+        'order'          => 'ASC',
+        'fields'         => 'ids',
+    ) );
+    $converted = 0;
+    foreach ( $pending as $pid ) {
+        $reply_to = (string) get_post_meta( $pid, '_reply_to_id', true );
+        if ( $reply_to === '' ) {
+            delete_post_meta( $pid, '_pending_reattach' );
+            continue;
+        }
+        $parent_pid = onionpress_bluesky_find_attachable_post( 'bluesky:' . $reply_to );
+        if ( ! $parent_pid ) continue;
+        if ( onionpress_bluesky_convert_post_to_comment( $pid, $parent_pid ) ) {
+            $converted++;
+        }
+    }
+    return $converted;
+}
+
+/**
+ * End-of-tick context backfill: take a small batch of existing
+ * _is_reply=1 posts whose parent isn't in our DB, fetch the parent
+ * (and ancestor chain) via getPosts, and re-thread the reply as a
+ * comment. Capped per call because each ancestor walk is Tor-bound.
+ */
+function onionpress_bluesky_backfill_context( $limit = null ) {
+    if ( $limit === null ) $limit = ONIONPRESS_BLUESKY_CONTEXT_BATCH_PER_TICK;
+    global $wpdb;
+    $candidates = $wpdb->get_results( $wpdb->prepare(
+        "SELECT p.ID, m2.meta_value AS reply_to_id
+         FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} m1 ON m1.post_id=p.ID AND m1.meta_key='_source_id'
+         JOIN {$wpdb->postmeta} m2 ON m2.post_id=p.ID AND m2.meta_key='_reply_to_id'
+         JOIN {$wpdb->postmeta} m4 ON m4.post_id=p.ID AND m4.meta_key='_is_reply' AND m4.meta_value='1'
+         WHERE m1.meta_value LIKE 'bluesky:%' AND m2.meta_value <> ''
+           AND p.post_status='publish'
+           AND NOT EXISTS (
+             SELECT 1 FROM {$wpdb->postmeta} pm
+             WHERE pm.meta_key='_source_id'
+               AND pm.meta_value = CONCAT('bluesky:', m2.meta_value)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM {$wpdb->commentmeta} cm
+             WHERE cm.meta_key='_source_id'
+               AND cm.meta_value = CONCAT('bluesky:', m2.meta_value)
+           )
+         ORDER BY p.post_date DESC
+         LIMIT %d",
+        (int) $limit
+    ) );
+    if ( empty( $candidates ) ) return 0;
+    $opts = (array) get_option( ONIONPRESS_BLUESKY_OPTS_OPT, array() );
+    $threaded = 0;
+    foreach ( $candidates as $c ) {
+        $parent_pid = onionpress_bluesky_ensure_imported_with_ancestry(
+            (string) $c->reply_to_id, $opts, 1
+        );
+        if ( ! $parent_pid ) continue;
+        if ( onionpress_bluesky_convert_post_to_comment( (int) $c->ID, $parent_pid ) ) {
+            $threaded++;
+        }
+    }
+    return $threaded;
+}
+
+/**
+ * One-shot migration for installs that imported reply posts before
+ * threading was wired up. Finds existing posts with _is_reply=1 whose
+ * _reply_to_id matches a known _source_id, converts them to comments
+ * on that parent, and deletes the now-redundant top-level post.
+ *
+ * Gated by an option flag so it only runs once per install.
+ */
+function onionpress_bluesky_migrate_replies_to_comments() {
+    if ( get_option( ONIONPRESS_BLUESKY_THREADS_MIGRATED_OPT ) === 'yes' ) {
+        return 0;
+    }
+    if ( get_option( ONIONPRESS_BLUESKY_DID_OPT ) === false
+         || (string) get_option( ONIONPRESS_BLUESKY_DID_OPT, '' ) === '' ) {
+        return 0;
+    }
+    global $wpdb;
+    $candidates = $wpdb->get_results(
+        "SELECT p.ID, m2.meta_value AS reply_to_id
+         FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} m1 ON m1.post_id=p.ID AND m1.meta_key='_source_id'
+         JOIN {$wpdb->postmeta} m2 ON m2.post_id=p.ID AND m2.meta_key='_reply_to_id'
+         JOIN {$wpdb->postmeta} m4 ON m4.post_id=p.ID AND m4.meta_key='_is_reply' AND m4.meta_value='1'
+         WHERE m1.meta_value LIKE 'bluesky:%' AND m2.meta_value <> ''
+         ORDER BY p.post_date ASC"
+    );
+    $converted = 0;
+    foreach ( $candidates as $c ) {
+        $parent_pid = onionpress_bluesky_find_attachable_post( 'bluesky:' . $c->reply_to_id );
+        if ( ! $parent_pid ) continue;
+        if ( onionpress_bluesky_convert_post_to_comment( (int) $c->ID, $parent_pid ) ) {
+            $converted++;
+        }
+    }
+    update_option( ONIONPRESS_BLUESKY_THREADS_MIGRATED_OPT, 'yes' );
+    return $converted;
+}
+
+function onionpress_bluesky_import_post( $item, $opts, $as_context = false ) {
     $uri = onionpress_bluesky_feed_item_uri( $item );
     if ( $uri === '' ) return 'errors';
 
@@ -777,6 +1122,28 @@ function onionpress_bluesky_import_post( $item, $opts ) {
         return 'skipped';
     }
 
+    // Any reply (self OR to another account) → fold into the parent's
+    // comment thread so the conversation reads whole. For self-replies
+    // the parent comes from our own feed; for replies-to-others we fetch
+    // the parent (and its ancestor chain) via getPosts so the
+    // conversation hangs off whatever root we can find. Failed fetch →
+    // top-level + _pending_reattach=1, picked up by the end-of-tick
+    // sweep if the parent ever shows up.
+    $pending_reattach = false;
+    if ( $in_reply && ! $is_repost ) {
+        $reply_to_source = 'bluesky:' . $parent_uri;
+        $parent_pid = onionpress_bluesky_find_attachable_post( $reply_to_source );
+        if ( ! $parent_pid ) {
+            $parent_pid = onionpress_bluesky_ensure_imported_with_ancestry(
+                $parent_uri, $opts, 1
+            );
+        }
+        if ( $parent_pid ) {
+            return onionpress_bluesky_create_reply_comment( $item, $parent_pid );
+        }
+        $pending_reattach = true;
+    }
+
     // Timestamp: prefer record.createdAt (author's stated time). Reposts
     // use the reason.indexedAt so the post appears in timeline order.
     $ts_src = $is_repost
@@ -802,13 +1169,15 @@ function onionpress_bluesky_import_post( $item, $opts ) {
         'post_date_gmt' => $post_date_gmt,
         'post_date'     => get_date_from_gmt( $post_date_gmt ),
         'meta_input'    => array(
-            '_source_id'      => $source_id,
-            '_source_url'     => $source_url,
-            '_is_repost'      => $is_repost ? '1' : '0',
-            '_is_reply'       => $in_reply  ? '1' : '0',
-            '_reply_to_id'    => $in_reply  ? $parent_uri : '',
-            '_thread_root_id' => $is_self_reply ? '' : (string) ( $post['uri'] ?? '' ),
-            '_raw'            => wp_json_encode( $item ),
+            '_source_id'        => $source_id,
+            '_source_url'       => $source_url,
+            '_is_repost'        => $is_repost ? '1' : '0',
+            '_is_reply'         => $in_reply  ? '1' : '0',
+            '_reply_to_id'      => $in_reply  ? $parent_uri : '',
+            '_thread_root_id'   => $is_self_reply ? '' : (string) ( $post['uri'] ?? '' ),
+            '_pending_reattach' => $pending_reattach ? '1' : '0',
+            '_is_context'       => $as_context ? '1' : '0',
+            '_raw'              => wp_json_encode( $item ),
         ),
     ), true );
 
