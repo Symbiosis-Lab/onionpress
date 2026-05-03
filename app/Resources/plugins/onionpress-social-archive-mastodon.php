@@ -67,6 +67,14 @@ const ONIONPRESS_MASTODON_DAEMON_STALE_SEC = 300;  // heartbeat older than this 
 const ONIONPRESS_MASTODON_DAEMON_IDLE_SEC  = 3;    // politeness pause between ticks (API rate-limit hygiene)
 const ONIONPRESS_MASTODON_HTTP_TIMEOUT    = 45;
 
+// Self-reply threading: replies to your own toots are imported as WP
+// comments on the parent's post (so a thread reads as post + comments,
+// not a flood of fragmentary top-level posts). Backfill walks
+// newest→oldest, so a reply usually arrives before its parent — those
+// land as top-level posts marked _pending_reattach, and a sweep at the
+// end of each tick converts them once the parent shows up.
+const ONIONPRESS_MASTODON_THREADS_MIGRATED_OPT = 'onionpress_mastodon_threads_v1_migrated';
+
 add_action( 'admin_menu', function () {
     if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
         return;
@@ -89,6 +97,13 @@ add_action( 'admin_init', function () {
     if ( ! wp_next_scheduled( ONIONPRESS_MASTODON_CRON_HOOK )
          && get_option( ONIONPRESS_MASTODON_ACCT_ID_OPT ) ) {
         wp_schedule_event( time() + 60, 'onionpress_mastodon_5min', ONIONPRESS_MASTODON_CRON_HOOK );
+    }
+    // One-shot conversion of self-reply posts that predate threading.
+    // The function self-gates on its own option flag, so this is a
+    // no-op after the first successful run.
+    if ( get_option( ONIONPRESS_MASTODON_THREADS_MIGRATED_OPT ) !== 'yes'
+         && get_option( ONIONPRESS_MASTODON_ACCT_ID_OPT ) ) {
+        onionpress_mastodon_migrate_self_replies_to_comments();
     }
 } );
 
@@ -138,6 +153,24 @@ function onionpress_mastodon_clear_cursors() {
     delete_option( ONIONPRESS_MASTODON_OLDEST_OWNER_OPT );
     delete_option( ONIONPRESS_MASTODON_NEWEST_OPT );
     delete_option( ONIONPRESS_MASTODON_NEWEST_OWNER_OPT );
+}
+
+/**
+ * Extract the server portion ("user@server") from a stored handle, lower-cased.
+ * Returns '' if the handle is empty or unparseable. Used to detect drift between
+ * the user-visible handle and the routing options (_server / _account_id) — a
+ * symptom of test pollution or an interrupted save flow.
+ */
+function onionpress_mastodon_handle_server( $handle ) {
+    $handle = trim( (string) $handle );
+    if ( $handle === '' ) {
+        return '';
+    }
+    $parts = explode( '@', ltrim( $handle, '@' ), 2 );
+    if ( count( $parts ) !== 2 ) {
+        return '';
+    }
+    return strtolower( trim( $parts[1] ) );
 }
 
 function onionpress_mastodon_import_page() {
@@ -231,7 +264,26 @@ function onionpress_mastodon_import_page() {
             </table>
         </form>
 
-        <?php if ( $account_id ) :
+        <?php
+        // Routing-drift warning: the displayed handle parses to a different
+        // server than the one we'd actually poll. Symptoms include test
+        // pollution writing _server/_account_id without touching _handle, or
+        // an interrupted save where the form half-completed. Either way the
+        // Sync button would silently poll the wrong host, so block it visibly.
+        $handle_server = onionpress_mastodon_handle_server( $handle );
+        $routing_drift = ( $handle !== '' && $server !== '' && $handle_server !== '' && $handle_server !== $server );
+        if ( $routing_drift ) : ?>
+            <div class="notice notice-error">
+                <p><strong>Stored server doesn't match the address shown above.</strong>
+                    Address parses to <code><?php echo esc_html( $handle_server ); ?></code>
+                    but routing is pinned to <code><?php echo esc_html( $server ); ?></code>
+                    (account id <code><?php echo esc_html( $account_id ); ?></code>).
+                    Re-enter the address and click <strong>Save</strong> to re-resolve the account.
+                    Until then, <strong>Sync now</strong> will fetch nothing.</p>
+            </div>
+        <?php endif; ?>
+
+        <?php if ( $account_id && ! $routing_drift ) :
             // Drift warning: backfill claims done but imported count
             // is far below what the server said existed. Catches test
             // pollution and interrupted walks. 50% threshold leaves
@@ -613,6 +665,17 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
                 // walking until we see a truly empty page.
             }
         }
+
+        // End-of-tick: convert pending self-reply posts into comments
+        // on parents that have since been imported. The backward backfill
+        // walks newest→oldest, so a self-reply typically arrives before
+        // its parent and is held as a top-level post until this sweep
+        // catches up. Capped per tick so a single call can't blow the
+        // wall-clock budget — leftovers carry to the next tick.
+        $reattached = onionpress_mastodon_reattach_pending();
+        if ( $reattached > 0 ) {
+            $stats['reattached'] = ( $stats['reattached'] ?? 0 ) + $reattached;
+        }
     } finally {
         delete_transient( ONIONPRESS_MASTODON_LOCK );
     }
@@ -630,10 +693,11 @@ function onionpress_mastodon_sync_one_tick( $server, $account_id ) {
     $done = ( onionpress_mastodon_get_oldest_for( $account_id ) === 'done' );
     return array(
         'stats'  => array(
-            'imported' => intval( $stats['imported'] ?? 0 ),
-            'skipped'  => intval( $stats['skipped']  ?? 0 ),
-            'errors'   => intval( $stats['errors']   ?? 0 ),
-            'pages'    => intval( $stats['pages']    ?? 0 ),
+            'imported'   => intval( $stats['imported']   ?? 0 ),
+            'skipped'    => intval( $stats['skipped']    ?? 0 ),
+            'errors'     => intval( $stats['errors']     ?? 0 ),
+            'pages'      => intval( $stats['pages']      ?? 0 ),
+            'reattached' => intval( $stats['reattached'] ?? 0 ),
         ),
         'errors' => $errors,
         'note'   => $note,
@@ -742,13 +806,293 @@ function onionpress_mastodon_fetch_file( $url, $dest_path ) {
 }
 
 /**
+ * Look up a post by its `_source_id` postmeta. Returns post ID or 0.
+ * Used to find the parent post when threading a self-reply as a comment.
+ */
+function onionpress_mastodon_find_post_by_source_id( $source_id ) {
+    $posts = get_posts( array(
+        'post_type'      => 'post',
+        'meta_key'       => '_source_id',
+        'meta_value'     => $source_id,
+        'post_status'    => 'any',
+        'posts_per_page' => 1,
+        'fields'         => 'ids',
+    ) );
+    return ! empty( $posts ) ? (int) $posts[0] : 0;
+}
+
+/**
+ * Look up a comment by its `_source_id` commentmeta. Returns comment ID or 0.
+ * Used both for dedup (re-import same self-reply → no second comment) and
+ * for nesting (a self-reply whose parent is itself a self-reply gets its
+ * comment_parent set to the parent comment).
+ */
+function onionpress_mastodon_find_comment_by_source_id( $source_id ) {
+    $ids = get_comments( array(
+        'meta_key'   => '_source_id',
+        'meta_value' => $source_id,
+        'number'     => 1,
+        'fields'     => 'ids',
+    ) );
+    return ! empty( $ids ) ? (int) $ids[0] : 0;
+}
+
+/**
+ * Find the post a self-reply should attach to, given the source_id of
+ * the toot it replies to. The parent might be:
+ *   - a top-level post (the typical case: thread root) → return its ID, or
+ *   - a comment that we converted earlier in the same thread → walk up
+ *     to the comment's post and return that.
+ * Returns 0 when neither exists yet (parent not yet imported).
+ */
+function onionpress_mastodon_find_attachable_post( $parent_source_id ) {
+    $pid = onionpress_mastodon_find_post_by_source_id( $parent_source_id );
+    if ( $pid ) return $pid;
+    $cid = onionpress_mastodon_find_comment_by_source_id( $parent_source_id );
+    if ( $cid ) {
+        $c = get_comment( $cid );
+        if ( $c ) return (int) $c->comment_post_ID;
+    }
+    return 0;
+}
+
+/**
+ * Import a self-reply toot as a WP comment on the parent post. Idempotent
+ * by `_source_id` commentmeta. If the toot it replies to was itself a
+ * self-reply (already imported as a comment), the new comment is nested
+ * under that one via comment_parent so threading survives.
+ */
+function onionpress_mastodon_create_self_reply_comment( $status, $parent_post_id ) {
+    $status_id = isset( $status['id'] ) ? (string) $status['id'] : '';
+    if ( $status_id === '' ) return 'errors';
+    $source_id = 'mastodon:' . $status_id;
+
+    if ( onionpress_mastodon_find_comment_by_source_id( $source_id ) ) {
+        return 'skipped';
+    }
+
+    $ts = strtotime( $status['created_at'] ?? '' );
+    if ( ! $ts ) return 'errors';
+
+    list( $content_html, ) = onionpress_mastodon_render_content( $status );
+
+    $author = (string) ( $status['account']['display_name']
+                         ?? $status['account']['username']
+                         ?? 'me' );
+    $author_url = (string) ( $status['url'] ?? '' );
+
+    // Nest under the parent comment if the toot we're replying to was
+    // also a self-reply already converted. Top-level if the parent is the
+    // post itself (root of the thread).
+    $comment_parent = 0;
+    $reply_to_id = (string) ( $status['in_reply_to_id'] ?? '' );
+    if ( $reply_to_id !== '' ) {
+        $comment_parent = onionpress_mastodon_find_comment_by_source_id( 'mastodon:' . $reply_to_id );
+    }
+
+    $gmt = gmdate( 'Y-m-d H:i:s', $ts );
+    $comment_id = wp_insert_comment( array(
+        'comment_post_ID'    => $parent_post_id,
+        'comment_author'     => $author,
+        'comment_author_url' => $author_url,
+        'comment_content'    => $content_html,
+        'comment_date'       => get_date_from_gmt( $gmt ),
+        'comment_date_gmt'   => $gmt,
+        'comment_approved'   => 1,
+        'comment_parent'     => $comment_parent,
+        'comment_type'       => 'comment',
+        'comment_meta'       => array(
+            '_source_id'  => $source_id,
+            '_source_url' => $author_url,
+            '_raw'        => wp_json_encode( $status ),
+        ),
+    ) );
+
+    return $comment_id ? 'imported' : 'errors';
+}
+
+/**
+ * Convert any top-level posts marked `_pending_reattach=1` whose parent
+ * has since been imported into comments on that parent. Run at the end
+ * of each sync tick so within a single backward backfill walk, posts
+ * created earlier in the tick get folded into newly-arrived parents.
+ *
+ * Capped per call so a tick that crosses many threads can't blow its
+ * wall-clock budget here — leftovers get picked up the next tick.
+ *
+ * Returns the number of posts converted.
+ */
+function onionpress_mastodon_reattach_pending( $limit = 200 ) {
+    // Process oldest pending first so that, in a chain A→B→C all imported
+    // pending in reverse order, B converts before C — at which point C's
+    // comment-aware lookup can resolve B (now a comment) and chain in.
+    $pending = get_posts( array(
+        'post_type'      => 'post',
+        'meta_key'       => '_pending_reattach',
+        'meta_value'     => '1',
+        'post_status'    => 'publish',
+        'posts_per_page' => (int) $limit,
+        'orderby'        => 'date',
+        'order'          => 'ASC',
+        'fields'         => 'ids',
+    ) );
+    $converted = 0;
+    foreach ( $pending as $pid ) {
+        $reply_to = (string) get_post_meta( $pid, '_reply_to_id', true );
+        if ( $reply_to === '' ) {
+            // Marked pending without a reply target — clear the flag so
+            // we don't re-scan this post forever.
+            delete_post_meta( $pid, '_pending_reattach' );
+            continue;
+        }
+        $parent_pid = onionpress_mastodon_find_attachable_post( 'mastodon:' . $reply_to );
+        if ( ! $parent_pid ) {
+            continue; // parent still hasn't been imported; try next tick
+        }
+        $raw = (string) get_post_meta( $pid, '_raw', true );
+        $status = json_decode( $raw, true );
+        if ( ! is_array( $status ) ) {
+            // No raw payload to reconstruct the comment from — drop the
+            // flag and leave the post as-is rather than losing data.
+            delete_post_meta( $pid, '_pending_reattach' );
+            continue;
+        }
+        $r = onionpress_mastodon_create_self_reply_comment( $status, $parent_pid );
+        if ( $r === 'imported' || $r === 'skipped' ) {
+            wp_delete_post( $pid, true );
+            $converted++;
+        }
+    }
+    return $converted;
+}
+
+/**
+ * Convert an existing top-level post into a comment on $parent_post_id.
+ * Reads the post's own fields + postmeta (NOT the `_raw` Mastodon JSON,
+ * which on older installs was stored with broken escaping and can't be
+ * decoded). Idempotent on `_source_id` commentmeta. On success the
+ * placeholder post is force-deleted.
+ *
+ * Returns true on conversion (or skipped-as-already-converted), false
+ * on failure to insert.
+ */
+function onionpress_mastodon_convert_post_to_comment( $post_id, $parent_post_id ) {
+    $post = get_post( $post_id );
+    if ( ! $post ) return false;
+    $source_id = (string) get_post_meta( $post_id, '_source_id', true );
+    if ( $source_id === '' ) return false;
+
+    if ( onionpress_mastodon_find_comment_by_source_id( $source_id ) ) {
+        // Already converted in a prior run — drop the placeholder.
+        wp_delete_post( $post_id, true );
+        return true;
+    }
+
+    // Nest under the parent comment if the toot we're replying to was
+    // also a self-reply already converted in this same migration pass.
+    $reply_to_id = (string) get_post_meta( $post_id, '_reply_to_id', true );
+    $comment_parent = 0;
+    if ( $reply_to_id !== '' ) {
+        $comment_parent = onionpress_mastodon_find_comment_by_source_id( 'mastodon:' . $reply_to_id );
+    }
+
+    $author = (string) get_option( ONIONPRESS_MASTODON_USER_OPT, '' );
+    if ( $author === '' ) $author = 'me';
+    $author_url = (string) get_post_meta( $post_id, '_source_url', true );
+
+    $gmt = $post->post_date_gmt ?: gmdate( 'Y-m-d H:i:s' );
+    $comment_id = wp_insert_comment( array(
+        'comment_post_ID'    => $parent_post_id,
+        'comment_author'     => $author,
+        'comment_author_url' => $author_url,
+        'comment_content'    => (string) $post->post_content,
+        'comment_date'       => get_date_from_gmt( $gmt ),
+        'comment_date_gmt'   => $gmt,
+        'comment_approved'   => 1,
+        'comment_parent'     => $comment_parent,
+        'comment_type'       => 'comment',
+        'comment_meta'       => array(
+            '_source_id'  => $source_id,
+            '_source_url' => $author_url,
+        ),
+    ) );
+    if ( ! $comment_id ) return false;
+
+    wp_delete_post( $post_id, true );
+    return true;
+}
+
+/**
+ * One-time migration for installs that imported self-reply toots as
+ * top-level posts before threading was wired up. Finds existing posts
+ * with `_is_reply=1` whose `_reply_to_id` matches a known `_source_id`
+ * of another mastodon post, converts them to comments on that parent,
+ * and deletes the now-redundant top-level post.
+ *
+ * Gated by an option flag so it only runs once per install. Safe to
+ * call repeatedly — the flag check short-circuits.
+ *
+ * Returns the number of posts converted.
+ */
+function onionpress_mastodon_migrate_self_replies_to_comments() {
+    if ( get_option( ONIONPRESS_MASTODON_THREADS_MIGRATED_OPT ) === 'yes' ) {
+        return 0;
+    }
+    $our_id = (string) get_option( ONIONPRESS_MASTODON_ACCT_ID_OPT, '' );
+    if ( $our_id === '' ) {
+        // Can't classify self-replies without our own account id.
+        // Don't set the flag — try again later when the account is set.
+        return 0;
+    }
+    global $wpdb;
+    $candidates = $wpdb->get_results(
+        "SELECT p.ID, m1.meta_value AS source_id, m2.meta_value AS reply_to_id, m3.meta_value AS raw
+         FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} m1 ON m1.post_id=p.ID AND m1.meta_key='_source_id'
+         JOIN {$wpdb->postmeta} m2 ON m2.post_id=p.ID AND m2.meta_key='_reply_to_id'
+         LEFT JOIN {$wpdb->postmeta} m3 ON m3.post_id=p.ID AND m3.meta_key='_raw'
+         JOIN {$wpdb->postmeta} m4 ON m4.post_id=p.ID AND m4.meta_key='_is_reply' AND m4.meta_value='1'
+         WHERE m1.meta_value LIKE 'mastodon:%' AND m2.meta_value <> ''
+         ORDER BY p.post_date ASC"
+    );
+    $converted = 0;
+    foreach ( $candidates as $c ) {
+        // Self-reply confirmation: prefer an explicit account_id from
+        // _raw if it decodes (newer imports). Older imports stored _raw
+        // with broken HTML escaping inside the content field — those
+        // fail json_decode and we fall back to "parent is in our DB"
+        // as proof of self-reply, since the importer only ever pulls
+        // our own account's statuses.
+        $status = $c->raw ? json_decode( $c->raw, true ) : null;
+        if ( is_array( $status ) ) {
+            $reply_to_acct = (string) ( $status['in_reply_to_account_id'] ?? '' );
+            if ( $reply_to_acct !== '' && $reply_to_acct !== $our_id ) {
+                continue; // explicit evidence: not a self-reply
+            }
+        }
+        // Comment-aware lookup so chains migrate in one pass: an earlier
+        // iteration may have converted this candidate's parent into a
+        // comment, in which case we attach to the comment's post.
+        $parent_pid = onionpress_mastodon_find_attachable_post( 'mastodon:' . $c->reply_to_id );
+        if ( ! $parent_pid ) continue;
+        if ( onionpress_mastodon_convert_post_to_comment( (int) $c->ID, $parent_pid ) ) {
+            $converted++;
+        }
+    }
+    update_option( ONIONPRESS_MASTODON_THREADS_MIGRATED_OPT, 'yes' );
+    return $converted;
+}
+
+/**
  * Import one Mastodon status object. Returns 'imported' | 'skipped' |
  * 'errors' for the caller's tally.
  *
  * Mastodon's `reblog` field holds the boosted status; when it's set,
  * the outer status is a boost shell with no original content. Replies
  * are detected by `in_reply_to_id`; self-replies (to the same account)
- * form threads and are always imported.
+ * form threads — they're folded into the parent post's comments when
+ * the parent is already imported, otherwise they land as a top-level
+ * post flagged _pending_reattach for the end-of-tick sweep to convert.
  */
 function onionpress_mastodon_import_status( $status, $opts ) {
     $status_id = isset( $status['id'] ) ? (string) $status['id'] : '';
@@ -778,6 +1122,23 @@ function onionpress_mastodon_import_status( $status, $opts ) {
         return 'skipped';
     }
 
+    // Self-reply with parent already imported → fold into the parent's
+    // comment thread instead of creating a fragmentary top-level post.
+    // If the parent isn't here yet (typical during backward backfill,
+    // since replies are newer than what they reply to), fall through and
+    // create as a top-level post flagged _pending_reattach=1; the
+    // end-of-tick sweep converts it once the parent shows up.
+    $pending_reattach = false;
+    if ( $is_self_reply ) {
+        $parent_pid = onionpress_mastodon_find_attachable_post(
+            'mastodon:' . (string) $status['in_reply_to_id']
+        );
+        if ( $parent_pid ) {
+            return onionpress_mastodon_create_self_reply_comment( $status, $parent_pid );
+        }
+        $pending_reattach = true;
+    }
+
     $ts = strtotime( $status['created_at'] ?? '' );
     if ( ! $ts ) return 'errors';
 
@@ -803,13 +1164,14 @@ function onionpress_mastodon_import_status( $status, $opts ) {
         'post_date_gmt' => $post_date_gmt,
         'post_date'     => get_date_from_gmt( $post_date_gmt ),
         'meta_input'    => array(
-            '_source_id'      => $source_id,
-            '_source_url'     => $source_url,
-            '_is_repost'      => $is_boost  ? '1' : '0',
-            '_is_reply'       => $in_reply  ? '1' : '0',
-            '_reply_to_id'    => $in_reply  ? (string) $status['in_reply_to_id'] : '',
-            '_thread_root_id' => $is_self_reply ? '' : $status_id,
-            '_raw'            => wp_json_encode( $status ),
+            '_source_id'        => $source_id,
+            '_source_url'       => $source_url,
+            '_is_repost'        => $is_boost  ? '1' : '0',
+            '_is_reply'         => $in_reply  ? '1' : '0',
+            '_reply_to_id'      => $in_reply  ? (string) $status['in_reply_to_id'] : '',
+            '_thread_root_id'   => $is_self_reply ? '' : $status_id,
+            '_pending_reattach' => $pending_reattach ? '1' : '0',
+            '_raw'              => wp_json_encode( $status ),
         ),
     ), true );
 

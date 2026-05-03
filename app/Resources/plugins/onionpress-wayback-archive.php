@@ -1401,9 +1401,22 @@ function onionpress_wayback_admin_page() {
                 <tr>
                     <th>Next scheduled cron</th>
                     <td>
-                        <?php if ( $next_cron ) : ?>
-                            <?php echo esc_html( human_time_diff( time(), $next_cron ) ); ?>
-                            (<?php echo esc_html( date( 'H:i:s', $next_cron ) ); ?>)
+                        <?php if ( $next_cron ) :
+                            // human_time_diff() is direction-agnostic, so an
+                            // overdue event reads identically to a future one
+                            // — confusing when the site has had no traffic
+                            // for a while (WP-Cron only fires on web hits).
+                            // Disambiguate explicitly.
+                            $diff_label = human_time_diff( time(), $next_cron );
+                            $is_overdue = ( $next_cron < time() );
+                            ?>
+                            <?php if ( $is_overdue ) : ?>
+                                <strong>Overdue</strong> by <?php echo esc_html( $diff_label ); ?>
+                                <small style="color:#666;">(scheduled for <?php echo esc_html( date( 'Y-m-d H:i:s', $next_cron ) ); ?>; will fire on the next page load — WP-Cron requires HTTP traffic to tick)</small>
+                            <?php else : ?>
+                                in <?php echo esc_html( $diff_label ); ?>
+                                (<?php echo esc_html( date( 'H:i:s', $next_cron ) ); ?>)
+                            <?php endif; ?>
                         <?php else : ?>
                             <em>Not scheduled — will be re-registered on next page load.</em>
                         <?php endif; ?>
