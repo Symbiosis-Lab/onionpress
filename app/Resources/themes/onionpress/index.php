@@ -18,6 +18,66 @@
             <?php if (get_the_content() && str_word_count(get_the_content()) > str_word_count(get_the_excerpt())) : ?>
                 <a class="read-more" href="<?php the_permalink(); ?>">Read more &rarr;</a>
             <?php endif; ?>
+            <?php
+            // Inline thread preview: show the first couple of replies
+            // (top-level comments only, oldest-first — how the
+            // conversation actually unfolded) so the archive reads like
+            // a timeline instead of disconnected post stubs. Nested
+            // replies and anything past the cap stay behind the
+            // "view full thread" link.
+            $thread_top = get_comments(array(
+                'post_id' => get_the_ID(),
+                'parent'  => 0,
+                'status'  => 'approve',
+                'orderby' => 'comment_date_gmt',
+                'order'   => 'ASC',
+                'number'  => 2,
+            ));
+            $total_comments = (int) get_comments_number();
+            if (!empty($thread_top)) :
+                ?>
+                <div class="post-thread-preview" aria-label="Thread replies">
+                    <?php foreach ($thread_top as $c) :
+                        $author     = $c->comment_author ?: 'someone';
+                        $author_url = (string) $c->comment_author_url;
+                        $body       = wp_trim_words(
+                            wp_strip_all_tags($c->comment_content),
+                            45, '…'
+                        );
+                        ?>
+                        <div class="post-thread-reply">
+                            <div class="post-thread-reply-meta">
+                                <?php if ($author_url) : ?>
+                                    <a class="post-thread-reply-author"
+                                       href="<?php echo esc_url($author_url); ?>"
+                                       rel="nofollow noopener"><?php echo esc_html($author); ?></a>
+                                <?php else : ?>
+                                    <span class="post-thread-reply-author"><?php echo esc_html($author); ?></span>
+                                <?php endif; ?>
+                                <span class="post-thread-reply-date">
+                                    <?php echo esc_html(human_time_diff(strtotime($c->comment_date_gmt))); ?> ago
+                                </span>
+                            </div>
+                            <div class="post-thread-reply-body"><?php echo esc_html($body); ?></div>
+                        </div>
+                    <?php endforeach;
+                    $shown = count($thread_top);
+                    if ($total_comments > $shown) :
+                        $more = $total_comments - $shown;
+                        $label = sprintf(
+                            _n('view full thread (%s more reply)',
+                               'view full thread (%s more replies)', $more, 'onionpress'),
+                            number_format_i18n($more)
+                        );
+                        ?>
+                        <a class="post-thread-more"
+                           href="<?php echo esc_url(get_permalink() . '#comments'); ?>"><?php echo esc_html($label); ?> &rarr;</a>
+                    <?php elseif ($total_comments > 0) : ?>
+                        <a class="post-thread-more"
+                           href="<?php echo esc_url(get_permalink() . '#comments'); ?>">view full thread &rarr;</a>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
         </article>
     <?php endwhile; ?>
 

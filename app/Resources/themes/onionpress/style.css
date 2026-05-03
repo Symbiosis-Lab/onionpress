@@ -298,6 +298,59 @@ a.header-avatar-add:hover {
     color: #5b21b6;
 }
 
+/* === Inline thread preview (archive only) === */
+/* Hangs off each post in the archive listing when self/external replies
+ * have been threaded as comments. Visually nested with a left accent
+ * bar so the conversation reads as "post → replies" without forcing
+ * the reader to click through. */
+.post-thread-preview {
+    margin: 14px 0 0 8px;
+    padding: 0 0 0 14px;
+    border-left: 3px solid #ede9fe;
+}
+
+.post-thread-reply {
+    margin: 10px 0;
+    font-size: 14px;
+    color: #2a2a2a;
+}
+
+.post-thread-reply-meta {
+    font-size: 12px;
+    color: #666;
+    margin-bottom: 2px;
+}
+
+.post-thread-reply-author {
+    color: #5b21b6;
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.post-thread-reply-author:hover {
+    text-decoration: underline;
+}
+
+.post-thread-reply-date {
+    margin-left: 6px;
+    color: #888;
+}
+
+.post-thread-reply-body {
+    line-height: 1.45;
+}
+
+.post-thread-more {
+    display: inline-block;
+    margin-top: 6px;
+    font-size: 13px;
+    color: #7c3aed;
+}
+
+.post-thread-more:hover {
+    color: #5b21b6;
+}
+
 /* === Single Post === */
 .single .post {
     padding: 40px;
