@@ -309,14 +309,14 @@ class SetupProgressWindow(AppKit.NSObject):
         ))
         eye_w = 36
         pass_frame = NSMakeRect(field_x, y - 2, field_w - eye_w - 6, 24)
-        # Visible field (shown by default)
+        # Visible field (hidden by default; shown when user clicks eye)
         self._pass_field = _input_field(pass_frame, placeholder="Choose a password")
+        self._pass_field.setHidden_(True)
         self.welcome_view.addSubview_(self._pass_field)
-        # Secure field (hidden by default)
+        # Secure field (shown by default — dots)
         self._pass_field_secure = _input_field(pass_frame, placeholder="Choose a password", secure=True)
-        self._pass_field_secure.setHidden_(True)
         self.welcome_view.addSubview_(self._pass_field_secure)
-        self._pass_visible = True
+        self._pass_visible = False
         # Eye toggle button
         eye_btn = NSButton.alloc().initWithFrame_(
             NSMakeRect(field_x + field_w - eye_w, y - 2, eye_w, 24)
@@ -426,7 +426,7 @@ class SetupProgressWindow(AppKit.NSObject):
 
         # Tab order: title → onionname → password → analytics → language → setup
         self._title_field.setNextKeyView_(self._user_field)
-        self._user_field.setNextKeyView_(self._pass_field)
+        self._user_field.setNextKeyView_(self._pass_field_secure)
         self._pass_field.setNextKeyView_(self._analytics_check)
         self._pass_field_secure.setNextKeyView_(self._analytics_check)
         self._analytics_check.setNextKeyView_(self._language_popup)
