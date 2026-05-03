@@ -33,6 +33,14 @@ const ONIONPRESS_TWITTER_DEEPLINK_URL = 'https://twitter.com/settings/download_y
 const ONIONPRESS_TWITTER_HELP_ONION    = 'http://op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion/help-import-twitter/';
 const ONIONPRESS_TWITTER_HELP_CLEARNET = 'https://onionpress.org/help-import-twitter/';
 
+// Threading: replies to your own tweets are imported as WP comments on
+// the parent post. Twitter is a one-shot ZIP import (no API to fetch
+// foreign ancestors), so we sort tweets oldest-first before importing
+// — parents always arrive before replies, no _pending_reattach sweep
+// needed. The migration handles installs that imported pre-threading.
+const ONIONPRESS_TWITTER_SELF_USER_ID_OPT      = 'onionpress_social_twitter_self_user_id';
+const ONIONPRESS_TWITTER_THREADS_MIGRATED_OPT  = 'onionpress_twitter_threads_v1_migrated';
+
 /**
  * Register the "Twitter" submenu page under Social Archive. Uses
  * priority 20 so the core plugin's `add_menu_page` (priority 10) has
@@ -51,6 +59,14 @@ add_action( 'admin_menu', function () {
         'onionpress_twitter_import_page'
     );
 }, 20 );
+
+add_action( 'admin_init', function () {
+    // One-shot conversion of pre-threading reply posts into comments.
+    // Self-gates on its own option flag, so this is a no-op once done.
+    if ( get_option( ONIONPRESS_TWITTER_THREADS_MIGRATED_OPT ) !== 'yes' ) {
+        onionpress_twitter_migrate_replies_to_comments();
+    }
+} );
 
 function onionpress_twitter_import_page() {
     if ( ! current_user_can( 'manage_options' ) ) {
@@ -239,27 +255,49 @@ function onionpress_twitter_handle_upload() {
     $media_dir = onionpress_twitter_find_media_dir( $data_dir );
     $self_user_id = onionpress_twitter_read_self_user_id( $data_dir );
 
-    $stats = array( 'imported' => 0, 'skipped' => 0, 'errors' => 0 );
+    // Persist the self user ID so the migration (which runs without
+    // access to the original ZIP) can classify self-replies correctly.
+    if ( $self_user_id !== null && $self_user_id !== '' ) {
+        update_option( ONIONPRESS_TWITTER_SELF_USER_ID_OPT, (string) $self_user_id );
+    }
+
+    // Collect ALL tweets across all part-files, then sort oldest-first
+    // before importing. Twitter archives ship tweets in arbitrary
+    // (mostly newest-first) order, but threading needs parents to be
+    // present at import time so a reply can directly become a comment
+    // on its parent's post. Sorting once upfront eliminates the need
+    // for the pending/reattach sweep that the live importers have.
+    $all_tweets = array();
     foreach ( $tweets_files as $file ) {
         $tweets = onionpress_twitter_parse_tweets_file( $file );
         if ( $tweets === null ) {
-            $stats['errors']++;
+            // Tracked separately from per-tweet errors so a malformed
+            // part file doesn't silently skip its content with no signal.
             continue;
         }
         foreach ( $tweets as $entry ) {
-            if ( ! isset( $entry['tweet'] ) ) {
-                continue;
+            if ( isset( $entry['tweet'] ) ) {
+                $all_tweets[] = $entry['tweet'];
             }
-            $result = onionpress_twitter_import_tweet(
-                $entry['tweet'],
-                array_merge( $opts, array(
-                    'media_dir'    => $media_dir,
-                    'self_user_id' => $self_user_id,
-                ) )
-            );
-            if ( isset( $stats[ $result ] ) ) {
-                $stats[ $result ]++;
-            }
+        }
+    }
+    usort( $all_tweets, function ( $a, $b ) {
+        $ta = isset( $a['created_at'] ) ? strtotime( (string) $a['created_at'] ) : 0;
+        $tb = isset( $b['created_at'] ) ? strtotime( (string) $b['created_at'] ) : 0;
+        return $ta <=> $tb;
+    } );
+
+    $stats = array( 'imported' => 0, 'skipped' => 0, 'errors' => 0 );
+    foreach ( $all_tweets as $tweet ) {
+        $result = onionpress_twitter_import_tweet(
+            $tweet,
+            array_merge( $opts, array(
+                'media_dir'    => $media_dir,
+                'self_user_id' => $self_user_id,
+            ) )
+        );
+        if ( isset( $stats[ $result ] ) ) {
+            $stats[ $result ]++;
         }
     }
 
@@ -396,8 +434,198 @@ function onionpress_twitter_parse_tweets_file( $file ) {
 }
 
 /**
+ * Look up a Twitter post by `_source_id`. Returns post ID or 0.
+ */
+function onionpress_twitter_find_post_by_source_id( $source_id ) {
+    $posts = get_posts( array(
+        'post_type'      => 'post',
+        'meta_key'       => '_source_id',
+        'meta_value'     => $source_id,
+        'post_status'    => 'any',
+        'posts_per_page' => 1,
+        'fields'         => 'ids',
+    ) );
+    return ! empty( $posts ) ? (int) $posts[0] : 0;
+}
+
+/**
+ * Look up a Twitter comment by `_source_id` commentmeta.
+ */
+function onionpress_twitter_find_comment_by_source_id( $source_id ) {
+    $ids = get_comments( array(
+        'meta_key'   => '_source_id',
+        'meta_value' => $source_id,
+        'number'     => 1,
+        'fields'     => 'ids',
+    ) );
+    return ! empty( $ids ) ? (int) $ids[0] : 0;
+}
+
+/**
+ * Find the post a self-reply should attach to. The parent might be a
+ * top-level post (thread root) or a comment (a self-reply we converted
+ * earlier in the same archive walk) — in the latter case attach to the
+ * comment's post and let comment_parent nest us under the comment.
+ */
+function onionpress_twitter_find_attachable_post( $parent_source_id ) {
+    $pid = onionpress_twitter_find_post_by_source_id( $parent_source_id );
+    if ( $pid ) return $pid;
+    $cid = onionpress_twitter_find_comment_by_source_id( $parent_source_id );
+    if ( $cid ) {
+        $c = get_comment( $cid );
+        if ( $c ) return (int) $c->comment_post_ID;
+    }
+    return 0;
+}
+
+/**
+ * Insert a WP comment on $parent_post_id from a tweet. Idempotent on
+ * `_source_id`. If the tweet replies to another tweet that's now a
+ * comment, comment_parent nests us under it so deep threads survive.
+ */
+function onionpress_twitter_create_self_reply_comment( $tweet, $parent_post_id, $opts ) {
+    $tweet_id = $tweet['id_str'] ?? $tweet['id'] ?? null;
+    if ( ! $tweet_id ) return 'errors';
+    $source_id = 'twitter:' . $tweet_id;
+    if ( onionpress_twitter_find_comment_by_source_id( $source_id ) ) {
+        return 'skipped';
+    }
+    $created_at = $tweet['created_at'] ?? null;
+    $ts = $created_at ? strtotime( $created_at ) : 0;
+    if ( ! $ts ) return 'errors';
+    $content = onionpress_twitter_render_content( $tweet );
+    $author = (string) get_option( ONIONPRESS_TWITTER_HANDLE_OPT, '' );
+    if ( $author === '' ) $author = 'me';
+    $author_url = 'https://twitter.com/i/status/' . $tweet_id;
+
+    $comment_parent = 0;
+    $reply_to_id = (string) ( $tweet['in_reply_to_status_id_str']
+                            ?? $tweet['in_reply_to_status_id']
+                            ?? '' );
+    if ( $reply_to_id !== '' ) {
+        $comment_parent = onionpress_twitter_find_comment_by_source_id( 'twitter:' . $reply_to_id );
+    }
+
+    $gmt = gmdate( 'Y-m-d H:i:s', $ts );
+    $comment_id = wp_insert_comment( array(
+        'comment_post_ID'    => $parent_post_id,
+        'comment_author'     => $author,
+        'comment_author_url' => $author_url,
+        'comment_content'    => $content,
+        'comment_date'       => get_date_from_gmt( $gmt ),
+        'comment_date_gmt'   => $gmt,
+        'comment_approved'   => 1,
+        'comment_parent'     => $comment_parent,
+        'comment_type'       => 'comment',
+        'comment_meta'       => array(
+            '_source_id'  => $source_id,
+            '_source_url' => $author_url,
+            '_raw'        => wp_json_encode( $tweet ),
+        ),
+    ) );
+    return $comment_id ? 'imported' : 'errors';
+}
+
+/**
+ * Convert an existing top-level tweet post into a comment on
+ * $parent_post_id. Used by the migration; reads from post fields and
+ * postmeta so a corrupt _raw doesn't block conversion.
+ */
+function onionpress_twitter_convert_post_to_comment( $post_id, $parent_post_id ) {
+    $post = get_post( $post_id );
+    if ( ! $post ) return false;
+    $source_id = (string) get_post_meta( $post_id, '_source_id', true );
+    if ( $source_id === '' ) return false;
+    if ( onionpress_twitter_find_comment_by_source_id( $source_id ) ) {
+        wp_delete_post( $post_id, true );
+        return true;
+    }
+    $reply_to = (string) get_post_meta( $post_id, '_reply_to_id', true );
+    $comment_parent = 0;
+    if ( $reply_to !== '' ) {
+        $comment_parent = onionpress_twitter_find_comment_by_source_id( 'twitter:' . $reply_to );
+    }
+    $author = (string) get_option( ONIONPRESS_TWITTER_HANDLE_OPT, '' );
+    if ( $author === '' ) $author = 'me';
+    $author_url = (string) get_post_meta( $post_id, '_source_url', true );
+    $gmt = $post->post_date_gmt ?: gmdate( 'Y-m-d H:i:s' );
+    $comment_id = wp_insert_comment( array(
+        'comment_post_ID'    => $parent_post_id,
+        'comment_author'     => $author,
+        'comment_author_url' => $author_url,
+        'comment_content'    => (string) $post->post_content,
+        'comment_date'       => get_date_from_gmt( $gmt ),
+        'comment_date_gmt'   => $gmt,
+        'comment_approved'   => 1,
+        'comment_parent'     => $comment_parent,
+        'comment_type'       => 'comment',
+        'comment_meta'       => array(
+            '_source_id'  => $source_id,
+            '_source_url' => $author_url,
+        ),
+    ) );
+    if ( ! $comment_id ) return false;
+    wp_delete_post( $post_id, true );
+    return true;
+}
+
+/**
+ * One-time migration for installs that imported tweets before threading.
+ * Finds posts with _is_reply=1 whose _reply_to_id matches a known
+ * _source_id, converts them to comments on that parent. Self-gates on
+ * an option flag.
+ *
+ * Self-reply detection: prefers _raw's in_reply_to_user_id_str (newer
+ * imports) and falls back to "parent post is in our DB" — which is
+ * also a valid signal because the importer only ingests the user's own
+ * archive (everything we have IS our own tweet).
+ */
+function onionpress_twitter_migrate_replies_to_comments() {
+    if ( get_option( ONIONPRESS_TWITTER_THREADS_MIGRATED_OPT ) === 'yes' ) {
+        return 0;
+    }
+    $self_user_id = (string) get_option( ONIONPRESS_TWITTER_SELF_USER_ID_OPT, '' );
+    global $wpdb;
+    $candidates = $wpdb->get_results(
+        "SELECT p.ID, m1.meta_value AS source_id, m2.meta_value AS reply_to_id, m3.meta_value AS raw
+         FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} m1 ON m1.post_id=p.ID AND m1.meta_key='_source_id'
+         JOIN {$wpdb->postmeta} m2 ON m2.post_id=p.ID AND m2.meta_key='_reply_to_id'
+         LEFT JOIN {$wpdb->postmeta} m3 ON m3.post_id=p.ID AND m3.meta_key='_raw'
+         JOIN {$wpdb->postmeta} m4 ON m4.post_id=p.ID AND m4.meta_key='_is_reply' AND m4.meta_value='1'
+         WHERE m1.meta_value LIKE 'twitter:%' AND m2.meta_value <> ''
+         ORDER BY p.post_date ASC"
+    );
+    $converted = 0;
+    foreach ( $candidates as $c ) {
+        $tweet = $c->raw ? json_decode( $c->raw, true ) : null;
+        if ( is_array( $tweet ) && $self_user_id !== '' ) {
+            $reply_user = (string) ( $tweet['in_reply_to_user_id_str']
+                                  ?? $tweet['in_reply_to_user_id'] ?? '' );
+            if ( $reply_user !== '' && $reply_user !== $self_user_id ) {
+                continue; // explicit other-account reply
+            }
+        }
+        $parent_pid = onionpress_twitter_find_attachable_post( 'twitter:' . $c->reply_to_id );
+        if ( ! $parent_pid ) continue;
+        if ( onionpress_twitter_convert_post_to_comment( (int) $c->ID, $parent_pid ) ) {
+            $converted++;
+        }
+    }
+    update_option( ONIONPRESS_TWITTER_THREADS_MIGRATED_OPT, 'yes' );
+    return $converted;
+}
+
+/**
  * Import one tweet. Returns one of 'imported', 'skipped', 'errors' for
  * the caller's tally.
+ *
+ * Self-replies fold into the parent post's comment thread when the
+ * parent is already in the DB — and since we sort the archive
+ * oldest-first before iterating, parents reliably ARE in the DB by the
+ * time their replies get processed. Replies to other users have no
+ * parent in our DB (the importer ingests only the user's own tweets,
+ * not anyone else's) so they stay top-level — gated by `include_replies`.
  */
 function onionpress_twitter_import_tweet( $tweet, $opts ) {
     $tweet_id = $tweet['id_str'] ?? $tweet['id'] ?? null;
@@ -435,6 +663,21 @@ function onionpress_twitter_import_tweet( $tweet, $opts ) {
     }
     if ( $is_reply && ! $is_self_reply && ! $opts['include_replies'] ) {
         return 'skipped';
+    }
+
+    // Self-reply with the parent already imported → fold into the
+    // parent post's comment thread instead of fragmenting the
+    // archive. Because import_archive() sorts oldest-first, the
+    // parent reliably arrives before its replies, so we can resolve
+    // it directly without any pending/reattach machinery.
+    if ( $is_self_reply ) {
+        $parent_pid = onionpress_twitter_find_attachable_post( 'twitter:' . $reply_status );
+        if ( $parent_pid ) {
+            return onionpress_twitter_create_self_reply_comment( $tweet, $parent_pid, $opts );
+        }
+        // Fall through to top-level: parent is missing (out-of-order
+        // archive, partial import, etc.). The migration sweep will
+        // re-thread later if it ever shows up.
     }
 
     $created_at = $tweet['created_at'] ?? null;
