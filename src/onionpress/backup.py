@@ -533,6 +533,19 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         onion_address = metadata.get('onion_address', '')
         _data_dir = data_dir if data_dir is not None else _default_data_dir()
         if onion_address:
+            # Overwrite the menubar's cached onion_address. The menubar reads
+            # this file at startup into self.onion_address; if it still holds
+            # the pre-restore address, a heartbeat that fires before the next
+            # update_status poll will ship (content=OLD, key=NEW) and the
+            # server clobbers KEYS_DIR/OLD/ with NEW's bytes — old address's
+            # takeover key is then unrecoverable.
+            cached_path = os.path.join(_data_dir, 'onion_address')
+            try:
+                with open(cached_path, 'w') as cf:
+                    cf.write(onion_address + '\n')
+                log_func(f"Restore: updated cached onion_address to {onion_address}")
+            except OSError as e:
+                log_func(f"Restore: warning — could not update {cached_path}: {e}")
             with _phase_timer(log_func, 'RESTORE', 'vanity_sync'):
                 vanity_dir = os.path.join(_data_dir, 'shared', 'vanity-keys')
                 addr_dir = os.path.join(vanity_dir, onion_address)

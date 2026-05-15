@@ -336,6 +336,20 @@ def _send_heartbeat(app, wordpress_healthy=True):
         from onionpress import key_manager
         from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        # Guard: the keystore key and app.onion_address must agree. They can
+        # diverge during a restore — write_private_key updates the keystore
+        # in the running container, but self.onion_address (loaded from the
+        # ~/.onionpress/onion_address cache at startup) only refreshes when
+        # update_status() next polls the container. A heartbeat fired in
+        # that window would ship (content=OLD, key=NEW), and OnionHeaven's
+        # /online clobbers KEYS_DIR/OLD/ with NEW's bytes — irrecoverable
+        # data loss for the old address's takeover key.
+        derived = onion_auth.derive_onion_address(public_key_raw)
+        if derived != content_addr:
+            app.log(f"OnionHeaven: ABORT heartbeat — onion_address stale "
+                    f"(app={content_addr}, key_derives_to={derived}); "
+                    f"skipping until update_status catches up")
+            return False
         timestamp = onion_auth.make_timestamp()
         signature = onion_auth.sign_payload(
             secret_key_bytes, public_key_raw,
@@ -581,6 +595,14 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
         from onionpress import key_manager
         from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        # See _send_heartbeat for context — same staleness guard applies to
+        # lifecycle notifications (/online, /offline). Skip rather than ship
+        # a mismatched (content_addr, arti_key_pem) pair.
+        derived = onion_auth.derive_onion_address(public_key_raw)
+        if derived != content_addr:
+            app.log(f"OnionHeaven: ABORT /{endpoint} — onion_address stale "
+                    f"(app={content_addr}, key_derives_to={derived})")
+            return False
         timestamp = onion_auth.make_timestamp()
         signature = onion_auth.sign_payload(
             secret_key_bytes, public_key_raw,

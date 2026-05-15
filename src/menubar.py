@@ -4101,6 +4101,17 @@ class OnionPressApp(rumps.App):
 
                 restored_addr = metadata.get('onion_address', addr)
 
+                # Immediately refresh the in-memory address so the heartbeat
+                # thread (which polls extract_keys() live from the container
+                # and is about to see the new key) sends the matching
+                # content_address. Without this, the next heartbeat would
+                # ship (content=OLD, key=NEW) and OnionHeaven would clobber
+                # the old address's stored key — unrecoverable. backup.py
+                # also writes the on-disk cache, but in-memory wins for the
+                # rest of this process's lifetime.
+                if restored_addr and restored_addr.endswith('.onion'):
+                    self.onion_address = restored_addr
+
                 # Restart containers to pick up restored keys
                 log_and_update("Restarting with restored address...")
                 try:
