@@ -196,6 +196,54 @@ def validate_arti_pem(pem_bytes):
     return True
 
 
+def extract_public_key_from_arti_pem(pem_bytes):
+    """Return the 32-byte Ed25519 public key embedded in an Arti OpenSSH PEM,
+    or None if the PEM is malformed. Caller is responsible for derivation.
+
+    The format (mirror of build_openssh_key above):
+      OPENSSH_MAGIC | str("none") | str("none") | str("") | u32(1)
+      | str(pub_blob) | str(priv_blob)
+    where pub_blob = str(ARTI_KEY_TYPE) | str(public_key_32).
+    """
+    try:
+        text = pem_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    lines = [l for l in text.strip().splitlines()
+             if not l.startswith("-----")]
+    try:
+        decoded = base64.b64decode("".join(lines))
+    except Exception:
+        return None
+    if not decoded.startswith(OPENSSH_MAGIC):
+        return None
+
+    def _read_str(buf, off):
+        if off + 4 > len(buf):
+            raise ValueError("truncated")
+        n = struct.unpack(">I", buf[off:off + 4])[0]
+        if off + 4 + n > len(buf):
+            raise ValueError("truncated")
+        return buf[off + 4:off + 4 + n], off + 4 + n
+
+    try:
+        off = len(OPENSSH_MAGIC)
+        _, off = _read_str(decoded, off)   # ciphername
+        _, off = _read_str(decoded, off)   # kdfname
+        _, off = _read_str(decoded, off)   # kdfoptions
+        off += 4                            # nkeys (always 1)
+        pub_blob, _ = _read_str(decoded, off)
+        ktype, sub = _read_str(pub_blob, 0)
+        if ktype != ARTI_KEY_TYPE:
+            return None
+        public_key, _ = _read_str(pub_blob, sub)
+        if len(public_key) != 32:
+            return None
+        return public_key
+    except (ValueError, struct.error):
+        return None
+
+
 def _pack_string(data):
     """Pack bytes as uint32 big-endian length + data."""
     return struct.pack(">I", len(data)) + data
@@ -958,6 +1006,27 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 return
             if not validate_arti_pem(arti_pem):
                 self._send_json(400, {"error": "Corrupted arti_key_pem: key data failed integrity check"})
+                return
+
+            # Verify the key derives to content_address. Without this, a
+            # buggy client (or a request that slipped past signature
+            # verification via the local-bypass) can overwrite a stored
+            # key with bytes that decode to a different address. The key
+            # is unrecoverable once clobbered — only the authoritative
+            # OnionPress instance for that address holds the original.
+            public_key = extract_public_key_from_arti_pem(arti_pem)
+            if public_key is None:
+                self._send_json(400, {"error": "arti_key_pem: cannot extract public key"})
+                return
+            derived = derive_onion_address(public_key)
+            if derived != content_address:
+                # Loud alert so we notice the next outbreak fast.
+                log(f"REJECT-MISMATCH /online: content_address={content_address} "
+                    f"key_derives_to={derived} client_ip={self.client_address[0]}")
+                self._send_json(400, {
+                    "error": "arti_key_pem does not derive to content_address",
+                    "derived": derived,
+                })
                 return
 
             # Store plaintext PEM key

@@ -105,8 +105,16 @@ class TorCommandConn:
             return True, content_address.replace(".onion", "")
 
         if "Onion address collision" in resp:
-            # Already active — that's fine
-            return True, content_address.replace(".onion", "")
+            # Tor says the key already maps to a registered service. That's
+            # only "fine" if Tor is actually serving it — otherwise the entry
+            # is leaked inside hs_service_map (Tor 0.4.x bug: invisible to
+            # GETINFO onions/{detached,current} and unreachable via DEL_ONION,
+            # so it can't be cleared without restarting Tor). Verify before
+            # claiming success to avoid an infinite retry loop where the
+            # caller thinks the ADD succeeded but no descriptor ever publishes.
+            if self.has_onion(content_address):
+                return True, content_address.replace(".onion", "")
+            return False, "stuck_collision"
 
         # Failure
         return False, resp.strip()
