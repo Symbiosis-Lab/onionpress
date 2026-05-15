@@ -1,6 +1,6 @@
 #!/bin/sh
 # OnionPress Tor entrypoint
-# Supports both Arti (default) and C Tor via TOR_IMPL env var.
+# Supports both C Tor (default) and Arti via TOR_IMPL env var.
 # Creates state directories, starts healthcheck server, launches Tor,
 # and writes compat hostname files for existing scripts to read.
 
@@ -353,7 +353,7 @@ SERVICES_EOF
     # Wait for C Tor process
     wait $TOR_PID
 else
-    # ==================== Arti mode (default) ====================
+    # ==================== Arti mode ====================
 
     # Expose port 8083 through the onion service so other nodes can reach the API
     sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml

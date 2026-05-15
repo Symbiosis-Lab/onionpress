@@ -30,10 +30,15 @@ from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, unregister_entry,
     check_worker_bootstrap, cleanup_dead_workers,
-    _init_worker_index, _ensure_capacity, _pick_worker, _exec_takeover,
+    _init_worker_index, _ensure_capacity, _pick_worker,
+    _exec_takeover, _exec_release,
     _check_arti_key_errors,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE,
 )
+
+# How many drift repairs to attempt per worker per heartbeat pass.
+# Low cap avoids overwhelming the queue manager when many addresses are stuck.
+RECONCILE_REPAIRS_PER_PASS = 2
 
 def wall_sleep(seconds):
     """Sleep using wall-clock busy-wait — time.sleep() is unreliable under qemu."""
@@ -280,7 +285,9 @@ def main():
                 pass
 
             # Reconcile: compare what Tor actually serves vs what DB expects.
-            # Log-only for now — helps diagnose silent service drops.
+            # Repair drift by re-queuing dropped services and DEL_ONIONing extras.
+            # Rate-limited to RECONCILE_REPAIRS_PER_PASS per worker per pass to
+            # avoid thundering-herd through the queue manager.
             try:
                 for w in (workers if workers else []):
                     name = w["container_name"]
@@ -288,18 +295,51 @@ def main():
                     if tor_onions is None:
                         continue
                     db_rows = conn.execute(
-                        "SELECT content_address FROM registry "
+                        "SELECT content_address, last_taken_over FROM registry "
                         "WHERE takeover_container = ? AND status = 'taken-over' "
                         "AND unregistered_at IS NULL",
                         (name,)
                     ).fetchall()
                     db_addrs = set(r["content_address"] for r in db_rows)
+                    # Sort dropped by oldest last_taken_over first so the most stuck
+                    # services get repaired first. NULLs sort last.
+                    last_takeover_by_addr = {
+                        r["content_address"]: r["last_taken_over"] for r in db_rows
+                    }
                     dropped = db_addrs - tor_onions
                     extra = tor_onions - db_addrs
-                    if dropped or extra:
-                        log(f"RECONCILE: {name} — "
-                            f"Tor has {len(tor_onions)}, DB expects {len(db_addrs)}, "
-                            f"dropped={len(dropped)}, extra={len(extra)}")
+                    if not (dropped or extra):
+                        continue
+                    log(f"RECONCILE: {name} — "
+                        f"Tor has {len(tor_onions)}, DB expects {len(db_addrs)}, "
+                        f"dropped={len(dropped)}, extra={len(extra)} — repairing")
+                    # Skip repair if last_taken_over is very recent — give the
+                    # in-flight ADD_ONION a chance to land before re-queuing.
+                    now_dt = datetime.now(timezone.utc)
+                    repair_candidates = []
+                    for addr in dropped:
+                        lto = last_takeover_by_addr.get(addr)
+                        if lto:
+                            try:
+                                lto_dt = datetime.fromisoformat(lto.replace("Z", "+00:00"))
+                                if (now_dt - lto_dt).total_seconds() < 60:
+                                    continue  # too fresh, skip this pass
+                            except (ValueError, TypeError):
+                                pass
+                        repair_candidates.append((addr, lto or ""))
+                    repair_candidates.sort(key=lambda x: x[1])  # oldest first
+                    repaired = 0
+                    for addr, _ in repair_candidates[:RECONCILE_REPAIRS_PER_PASS]:
+                        log(f"RECONCILE: re-queuing {addr} on {name}")
+                        if _exec_takeover(name, addr):
+                            repaired += 1
+                    cleaned = 0
+                    for addr in list(extra)[:RECONCILE_REPAIRS_PER_PASS]:
+                        log(f"RECONCILE: cleaning extra {addr} from {name}")
+                        if _exec_release(name, addr):
+                            cleaned += 1
+                    if repaired or cleaned:
+                        log(f"RECONCILE: {name} — repaired={repaired}, cleaned={cleaned}")
             except Exception as e:
                 log(f"RECONCILE error: {e}")
 

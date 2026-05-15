@@ -280,12 +280,25 @@ class QueueManager:
         self._last_recovery_time = 0.0     # monotonic time of last recovery
 
     def takeover(self, content_address):
-        """Add an address to the takeover queue."""
+        """Add an address to the takeover queue.
+
+        If in-memory state says active/in_flight but Tor doesn't actually have
+        the service (e.g. DEL_ONION'd via tor-manager out-of-band, or a
+        takeover_function race left the row marked taken-over without ADD_ONION
+        ever firing), the stale entry is evicted so the address re-queues.
+        """
         with self.lock:
-            if content_address in self.active:
-                return {"status": "already_active", "address": content_address}
-            if content_address in self.in_flight:
-                return {"status": "in_flight", "address": content_address}
+            if content_address in self.active or content_address in self.in_flight:
+                if self.cmd.has_onion(content_address):
+                    if content_address in self.active:
+                        return {"status": "already_active", "address": content_address}
+                    return {"status": "in_flight", "address": content_address}
+                log(f"RECONCILE: {content_address[:20]}... in memory but not in Tor — re-queuing")
+                self.active.discard(content_address)
+                self.in_flight.pop(content_address, None)
+                self.failed.discard(content_address)
+                self.evt.clear(content_address)
+                # fall through to enqueue
             if content_address in self.queued:
                 return {"status": "already_queued", "address": content_address}
             self.queued.append(content_address)
