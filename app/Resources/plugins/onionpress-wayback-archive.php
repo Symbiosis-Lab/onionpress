@@ -829,7 +829,16 @@ function onionpress_wayback_sweep_loop( $token ) {
                     ),
                     'fields' => 'ids',
                 ) );
-                if ( empty( $remaining ) && empty( $in_flight ) ) {
+                // Home + feed are tracked in wp_options, not post meta, so the
+                // post probes above miss them. A subsite with every post archived
+                // can still need work if save_post invalidated its home/feed
+                // capture (state cleared) or a home/feed job is in flight. Treat
+                // a state as "needs work" unless archived_at is set AND no job_id.
+                $home_state    = onionpress_wayback_opt_read( OP_WB_OPT_HOME );
+                $feed_state    = onionpress_wayback_opt_read( OP_WB_OPT_FEED );
+                $sitewide_work = empty( $home_state['archived_at'] ) || ! empty( $home_state['job_id'] )
+                              || empty( $feed_state['archived_at'] ) || ! empty( $feed_state['job_id'] );
+                if ( empty( $remaining ) && empty( $in_flight ) && ! $sitewide_work ) {
                     // No work on this subsite — skip.
                     continue;
                 }
@@ -1132,8 +1141,20 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     if ( ! in_array( $post->post_type, array( 'post', 'page' ), true ) ) return;
 
     // Home page + feed content just changed — invalidate their captures.
-    delete_option( OP_WB_OPT_HOME );
-    delete_option( OP_WB_OPT_FEED );
+    // Skip invalidation if a capture is already in flight: SPN's crawl
+    // happens many seconds after submission, so the in-flight job will
+    // already render this save_post's content. Wiping the option would
+    // drop the job_id, causing the next sweep to resubmit and burn an
+    // SPN slot. Coalescing bursts is structural, not explicit — one row
+    // per subsite already collapses N saves into ≤1 fresh submission.
+    $home_state = onionpress_wayback_opt_read( OP_WB_OPT_HOME );
+    $feed_state = onionpress_wayback_opt_read( OP_WB_OPT_FEED );
+    if ( empty( $home_state['job_id'] ) ) {
+        delete_option( OP_WB_OPT_HOME );
+    }
+    if ( empty( $feed_state['job_id'] ) ) {
+        delete_option( OP_WB_OPT_FEED );
+    }
 
     // Re-archive on edit, but only for original posts. Imported social
     // posts (anything with _source_id) stay archived once.
