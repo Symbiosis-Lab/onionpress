@@ -560,13 +560,45 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         method = "HEAD" if head_only else ("POST" if post_data else "GET")
 
-        conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=60)
-        conn.request(method, PHP_PROXY_PATH, body=post_data, headers=headers)
-        resp = conn.getresponse()
-        body = resp.read()
-        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
-        status = resp.status
-        conn.close()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=60)
+            conn.request(method, PHP_PROXY_PATH, body=post_data, headers=headers)
+            resp = conn.getresponse()
+            body = resp.read()
+            resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+            status = resp.status
+            conn.close()
+        except OSError as e:
+            # Log once on first failure, then every 5 minutes while down.
+            # OSError covers ConnectionRefusedError, timeout, etc. — all signs
+            # that the Lima SSH port forward for localhost:PHP_PROXY_PORT has dropped.
+            srv = self.server
+            now = time.time()
+            if srv._wp_unreachable_since is None:
+                srv._wp_unreachable_since = now
+                srv._wp_unreachable_last_log = now
+                if srv.log_func:
+                    srv.log_func(
+                        "WARNING: WordPress unreachable on localhost:%d — "
+                        "Lima port forward may be down (%s)", PHP_PROXY_PORT, e)
+            elif now - srv._wp_unreachable_last_log >= 300:
+                srv._wp_unreachable_last_log = now
+                elapsed = int(now - srv._wp_unreachable_since)
+                if srv.log_func:
+                    srv.log_func(
+                        "WARNING: WordPress still unreachable on localhost:%d — "
+                        "%ds elapsed (%s)", PHP_PROXY_PORT, elapsed, e)
+            raise
+
+        # Recovery: log once when WordPress comes back after a failure.
+        if self.server._wp_unreachable_since is not None:
+            if self.server.log_func:
+                elapsed = int(time.time() - self.server._wp_unreachable_since)
+                self.server.log_func(
+                    "WordPress reachable again on localhost:%d after %ds down",
+                    PHP_PROXY_PORT, elapsed)
+            self.server._wp_unreachable_since = None
+            self.server._wp_unreachable_last_log = None
 
         return status, resp_headers, body
 
@@ -1040,6 +1072,8 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self.data_dir = None
         self.launcher_script = None
         self.cache = ProxyCache()
+        self._wp_unreachable_since = None   # time.time() of first failure, or None
+        self._wp_unreachable_last_log = None  # time.time() of last warning log
         super().__init__(*args, **kwargs)
 
 
