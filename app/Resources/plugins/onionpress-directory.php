@@ -192,12 +192,13 @@ function onionpress_directory_handle_name_lookup( $name ) {
 
     // If the name is registered to this very instance, let WP handle the
     // request as it would normally (the multisite path will match this
-    // user's blog).
-    $own = strtolower( (string) ( $_SERVER['HTTP_HOST'] ?? '' ) );
-    if ( strpos( $own, ':' ) !== false ) {
-        $own = substr( $own, 0, strpos( $own, ':' ) );
-    }
-    if ( $own === strtolower( $info['onionaddress'] ) ) {
+    // user's blog). Compare to our own onion address rather than to
+    // HTTP_HOST: on clearnet (onionpress.org via Cloudflare tunnel) the
+    // host is "onionpress.org" and never matches the onion address, so
+    // the old HTTP_HOST check sent clearnet visitors to the Tor-only
+    // stub even when the name was our own subsite.
+    $own_addr = onionpress_directory_own_address();
+    if ( $own_addr && strtolower( $own_addr ) === strtolower( $info['onionaddress'] ) ) {
         return;
     }
 
