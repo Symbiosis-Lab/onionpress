@@ -192,7 +192,6 @@ def _do_upload_cycle(app, include_active=False):
         getattr(app, "_clearnet_log", None),
     ]
 
-    # Scan logs dir for all container-* rotating logs (catches takeover workers)
     import glob as _glob
     logs_dir = os.path.join(getattr(app, "app_support", ""), "logs")
     for log_inst in log_instances:
@@ -211,6 +210,25 @@ def _do_upload_cycle(app, include_active=False):
                                 all_files.append({"name": name, "size": size, "path": path})
                     except OSError:
                         pass
+
+    # Scan logs dir for any other container-* rotating logs whose RotatingLog
+    # instance isn't held as an attribute on `app` (e.g. container-db,
+    # container-cloudflared, and takeover-worker logs that get spun up
+    # dynamically). Without this, those files exist on disk but never ship.
+    container_patterns = ["container-*.log.gz"]
+    if include_active:
+        container_patterns.append("container-*.log")
+    for pattern in container_patterns:
+        for p in sorted(_glob.glob(os.path.join(logs_dir, pattern))):
+            name = os.path.basename(p)
+            if any(f["name"] == name for f in all_files):
+                continue
+            try:
+                size = os.path.getsize(p)
+                if size > 0:
+                    all_files.append({"name": name, "size": size, "path": p})
+            except OSError:
+                pass
 
     # Include launcher rotating logs (written by shell script, not RotatingLog)
     import glob as _glob_launcher
