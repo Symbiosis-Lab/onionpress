@@ -51,26 +51,28 @@ SERVER_VERSION = os.environ.get("ONIONPRESS_VERSION", "unknown")
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 8083
 
-# OnionHome address — the /logs/* endpoints only accept requests when this
-# instance IS OnionHome (detected lazily by comparing onion_address file).
+# OnionHome address — the /logs/* and /api/name/* endpoints only accept
+# requests when this instance IS OnionHome. Derived from the actual onion
+# hostname (same source _get_own_address() uses); the previous
+# /var/lib/onionpress/onion_address path depended on the launcher's
+# docker-exec running after readiness checks, which silently never happened
+# on boots that timed out — leaving op2home permanently returning 403/404.
 _ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
 _is_onionhome_cache = None
 
 
 def _is_onionhome():
-    """Return True if this instance is OnionHome.  Cached after first check."""
+    """Return True if this instance is OnionHome. Cached after first check."""
     global _is_onionhome_cache
     if _is_onionhome_cache is not None:
         return _is_onionhome_cache
-    try:
-        addr_path = "/var/lib/onionpress/onion_address"
-        if os.path.exists(addr_path):
-            with open(addr_path) as f:
-                _is_onionhome_cache = f.read().strip() == _ONIONHOME_ADDRESS
-                return _is_onionhome_cache
-    except OSError:
-        pass
-    return False
+    addr = _get_own_address()
+    if addr is None:
+        # Hostname file not written yet — don't cache, keep retrying so we
+        # flip to True as soon as Tor finalizes the hidden service.
+        return False
+    _is_onionhome_cache = (addr == _ONIONHOME_ADDRESS)
+    return _is_onionhome_cache
 
 # Analytics storage
 ANALYTICS_DIR = "/var/lib/onionhome/analytics"
