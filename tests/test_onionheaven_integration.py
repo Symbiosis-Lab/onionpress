@@ -181,6 +181,12 @@ srv.main()
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+            # Close the PIPE fds explicitly; wait() leaves them open and
+            # dropping the Popen reference relies on GC, which trips
+            # ResourceWarning at interpreter shutdown.
+            for stream in (self.proc.stdout, self.proc.stderr, self.proc.stdin):
+                if stream is not None:
+                    stream.close()
             self.proc = None
         if self._tmpdir:
             import shutil
