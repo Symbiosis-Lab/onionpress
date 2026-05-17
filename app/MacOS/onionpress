@@ -1707,6 +1707,16 @@ install_onionpress_theme() {
         log "WARNING: Failed to install onionpress-creations plugin"
     fi
 
+    # Install login rate limiter (blocks brute-force attacks on wp-login.php)
+    if ! docker exec onionpress-wordpress wp plugin is-installed limit-login-attempts-reloaded --allow-root >> "$LOG_FILE" 2>&1; then
+        docker exec onionpress-wordpress wp plugin install limit-login-attempts-reloaded --activate --allow-root >> "$LOG_FILE" 2>&1 && \
+        log "✓ limit-login-attempts-reloaded installed and activated" || \
+        log "WARNING: Failed to install limit-login-attempts-reloaded"
+    else
+        docker exec onionpress-wordpress wp plugin activate limit-login-attempts-reloaded --allow-root >> "$LOG_FILE" 2>&1 || true
+        log "✓ limit-login-attempts-reloaded already installed"
+    fi
+
     return 0
 }
 
