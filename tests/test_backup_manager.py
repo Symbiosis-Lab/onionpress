@@ -424,37 +424,36 @@ class TestRestoreRoundTrip(unittest.TestCase):
         self.assertEqual(metadata["onion_address"], "restored123.onion")
         self.assertEqual(metadata["username"], "admin")
 
-    def test_restore_preserves_sibling_vanity_keys(self):
-        """Restoring must not wipe cached keys for OTHER onion addresses.
+    def test_restore_renames_old_vanity_keys(self):
+        """Restore renames the entire vanity-keys dir to vanity-keys.old<ts>.
 
-        Regression test for a bug where restore_from_backup did
-        `shutil.rmtree(vanity_dir)` on the parent directory, destroying
-        every cached address instead of just the one being restored.
+        This ensures no stale keys from a prior install cause the launcher's
+        head -1 to pick the wrong address. Old keys are kept for recovery.
         """
-        # Pre-seed a sibling address cache (simulating a user who has
-        # generated a vanity prefix or is running multiple addresses).
         sibling_addr = "siblingaddress.onion"
         sibling_dir = os.path.join(
             self.data_dir, "shared", "vanity-keys", sibling_addr)
         os.makedirs(sibling_dir)
-        sibling_key = os.path.join(sibling_dir, "ks_hs_id.ed25519_expanded_private")
-        with open(sibling_key, "wb") as f:
-            f.write(b"SIBLING-KEY-DO-NOT-TOUCH")
+        with open(os.path.join(sibling_dir, "ks_hs_id.ed25519_expanded_private"), "wb") as f:
+            f.write(b"SIBLING-KEY")
 
         zip_path = self._make_backup_zip()
         backup_manager.restore_from_backup(
             zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
 
-        # Sibling address dir and its key must still be intact.
-        self.assertTrue(os.path.isdir(sibling_dir),
-                        "Restore deleted a sibling address's vanity-keys directory")
-        with open(sibling_key, "rb") as f:
-            self.assertEqual(f.read(), b"SIBLING-KEY-DO-NOT-TOUCH")
+        vanity_dir = os.path.join(self.data_dir, "shared", "vanity-keys")
 
-        # Restored address dir should also exist alongside it.
-        restored_dir = os.path.join(
-            self.data_dir, "shared", "vanity-keys", "restored123.onion")
-        self.assertTrue(os.path.isdir(restored_dir))
+        # Old keys moved to a .old<timestamp> dir, not deleted.
+        parent = os.path.join(self.data_dir, "shared")
+        old_dirs = [d for d in os.listdir(parent) if d.startswith("vanity-keys.old")]
+        self.assertEqual(len(old_dirs), 1, "Expected exactly one vanity-keys.old* dir")
+        old_sibling = os.path.join(parent, old_dirs[0], sibling_addr,
+                                   "ks_hs_id.ed25519_expanded_private")
+        with open(old_sibling, "rb") as f:
+            self.assertEqual(f.read(), b"SIBLING-KEY")
+
+        # New vanity-keys dir has only the restored address.
+        self.assertEqual(os.listdir(vanity_dir), ["restored123.onion"])
 
     def test_restore_logs_progress(self):
         zip_path = self._make_backup_zip()
