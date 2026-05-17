@@ -3500,6 +3500,19 @@ class OnionPressApp(rumps.App):
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=30,
         )
+
+        # Hide LLAR's admin-bar badge on the user's subsite. Onionpress
+        # sites are Tor-only, so IP-based lockout counters are mostly
+        # noise — the plugin stays active for protection, but the count
+        # lives where users expect it: Settings → Limit Login Attempts.
+        subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "option", "update", "limit_login_show_top_bar_menu_item", "0",
+             f"--url=http://localhost/{onionname}/", "--allow-root"],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=30,
+        )
+
         if sw:
             sw.add_log(f"Your blog is at /{onionname}/")
 
