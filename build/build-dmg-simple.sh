@@ -211,11 +211,15 @@ if cache_get "mkp224o-${MKP224O_VERSION}-universal" "$TEMP_BIN_DIR/mkp224o"; the
     echo "  mkp224o ${MKP224O_VERSION}: cache hit"
 elif command -v git >/dev/null 2>&1; then
     echo "  Building mkp224o ${MKP224O_VERSION} for custom onion address prefixes..."
+    # Run the entire mkp224o build in a subshell so any failure is isolated
+    # and does not abort the DMG build via set -e in the outer shell.
+    (
+    set -e
     # Clone mkp224o at the pinned tag — shallow clone, saves most of the
     # git fetch cost relative to a full clone of the master history.
     git clone --branch "${MKP224O_VERSION}" --depth 1 \
         https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || \
-        git clone https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || true
+        git clone https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null
 
     # Check for required dependencies
     if command -v brew >/dev/null 2>&1; then
@@ -296,10 +300,11 @@ elif command -v git >/dev/null 2>&1; then
     elif [ -f "$MKP_ARM64_DIR/mkp224o" ]; then
         echo "  WARNING: x86_64 build failed, using arm64-only mkp224o"
         cp "$MKP_ARM64_DIR/mkp224o" "$TEMP_BIN_DIR/mkp224o"
-        # Don't cache arch-incomplete builds.
     else
-        echo "  WARNING: mkp224o build failed"
+        echo "  WARNING: mkp224o build failed" >&2
+        exit 1
     fi
+    ) || echo "  WARNING: mkp224o build failed — vanity address generation unavailable"
 
     cd "$TEMP_BIN_DIR"
 else
