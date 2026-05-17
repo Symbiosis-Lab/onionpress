@@ -428,7 +428,8 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                 raise Exception(f"zip failed: {result.stderr}")
 
         log_func(f"BACKUP_PHASE: name=total elapsed_s={time.monotonic() - backup_start:.2f}")
-        log_func("Backup: complete")
+        zip_bytes = os.path.getsize(output_path)
+        log_func(f"Backup: complete ({zip_bytes / 1_048_576:.1f} MB)")
 
     finally:
         shutil.rmtree(staging, ignore_errors=True)
