@@ -2066,7 +2066,7 @@ class OnionPressApp(rumps.App):
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
                 self.menu["Backup..."].set_callback(self.backup)
-                self.menu["Restore..."].set_callback(self.restore)
+                self.menu["Restore..."].set_callback(None)
                 # Gray/Yellow: browser opens local site since .onion isn't reachable
                 self.browser_menu_item.title = f"Open Local Site ({self.local_url})"
                 self.browser_menu_item.set_callback(self.open_local_site)
@@ -2083,7 +2083,7 @@ class OnionPressApp(rumps.App):
                 self.menu["Stop"].set_callback(None)
                 self.menu["Restart"].set_callback(None)
                 self.menu["Backup..."].set_callback(None)
-                self.menu["Restore..."].set_callback(self.restore)
+                self.menu["Restore..."].set_callback(None)
                 # Stopped: disable browser items
                 self.browser_menu_item.set_callback(None)
                 self.local_site_item.title = ""
