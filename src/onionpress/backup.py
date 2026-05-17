@@ -565,14 +565,17 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
                     hf.write(onion_address + '\n')
                 log_func(f"Restore: synced vanity-keys for {onion_address}")
 
-                # Update ADDRESS_PREFIX in config to match restored address
-                # so the prefix mismatch detector doesn't regenerate on next start
+                # Update ADDRESS_PREFIX and ONIONNAME in config to match
+                # restored address/username so the prefix mismatch detector
+                # doesn't regenerate and backup filenames are correct.
                 addr_base = onion_address.replace('.onion', '')
+                restored_username = metadata.get('username', '').strip()
                 config_path = os.path.join(_data_dir, 'config')
                 if os.path.exists(config_path):
                     with open(config_path, 'r', encoding='utf-8') as cf:
                         lines = cf.readlines()
-                    found = False
+                    found_prefix = False
+                    found_onionname = False
                     for i, line in enumerate(lines):
                         if line.strip().startswith('ADDRESS_PREFIX='):
                             old_prefix = line.strip().split('=', 1)[1]
@@ -581,10 +584,16 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
                                 new_prefix = addr_base[:plen]
                                 lines[i] = f'ADDRESS_PREFIX={new_prefix}\n'
                                 log_func(f"Restore: updated ADDRESS_PREFIX to {new_prefix}")
-                            found = True
-                            break
-                    if not found:
+                            found_prefix = True
+                        elif line.strip().startswith('ONIONNAME=') and restored_username:
+                            lines[i] = f'ONIONNAME={restored_username}\n'
+                            log_func(f"Restore: updated ONIONNAME to {restored_username}")
+                            found_onionname = True
+                    if not found_prefix:
                         lines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
+                    if not found_onionname and restored_username:
+                        lines.append(f'ONIONNAME={restored_username}\n')
+                        log_func(f"Restore: set ONIONNAME to {restored_username}")
                     with open(config_path, 'w', encoding='utf-8') as cf:
                         cf.writelines(lines)
 
