@@ -550,10 +550,13 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
             with _phase_timer(log_func, 'RESTORE', 'vanity_sync'):
                 vanity_dir = os.path.join(_data_dir, 'shared', 'vanity-keys')
                 addr_dir = os.path.join(vanity_dir, onion_address)
-                # Clear only this address's cache — sibling address dirs (e.g.
-                # other vanity prefixes the user has generated) are preserved.
-                if os.path.isdir(addr_dir):
-                    shutil.rmtree(addr_dir)
+                # Rename existing vanity-keys dir so no stale keys cause the
+                # launcher's head -1 to pick the wrong address. Kept as
+                # .old<timestamp> for recovery if needed.
+                if os.path.isdir(vanity_dir):
+                    import datetime
+                    ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+                    shutil.move(vanity_dir, vanity_dir + f'.old{ts}')
                 os.makedirs(addr_dir, exist_ok=True)
                 # Copy the key file so generate_vanity_address isn't needed
                 shutil.copy2(key_path, os.path.join(addr_dir, 'ks_hs_id.ed25519_expanded_private'))
