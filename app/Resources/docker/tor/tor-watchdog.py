@@ -38,7 +38,7 @@ HALT_COOLDOWN = 300  # 5 minutes — last resort
 FAILED_NODE_THRESHOLD = 5       # failures within window → DROPGUARDS
 FAILED_NODE_WINDOW = 60         # seconds
 BOOTSTRAP_STALL_TIMEOUT = 120   # no progress for 2 min → DROPGUARDS
-HS_DESC_UPLOAD_TIMEOUT = 60     # no descriptor upload 60s after recovery → HSFETCH
+HS_DESC_UPLOAD_TIMEOUT = 60     # no descriptor upload 60s after recovery → DEL+ADD
 # Reconnect delay when control port isn't available yet
 CONNECT_RETRY_DELAY = 5
 
@@ -322,7 +322,11 @@ class WatchdogState:
         self.last_heartbeat_log = time.time()  # periodic "alive" log
         self.failed_node_window_start = time.time()
         self.last_recovery_time = 0  # when we last detected a wake
+        self.last_recovery_trigger = ""  # e.g. "wake", "clock-skew", "circuits lost"
         self.hs_desc_uploaded_since_recovery = False
+        self.hs_desc_upload_started_since_recovery = False
+        self.hs_desc_upload_failed_since_recovery = False
+        self.hs_desc_last_failed_reason = ""
         self.onion_addresses = []  # for HSFETCH
         self.services = []  # discovered onion services
         self.services_active = False  # True when ADD_ONION has been done
@@ -397,7 +401,11 @@ def do_dropguards(cmd_sock, state, reason):
 
     state.last_dropguards = now
     state.last_recovery_time = now
+    state.last_recovery_trigger = reason
     state.hs_desc_uploaded_since_recovery = False
+    state.hs_desc_upload_started_since_recovery = False
+    state.hs_desc_upload_failed_since_recovery = False
+    state.hs_desc_last_failed_reason = ""
     state.failed_node_count = 0
 
 
@@ -450,6 +458,12 @@ def process_event(line, cmd_sock, state):
     # USR1/USR2 signals handle sleep/wake.
     if "CLOCK_SKEW" in line or "clock just jumped" in line:
         log("Clock skew detected — letting Tor recover naturally")
+        state.last_recovery_time = time.time()
+        state.last_recovery_trigger = "clock-skew"
+        state.hs_desc_uploaded_since_recovery = False
+        state.hs_desc_upload_started_since_recovery = False
+        state.hs_desc_upload_failed_since_recovery = False
+        state.hs_desc_last_failed_reason = ""
         return
 
     # --- Failed to find node for hop #1 ---
@@ -493,9 +507,19 @@ def process_event(line, cmd_sock, state):
                 state.bootstrapped = False
         return
 
-    # --- Descriptor upload (onion service containers) ---
-    if "HS_DESC UPLOADED" in line:
+    # --- Descriptor publication events (onion service containers) ---
+    # Event format: 650 HS_DESC <ACTION> <HSAddress> <AuthType> <HsDir> ...
+    # Match with trailing space so UPLOAD doesn't match UPLOADED.
+    if "HS_DESC UPLOADED " in line:
         state.hs_desc_uploaded_since_recovery = True
+        return
+    if "HS_DESC UPLOAD " in line:
+        state.hs_desc_upload_started_since_recovery = True
+        return
+    if "HS_DESC FAILED " in line:
+        state.hs_desc_upload_failed_since_recovery = True
+        if "REASON=" in line:
+            state.hs_desc_last_failed_reason = line.split("REASON=", 1)[1].split()[0]
         return
 
 
@@ -546,20 +570,48 @@ def check_stalls(cmd_sock, state):
         do_dropguards(cmd_sock, state,
                       f"bootstrap stalled at {state.last_bootstrap_pct}% for {BOOTSTRAP_STALL_TIMEOUT}s")
 
-    # Descriptor upload stall — HSFETCH if stuck
+    # Descriptor upload stall — decide between DEL+ADD vs leave-alone based
+    # on which HS_DESC events fired since recovery. The structured log line
+    # lets analytics count branch frequencies across users.
     if (state.last_recovery_time > 0
             and not state.hs_desc_uploaded_since_recovery
             and now - state.last_recovery_time > HS_DESC_UPLOAD_TIMEOUT
             and state.bootstrapped):
-        log(f"Warning: no HS_DESC upload {HS_DESC_UPLOAD_TIMEOUT}s after recovery — flushing descriptor cache")
-        if not state.onion_addresses:
-            state.onion_addresses = discover_onion_addresses()
-        if state.onion_addresses:
-            send_cmd(cmd_sock, "SIGNAL NEWNYM")
-            for addr in state.onion_addresses:
-                resp = send_cmd(cmd_sock, f"HSFETCH {addr}")
-                if "250" in resp:
-                    log(f"HSFETCH {addr[:16]}... — refreshing descriptor")
+        elapsed = int(now - state.last_recovery_time)
+        started = state.hs_desc_upload_started_since_recovery
+        failed = state.hs_desc_upload_failed_since_recovery
+        trigger = state.last_recovery_trigger or "unknown"
+        failed_reason = state.hs_desc_last_failed_reason or ""
+
+        fields = (f"trigger={trigger} elapsed={elapsed}s "
+                  f"upload_started={'yes' if started else 'no'} "
+                  f"uploaded=no "
+                  f"failed={'yes' if failed else 'no'}")
+        if failed and failed_reason:
+            fields += f" failed_reason={failed_reason}"
+
+        if started and not failed:
+            log(f"HS_DESC stall after recovery ({fields}) — UPLOAD in flight, leaving alone")
+        elif state.services:
+            log(f"HS_DESC stall after recovery ({fields}) — DEL+ADD to force republish")
+            del_all_services(cmd_sock, state.services)
+            added, _ = add_all_services(cmd_sock, state.services)
+            if added > 0:
+                state.services_active = True
+        else:
+            # SOCKS-only container (no services). Fall back to HSFETCH to
+            # refresh the client-side descriptor cache for known addresses.
+            if not state.onion_addresses:
+                state.onion_addresses = discover_onion_addresses()
+            if state.onion_addresses:
+                log(f"HS_DESC stall after recovery ({fields}) — no services configured; HSFETCH only")
+                send_cmd(cmd_sock, "SIGNAL NEWNYM")
+                for addr in state.onion_addresses:
+                    resp = send_cmd(cmd_sock, f"HSFETCH {addr}")
+                    if "250" in resp:
+                        log(f"HSFETCH {addr[:16]}... — refreshing descriptor")
+            else:
+                log(f"HS_DESC stall after recovery ({fields}) — no services or addresses known; no action")
         state.last_recovery_time = 0
 
     # Escalation: DORMANT/ACTIVE if DROPGUARDS didn't work after 2 minutes.
@@ -659,7 +711,11 @@ def run():
                 _signal_wake = False
                 state.sleeping = False
                 state.last_recovery_time = time.time()
+                state.last_recovery_trigger = "wake"
                 state.hs_desc_uploaded_since_recovery = False
+                state.hs_desc_upload_started_since_recovery = False
+                state.hs_desc_upload_failed_since_recovery = False
+                state.hs_desc_last_failed_reason = ""
 
                 # Wait for Tor to have live circuits before ADD_ONION.
                 # After sleep, Tor may report bootstrapped=True (stale) but
