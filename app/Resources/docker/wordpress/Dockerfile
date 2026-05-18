@@ -11,7 +11,8 @@ COPY onionpress-uploads.ini /usr/local/etc/php/conf.d/
 RUN a2enmod remoteip rewrite headers
 COPY onionpress-proxy-protocol.conf /etc/apache2/conf-available/
 COPY onionpress-xmlrpc-block.conf /etc/apache2/conf-available/
-RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block
+COPY onionpress-log-format.conf /etc/apache2/conf-available/
+RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format
 
 # Multisite init script — runs on every container start to ensure
 # multisite is configured (safe to re-run, checks if already done)
