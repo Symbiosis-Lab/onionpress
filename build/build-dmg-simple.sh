@@ -27,9 +27,8 @@ cp "$PROJECT_DIR/app/Info.plist" "$APP_PATH/Contents/"
 cp "$PROJECT_DIR/app/MacOS/onionpress" "$APP_PATH/Contents/MacOS/"
 cp "$PROJECT_DIR/app/MacOS/launcher.sh" "$APP_PATH/Contents/MacOS/"
 cp "$PROJECT_DIR/app/MacOS/torcurl" "$APP_PATH/Contents/MacOS/"
-cp "$PROJECT_DIR/app/MacOS/onionpress-cli" "$APP_PATH/Contents/MacOS/"
 chmod +x "$APP_PATH/Contents/MacOS/onionpress" "$APP_PATH/Contents/MacOS/launcher.sh" \
-         "$APP_PATH/Contents/MacOS/torcurl" "$APP_PATH/Contents/MacOS/onionpress-cli"
+         "$APP_PATH/Contents/MacOS/torcurl"
 
 # Compile Swift launcher from source
 echo "  Compiling launcher from launcher-wrapper.swift..."

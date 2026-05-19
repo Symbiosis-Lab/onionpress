@@ -59,7 +59,7 @@ handles startup, port detection, key management, backups, and updates.
 5. To launch from a clean state:
 
    ```
-   /Applications/OnionPress.app/Contents/MacOS/onionpress-cli quit
+   /Applications/OnionPress.app/Contents/MacOS/onionpress quit
    open /Applications/OnionPress.app
    ```
 
@@ -159,7 +159,7 @@ with the maintainer.
 For non-security bugs, open an issue with the
 [bug report template](.github/ISSUE_TEMPLATE/bug_report.md). Include
 your OS version, OnionPress version (visible at the top of WP admin
-or via `onionpress-cli status`), and the relevant log lines from
+or via `onionpress status`), and the relevant log lines from
 `~/.onionpress/onionpress.log`.
 
 For security issues, see [SECURITY.md](SECURITY.md) — please report
