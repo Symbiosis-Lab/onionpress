@@ -42,6 +42,8 @@ from onionpress.health import (
     WEDGE_FAILING_STREAK_ALARM,
 )
 from onionpress import config as op_config
+from onionpress.reachability_stats import ReachabilityStats
+from onionpress.system_metrics import host_metrics, container_metrics
 from onionpress.ui_helpers import (
     HelpButtonTarget as _HelpButtonTarget,
     parse_version,
@@ -449,6 +451,15 @@ class OnionPressApp(rumps.App):
         self._run_generation = 0               # Incremented on stop/start; stale threads check this
         self._consecutive_fail_count = 0       # Require 2 consecutive failures before flipping to yellow
         self._wedge_warning_fired = False      # One-shot wedge-recovery hint per wedge episode
+
+        # Reachability instrumentation (issue #238): counters tick every
+        # probe (silent), transitions emit one log line at the icon-flip
+        # debounce, snapshots fire at sleep/wake and every ~12h.
+        self._reachability_stats = ReachabilityStats()
+        self._last_probe_code = ""
+        self._last_probe_ms = 0
+        self._last_snapshot_ts = time.time()
+        self._snapshot_interval_seconds = 12 * 3600
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -1309,9 +1320,23 @@ class OnionPressApp(rumps.App):
             return None
 
     def check_tor_reachability(self, log_result=True):
-        """Check if the .onion service is properly configured and published"""
+        """Check if the .onion service is properly configured and published.
+
+        Returns bool. Also stores the external probe outcome on self so
+        the caller (status loop) can record per-probe stats and emit
+        transition lines (issue #238):
+          - self._last_probe_code: code from check_external_reachability
+            (e.g. "301", "000:rc=28", "takeover", "degraded:ext=...")
+            or a pre-external sentinel ("hostname_missing", "bootstrap",
+            "internal_wp") when we never reached the external probe.
+          - self._last_probe_ms: external probe duration in ms (0 if we
+            short-circuited before the external check).
+        """
         self._tor_internally_ready = False
+        self._last_probe_code = ""
+        self._last_probe_ms = 0
         if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
+            self._last_probe_code = "no_address"
             return False
 
         try:
@@ -1323,10 +1348,12 @@ class OnionPressApp(rumps.App):
             if not hostname:
                 if log_result:
                     self.log("✗ Onion service hostname file not found")
+                self._last_probe_code = "hostname_missing"
                 return False
             if hostname != self.onion_address:
                 if log_result:
                     self.log(f"✗ Hostname mismatch: {hostname} != {self.onion_address}")
+                self._last_probe_code = "hostname_mismatch"
                 return False
 
             # Check 2: Verify Tor has bootstrapped (via control port)
@@ -1334,18 +1361,23 @@ class OnionPressApp(rumps.App):
             if not bootstrapped:
                 if log_result:
                     self.log(f"✗ onionpress-tor not fully bootstrapped yet ({pct}%)")
+                self._last_probe_code = f"bootstrap_{pct}"
                 return False
 
             # Check 4: Internal connectivity (Tor → WordPress over Docker network)
             if not self._health_checker.check_internal_connectivity():
                 if log_result:
                     self.log("✗ WordPress not reachable from Tor container")
+                self._last_probe_code = "internal_wp"
                 return False
 
             self._tor_internally_ready = True
 
             # Check 5: External reachability via onionheaven's independent Tor
+            _probe_start = time.monotonic()
             reachable, http_code = self._health_checker.check_external_reachability(self.onion_address)
+            self._last_probe_ms = int((time.monotonic() - _probe_start) * 1000)
+            self._last_probe_code = http_code or ""
             if not reachable:
                 if log_result:
                     if http_code == "takeover":
@@ -1378,6 +1410,8 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             if log_result:
                 self.log(f"✗ Tor status check failed: {str(e)}")
+            if not self._last_probe_code:
+                self._last_probe_code = "exception"
             return False
 
     def _remove_pid_file(self):
@@ -1685,11 +1719,33 @@ class OnionPressApp(rumps.App):
                     else:
                         wordpress_ready = True
                     tor_reachable = self.check_tor_reachability(log_result=should_log)
+                    # Issue #238: silent per-probe counter update.
+                    self._reachability_stats.record_probe(
+                        tor_reachable,
+                        self._last_probe_code,
+                        self._last_probe_ms,
+                    )
 
                     previous_ready = self.is_ready
                     ready_now = wordpress_ready and tor_reachable
 
                     if ready_now and not previous_ready:
+                        # Issue #238: log the icon transition only when we
+                        # actually entered yellow (i.e. tripped the debounce
+                        # earlier). First-time startup just resets stats so
+                        # subsequent uptime accounting is clean.
+                        _now = time.time()
+                        if self._reachability_stats.current_yellow_start_ts is not None:
+                            _ydur = int(_now - self._reachability_stats.current_yellow_start_ts)
+                            self._reachability_stats.exit_yellow(_now)
+                            self.log(
+                                f"reachability: yellow → purple "
+                                f"(http={self._last_probe_code}, "
+                                f"{self._last_probe_ms}ms, "
+                                f"yellow lasted {_ydur}s)"
+                            )
+                        elif not self._was_ready:
+                            self._reachability_stats.reset_session(_now)
                         self.is_ready = True
                         self._was_ready = True
                         self._onionheaven_reclaim_succeeded = False
@@ -1777,11 +1833,18 @@ class OnionPressApp(rumps.App):
                                 pass
                             else:
                                 self.is_ready = False
-                                self._yellow_since = time.time()
+                                _trip_ts = time.time()
+                                self._yellow_since = _trip_ts
                                 self._bootstrap_stall_count = 0
                                 self._onionheaven_heartbeat_succeeded = False
-                                self.startup_time = time.time()  # Reset so "launched in Xs" shows recovery time
-                                self.log("Service became unreachable — reconnecting")
+                                self.startup_time = _trip_ts  # Reset so "launched in Xs" shows recovery time
+                                # Issue #238: icon-flip transition.
+                                self._reachability_stats.enter_yellow(_trip_ts)
+                                self.log(
+                                    f"reachability: purple → yellow "
+                                    f"(http={self._last_probe_code}, "
+                                    f"{self._last_probe_ms}ms, after 2 fails)"
+                                )
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
                         pct = self._parse_bootstrap_percentage()
@@ -1979,6 +2042,11 @@ class OnionPressApp(rumps.App):
             # Update menu
             self.update_menu()
 
+            # Issue #238: periodic snapshot every ~12h. Only fires while
+            # awake; sleep/wake handlers emit their own snapshots so there's
+            # no need to chase those edge cases here.
+            self._maybe_emit_snapshot()
+
         except Exception as e:
             self.log(f"ERROR in check_status: {e}")
             import traceback
@@ -1986,6 +2054,25 @@ class OnionPressApp(rumps.App):
         finally:
             self._last_check_complete_ts = time.time()
             self.checking = False
+
+    def _maybe_emit_snapshot(self, force: bool = False) -> None:
+        """Emit a ~12h snapshot line if enough time has passed (or if forced).
+
+        Force=True is used by handle_sleep / handle_wake to checkpoint
+        unconditionally. Issue #238.
+        """
+        now = time.time()
+        if not force and now - self._last_snapshot_ts < self._snapshot_interval_seconds:
+            return
+        try:
+            host = host_metrics()
+            ctn = container_metrics(self._docker) if self._docker is not None else None
+            line = self._reachability_stats.format_snapshot(host, ctn, now)
+            self.log(line)
+        except Exception as e:
+            self.log(f"snapshot emit failed: {e}")
+        finally:
+            self._last_snapshot_ts = now
 
     def update_menu(self):
         """Update menu items based on current state - thread-safe"""
@@ -2292,6 +2379,10 @@ class OnionPressApp(rumps.App):
         (no competing descriptors). On wake, USR2 re-ADDs the services.
         """
         self.log("System going to sleep")
+        # Issue #238: emit a final session snapshot before sleeping so the
+        # session's reachability + resource numbers are captured. Done before
+        # _sleeping flag flips so any in-progress yellow streak finalizes.
+        self._maybe_emit_snapshot(force=True)
         self._sleeping = True
         self._onionheaven_heartbeat_succeeded = False
         if not self.is_onionheaven:
@@ -2384,6 +2475,10 @@ class OnionPressApp(rumps.App):
     def handle_wake(self):
         """Handle system wake — signal watchdogs to ADD_ONION, go yellow until verified."""
         self.log("System wake detected — marking Tor as reconnecting")
+        # Issue #238: snapshot the prior session, then start fresh counters.
+        # Done before USR2 so the snapshot reflects the just-finished session.
+        self._maybe_emit_snapshot(force=True)
+        self._reachability_stats.reset_session(time.time())
         self._sleeping = False
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.caffeine.start()

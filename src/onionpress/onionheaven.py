@@ -221,6 +221,12 @@ def _heartbeat_loop(app):
     Runs in the registration thread after successful registration.
     Sends the same /online payload but adds wordpress_healthy status.
     Keeps running until the app quits (daemon thread).
+
+    Also emits a ~12h system-metrics snapshot line (issue #238) on
+    platforms where the menubar isn't driving its own snapshots (i.e.
+    Linux). The Mac menubar emits richer snapshots from check_status
+    and sleep/wake, so the heartbeat skips emission when it detects
+    _maybe_emit_snapshot on the app object.
     """
     # Prevent duplicate heartbeat loops (multiple registration threads
     # can race into this function after wake/restart)
@@ -235,6 +241,13 @@ def _heartbeat_loop(app):
     jitter = random.uniform(0, 15)
     app.log(f"OnionHeaven: heartbeat loop starting (gen={my_generation}, first beat in {jitter:.0f}s)")
     time.sleep(jitter)
+
+    # Issue #238: heartbeat-driven ~12h snapshot for Linux (no menubar).
+    # 720 iterations × 60s ≈ 12h. The Mac menubar runs its own snapshot
+    # path from check_status, so skip emission there.
+    snapshot_every_n = max(1, int((12 * 3600) / HEARTBEAT_INTERVAL))
+    iteration = 0
+    drives_own_snapshot = hasattr(app, "_maybe_emit_snapshot")
 
     while True:
         # Exit if a newer heartbeat loop has been started (after wake)
@@ -255,7 +268,33 @@ def _heartbeat_loop(app):
         except Exception as e:
             app.log(f"OnionHeaven: heartbeat error: {e}")
 
+        iteration += 1
+        if (not drives_own_snapshot
+                and not getattr(app, '_sleeping', False)
+                and iteration % snapshot_every_n == 0):
+            _emit_heartbeat_snapshot(app)
+
         time.sleep(HEARTBEAT_INTERVAL)
+
+
+def _emit_heartbeat_snapshot(app):
+    """System-metrics-only snapshot for the heartbeat path.
+
+    Used on Linux where the menubar app isn't running. Importing the
+    metric helpers lazily keeps this module's import surface unchanged.
+    """
+    try:
+        from .system_metrics import host_metrics, container_metrics
+        from .reachability_stats import ReachabilityStats
+        host = host_metrics()
+        docker = getattr(app, '_docker', None)
+        ctn = container_metrics(docker) if docker is not None else None
+        # Empty stats object: yields a snapshot with no reachability
+        # section (heartbeat doesn't track per-probe outcomes).
+        stats = ReachabilityStats()
+        app.log(stats.format_snapshot(host, ctn))
+    except Exception as e:
+        app.log(f"OnionHeaven: heartbeat snapshot failed: {e}")
 
 
 def _check_wordpress_healthy(app):

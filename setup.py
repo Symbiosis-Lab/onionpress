@@ -81,6 +81,8 @@ OPTIONS = {
                  'onionpress.install_native_messaging', 'onionpress.native_messaging_host',
                  'onionpress.onionnames_client',
                  'onionpress.onionnames_registrar',
+                 'onionpress.reachability_stats',
+                 'onionpress.system_metrics',
                  'onionpress.redact'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
