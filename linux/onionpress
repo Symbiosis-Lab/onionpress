@@ -22,21 +22,36 @@ PIDFILE="$DATA_DIR/onionpress.pid"
 mkdir -p "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/onionpress (Linux default)
-# or ~/Documents/OnionPress (cross-platform) → ~/OnionPress.
-# Issue #239 unifies the path across platforms and (on macOS) sidesteps
-# TCC; Linux has no TCC but adopts the same path for consistency.
-# Marker only set when all old dirs are actually gone, so a failed move
-# retries instead of stranding content.
+# or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
+# source tree recursively so empty subdirs in the destination (from a
+# previous launcher pass) don't block the mv. Issue #239.
+_op_migrate_tree() {
+    local src="$1" dst="$2"
+    [ -d "$src" ] || return 0
+    mkdir -p "$dst"
+    shopt -s dotglob nullglob 2>/dev/null || true
+    local entry base target
+    for entry in "$src"/*; do
+        [ -e "$entry" ] || continue
+        base=$(basename "$entry")
+        target="$dst/$base"
+        if [ -d "$entry" ] && [ -d "$target" ]; then
+            _op_migrate_tree "$entry" "$target"
+            rmdir "$entry" 2>/dev/null || true
+        else
+            mv -n "$entry" "$target" 2>/dev/null || true
+        fi
+    done
+}
+
 if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    mkdir -p "$DOCUMENTS_DIR"
     _migration_residual=0
+    _migration_did_work=0
     for OLD in "$HOME/Documents/onionpress" "$HOME/Documents/OnionPress"; do
         [ -d "$OLD" ] || continue
-        shopt -s dotglob nullglob 2>/dev/null || true
-        for entry in "$OLD"/*; do
-            [ -e "$entry" ] || continue
-            mv -n "$entry" "$DOCUMENTS_DIR"/ 2>/dev/null || true
-        done
+        _migration_did_work=1
+        rm -f "$OLD/MOVED.txt" 2>/dev/null || true
+        _op_migrate_tree "$OLD" "$DOCUMENTS_DIR"
         rmdir "$OLD" 2>/dev/null || true
         if [ -d "$OLD" ]; then
             _migration_residual=1
@@ -44,6 +59,9 @@ if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; th
                 > "$OLD/MOVED.txt" 2>/dev/null || true
         fi
     done
+    if [ "$_migration_did_work" = "0" ]; then
+        mkdir -p "$DOCUMENTS_DIR"
+    fi
     if [ "$_migration_residual" = "0" ]; then
         printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
     fi

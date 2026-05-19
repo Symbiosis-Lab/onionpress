@@ -29,18 +29,33 @@ COLIMA_HOME="$DATA_DIR/colima"
 mkdir -p "$DATA_DIR"
 
 # One-time host-side migration from ~/Documents/OnionPress to
-# ~/OnionPress (#239). Marker is set only when the old dir is actually
-# gone — so a TCC-denied attempt retries on next launch instead of
-# stranding content. Must run before any --mount source is stat()'d by
-# Colima.
+# ~/OnionPress (#239). Walks source tree recursively so empty subdirs
+# pre-existing in destination don't block the mv. Marker is set only
+# when the old dir is actually gone; a TCC-denied attempt retries on
+# next launch.
+_op_migrate_tree() {
+    local src="$1" dst="$2"
+    [ -d "$src" ] || return 0
+    mkdir -p "$dst"
+    shopt -s dotglob nullglob 2>/dev/null || true
+    local entry base target
+    for entry in "$src"/*; do
+        [ -e "$entry" ] || continue
+        base=$(basename "$entry")
+        target="$dst/$base"
+        if [ -d "$entry" ] && [ -d "$target" ]; then
+            _op_migrate_tree "$entry" "$target"
+            rmdir "$entry" 2>/dev/null || true
+        else
+            mv -n "$entry" "$target" 2>/dev/null || true
+        fi
+    done
+}
+
 if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    mkdir -p "$DOCUMENTS_DIR"
     if [ -d "$OLD_DOCUMENTS_DIR" ]; then
-        shopt -s dotglob nullglob 2>/dev/null || true
-        for entry in "$OLD_DOCUMENTS_DIR"/*; do
-            [ -e "$entry" ] || continue
-            mv -n "$entry" "$DOCUMENTS_DIR"/ 2>/dev/null || true
-        done
+        rm -f "$OLD_DOCUMENTS_DIR/MOVED.txt" 2>/dev/null || true
+        _op_migrate_tree "$OLD_DOCUMENTS_DIR" "$DOCUMENTS_DIR"
         rmdir "$OLD_DOCUMENTS_DIR" 2>/dev/null || true
         if [ -d "$OLD_DOCUMENTS_DIR" ]; then
             echo "OnionPress content moved to $DOCUMENTS_DIR" \
@@ -49,6 +64,7 @@ if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; th
             printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
         fi
     else
+        mkdir -p "$DOCUMENTS_DIR"
         printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
     fi
 fi
