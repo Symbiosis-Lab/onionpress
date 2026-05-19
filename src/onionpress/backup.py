@@ -322,7 +322,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                 f.write(result.stdout)
 
         # 3. Copy wp-content from container, excluding:
-        #    - creations/: bind-mounted from ~/Documents/OnionPress/Creations,
+        #    - creations/: bind-mounted from ~/OnionPress/Creations,
         #      often multi-GB of media. Lives on the host filesystem already,
         #      so docker-cp'ing it through the VM and then re-encrypting it
         #      into the zip is redundant work for a local backup.
@@ -422,7 +422,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             'is_onionheaven': is_onionheaven,
             'is_onionhome': is_onionhome,
             # Creations aren't inside wp-content anymore; they're in the
-            # user's ~/Documents/OnionPress/Creations directory. Flag this
+            # user's ~/OnionPress/Creations directory. Flag this
             # so restore can surface a useful "also copy your Documents"
             # reminder instead of silently producing an empty Creations page.
             'excludes_creations': True,
@@ -699,13 +699,13 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
 
         # Surface Creations-exclusion reminder. The backup intentionally
         # skips wp-content/creations (it's the host-side bind mount of
-        # ~/Documents/OnionPress/Creations) — on this machine the bind
+        # ~/OnionPress/Creations) — on this machine the bind
         # mount re-materializes Creations at container start, but on a
         # different machine the user has to bring their Documents folder
         # along too, or My Creations will be empty.
         if metadata.get('excludes_creations'):
             log_func("Restore: NOTE — backup does not include 'My Creations' files. "
-                     "They live in ~/Documents/OnionPress/Creations/ — if restoring "
+                     "They live in ~/OnionPress/Creations/ — if restoring "
                      "on a new machine, copy that folder across separately.")
 
         # 4. Restore OnionHeaven data if present in backup

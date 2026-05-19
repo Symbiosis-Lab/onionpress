@@ -73,7 +73,7 @@ $page_url = get_permalink();
         <div class="creations-empty">
             <p>No creations yet.</p>
             <?php if (current_user_can('upload_files')) : ?>
-                <p>Upload files above or drop them into <code>~/Documents/OnionPress/Creations/My Creations/</code></p>
+                <p>Upload files above or drop them into <code>~/OnionPress/Creations/My Creations/</code></p>
             <?php endif; ?>
         </div>
     <?php else : ?>

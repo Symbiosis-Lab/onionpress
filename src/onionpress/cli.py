@@ -171,7 +171,7 @@ class OnionPressCLI:
             return 1
         addr = self.containers.get_onion_address()
         if not output_path:
-            backups_dir = os.path.expanduser("~/Documents/OnionPress/backups")
+            backups_dir = os.path.expanduser("~/OnionPress/backups")
             os.makedirs(backups_dir, exist_ok=True)
             output_path = os.path.join(
                 backups_dir, backup_filename(addr, username))
@@ -398,7 +398,7 @@ def main(argv: list[str] = None) -> int:
 
     p_backup = sub.add_parser("backup", help="Create a backup")
     p_backup.add_argument("password", help="WP admin password (also used to encrypt the zip)")
-    p_backup.add_argument("output", nargs="?", help="Output path (default: ~/Documents/OnionPress/backups/)")
+    p_backup.add_argument("output", nargs="?", help="Output path (default: ~/OnionPress/backups/)")
     p_backup.add_argument("--user", help="WP admin username (default: auto-resolve)")
 
     p_restore = sub.add_parser("restore", help="Restore from backup")

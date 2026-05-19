@@ -84,7 +84,7 @@ OnionPress is built on [WordPress](https://wordpress.org/), [Tor](https://www.to
 
 All data is stored in:
 - `~/.onionpress/` — Application state, logs, config
-- `~/Documents/OnionPress/` — Backups and My Creations
+- `~/OnionPress/` — Backups and My Creations
 - Docker volumes for WordPress content, database, and Tor keys
 
 ## Building from Source

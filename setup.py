@@ -61,7 +61,7 @@ OPTIONS = {
         'NSRequiresAquaSystemAppearance': False,
         'LSApplicationCategoryType': 'public.app-category.utilities',
         'NSLocalNetworkUsageDescription': 'OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.',
-        'NSDocumentsFolderUsageDescription': 'OnionPress saves your posts, backups, Creations in ~/Documents/OnionPress/ so they\'re easy to find and share. Access is limited to that subfolder.',
+        'NSDocumentsFolderUsageDescription': 'OnionPress is migrating existing files from ~/Documents/OnionPress/ to ~/OnionPress/. After the one-time move, OnionPress no longer accesses your Documents folder.',
     },
     'packages': ['rumps', 'objc', 'AppKit'],
     # Local modules that menubar.py imports at runtime. py2app cannot

@@ -17,7 +17,7 @@ $files = class_exists('OnionPress_Creations') ? OnionPress_Creations::get_files(
     <?php if (empty($files)) : ?>
         <div class="creations-empty">
             <p>No creations yet.</p>
-            <p>Drop files into <code>~/Documents/OnionPress/Creations/My Creations/</code> and they will appear here automatically.</p>
+            <p>Drop files into <code>~/OnionPress/Creations/My Creations/</code> and they will appear here automatically.</p>
         </div>
     <?php else : ?>
         <div class="creations-view-toggle">

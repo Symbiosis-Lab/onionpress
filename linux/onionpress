@@ -13,15 +13,47 @@ PLUGINS_DIR="$INSTALL_DIR/plugins"
 THEMES_DIR="$INSTALL_DIR/themes"
 SCRIPTS_DIR="$INSTALL_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
-DOCUMENTS_DIR="$(xdg-user-dir DOCUMENTS 2>/dev/null || echo "$HOME/Documents")/onionpress"
+DOCUMENTS_DIR="$HOME/OnionPress"
 
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
-# Ensure data and documents directories exist
+# Ensure data dir exists
 mkdir -p "$DATA_DIR"
+
+# One-time host-side migration: ~/Documents/onionpress (Linux default)
+# or ~/Documents/OnionPress (cross-platform) → ~/OnionPress.
+# Issue #239 unifies the path across platforms and (on macOS) sidesteps
+# TCC; Linux has no TCC but adopts the same path for consistency.
+# Marker only set when all old dirs are actually gone, so a failed move
+# retries instead of stranding content.
+if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
+    mkdir -p "$DOCUMENTS_DIR"
+    _migration_residual=0
+    for OLD in "$HOME/Documents/onionpress" "$HOME/Documents/OnionPress"; do
+        [ -d "$OLD" ] || continue
+        shopt -s dotglob nullglob 2>/dev/null || true
+        for entry in "$OLD"/*; do
+            [ -e "$entry" ] || continue
+            mv -n "$entry" "$DOCUMENTS_DIR"/ 2>/dev/null || true
+        done
+        rmdir "$OLD" 2>/dev/null || true
+        if [ -d "$OLD" ]; then
+            _migration_residual=1
+            echo "OnionPress content moved to $DOCUMENTS_DIR" \
+                > "$OLD/MOVED.txt" 2>/dev/null || true
+        fi
+    done
+    if [ "$_migration_residual" = "0" ]; then
+        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
+    fi
+fi
+
+# Ensure subtree exists for compose bind-mounts.
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+mkdir -p "$DOCUMENTS_DIR/Social Archives"
+touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
 
 # Log file with rotation (keep 3 x 5MB files)
 LOG_FILE="$DATA_DIR/onionpress.log"

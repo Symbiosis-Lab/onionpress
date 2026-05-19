@@ -34,7 +34,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>OnionPress saves your posts, backups, Creations in ~/Documents/OnionPress/ so they're easy to find and share. Access is limited to that subfolder.</string>
+	<string>OnionPress is migrating existing files from ~/Documents/OnionPress/ to ~/OnionPress/. After the one-time move, OnionPress no longer accesses your Documents folder.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>

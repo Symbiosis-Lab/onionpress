@@ -33,7 +33,7 @@ handles startup, port detection, key management, backups, and updates.
   that term. (The exception is unavoidable external identifiers like the
   `goldy/tor-hidden-service` Docker image name.)
 - Data directory is `~/.onionpress/`. User-visible content lives in
-  `~/Documents/OnionPress/`.
+  `~/OnionPress/`.
 
 ## Setting up a dev environment (macOS)
 

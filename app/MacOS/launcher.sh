@@ -18,29 +18,50 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
 MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
 DATA_DIR="$HOME/.onionpress"
-DOCUMENTS_DIR="$HOME/Documents/OnionPress"
+DOCUMENTS_DIR="$HOME/OnionPress"
+OLD_DOCUMENTS_DIR="$HOME/Documents/OnionPress"
 
-# NB: we intentionally do NOT stat or mkdir under $HOME/Documents/ at
-# startup — doing so triggers the macOS TCC "OnionPress would like to
-# access files in your Documents folder" prompt on first launch with
-# zero context. Features that need the Documents subtree (backups,
-# Creations) create it at the moment of use via ensure_documents_dir()
-# in app/MacOS/onionpress. The lowercase→uppercase migration ran at
-# startup in earlier versions; it now runs from ensure_documents_dir
-# so the stat() doesn't fire until first feature activation.
+# DOCUMENTS_DIR lives at top-of-$HOME (not under ~/Documents/) so the VM
+# can mount it without triggering macOS TCC. See issue #239.
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
-# Ensure data dir exists. Documents/OnionPress subtree is created
-# lazily by the main launcher's ensure_documents_dir() when needed.
 mkdir -p "$DATA_DIR"
 
-# Emit `--mount $DOCUMENTS_DIR:w` only if the Documents subtree already
-# exists. Same rationale as docs_mount_args() in app/MacOS/onionpress:
-# Colima stat()s --mount sources at VM creation, which would trigger
-# the TCC Documents prompt at first launch. Gating on directory
-# existence defers the prompt to the first feature that activates
-# Documents via ensure_documents_dir().
+# One-time host-side migration from ~/Documents/OnionPress to
+# ~/OnionPress (#239). Marker is set only when the old dir is actually
+# gone — so a TCC-denied attempt retries on next launch instead of
+# stranding content. Must run before any --mount source is stat()'d by
+# Colima.
+if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
+    mkdir -p "$DOCUMENTS_DIR"
+    if [ -d "$OLD_DOCUMENTS_DIR" ]; then
+        shopt -s dotglob nullglob 2>/dev/null || true
+        for entry in "$OLD_DOCUMENTS_DIR"/*; do
+            [ -e "$entry" ] || continue
+            mv -n "$entry" "$DOCUMENTS_DIR"/ 2>/dev/null || true
+        done
+        rmdir "$OLD_DOCUMENTS_DIR" 2>/dev/null || true
+        if [ -d "$OLD_DOCUMENTS_DIR" ]; then
+            echo "OnionPress content moved to $DOCUMENTS_DIR" \
+                > "$OLD_DOCUMENTS_DIR/MOVED.txt" 2>/dev/null || true
+        else
+            printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
+        fi
+    else
+        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
+    fi
+fi
+
+# Idempotent subtree setup (no TCC concerns now that DOCUMENTS_DIR is
+# top-of-home). Compose's bind-mount needs these subdirs present.
+mkdir -p "$DOCUMENTS_DIR/backups"
+mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+mkdir -p "$DOCUMENTS_DIR/Social Archives"
+touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
+
+# Emit `--mount $DOCUMENTS_DIR:w`. Defensive existence check against
+# a hand-deleted directory mid-session.
 docs_mount_args() {
     if [ -d "$DOCUMENTS_DIR" ]; then
         printf -- '--mount %s:w' "$DOCUMENTS_DIR"

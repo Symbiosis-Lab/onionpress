@@ -507,7 +507,7 @@ class OnionPressApp(rumps.App):
         self.start_status_checker()
 
         # Thumbnail generator is NOT started here. Its 60-second poll
-        # loop stats ~/Documents/OnionPress/Creations/My Creations,
+        # loop stats ~/OnionPress/Creations/My Creations,
         # which triggers macOS TCC's "Documents access" prompt at every
         # launch of a newly-signed binary — and earns that prompt zero
         # context, since the user hasn't asked for anything Creations-
@@ -2556,14 +2556,14 @@ class OnionPressApp(rumps.App):
         """Background thread to generate thumbnails for Creations files using qlmanage.
 
         Idempotent: callers may invoke this from any flow that has
-        just touched ``~/Documents/OnionPress/``; the thread is only
+        just touched ``~/OnionPress/``; the thread is only
         spawned once per process. See :meth:`__init__` for why this
         isn't started eagerly at launch.
         """
         if getattr(self, "_thumbnail_generator_started", False):
             return
         self._thumbnail_generator_started = True
-        creations_dir = os.path.expanduser("~/Documents/OnionPress/Creations/My Creations")
+        creations_dir = os.path.expanduser("~/OnionPress/Creations/My Creations")
         thumbs_dir = os.path.join(creations_dir, ".thumbs")
 
         def generator():
@@ -4064,7 +4064,7 @@ class OnionPressApp(rumps.App):
             suggested_address = self.onion_address
         panel.setNameFieldStringValue_(
             backup_manager.backup_filename(suggested_address, username))
-        backups_dir = os.path.expanduser("~/Documents/OnionPress/backups")
+        backups_dir = os.path.expanduser("~/OnionPress/backups")
         os.makedirs(backups_dir, exist_ok=True)
         # The backup flow has now earned macOS TCC's Documents grant
         # (or been denied — either way the prompt has been resolved).

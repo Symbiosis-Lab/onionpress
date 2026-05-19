@@ -49,7 +49,7 @@ In particular, please report:
   `onionpress_curl_tor()` for PHP).
 - Persistent or stored XSS in the OnionPress-shipped WordPress plugins.
 - Privilege escalation between containers, or container → host escapes
-  via our shared mounts (`~/.onionpress/shared`, `~/Documents/OnionPress`).
+  via our shared mounts (`~/.onionpress/shared`, `~/OnionPress`).
 - Authentication bypass in the WP admin auto-login flow or the
   OnionHeaven registration protocol.
 - Tampering attacks against the auto-update path (replace the DMG between
