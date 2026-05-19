@@ -17,13 +17,23 @@ from onionpress import backup as backup_manager
 from onionpress import key_manager
 
 
+_FAKE_PUB = b"\x02" * 32
+_FAKE_PRIV = b"\x01" * 64
+# The .onion address that derives from _FAKE_PUB. create_backup and
+# restore_from_backup both treat the key as authoritative and write this
+# derived value into metadata regardless of any address the caller (or an
+# older backup's metadata) provides. Fixtures that need a matching pair
+# should use this constant.
+_FAKE_DERIVED_ADDR = key_manager.derive_onion_address(_FAKE_PUB)
+
+
 def _fake_arti_pem():
     """A deterministic, parseable OpenSSH PEM for test fixtures.
 
     The key bytes are arbitrary (not a real ed25519 pair) — build/parse is
     byte-level, not crypto. Tests round-trip these through backup+restore.
     """
-    return key_manager.build_openssh_key(b"\x01" * 64, b"\x02" * 32)
+    return key_manager.build_openssh_key(_FAKE_PRIV, _FAKE_PUB)
 
 
 class TestBackupFilename(unittest.TestCase):
@@ -263,8 +273,10 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.assertTrue(any("wp-content/plugins/" in n for n in names_normalized))
 
     def test_metadata_content(self):
+        # Pass the address that actually derives from the fake key so the
+        # caller-vs-derived agreement check is satisfied.
         backup_manager.create_backup(
-            onion_address="testaddr.onion",
+            onion_address=_FAKE_DERIVED_ADDR,
             username="admin",
             password="testpass",
             output_path=self.output_zip,
@@ -279,14 +291,53 @@ class TestCreateBackupZipStructure(unittest.TestCase):
                     data = json.loads(zf.read(name, pwd=b"testpass"))
                     break
 
-        self.assertEqual(data["onion_address"], "testaddr.onion")
+        self.assertEqual(data["onion_address"], _FAKE_DERIVED_ADDR)
         self.assertEqual(data["username"], "admin")
         self.assertEqual(data["onionpress_version"], "2.2.84")
         self.assertIn("backup_date", data)
+        # No KEY-MISMATCH warning when caller and key agree.
+        self.assertFalse(any("KEY-MISMATCH" in m for m in self.logs),
+                         f"unexpected KEY-MISMATCH log: {self.logs}")
+
+    def test_metadata_overrides_stale_caller_address(self):
+        # Simulates the post-vanity-rotation / post-restore window where
+        # self.onion_address (passed in as onion_address=) is still the
+        # PRIOR address while the in-container key is already the NEW one.
+        # Backup must record the key-derived address so the resulting zip
+        # is internally consistent, and log a loud KEY-MISMATCH so the
+        # source of stale caller input is greppable in analytics.
+        stale_caller_addr = "stale123stale123stale123stale123stale123stale123stale1.onion"
+        backup_manager.create_backup(
+            onion_address=stale_caller_addr,
+            username="admin",
+            password="testpass",
+            output_path=self.output_zip,
+            version="2.2.84",
+            log_func=self.logs.append,
+            data_dir=self.data_dir,
+        )
+
+        with zipfile.ZipFile(self.output_zip, "r") as zf:
+            for name in zf.namelist():
+                if name.endswith("metadata.json"):
+                    data = json.loads(zf.read(name, pwd=b"testpass"))
+                    break
+
+        # Derived wins over the stale caller-supplied value.
+        self.assertEqual(data["onion_address"], _FAKE_DERIVED_ADDR)
+        self.assertNotEqual(data["onion_address"], stale_caller_addr)
+
+        # Loud, structured log line with both addresses for cross-user grep.
+        mismatch_logs = [m for m in self.logs if "KEY-MISMATCH" in m]
+        self.assertEqual(len(mismatch_logs), 1,
+                         f"expected exactly one KEY-MISMATCH log, got "
+                         f"{len(mismatch_logs)}: {self.logs}")
+        self.assertIn(stale_caller_addr, mismatch_logs[0])
+        self.assertIn(_FAKE_DERIVED_ADDR, mismatch_logs[0])
 
     def test_password_protection(self):
         backup_manager.create_backup(
-            onion_address="testaddr.onion",
+            onion_address=_FAKE_DERIVED_ADDR,
             username="admin",
             password="secret",
             output_path=self.output_zip,
@@ -303,7 +354,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
                         zf.read(name)
                     # Reading with correct password should succeed
                     data = zf.read(name, pwd=b"secret")
-                    self.assertIn(b"testaddr.onion", data)
+                    self.assertIn(_FAKE_DERIVED_ADDR.encode(), data)
                     break
 
     def test_log_messages(self):
@@ -375,14 +426,22 @@ class TestRestoreRoundTrip(unittest.TestCase):
         os.environ["PATH"] = self.orig_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _make_backup_zip(self, password="testpw"):
-        """Create a realistic backup zip manually."""
+    def _make_backup_zip(self, password="testpw", metadata_address=None):
+        """Create a realistic backup zip manually.
+
+        metadata_address overrides the address recorded in metadata.json
+        (default: the address that derives from the fake key, i.e. an
+        internally-consistent backup). Tests pass a different value to
+        simulate a corrupted backup whose metadata disagrees with its key.
+        """
         staging = os.path.join(self.tmpdir, "staging")
         os.makedirs(staging)
 
-        # metadata
+        # metadata — defaults to the key-derived address so the backup is
+        # internally consistent. test_restore_overrides_mismatched_metadata
+        # overrides this to exercise the corruption-detection path.
         metadata = {
-            "onion_address": "restored123.onion",
+            "onion_address": metadata_address or _FAKE_DERIVED_ADDR,
             "backup_date": "2026-02-01T12:00:00Z",
             "onionpress_version": "2.2.84",
             "username": "admin",
@@ -421,8 +480,45 @@ class TestRestoreRoundTrip(unittest.TestCase):
         zip_path = self._make_backup_zip()
         metadata = backup_manager.restore_from_backup(
             zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
-        self.assertEqual(metadata["onion_address"], "restored123.onion")
+        self.assertEqual(metadata["onion_address"], _FAKE_DERIVED_ADDR)
         self.assertEqual(metadata["username"], "admin")
+        # No KEY-MISMATCH when backup metadata and key agree.
+        self.assertFalse(any("KEY-MISMATCH" in m for m in self.logs),
+                         f"unexpected KEY-MISMATCH log: {self.logs}")
+
+    def test_restore_overrides_mismatched_metadata(self):
+        # Simulates a corrupted backup created by a stale-cached source
+        # instance (op2ijk3-style incident): metadata claims one address
+        # but tor-keys holds a key for a different address. Restore must
+        # detect the mismatch, prefer the key-derived address everywhere
+        # it persists state, and log loudly so the analytics pipeline
+        # surfaces the source instance.
+        stale_metadata_addr = "stalemd1stalemd1stalemd1stalemd1stalemd1stalemd1stale12.onion"
+        zip_path = self._make_backup_zip(metadata_address=stale_metadata_addr)
+        metadata = backup_manager.restore_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+
+        # The returned metadata is mutated in-place so menubar.do_restore
+        # picks up the derived address without further code changes.
+        self.assertEqual(metadata["onion_address"], _FAKE_DERIVED_ADDR)
+        self.assertNotEqual(metadata["onion_address"], stale_metadata_addr)
+
+        # vanity-keys directory is named after the DERIVED address.
+        vanity_dir = os.path.join(self.data_dir, "shared", "vanity-keys")
+        self.assertEqual(os.listdir(vanity_dir), [_FAKE_DERIVED_ADDR])
+
+        # Host-side cache file holds the DERIVED address.
+        with open(os.path.join(self.data_dir, "onion_address")) as f:
+            cached = f.read().strip()
+        self.assertEqual(cached, _FAKE_DERIVED_ADDR)
+
+        # Loud, greppable log line with both addresses.
+        mismatch_logs = [m for m in self.logs if "KEY-MISMATCH" in m]
+        self.assertEqual(len(mismatch_logs), 1,
+                         f"expected exactly one KEY-MISMATCH log, got "
+                         f"{len(mismatch_logs)}: {self.logs}")
+        self.assertIn(stale_metadata_addr, mismatch_logs[0])
+        self.assertIn(_FAKE_DERIVED_ADDR, mismatch_logs[0])
 
     def test_restore_renames_old_vanity_keys(self):
         """Restore renames the entire vanity-keys dir to vanity-keys.old<ts>.
@@ -453,7 +549,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
             self.assertEqual(f.read(), b"SIBLING-KEY")
 
         # New vanity-keys dir has only the restored address.
-        self.assertEqual(os.listdir(vanity_dir), ["restored123.onion"])
+        self.assertEqual(os.listdir(vanity_dir), [_FAKE_DERIVED_ADDR])
 
     def test_restore_logs_progress(self):
         zip_path = self._make_backup_zip()

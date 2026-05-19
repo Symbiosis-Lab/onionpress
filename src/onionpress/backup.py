@@ -277,6 +277,30 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
                 f.write(pem_data)
 
+            # Override caller-supplied onion_address with the address derived
+            # from the actual key being zipped. The caller passes
+            # self.onion_address from the menubar, which is a cached value
+            # updated only on the ~30s update_status poll. If a backup runs
+            # in the window after a vanity rotation / restore / key import
+            # but before that poll, the caller's value is stale and the
+            # backup is born with metadata.onion_address pointing at the
+            # PRIOR address while tor-keys/ holds the NEW key — exactly the
+            # corrupted-backup shape that propagates the mismatch into
+            # KEYS_DIR on the hub when this backup is later restored and
+            # heartbeated. Derive from the key and the backup is internally
+            # consistent regardless of the caller's view.
+            derived_address = key_manager.derive_onion_address(pub)
+            if onion_address and onion_address != derived_address:
+                log_func(f"Backup: KEY-MISMATCH — caller-supplied "
+                         f"onion_address={onion_address} does not match "
+                         f"key_derives_to={derived_address}. Recording "
+                         f"DERIVED in metadata (key is authoritative). The "
+                         f"caller's cached onion_address was stale — likely "
+                         f"a backup taken in the window after a vanity "
+                         f"rotation / restore / key import but before "
+                         f"update_status repolled the container.")
+            onion_address = derived_address
+
         # 2. Dump WordPress database via mariadb-dump in the db container
         # (wp db export uses mysqldump which isn't in the WordPress container)
         with _phase_timer(log_func, 'BACKUP', 'db_dump'):
@@ -520,6 +544,30 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
                 pem_data = f.read()
             priv, pub = key_manager.parse_openssh_key(pem_data)
             key_manager.write_private_key(priv, pub)
+
+            # Address is fully determined by the key — derive it here and
+            # use the derived value for every address-keyed write that
+            # follows (cache file, vanity-keys directory name, hostname
+            # file, ADDRESS_PREFIX). Trusting metadata.onion_address instead
+            # propagated corruption when older clients produced backups
+            # with metadata.onion_address pointing at the previous address
+            # while tor-keys/ already held the new key. The metadata value
+            # is recorded only as a diagnostic check.
+            derived_address = key_manager.derive_onion_address(pub)
+            metadata_address = metadata.get('onion_address', '')
+            if metadata_address and metadata_address != derived_address:
+                log_func(f"Restore: KEY-MISMATCH — backup "
+                         f"metadata.onion_address={metadata_address} does "
+                         f"not match key_derives_to={derived_address}. "
+                         f"Using DERIVED address for all persisted state "
+                         f"(cache file, vanity-keys directory, hostname, "
+                         f"ADDRESS_PREFIX). The source instance that "
+                         f"created this backup had a stale cached "
+                         f"onion_address — before the 542cb61b server-side "
+                         f"guard, it may have leaked the wrong (address, "
+                         f"key) pair to OnionHeaven, clobbering some other "
+                         f"address's stored takeover key.")
+            metadata['onion_address'] = derived_address
 
             # Remove arti-state volume so it gets recreated from vanity-keys
             # on next launch. This avoids stale key mismatches.

@@ -499,6 +499,20 @@ def unregister_from_onionheaven(app, content_address=None):
         app.log(f"OnionHeaven: failed to extract keys for unregister: {e}")
         return
 
+    # Same staleness guard as _send_heartbeat / _send_onionheaven_notification:
+    # refuse to unregister an address that doesn't match the live key. addr
+    # comes from a caller-supplied parameter, a registration-status cache,
+    # or self.onion_address — all three can lag the container's actual key
+    # after a vanity rotation or restore. Without this check we'd sign with
+    # the new key but ship the old address, which the server-side guard
+    # (542cb61b) rejects — but we'd still waste the round-trip and leak the
+    # mismatch into logs without a clear KEY-MISMATCH marker.
+    derived = onion_auth.derive_onion_address(public_key_raw)
+    if derived != addr:
+        app.log(f"OnionHeaven: ABORT unregister — content_address stale "
+                f"(app={addr}, key_derives_to={derived})")
+        return
+
     hc_addr = getattr(app, 'healthcheck_address', None)
     hc_addr_val = hc_addr if (hc_addr and hc_addr.endswith('.onion')) else ""
 
