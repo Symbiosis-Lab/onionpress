@@ -2750,6 +2750,13 @@ main() {
                 log "restart: Lima VM restarted, resuming normal restart"
             fi
             setup_db_passwords
+            # Pull updated images before stop_containers: the OnionHeaven
+            # farm respawns takeover-* containers within ~2s of being
+            # stopped, racing the pull. If the pull runs after, takeover
+            # containers persist on a stale cached image while compose
+            # containers refresh, splitting the cluster across image
+            # versions (e.g. missing `has` command in queue-manager).
+            update_images
             stop_containers
             start_containers
             wait_for_services
