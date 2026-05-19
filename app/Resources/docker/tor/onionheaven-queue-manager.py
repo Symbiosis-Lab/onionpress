@@ -90,19 +90,36 @@ class TorCommandConn:
         return data.decode("utf-8", errors="replace")
 
     def add_onion(self, content_address, key_b64):
-        """Send ADD_ONION. Returns (success, service_id_or_error)."""
+        """Send ADD_ONION. Returns (success, service_id_or_error).
+
+        Defense-in-depth: if Tor's ServiceID doesn't match content_address,
+        the key on disk derives to a different onion than the directory
+        name claims. Roll back the ADD and refuse — otherwise Tor ends up
+        serving the wrong content under content_address's takeover slot,
+        and the heartbeat RECONCILE loop runs forever cleaning up an entry
+        the queue manager keeps re-creating. Catches residue from the
+        pre-542cb61b /online key-write bug and any future class of bug
+        that lets a wrong key onto disk.
+        """
         cmd = (f"ADD_ONION ED25519-V3:{key_b64} Flags=Detach "
                f"Port=80,127.0.0.1:{REDIRECT_PORT}")
         self._send(cmd)
         resp = self._read_response()
 
+        expected_sid = content_address.replace(".onion", "")
         if "250-ServiceID=" in resp:
             # Extract service ID from response
             for line in resp.split("\r\n"):
                 if line.startswith("250-ServiceID="):
                     sid = line.split("=", 1)[1]
+                    if sid != expected_sid:
+                        # Wrong key on disk. Roll back the ADD so we don't
+                        # leak a service into Tor under the wrong slot.
+                        self._send(f"DEL_ONION {sid}")
+                        self._read_response()
+                        return False, f"key_mismatch:expected={expected_sid} actual={sid}"
                     return True, sid
-            return True, content_address.replace(".onion", "")
+            return True, expected_sid
 
         if "Onion address collision" in resp:
             # Tor says the key already maps to a registered service. That's
