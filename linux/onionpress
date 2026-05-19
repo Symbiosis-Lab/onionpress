@@ -25,6 +25,9 @@ mkdir -p "$DATA_DIR"
 # or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
 # source tree recursively so empty subdirs in the destination (from a
 # previous launcher pass) don't block the mv. Issue #239.
+#
+# REMOVE-AFTER 2026-08-01: by then every active install will have
+# migrated. Delete this block and _op_migrate_tree.
 _op_migrate_tree() {
     local src="$1" dst="$2"
     [ -d "$src" ] || return 0

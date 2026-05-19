@@ -33,6 +33,9 @@ mkdir -p "$DATA_DIR"
 # pre-existing in destination don't block the mv. Marker is set only
 # when the old dir is actually gone; a TCC-denied attempt retries on
 # next launch.
+#
+# REMOVE-AFTER 2026-08-01: by then every active install will have
+# migrated. Delete this block, _op_migrate_tree, and OLD_DOCUMENTS_DIR.
 _op_migrate_tree() {
     local src="$1" dst="$2"
     [ -d "$src" ] || return 0
