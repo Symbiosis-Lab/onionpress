@@ -824,25 +824,89 @@ def _exec_takeover(container_name, content_address):
 def _exec_release(container_name, content_address):
     """Release on a worker via the queue manager.
 
-    Returns True on success, False on failure.
+    Uses the worker's own Tor (GETINFO onions/{detached,current} via the
+    queue-manager's `has` command) as the source of truth, because the
+    queue-manager's reported release status alone is unreliable: a
+    `release_warning` means DEL_ONION explicitly failed, and a `not_found`
+    can mask orphans the queue-manager forgot about (e.g. after a daemon
+    restart cleared its in-memory active set while Tor kept the detached
+    service). Both produced returncode 0 under the previous returncode-only
+    contract, which left orphaned takeover services serving redirects long
+    after the registry said "released".
+
+    Returns True on verified success, False otherwise.
     """
     addr_log(content_address, f"Releasing {content_address} via {container_name}")
+
     try:
         result = subprocess.run(
             ["docker", "exec", container_name,
              "python3", "/onionheaven-queue-manager.py", "release", content_address],
             capture_output=True, text=True, timeout=30
         )
-        if result.returncode == 0:
-            addr_log(content_address, f"Release complete: {content_address} on {container_name}")
-            return True
-        else:
-            log(f"Release failed for {content_address} on {container_name}: "
-                f"{result.stderr.strip()}")
-            return False
     except Exception as e:
         log(f"Release error for {content_address} on {container_name}: {e}")
         return False
+
+    if result.returncode != 0:
+        log(f"Release subprocess failed for {content_address} on {container_name}: "
+            f"rc={result.returncode} stderr={result.stderr.strip()[:200]}")
+        return False
+
+    reported = None
+    try:
+        reported = json.loads(result.stdout.strip() or "{}").get("status")
+    except (json.JSONDecodeError, AttributeError):
+        log(f"Release: non-JSON response from {container_name} for "
+            f"{content_address}: {result.stdout.strip()[:200]}")
+
+    has_after = _has_onion_on_worker(container_name, content_address)
+    if has_after is True:
+        log(f"Release FAILED-VERIFY: {content_address} still active on "
+            f"{container_name} (queue-manager reported={reported})")
+        return False
+    if has_after is False:
+        addr_log(content_address,
+                 f"Release complete: {content_address} on {container_name} "
+                 f"(reported={reported})")
+        return True
+
+    # Verify probe itself failed (e.g. worker still on an older image with
+    # no `has` command). Fall back to the queue-manager's reported status,
+    # but treat release_warning as the failure it is.
+    if reported in ("released", "not_found", "removed_from_queue"):
+        addr_log(content_address,
+                 f"Release complete: {content_address} on {container_name} "
+                 f"(reported={reported}, verify probe unavailable)")
+        return True
+    log(f"Release failed for {content_address} on {container_name}: "
+        f"reported={reported}, verify probe unavailable")
+    return False
+
+
+def _has_onion_on_worker(container_name, content_address):
+    """Independently probe whether a worker's Tor still has the onion.
+
+    Returns True/False on success, or None if the probe itself fails
+    (e.g. docker exec error, worker on older image without `has`).
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name,
+             "python3", "/onionheaven-queue-manager.py", "has", content_address],
+            capture_output=True, text=True, timeout=10
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout.strip() or "{}")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(data, dict) or "error" in data or "has_onion" not in data:
+        return None
+    return bool(data["has_onion"])
 
 
 def get_queue_status(container_name):
@@ -1109,11 +1173,20 @@ def release_function(conn, content_address, healthcheck_address):
     all_workers = conn.execute(
         "SELECT container_name FROM takeover_containers"
     ).fetchall()
+    sweep_problems = []
     for w in all_workers:
         wname = w["container_name"] if isinstance(w, dict) else w[0]
         if wname == takeover_container:
             continue  # already handled above
-        _exec_release(wname, content_address)
+        if not _exec_release(wname, content_address):
+            sweep_problems.append(wname)
+    if sweep_problems:
+        # These workers reported a release-time failure or still had the
+        # onion on the verify probe — surface them so the address-level
+        # log shows the silent-orphan case rather than hiding it.
+        addr_log(content_address,
+                 f"Safety sweep problems for {content_address} on: "
+                 f"{', '.join(sweep_problems)} — may still serve redirects")
 
     if not takeover_container:
         # Legacy fallback — only inside takeover worker containers

@@ -660,6 +660,8 @@ def run_daemon():
             elif cmd == "addr_state" and arg:
                 state = qm.addr_state(arg)
                 result = {"address": arg, "serving_status": state}
+            elif cmd == "has" and arg:
+                result = {"address": arg, "has_onion": qm.cmd.has_onion(arg)}
             else:
                 result = {"error": f"unknown command: {data}"}
 
@@ -702,7 +704,7 @@ def send_command(cmd):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: queue-manager.py daemon | takeover <addr> | release <addr> | status | reset")
+        print("Usage: queue-manager.py daemon | takeover <addr> | release <addr> | has <addr> | status | reset")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -712,6 +714,8 @@ if __name__ == "__main__":
         send_command(f"takeover {sys.argv[2]}")
     elif cmd == "release" and len(sys.argv) >= 3:
         send_command(f"release {sys.argv[2]}")
+    elif cmd == "has" and len(sys.argv) >= 3:
+        send_command(f"has {sys.argv[2]}")
     elif cmd == "status":
         send_command("status")
     elif cmd == "reset":
