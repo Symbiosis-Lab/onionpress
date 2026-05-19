@@ -55,6 +55,7 @@
 - `~/OnionPress/` holds user-visible backups and Creations
 - All other container data uses Docker named volumes (which live inside the VM)
 - **Do not move app state to `~/Library/Application Support/`** — the space in the path breaks Colima/Docker socket paths (104-char Unix socket limit + space handling issues)
+- **Diffdisk cap is 20 GiB on new installs** (issue #230) via `--disk 20` to the first `colima start` in `app/MacOS/launcher.sh` and `src/onionpress/colima.py`. The cap is set at VM creation and is immutable — existing installs keep their original 100 GiB cap. Dangling Docker images auto-prune after each successful image pull (`update_docker_images()` in `src/menubar.py` and the bash launchers), keeping real usage well under 5 GiB in practice.
 - **Do not add additional `--mount` flags without considering security implications**
 
 ## Multi-User Support (v2.4.11+)

@@ -604,15 +604,28 @@ update_images() {
     cd "$DOCKER_DIR"
 
     local images=("ghcr.io/brewsterkahle/onionpress-tor:latest" "ghcr.io/brewsterkahle/onionpress-wordpress:latest" "mariadb:latest")
+    local pulled=0
 
     for image in "${images[@]}"; do
         log "Pulling $image..."
         if docker pull "$image" >> "$LOG_FILE" 2>&1; then
             log "$image up to date"
+            pulled=1
         else
             log "WARNING: Failed to pull $image (continuing with cached version)"
         fi
     done
+
+    if [ "$pulled" = "1" ]; then
+        # Issue #230: reclaim disk from old <none> image tags created by
+        # the pull above. Dangling-only (no -a) so in-use and freshly
+        # tagged images are untouched.
+        local prune_out
+        prune_out=$(docker image prune -f 2>&1 | tail -1)
+        if [ -n "$prune_out" ]; then
+            log "$prune_out"
+        fi
+    fi
 
     return 0
 }

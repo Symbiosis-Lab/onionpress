@@ -93,8 +93,11 @@ class Colima:
         ]
 
         if not self.initialized:
-            # First-time: select VM backend based on architecture
-            args.extend(["--arch", arch.value])
+            # First-time: select VM backend based on architecture, and cap
+            # diffdisk at 20 GiB (issue #230). Lima's default is 100 GiB
+            # which is alarming in Finder; auto-prune in the image-update
+            # path keeps real usage well under 5 GiB in practice.
+            args.extend(["--arch", arch.value, "--disk", "20"])
             if arch == Arch.ARM64:
                 args.extend([
                     "--vm-type", "vz",

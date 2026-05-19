@@ -4284,7 +4284,14 @@ class OnionPressApp(rumps.App):
 
             if result.ok:
                 self.log("Docker images updated successfully")
-                return "Downloaded" in result.stdout or "Pulled" in result.stdout
+                pulled = "Downloaded" in result.stdout or "Pulled" in result.stdout
+                # Issue #230: prune dangling images immediately after pull.
+                # Only fires when there's been a fresh download — otherwise no
+                # new <none> tags to clean up. Dangling-only (no -a) so we
+                # never touch images that aren't in use but are still tagged.
+                if pulled:
+                    self._prune_dangling_images()
+                return pulled
             else:
                 self.log(f"Failed to update Docker images: {result.stderr}")
                 return False
@@ -4292,6 +4299,30 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Error updating Docker images: {e}")
             return False
+
+    def _prune_dangling_images(self):
+        """Reclaim disk by removing dangling images (issue #230).
+
+        Called right after a successful image pull, since that's exactly
+        when old tags become <none>. Safe: docker image prune (no -a)
+        only removes untagged images, never in-use or freshly-tagged ones.
+        """
+        try:
+            r = self._docker.run(
+                ["image", "prune", "-f"],
+                timeout=60,
+                quiet=True,
+            )
+            if r.ok:
+                # Output looks like: "Total reclaimed space: 1.234GB"
+                for line in (r.stdout or "").splitlines():
+                    line = line.strip()
+                    if line.startswith("Total reclaimed space:"):
+                        self.log(f"Pruned dangling images: {line.split(':', 1)[1].strip()}")
+                        return
+                self.log("Pruned dangling images")
+        except Exception as e:
+            self.log(f"Image prune skipped: {e}")
 
     def _fix_app_bundle_permissions(self):
         """Make app bundle group-writable so any admin user can update it.

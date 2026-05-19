@@ -87,6 +87,48 @@ All data is stored in:
 - `~/OnionPress/` — Backups and My Creations
 - Docker volumes for WordPress content, database, and Tor keys
 
+## Disk usage
+
+OnionPress runs Docker inside a Colima VM on macOS. The VM's disk image
+lives at `~/.onionpress/colima/_lima/colima/diffdisk` and is a **sparse
+file** — the operating system only allocates real disk for blocks that
+have been written to.
+
+To see real vs. apparent size:
+
+```
+$ du -sh ~/.onionpress/colima/_lima/colima/diffdisk     # real allocation
+3.2G    diffdisk
+
+$ ls -lh ~/.onionpress/colima/_lima/colima/diffdisk     # apparent (= cap)
+-rw-------  1 you  staff   20G May 19 13:50 diffdisk
+```
+
+Finder shows the **apparent** size, which is the configured cap. New
+installs are capped at **20 GiB**; existing installs created before
+that change keep their original 100 GiB cap (the cap is set when the
+VM is first created and is not changed by upgrades).
+
+Real disk usage stays small: after months of typical use, expect 3–7 GB
+for the full `~/.onionpress/` tree. The menubar's "Check for Updates"
+flow automatically prunes dangling Docker image versions after each
+successful image pull, so old releases don't accumulate on disk.
+
+If you want to apply the smaller 20 GiB cap to an existing install:
+
+```
+onionpress backup          # IMPORTANT: back up first — data loss otherwise
+/Applications/OnionPress.app/Contents/MacOS/onionpress quit
+colima delete onionpress   # destroys the VM and its diffdisk
+open /Applications/OnionPress.app  # next launch creates a fresh 20 GiB VM
+onionpress restore <backup-path>
+```
+
+This is a manual procedure because shrinking the diffdisk on a running
+install requires recreating the VM. Most users will never need to do
+this — sparse files mean the existing 100 GiB cap is a Finder display
+quirk, not actual disk consumption.
+
 ## Building from Source
 
 ```bash

@@ -1232,6 +1232,14 @@ update_images() {
 
     if [ "$updated" = true ]; then
         log "✓ Image update check complete"
+        # Issue #230: reclaim disk from old <none> image tags created by
+        # the pull above. Dangling-only (no -a) so in-use and freshly
+        # tagged images are untouched.
+        local prune_out
+        prune_out=$(docker image prune -f 2>&1 | tail -1)
+        if [ -n "$prune_out" ]; then
+            log "$prune_out"
+        fi
     fi
 
     return 0

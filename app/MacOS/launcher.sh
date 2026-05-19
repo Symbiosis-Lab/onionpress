@@ -194,6 +194,11 @@ initialize_colima() {
         fi
         # Create minimal shared directory to avoid Downloads folder permission prompt
         mkdir -p "$DATA_DIR/shared"
+        # Cap diffdisk at 20 GiB on first VM creation (#230). Lima's default
+        # is 100 GiB which alarms users seeing it in Finder; real usage stays
+        # well under 5 GiB with auto-prune in the image-update path. The
+        # value is baked in at VM creation; existing installs keep their
+        # original cap and are unaffected by changing this number.
         if [ "$HOST_ARCH" = "arm64" ]; then
             # Apple Silicon: use VZ backend (Virtualization.framework)
             "$BIN_DIR/colima" start \
@@ -203,6 +208,7 @@ initialize_colima() {
                 $(docs_mount_args) \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
+                --disk 20 \
                 --arch "$VM_ARCH" \
                 --vz-rosetta=false \
                 >> "$LOG_FILE" 2>&1
@@ -215,6 +221,7 @@ initialize_colima() {
                 $(docs_mount_args) \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
+                --disk 20 \
                 --arch "$VM_ARCH" \
                 >> "$LOG_FILE" 2>&1
         fi
