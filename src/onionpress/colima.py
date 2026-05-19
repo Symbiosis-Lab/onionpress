@@ -68,11 +68,27 @@ class Colima:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
-    def _read_vm_config(self) -> tuple[int, int]:
-        """Read VM memory (GB) and CPU count from config. Returns (memory, cpu)."""
+    def _read_vm_config(self) -> tuple:
+        """Read VM memory (GB), CPU count, and disk cap (GB) from config.
+
+        Returns (memory, cpu, disk). Disk defaults to 20 GiB (issue #230)
+        for normal nodes but auto-bumps to 100 GiB when the OnionHeaven
+        vanity key is present — hub installs run c-tor takeover
+        instances which accumulate at scale (one per offline site). For
+        very large hubs, set VM_DISK in ~/.onionpress/config before
+        first launch.
+        """
         memory = int(read_value(self.paths.config_file, "VM_MEMORY", "1") or "1")
         cpu = int(read_value(self.paths.config_file, "VM_CPU", "2") or "2")
-        return memory, cpu
+        disk = int(read_value(self.paths.config_file, "VM_DISK", "20") or "20")
+        # Hub auto-bump: same vanity-key path the launcher checks.
+        hub_key_dir = os.path.join(
+            self.paths.shared_dir, "vanity-keys",
+            "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",
+        )
+        if os.path.isdir(hub_key_dir) and disk < 100:
+            disk = 100
+        return memory, cpu, disk
 
     def start(self, memory: int = None, cpu: int = None) -> None:
         """Start the Colima VM.
@@ -80,7 +96,7 @@ class Colima:
         If memory/cpu not provided, reads from config file.
         On first run, selects the appropriate VM backend for the architecture.
         """
-        cfg_mem, cfg_cpu = self._read_vm_config()
+        cfg_mem, cfg_cpu, cfg_disk = self._read_vm_config()
         memory = memory or cfg_mem
         cpu = cpu or cfg_cpu
         arch = detect_arch()
@@ -94,10 +110,9 @@ class Colima:
 
         if not self.initialized:
             # First-time: select VM backend based on architecture, and cap
-            # diffdisk at 20 GiB (issue #230). Lima's default is 100 GiB
-            # which is alarming in Finder; auto-prune in the image-update
-            # path keeps real usage well under 5 GiB in practice.
-            args.extend(["--arch", arch.value, "--disk", "20"])
+            # diffdisk to keep Finder display reasonable (#230). Default
+            # 20 GiB; hub installs auto-bump to 100 in _read_vm_config.
+            args.extend(["--arch", arch.value, "--disk", str(cfg_disk)])
             if arch == Arch.ARM64:
                 args.extend([
                     "--vm-type", "vz",
@@ -147,7 +162,7 @@ class Colima:
         Returns:
             True if a restart is needed.
         """
-        cfg_mem, cfg_cpu = self._read_vm_config()
+        cfg_mem, cfg_cpu, _ = self._read_vm_config()
 
         # Get actual VM memory from /proc/meminfo inside a container
         result = docker.exec(

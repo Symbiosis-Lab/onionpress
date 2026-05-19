@@ -107,7 +107,10 @@ $ ls -lh ~/.onionpress/colima/_lima/colima/diffdisk     # apparent (= cap)
 Finder shows the **apparent** size, which is the configured cap. New
 installs are capped at **20 GiB**; existing installs created before
 that change keep their original 100 GiB cap (the cap is set when the
-VM is first created and is not changed by upgrades).
+VM is first created and is not changed by upgrades). To override
+before first launch, set `VM_DISK=N` (in GiB) in
+`~/.onionpress/config`. OnionHeaven hub installs auto-bump to 100 GiB
+to accommodate takeover containers at scale.
 
 Real disk usage stays small: after months of typical use, expect 3–7 GB
 for the full `~/.onionpress/` tree. The menubar's "Check for Updates"

@@ -192,6 +192,25 @@ initialize_colima() {
                 echo "VM_MEMORY=5" >> "$DATA_DIR/config"
             fi
         fi
+
+        # Read VM disk cap from config (default: 20 GiB for normal nodes,
+        # 100 GiB for the hub). Hub takeover containers are small per
+        # instance (~50 MB c-tor) but accumulate at scale — a hub serving
+        # thousands of users could see hundreds of simultaneous takeovers.
+        # Admins of large hubs should set VM_DISK in ~/.onionpress/config
+        # BEFORE first launch (cap is baked in at VM creation).
+        VM_DISK=20
+        if [ -f "$DATA_DIR/config" ]; then
+            config_disk=$(grep "^VM_DISK=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ ! -z "$config_disk" ]; then
+                VM_DISK="$config_disk"
+            fi
+        fi
+        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$VM_DISK" -lt 100 ]; then
+            log "OnionHeaven key detected — sizing diffdisk at 100GB for takeover-container headroom"
+            log "  (set VM_DISK=N in ~/.onionpress/config before first launch to override)"
+            VM_DISK=100
+        fi
         # Create minimal shared directory to avoid Downloads folder permission prompt
         mkdir -p "$DATA_DIR/shared"
         # Cap diffdisk at 20 GiB on first VM creation (#230). Lima's default
@@ -208,7 +227,7 @@ initialize_colima() {
                 $(docs_mount_args) \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
-                --disk 20 \
+                --disk "$VM_DISK" \
                 --arch "$VM_ARCH" \
                 --vz-rosetta=false \
                 >> "$LOG_FILE" 2>&1
@@ -221,7 +240,7 @@ initialize_colima() {
                 $(docs_mount_args) \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
-                --disk 20 \
+                --disk "$VM_DISK" \
                 --arch "$VM_ARCH" \
                 >> "$LOG_FILE" 2>&1
         fi
