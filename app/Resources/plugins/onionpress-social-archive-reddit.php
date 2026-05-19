@@ -42,6 +42,13 @@ const ONIONPRESS_REDDIT_TICK_BUDGET_SEC = 25;
 const ONIONPRESS_REDDIT_LOCK_OPT        = 'onionpress_social_reddit_lock';
 const ONIONPRESS_REDDIT_LAST_SYNC_OPT   = 'onionpress_social_reddit_last_sync';
 const ONIONPRESS_REDDIT_LAST_NOTE_OPT   = 'onionpress_social_reddit_last_note';
+// Cache of resolved parent-thread titles keyed by Reddit fullname (t3_*).
+// Empty string in the cache means "we tried, thread is gone" — prevents
+// infinite retries on deleted parents.
+const ONIONPRESS_REDDIT_TITLE_CACHE_OPT = 'onionpress_social_reddit_thread_titles';
+// Max comments resolved per tick. The /api/info endpoint returns up to
+// 100 fullnames per call, and we may process more than one batch per tick.
+const ONIONPRESS_REDDIT_TITLES_PER_TICK = 200;
 
 // Reddit base URL preference depends on viewer context: when the admin
 // is hitting WP over .onion, prefer the Reddit .onion mirror so any
@@ -480,16 +487,26 @@ function onionpress_reddit_import_comment( $row ) {
         return 'skipped';
     }
 
-    // Title derivation: until step 4 (parent thread title API resolution)
-    // lands, use the URL-slug from the permalink. Reddit permalinks look
-    // like /r/<sub>/comments/<id>/<slug>/<comment_id>/ — `<slug>` is a
-    // human-readable lowercase dash-separated rendering of the parent
-    // thread title that's usually decent.
+    // Title derivation: cache lookup → slug fallback → body fallback.
+    // The cache is populated by onionpress_reddit_resolve_titles_batch()
+    // during sync ticks, so newly-imported comments benefit from titles
+    // resolved by earlier imports.
+    $link_id     = onionpress_reddit_extract_link_id( $row );
+    $cache       = onionpress_reddit_get_title_cache();
     $thread_slug = onionpress_reddit_thread_slug( $permalink ?: $link_url );
-    if ( $thread_slug !== '' ) {
-        $title = 'Re: ' . onionpress_reddit_humanize_slug( $thread_slug );
+    $slug_human  = $thread_slug !== '' ? onionpress_reddit_humanize_slug( $thread_slug ) : '';
+
+    $used_cached_title = false;
+    if ( $link_id !== '' && isset( $cache[ $link_id ] ) && $cache[ $link_id ] !== '' ) {
+        $title = 'Re: ' . $cache[ $link_id ];
+        $reply_label = $cache[ $link_id ];
+        $used_cached_title = true;
+    } elseif ( $slug_human !== '' ) {
+        $title = 'Re: ' . $slug_human;
+        $reply_label = $slug_human;
     } else {
         $title = wp_trim_words( $body_md, 10, '…' );
+        $reply_label = $link_url;
     }
     if ( $title === '' ) {
         $title = gmdate( 'Y-m-d', $ts ) . ' Reddit comment';
@@ -500,20 +517,25 @@ function onionpress_reddit_import_comment( $row ) {
         $content .= sprintf(
             '<p><em>In reply to <a href="%s" rel="nofollow noopener">%s</a></em></p>',
             esc_url( $link_url ),
-            esc_html( $thread_slug ? onionpress_reddit_humanize_slug( $thread_slug ) : $link_url )
+            esc_html( $reply_label )
         );
     }
     $content .= onionpress_reddit_markdown_to_html( $body_md );
 
     $meta = array(
-        '_source_id'   => $source_id,
-        '_source_url'  => $permalink,
-        '_subreddit'   => $subreddit,
-        '_is_repost'   => '0',
-        '_is_reply'    => '1',
-        '_reply_to_id' => $parent,
-        '_raw'         => wp_json_encode( $row ),
+        '_source_id'      => $source_id,
+        '_source_url'     => $permalink,
+        '_subreddit'      => $subreddit,
+        '_is_repost'      => '0',
+        '_is_reply'       => '1',
+        '_reply_to_id'    => $parent,
+        '_thread_link_id' => $link_id,
+        '_raw'            => wp_json_encode( $row ),
     );
+    if ( $used_cached_title ) {
+        // No need to revisit this one during title resolution.
+        $meta['_thread_title_resolved'] = '1';
+    }
 
     return onionpress_reddit_insert_post( $title, $content, $post_date_gmt, $meta, $subreddit );
 }
@@ -818,9 +840,10 @@ function onionpress_reddit_handle_sync_now_post() {
         return array( 'level' => 'error', 'message' => 'Sync failed: ' . esc_html( $stats->get_error_message() ) );
     }
     $msg = sprintf(
-        'Sync tick complete. Imported: <strong>%d</strong>. Skipped: <strong>%d</strong>. Errors: <strong>%d</strong>.',
+        'Sync tick complete. Imported: <strong>%d</strong>. Skipped: <strong>%d</strong>. Titles resolved: <strong>%d</strong>. Errors: <strong>%d</strong>.',
         intval( $stats['imported'] ),
         intval( $stats['skipped'] ),
+        intval( $stats['resolved'] ?? 0 ),
         intval( $stats['errors'] )
     );
     $level = ( $stats['errors'] > 0 && $stats['imported'] === 0 ) ? 'warning' : 'success';
@@ -866,6 +889,17 @@ function onionpress_reddit_run_sync_tick() {
         }
         foreach ( $totals as $k => $_ ) {
             $totals[ $k ] += (int) ( $r[ $k ] ?? 0 );
+        }
+    }
+
+    // Tail-end of the tick: resolve any pending parent-thread titles. Cheap
+    // when caught up (single meta_query returns empty); otherwise drains a
+    // batch per tick until the queue empties.
+    if ( time() < $deadline ) {
+        $tr = onionpress_reddit_resolve_titles_batch( $deadline );
+        $totals['resolved'] = (int) ( $tr['resolved'] ?? 0 );
+        if ( ! empty( $tr['errors'] ) ) {
+            $totals['errors'] += (int) $tr['errors'];
         }
     }
 
@@ -1038,6 +1072,180 @@ function onionpress_reddit_api_comment_to_row( $data ) {
         'body'      => (string) ( $data['body'] ?? '' ),
         'link'      => $link,
         'parent'    => (string) ( $data['parent_id'] ?? '' ),
+    );
+}
+
+// ──────────────────────── parent-thread title resolution ────────────────────────
+
+function onionpress_reddit_get_title_cache() {
+    $c = get_option( ONIONPRESS_REDDIT_TITLE_CACHE_OPT, array() );
+    return is_array( $c ) ? $c : array();
+}
+
+function onionpress_reddit_save_title_cache( $cache ) {
+    update_option( ONIONPRESS_REDDIT_TITLE_CACHE_OPT, $cache );
+}
+
+/**
+ * Pull the parent thread fullname (t3_*) out of a comment row.
+ * Preferred source: `parent` column when it's already a t3_ (top-level
+ * comment). Otherwise reach into the thread `link` URL — Reddit
+ * permalinks embed the thread ID at /r/<sub>/comments/<id>/<slug>/.
+ * Returns '' when neither source yields one.
+ */
+function onionpress_reddit_extract_link_id( $row ) {
+    $parent = (string) ( $row['parent'] ?? '' );
+    if ( strpos( $parent, 't3_' ) === 0 ) {
+        return $parent;
+    }
+    $link = (string) ( $row['link'] ?? '' );
+    if ( $link === '' ) {
+        return '';
+    }
+    $path = parse_url( $link, PHP_URL_PATH );
+    if ( ! $path ) return '';
+    if ( preg_match( '#/comments/([^/]+)#', $path, $m ) ) {
+        return 't3_' . $m[1];
+    }
+    return '';
+}
+
+/**
+ * Walk pending comment posts (Reddit category, _is_reply=1, no
+ * _thread_title_resolved meta), batch-fetch their parents' real titles
+ * over Tor via /api/info, retroactively update the post title and the
+ * "In reply to" line in the content. Bound by the per-tick deadline
+ * and ONIONPRESS_REDDIT_TITLES_PER_TICK.
+ *
+ * Returns ['resolved' => N, 'errors' => M].
+ */
+function onionpress_reddit_resolve_titles_batch( $deadline ) {
+    $stats = array( 'resolved' => 0, 'errors' => 0 );
+
+    $unresolved = get_posts( array(
+        'post_type'      => 'post',
+        'posts_per_page' => ONIONPRESS_REDDIT_TITLES_PER_TICK,
+        'category_name'  => 'reddit',
+        'meta_query'     => array(
+            'relation' => 'AND',
+            array( 'key' => '_thread_title_resolved', 'compare' => 'NOT EXISTS' ),
+            array( 'key' => '_thread_link_id',        'compare' => 'EXISTS' ),
+        ),
+        'fields'         => 'ids',
+        'orderby'        => 'date',
+        'order'          => 'ASC',
+    ) );
+    if ( empty( $unresolved ) ) {
+        return $stats;
+    }
+
+    // Group post IDs by parent thread so one title update covers all
+    // comments on the same thread.
+    $by_link = array();
+    foreach ( $unresolved as $pid ) {
+        $link_id = (string) get_post_meta( $pid, '_thread_link_id', true );
+        if ( $link_id === '' ) continue;
+        $by_link[ $link_id ][] = (int) $pid;
+    }
+
+    $cache = onionpress_reddit_get_title_cache();
+    $misses = array();
+    foreach ( array_keys( $by_link ) as $link_id ) {
+        if ( ! array_key_exists( $link_id, $cache ) ) {
+            $misses[] = $link_id;
+        }
+    }
+
+    // Fetch misses in chunks of 100 (Reddit's /api/info cap).
+    foreach ( array_chunk( $misses, 100 ) as $chunk ) {
+        if ( time() >= $deadline ) break;
+        $titles = onionpress_reddit_fetch_thread_titles( $chunk );
+        if ( is_wp_error( $titles ) ) {
+            $stats['errors']++;
+            continue;
+        }
+        foreach ( $chunk as $id ) {
+            // '' means "Reddit returned no data for this id" — thread
+            // deleted, suspended, or otherwise gone. Cache the empty
+            // string so we don't retry.
+            $cache[ $id ] = $titles[ $id ] ?? '';
+        }
+    }
+    if ( ! empty( $misses ) ) {
+        onionpress_reddit_save_title_cache( $cache );
+    }
+
+    // Apply cached titles to posts. Posts whose cache entry is empty
+    // still get marked resolved so they're not re-queued forever.
+    foreach ( $by_link as $link_id => $pids ) {
+        if ( ! array_key_exists( $link_id, $cache ) ) {
+            continue;
+        }
+        $title = (string) $cache[ $link_id ];
+        foreach ( $pids as $pid ) {
+            if ( $title !== '' ) {
+                $post = get_post( $pid );
+                $new_content = $post ? onionpress_reddit_swap_inreplyto_label(
+                    (string) $post->post_content, $title
+                ) : null;
+                $update = array( 'ID' => $pid, 'post_title' => 'Re: ' . $title );
+                if ( $new_content !== null && $new_content !== $post->post_content ) {
+                    $update['post_content'] = $new_content;
+                }
+                wp_update_post( $update );
+            }
+            update_post_meta( $pid, '_thread_title_resolved', '1' );
+            $stats['resolved']++;
+        }
+    }
+    return $stats;
+}
+
+/**
+ * Batch lookup of thread titles via Reddit's /api/info endpoint.
+ * Accepts an array of t3_ fullnames, returns assoc(fullname → title).
+ * Missing entries (deleted threads) won't appear in the result.
+ */
+function onionpress_reddit_fetch_thread_titles( $link_ids ) {
+    if ( empty( $link_ids ) ) return array();
+    $url = 'https://' . ONIONPRESS_REDDIT_API_HOST
+         . '/api/info.json?'
+         . http_build_query( array(
+             'id'       => implode( ',', $link_ids ),
+             'raw_json' => 1,
+         ) );
+
+    $mock = apply_filters( 'onionpress_reddit_fetch_thread_titles_mock', null, $link_ids );
+    if ( $mock !== null ) return $mock;
+
+    $r = onionpress_reddit_api_get( $url );
+    if ( is_wp_error( $r ) ) return $r;
+    if ( (int) $r['code'] !== 200 ) {
+        return new WP_Error( 'reddit_http', 'HTTP ' . $r['code'] . ' from /api/info' );
+    }
+    $kids = $r['json']['data']['children'] ?? array();
+    $out = array();
+    foreach ( $kids as $child ) {
+        $id = (string) ( $child['data']['name'] ?? '' );
+        if ( $id === '' ) continue;
+        $out[ $id ] = (string) ( $child['data']['title'] ?? '' );
+    }
+    return $out;
+}
+
+/**
+ * Rewrite the visible label inside the "In reply to" link in post
+ * content so it matches the newly-resolved title. Idempotent — running
+ * twice with the same title is a no-op. Leaves the href untouched.
+ */
+function onionpress_reddit_swap_inreplyto_label( $content, $new_label ) {
+    return preg_replace_callback(
+        '#(<p><em>In reply to <a href="[^"]+" rel="nofollow noopener">)([^<]+)(</a></em></p>)#',
+        function ( $m ) use ( $new_label ) {
+            return $m[1] . esc_html( $new_label ) . $m[3];
+        },
+        $content,
+        1
     );
 }
 
