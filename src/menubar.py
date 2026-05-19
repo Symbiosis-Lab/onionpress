@@ -3956,8 +3956,19 @@ class OnionPressApp(rumps.App):
         # Show NSSavePanel for output location
         panel = AppKit.NSSavePanel.savePanel()
         panel.setTitle_("Save Backup")
+        # Build the suggested filename from the address the live key derives
+        # to, not self.onion_address. The cached value can lag the keystore
+        # by up to ~30s after a vanity rotation / restore / key import — a
+        # backup opened in that window would otherwise be labeled with the
+        # PRIOR address while its contents are the NEW identity. Falls back
+        # to the cached value if the key can't be read.
+        try:
+            _, _pub = key_manager.extract_keys()
+            suggested_address = key_manager.derive_onion_address(_pub)
+        except Exception:
+            suggested_address = self.onion_address
         panel.setNameFieldStringValue_(
-            backup_manager.backup_filename(self.onion_address, username))
+            backup_manager.backup_filename(suggested_address, username))
         backups_dir = os.path.expanduser("~/Documents/OnionPress/backups")
         os.makedirs(backups_dir, exist_ok=True)
         # The backup flow has now earned macOS TCC's Documents grant
@@ -5256,7 +5267,15 @@ License: AGPL v3"""
                         })
                     else:
                         import tempfile
-                        onion_short = (self.onion_address or "site").replace(".onion", "")[:8]
+                        # See the NSSavePanel handler for context — the
+                        # in-browser settings flow has no chance to rename
+                        # the file, so the wrong-prefix risk is worse here.
+                        try:
+                            _, _pub = key_manager.extract_keys()
+                            _derived = key_manager.derive_onion_address(_pub)
+                            onion_short = _derived.replace(".onion", "")[:8]
+                        except Exception:
+                            onion_short = (self.onion_address or "site").replace(".onion", "")[:8]
                         import time
                         filename = f"OnionPress-{onion_short}-{time.strftime('%Y-%m-%d-%H-%M')}.zip"
                         tmp_path = os.path.join(tempfile.gettempdir(), filename)
