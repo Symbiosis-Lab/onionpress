@@ -131,6 +131,20 @@ do_takeover_arti() {
         rm -f "$key_file"
         exit 1
     fi
+    # Check 5: key must actually derive to CONTENT_ADDRESS. Arti silently
+    # serves whatever address the key produces, so a corrupted KEYS_DIR entry
+    # (e.g. residue from the pre-542cb61b /online write bug) would make the
+    # takeover serve the wrong onion. Refuse before populating the keystore.
+    derived_addr=$(python3 /key-convert.py pem-to-onion-address "$key_file" 2>/dev/null)
+    expected_addr=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//')
+    if [ -z "$derived_addr" ]; then
+        echo "ERROR: Could not derive address from key for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+    if [ "$derived_addr" != "$expected_addr" ]; then
+        echo "ERROR: Key mismatch for ${CONTENT_ADDRESS}: key derives to ${derived_addr}.onion (refusing takeover)"
+        exit 1
+    fi
 
     # Create the Arti keystore directory for this service
     mkdir -p "$KEYSTORE_DIR"
@@ -237,6 +251,23 @@ do_takeover_ctor() {
         exit 1
     fi
 
+    # Verify the key actually derives to CONTENT_ADDRESS before using it.
+    # Tor registers ADD_ONION services under whatever address the key produces;
+    # a corrupted KEYS_DIR entry would otherwise serve the wrong onion under
+    # this address's takeover slot, and the heartbeat RECONCILE loop would
+    # cycle forever (see queue-manager.add_onion for the same guard).
+    local derived_addr expected_addr
+    derived_addr=$(python3 /key-convert.py pem-to-onion-address "$key_file" 2>/dev/null)
+    expected_addr=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//')
+    if [ -z "$derived_addr" ]; then
+        echo "ERROR: Could not derive address from key for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+    if [ "$derived_addr" != "$expected_addr" ]; then
+        echo "ERROR: Key mismatch for ${CONTENT_ADDRESS}: key derives to ${derived_addr}.onion (refusing takeover)"
+        exit 1
+    fi
+
     # Extract raw ed25519 expanded key as base64 for ADD_ONION
     local key_b64
     key_b64=$(python3 /key-convert.py pem-to-ed25519-base64 "$key_file")
@@ -251,6 +282,16 @@ do_takeover_ctor() {
     local response
     response=$(ctor_control "ADD_ONION ED25519-V3:${key_b64} Flags=Detach Port=80,127.0.0.1:${REDIRECT_PORT}")
     if echo "$response" | grep -q "^250 "; then
+        # Defense-in-depth post-ADD check (the pre-check above should catch this,
+        # but verify Tor's ServiceID matches expected — a wedged Tor with stale
+        # hs_service_map state could ignore our key and re-register an old one).
+        local actual_sid
+        actual_sid=$(echo "$response" | grep "^250-ServiceID=" | sed 's/^250-ServiceID=//' | tr -d "\r\n")
+        if [ -n "$actual_sid" ] && [ "$actual_sid" != "$expected_addr" ]; then
+            ctor_control "DEL_ONION ${actual_sid}" >/dev/null
+            echo "ERROR: ADD_ONION returned wrong ServiceID for ${CONTENT_ADDRESS}: got ${actual_sid} (rolled back)"
+            exit 1
+        fi
         echo "ADD_ONION succeeded for ${CONTENT_ADDRESS}"
     elif echo "$response" | grep -q "Onion address collision"; then
         echo "Service already active for ${CONTENT_ADDRESS} (collision — OK)"

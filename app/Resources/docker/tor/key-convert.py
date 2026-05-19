@@ -17,6 +17,7 @@ Usage:
 """
 
 import base64
+import hashlib
 import os
 import struct
 import sys
@@ -211,6 +212,23 @@ def pem_to_ed25519_base64(pem_path):
     print(base64.b64encode(expanded_key).decode("ascii"))
 
 
+def pem_to_onion_address(pem_path):
+    """Derive the v3 onion address (no .onion suffix) from an Arti PEM file.
+
+    Used to validate that a key file on disk actually belongs to the address
+    its directory name claims — guards against corrupted KEYS_DIR entries.
+
+    v3 address format: base32(pubkey | checksum | version), lowercase, no padding.
+        checksum = SHA3-256(b'.onion checksum' | pubkey | version)[:2]
+        version  = b'\\x03'
+    """
+    _, public_key = parse_arti_pem(pem_path)
+    version = b"\x03"
+    checksum = hashlib.sha3_256(b".onion checksum" + public_key + version).digest()[:2]
+    addr = base64.b32encode(public_key + checksum + version).decode("ascii").lower().rstrip("=")
+    print(addr)
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
@@ -235,6 +253,12 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
         pem_to_ed25519_base64(sys.argv[2])
+    elif cmd == "pem-to-onion-address":
+        if len(sys.argv) != 3:
+            print("Usage: key-convert.py pem-to-onion-address <pem_file>",
+                  file=sys.stderr)
+            sys.exit(1)
+        pem_to_onion_address(sys.argv[2])
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
