@@ -511,6 +511,16 @@ def process_event(line, cmd_sock, state):
     # Event format: 650 HS_DESC <ACTION> <HSAddress> <AuthType> <HsDir> ...
     # Match with trailing space so UPLOAD doesn't match UPLOADED.
     if "HS_DESC UPLOADED " in line:
+        # Log the first UPLOADED after each recovery arming, with elapsed
+        # time and the trigger that armed the monitor. This is the positive
+        # robustness signal: it confirms Tor actually republished after our
+        # ADD path armed the stall monitor, and the elapsed time lets us
+        # spot regressions in publication latency per trigger type.
+        if (state.last_recovery_time > 0
+                and not state.hs_desc_uploaded_since_recovery):
+            elapsed = time.time() - state.last_recovery_time
+            log(f"HS_DESC UPLOADED (trigger={state.last_recovery_trigger} "
+                f"elapsed={elapsed:.1f}s)")
         state.hs_desc_uploaded_since_recovery = True
         return
     if "HS_DESC UPLOAD " in line:
@@ -691,6 +701,19 @@ def run():
         if state.services and not state.services_active and not state.sleeping:
             n, _c = add_all_services(cmd_sock, state.services)
             state.services_active = (n + _c) > 0
+            if state.services_active:
+                # Arm the HS_DESC stall monitor for the post-ADD publication
+                # window. Without this, the stall handler doesn't engage until
+                # the first USR2 fires. The menubar app used to send a
+                # spurious USR2 here just to set last_recovery_time, which
+                # re-entered the wake handler and collided with the ADD we
+                # just did — forcing a wasteful DEL+ADD on every cold start.
+                state.last_recovery_time = time.time()
+                state.last_recovery_trigger = "startup"
+                state.hs_desc_uploaded_since_recovery = False
+                state.hs_desc_upload_started_since_recovery = False
+                state.hs_desc_upload_failed_since_recovery = False
+                state.hs_desc_last_failed_reason = ""
 
         log("Connected — monitoring Tor health")
         event_sock.settimeout(5)  # wake up frequently to check signals + stalls
@@ -764,6 +787,16 @@ def run():
                     if "circuit-established=1" in resp:
                         n, _c = add_all_services(cmd_sock, state.services)
                         state.services_active = (n + _c) > 0
+                        if state.services_active:
+                            # Arm HS_DESC stall monitor for the post-reconnect
+                            # publication window — same reason as the startup
+                            # ADD path above.
+                            state.last_recovery_time = time.time()
+                            state.last_recovery_trigger = "reconnect"
+                            state.hs_desc_uploaded_since_recovery = False
+                            state.hs_desc_upload_started_since_recovery = False
+                            state.hs_desc_upload_failed_since_recovery = False
+                            state.hs_desc_last_failed_reason = ""
 
                 continue
             except (ConnectionResetError, BrokenPipeError, OSError):

@@ -242,7 +242,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.88"
+        self.version = "2.4.89"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -3106,10 +3106,12 @@ class OnionPressApp(rumps.App):
                 time.sleep(2)
                 waited += 2
 
-            # Send USR2 to arm onionheaven's HSFETCH timer for cold start
-            # (watchdog already ADD_ONION'd, this just sets last_recovery_time)
-            for container in ["onionpress-tor", "onionheaven"]:
-                self._signal_watchdog(container, "USR2")
+            # Send USR2 to arm onionheaven's HSFETCH timer for cold start.
+            # Only onionheaven needs the nudge — tor-watchdog arms its own
+            # HS_DESC stall monitor inside its startup ADD path. Fanning out
+            # to onionpress-tor here re-entered its wake handler 11s after
+            # its initial ADD, which collided and forced a wasteful DEL+ADD.
+            self._signal_watchdog("onionheaven", "USR2")
 
             self.check_status()
 
@@ -3823,9 +3825,11 @@ class OnionPressApp(rumps.App):
             sw.set_progress(5 / 8)
             sw.set_status("Publishing onion address to Tor network (may take 5-10 min)...")
 
-        # Send USR2 to arm onionheaven's HSFETCH timer for cold start
-        for container in ["onionpress-tor", "onionheaven"]:
-            self._signal_watchdog(container, "USR2")
+        # Send USR2 to arm onionheaven's HSFETCH timer for cold start.
+        # tor-watchdog arms its own HS_DESC stall monitor inside its startup
+        # ADD path; sending it USR2 here just re-enters the wake handler and
+        # collides on the services we just ADD'd.
+        self._signal_watchdog("onionheaven", "USR2")
 
         self.check_status()
         self.caffeine.start()
