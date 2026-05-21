@@ -93,6 +93,29 @@ cp "$PROJECT_DIR/linux/onionpress-watcher.timer" "$DEB_ROOT/usr/lib/systemd/user
 mkdir -p "$DEB_ROOT/usr/local/bin"
 ln -s /opt/onionpress/onionpress "$DEB_ROOT/usr/local/bin/onionpress"
 
+# Desktop entry — gives GUI users (Ubuntu Desktop, KDE) an icon in their
+# app menu that opens http://localhost:8080. xdg-open routes to the
+# default browser, which is the right thing on every modern Linux desktop.
+mkdir -p "$DEB_ROOT/usr/share/applications"
+cat > "$DEB_ROOT/usr/share/applications/onionpress.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=OnionPress
+GenericName=Decentralized Blog
+Comment=Open your local OnionPress site
+Exec=xdg-open http://localhost:8080
+Icon=onionpress
+Categories=Network;Publishing;
+Keywords=blog;wordpress;tor;onion;
+StartupNotify=false
+EOF
+
+# Icon for the desktop entry.
+if [ -f "$PROJECT_DIR/app/Resources/app-icon.png" ]; then
+    mkdir -p "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps"
+    cp "$PROJECT_DIR/app/Resources/app-icon.png" "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps/onionpress.png"
+fi
+
 # DEBIAN control
 mkdir -p "$DEB_ROOT/DEBIAN"
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
@@ -112,8 +135,10 @@ Description: Your Decentralized Social Blog Site
  Built on WordPress + Tor + Wayback Machine.
 EOF
 
-# Post-install: data dir + secrets (first install only), port-binding
-# override (idempotent), enable user units.
+# Post-install: data dir + secrets (first install only), docker group,
+# linger, enable + start user units. Goal is "self-contained for casual
+# users": after `sudo apt install ./onionpress.deb` on a clean Ubuntu,
+# the site comes up and the user just needs a URL.
 #
 # Gating ($1=configure, $2 empty = fresh install; $2 set = upgrade from
 # that version). First-install logic must NOT re-run on upgrade or it
@@ -123,13 +148,36 @@ cat > "$DEB_ROOT/DEBIAN/postinst" <<'POSTINST'
 #!/bin/bash
 set -e
 
-# Detect the human user who invoked the install. SUDO_USER is set for
-# sudo invocations; logname falls back to the controlling terminal.
-# Both can be empty for non-interactive paths (cloud-init, GUI software
-# centers); in that case data goes to root's home and the user re-runs
-# setup as themselves.
-REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
-REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+# Detect the human user who invoked the install. We try every known
+# invocation channel because there are several:
+#   - sudo apt install …               → SUDO_USER (headless SSH, terminal)
+#   - GNOME Software (PackageKit)      → PACKAGEKIT_CALLER_UID
+#   - KDE Discover / pkexec            → PKEXEC_UID
+#   - dpkg -i from a TTY               → logname
+#   - last resort                      → first non-root user on the box
+detect_real_user() {
+    local u
+    if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+        echo "$SUDO_USER"; return
+    fi
+    if [ -n "$PACKAGEKIT_CALLER_UID" ]; then
+        u=$(getent passwd "$PACKAGEKIT_CALLER_UID" 2>/dev/null | cut -d: -f1)
+        [ -n "$u" ] && [ "$u" != "root" ] && { echo "$u"; return; }
+    fi
+    if [ -n "$PKEXEC_UID" ]; then
+        u=$(getent passwd "$PKEXEC_UID" 2>/dev/null | cut -d: -f1)
+        [ -n "$u" ] && [ "$u" != "root" ] && { echo "$u"; return; }
+    fi
+    u=$(logname 2>/dev/null || true)
+    [ -n "$u" ] && [ "$u" != "root" ] && { echo "$u"; return; }
+    # Last resort: pick the first regular user (UID >= 1000, < 65534).
+    u=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 { print $1; exit }')
+    [ -n "$u" ] && { echo "$u"; return; }
+    echo "root"
+}
+REAL_USER=$(detect_real_user)
+REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)
+[ -z "$REAL_HOME" ] && REAL_HOME="/root"
 DATA_DIR="$REAL_HOME/.onionpress"
 
 # Idempotent: data dir creation runs on every postinst trigger.
@@ -172,32 +220,104 @@ if [ "$REAL_USER" != "root" ]; then
     chown -R "$REAL_USER:$REAL_USER" "$DATA_DIR"
 fi
 
-# Port-binding host. Compose now reads ${ONIONPRESS_BIND_HOST:-127.0.0.1}
-# from the environment, set by the launcher (linux/onionpress) — no
-# more sed-mutating docker-compose.yml in postinst. The launcher exports
-# 0.0.0.0 by default on Linux for headless-Pi LAN access; users wanting
-# localhost-only can set ONIONPRESS_BIND_HOST=127.0.0.1 in
-# ~/.onionpress/config.
-
-# Reload the user-unit catalog and enable the units globally so they
-# activate on the next login of any user. Per-user disable preferences
-# (a user who explicitly opted out with `systemctl --user disable`)
-# remain respected — --global only affects users whose state is unset.
+# Reload the user-unit catalog and enable units for any user on next
+# login. --global respects per-user disable preferences.
 systemctl --global enable onionpress.service onionpress-heartbeat.service onionpress-watcher.timer 2>/dev/null || true
-systemctl --user daemon-reload 2>/dev/null || true
 
-if [ "$1" = "configure" ] && [ -z "$2" ]; then
-    cat <<EOF
+# Self-contained bootstrap. Only runs on first install (not upgrade) and
+# only when we have a real target user. apt has already installed
+# docker.io as a Depends, so the daemon is running and /var/run/docker.sock
+# exists; we just need to grant our user access via the docker group.
+if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
+    bootstrap_ok=1
 
-OnionPress v$(cat /opt/onionpress/VERSION) installed.
+    # 1. Docker group membership. apt's docker.io postinst creates the
+    #    group; we add the user to it. If usermod fails (NIS, LDAP, …),
+    #    we'll fall back to the manual-instructions path below.
+    if ! id -nG "$REAL_USER" 2>/dev/null | grep -qw docker; then
+        if usermod -aG docker "$REAL_USER" 2>/dev/null; then
+            echo "  Added $REAL_USER to the docker group."
+        else
+            bootstrap_ok=0
+        fi
+    fi
 
-Next: open a shell as your normal user and run:
-    loginctl enable-linger \$USER
-    systemctl --user start onionpress
+    # 2. Lingering so the user's services run at boot without a login.
+    if ! loginctl show-user "$REAL_USER" 2>/dev/null | grep -q 'Linger=yes'; then
+        loginctl enable-linger "$REAL_USER" 2>/dev/null || bootstrap_ok=0
+    fi
 
-CLI:  onionpress status | address | logs
+    # 3. Reload the user's systemd manager so it picks up the new
+    #    docker-group membership. Without this, services launched from
+    #    the existing user-manager instance inherit the old group set
+    #    and can't reach /var/run/docker.sock.
+    #    `systemctl --user --machine=USER@.host` requires systemd 248+
+    #    (Ubuntu 22.04, Debian 12, Raspberry Pi OS Bookworm — all fine).
+    if [ "$bootstrap_ok" = "1" ]; then
+        systemctl --user --machine="${REAL_USER}@.host" daemon-reexec 2>/dev/null || bootstrap_ok=0
+    fi
+
+    # 4. Enable + start the services.
+    if [ "$bootstrap_ok" = "1" ]; then
+        systemctl --user --machine="${REAL_USER}@.host" daemon-reload 2>/dev/null || true
+        systemctl --user --machine="${REAL_USER}@.host" enable --now \
+            onionpress.service \
+            onionpress-heartbeat.service \
+            onionpress-watcher.timer \
+            2>/dev/null || bootstrap_ok=0
+    fi
+
+    VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
+    if [ "$bootstrap_ok" = "1" ]; then
+        cat <<EOF
+
+OnionPress v$VERSION_INSTALLED installed and starting in the background.
+First start pulls ~500 MB of container images (Tor, WordPress, MariaDB)
+and may take 1-3 minutes on a fast connection, longer on a Pi.
+
+When ready:
+    Local:   http://localhost:8080
+    .onion:  onionpress address
+    Status:  onionpress status
+    Logs:    onionpress logs
 
 EOF
+    else
+        # Something in the bootstrap path failed — print clear manual
+        # instructions so the user can still get to a working install.
+        cat <<EOF
+
+OnionPress v$VERSION_INSTALLED installed. One manual step needed to finish:
+
+    sudo usermod -aG docker $REAL_USER
+    loginctl enable-linger $REAL_USER
+    # Log out and back in (so docker-group membership takes effect)
+    systemctl --user enable --now onionpress
+
+Then:
+    Local:   http://localhost:8080
+    .onion:  onionpress address
+    Status:  onionpress status
+
+EOF
+    fi
+
+    # Warn about a stale install.sh-style install if we detect one in the
+    # user's home. Only one curl|bash installer is known in the field
+    # (op2pie) — leave the cleanup to that user rather than auto-migrate.
+    if [ -f "$REAL_HOME/.config/systemd/user/onionpress.service" ]; then
+        cat <<EOF
+NOTE: Detected an earlier install.sh-installed copy of onionpress in
+      $REAL_HOME/.config/systemd/user/. Run the following once to clean
+      it up (the .deb's units in /usr/lib/systemd/user/ take over):
+
+    systemctl --user stop onionpress onionpress-heartbeat onionpress-watcher.timer 2>/dev/null
+    systemctl --user disable onionpress onionpress-heartbeat onionpress-watcher.timer 2>/dev/null
+    rm -f ~/.config/systemd/user/onionpress*.service ~/.config/systemd/user/onionpress*.timer
+    systemctl --user daemon-reload
+
+EOF
+    fi
 fi
 POSTINST
 chmod 755 "$DEB_ROOT/DEBIAN/postinst"
