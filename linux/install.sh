@@ -383,9 +383,16 @@ run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user restart onionpress-heartbeat
 
-# Wait for the service to finish starting
-echo "  Waiting for services..."
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+
+# Stream the service journal during the wait so the user sees Docker image-pull
+# progress instead of a silent 3-minute pause.
+echo ""
+echo "  ───── live progress (image pulls take 2-3 min on first run) ─────"
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    journalctl --user -u onionpress -f --no-hostname --no-pager --since=now &
+JOURNAL_PID=$!
+trap "kill $JOURNAL_PID 2>/dev/null || true" EXIT INT TERM
 
 # Wait for WordPress container to respond.
 # First run on a Pi can take 2-3 minutes (image pulls + DB bootstrap).
@@ -400,6 +407,11 @@ while [ $wp_wait -lt 180 ]; do
     wp_wait=$((wp_wait + 3))
 done
 
+# Stop tailing the journal before we print the success message.
+kill $JOURNAL_PID 2>/dev/null || true
+trap - EXIT INT TERM
+echo "  ─────────────────────────────────────────────────────────────────"
+
 if [ "$wp_ready" != "true" ]; then
     echo "  WARNING: WordPress did not respond within 3 minutes."
     echo "  It may still be starting. Check: journalctl --user -u onionpress -f"
@@ -411,32 +423,53 @@ if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     # Try to get the onion address
     onion_addr=$("$INSTALL_DIR/onionpress" address 2>/dev/null) || true
 
-    echo ""
-    echo "  ======================================="
-    echo "  OnionPress is running!"
-    echo "  ======================================="
-    echo ""
-    echo "  Local access:  http://${local_ip}:8080"
-    echo "  Status page:   http://${local_ip}:8080/onionpress-status"
-    echo ""
-    if [ "$onion_addr" != "Generating..." ] && [ -n "$onion_addr" ]; then
-        echo "  Onion address: http://${onion_addr}"
-    else
-        echo "  Onion address: Still generating... (run 'onionpress address' to check)"
+    # Read the auto-generated WP admin password (written by start_containers
+    # during headless first-run setup).
+    wp_pass=""
+    if [ -f "$DATA_DIR/wp-admin-password" ]; then
+        wp_pass=$(cat "$DATA_DIR/wp-admin-password" 2>/dev/null)
     fi
-    echo ""
-    # Note: first-time WordPress setup (WP install, multisite, plugins) is handled
-    # automatically by start_containers when running headless (non-interactive).
-    # No need to call 'onionpress setup' here — it would race with the systemd service.
 
     echo ""
-    echo "  Commands:"
-    echo "    onionpress status       - Show container status"
-    echo "    onionpress address      - Show .onion address"
-    echo "    onionpress logs         - Stream container logs"
-    echo "    onionpress write-status - Update status page data"
-    echo "    systemctl --user restart onionpress - Restart"
-    echo "    systemctl --user stop onionpress    - Stop"
+    echo "  ══════════════════════════════════════════════════════════"
+    echo "  OnionPress is running."
+    echo "  ══════════════════════════════════════════════════════════"
+    echo ""
+    echo "  NEXT — set up your site:"
+    echo ""
+    echo "    1. Open a browser to:"
+    if [ "$local_ip" = "localhost" ] || [ -z "$local_ip" ]; then
+        echo "         http://localhost:8080/wp-admin"
+    else
+        echo "         http://localhost:8080/wp-admin       (from this machine)"
+        echo "         http://${local_ip}:8080/wp-admin   (from any device on your LAN)"
+    fi
+    echo ""
+    echo "    2. Log in with:"
+    echo "         Username:  admin"
+    if [ -n "$wp_pass" ]; then
+        echo "         Password:  $wp_pass"
+        echo "                    (also saved to $DATA_DIR/wp-admin-password)"
+    else
+        echo "         Password:  see $DATA_DIR/wp-admin-password"
+        echo "                    (still being generated — try again in a moment)"
+    fi
+    echo ""
+    echo "  Your public .onion address (visit from Tor Browser):"
+    if [ "$onion_addr" != "Generating..." ] && [ -n "$onion_addr" ]; then
+        echo "       http://${onion_addr}"
+        echo "       (allow 5-10 min for the descriptor to propagate)"
+    else
+        echo "       still publishing — run 'onionpress address' to check"
+    fi
+    echo ""
+    echo "  ──────────────────────────────────────────────────────────"
+    echo "  Useful commands:"
+    echo "    onionpress status     - is it running?"
+    echo "    onionpress address    - show .onion address"
+    echo "    onionpress logs       - stream live container logs"
+    echo "    systemctl --user restart onionpress   - restart"
+    echo "    systemctl --user stop onionpress      - stop"
     echo ""
     echo "  Log file: $DATA_DIR/onionpress.log"
     echo ""
