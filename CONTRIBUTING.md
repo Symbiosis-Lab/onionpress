@@ -7,8 +7,8 @@ covers what you need to know.
 ## What OnionPress is
 
 A consumer-friendly way to publish a WordPress site as a Tor onion service.
-On macOS it ships as a menubar app; on Linux as a `.deb` / AppImage with a
-systemd service. WordPress, MariaDB, and Tor run as Docker containers
+On macOS it ships as a menubar app; on Linux as a `.deb` with a
+systemd user service. WordPress, MariaDB, and Tor run as Docker containers
 (inside Colima on macOS, native Docker on Linux). The host-side wrapper
 handles startup, port detection, key management, backups, and updates.
 
@@ -23,7 +23,7 @@ handles startup, port detection, key management, backups, and updates.
 | `app/Resources/plugins/` | WordPress plugins (mu-plugins) shipped with the app. |
 | `app/Resources/docker/` | Docker Compose file and per-container configs. |
 | `tests/` | Python unit tests (pytest / unittest). |
-| `build/` | Build scripts (DMG, .deb, AppImage, version bumping). |
+| `build/` | Build scripts (DMG, .deb, version bumping). |
 
 ## Naming and terminology
 
@@ -66,7 +66,7 @@ handles startup, port detection, key management, backups, and updates.
 ## Setting up a dev environment (Linux)
 
 The Linux build is scripts-only (no compiled binaries). `build/build-linux.sh`
-produces a `.deb` and an AppImage. Test the launcher directly:
+produces a `.deb`. Test the launcher directly:
 
 ```
 linux/onionpress start

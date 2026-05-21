@@ -138,7 +138,7 @@ quirk, not actual disk consumption.
 # Mac DMG
 bash build/build-dmg-simple.sh
 
-# Linux .deb and AppImage
+# Linux .deb
 bash build/build-linux.sh
 ```
 

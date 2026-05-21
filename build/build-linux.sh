@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# Build OnionPress .deb and AppImage packages for Linux
+# Build OnionPress .deb for Linux
 # Usage: bash build/build-linux.sh
 #
 # Outputs:
-#   build/onionpress_VERSION_ARCH.deb
-#   build/OnionPress-VERSION-ARCH.AppImage
+#   build/onionpress_VERSION_all.deb  (versioned, archived per release)
+#   build/onionpress.deb              (unversioned copy — what the homepage
+#                                      links to via releases/latest/download/)
 
 set -e
 
@@ -298,151 +299,20 @@ fi
 DEB_SIZE=$(du -h "$BUILD_DIR/${DEB_NAME}.deb" | cut -f1)
 echo "  .deb created: build/${DEB_NAME}.deb ($DEB_SIZE)"
 
-# ─── Build AppImage ────────────────────────────────────────────────────
-
-echo ""
-echo "Building AppImage..."
-
-APPIMAGE_NAME="OnionPress-${VERSION}"
-APPDIR="$STAGE_DIR/appimage/$APPIMAGE_NAME.AppDir"
-
-# Install files
-collect_files "$APPDIR/opt/onionpress"
-
-# Systemd services (for optional install)
-mkdir -p "$APPDIR/opt/onionpress/systemd"
-cp "$PROJECT_DIR/linux/onionpress.service" "$APPDIR/opt/onionpress/systemd/"
-cp "$PROJECT_DIR/linux/onionpress-heartbeat.service" "$APPDIR/opt/onionpress/systemd/"
-cp "$PROJECT_DIR/linux/onionpress-watcher.service" "$APPDIR/opt/onionpress/systemd/"
-cp "$PROJECT_DIR/linux/onionpress-watcher.timer" "$APPDIR/opt/onionpress/systemd/"
-
-# AppRun — the entry point
-cat > "$APPDIR/AppRun" <<'APPRUN'
-#!/bin/bash
-
-# OnionPress AppImage entry point
-# Runs the OnionPress launcher from the bundled files
-
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Set install dir to our bundled files
-export ONIONPRESS_INSTALL_DIR="$SELF_DIR/opt/onionpress"
-
-# Handle special commands
-case "${1:-}" in
-    install-service)
-        echo "Installing OnionPress systemd services..."
-        REAL_USER="${SUDO_USER:-$(whoami)}"
-        REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
-
-        # Get the actual AppImage path (not the mounted AppDir)
-        APPIMAGE_PATH="${APPIMAGE:-$(readlink -f "$0")}"
-
-        for svc in onionpress onionpress-heartbeat onionpress-watcher; do
-            if [ -f "$SELF_DIR/opt/onionpress/systemd/$svc.service" ]; then
-                sudo cp "$SELF_DIR/opt/onionpress/systemd/$svc.service" "/etc/systemd/system/$svc.service"
-                # Point ExecStart at the AppImage
-                sudo sed -i "s|/opt/onionpress/onionpress|$APPIMAGE_PATH|g" "/etc/systemd/system/$svc.service"
-                if [ "$REAL_USER" != "root" ]; then
-                    sudo sed -i "/^\[Service\]/a User=$REAL_USER\nEnvironment=HOME=$REAL_HOME" \
-                        "/etc/systemd/system/$svc.service"
-                fi
-            fi
-        done
-        if [ -f "$SELF_DIR/opt/onionpress/systemd/onionpress-watcher.timer" ]; then
-            sudo cp "$SELF_DIR/opt/onionpress/systemd/onionpress-watcher.timer" "/etc/systemd/system/"
-        fi
-
-        sudo systemctl daemon-reload
-        sudo systemctl enable onionpress onionpress-heartbeat
-        sudo systemctl enable --now onionpress-watcher.timer
-        echo "Services installed. Start with: sudo systemctl start onionpress"
-        exit 0
-        ;;
-esac
-
-# Run the launcher
-exec "$SELF_DIR/opt/onionpress/onionpress" "$@"
-APPRUN
-chmod +x "$APPDIR/AppRun"
-
-# Desktop file (required by AppImage spec)
-cat > "$APPDIR/onionpress.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=OnionPress
-Comment=Your Decentralized Social Blog Site
-Exec=onionpress
-Icon=onionpress
-Categories=Network;WebDevelopment;
-Terminal=true
-EOF
-
-# Icon (required by AppImage spec — use the app icon if available, else create a placeholder)
-if [ -f "$PROJECT_DIR/app/Resources/app-icon-source.png" ]; then
-    cp "$PROJECT_DIR/app/Resources/app-icon-source.png" "$APPDIR/onionpress.png"
-elif [ -f "$PROJECT_DIR/docs/favicon.png" ]; then
-    cp "$PROJECT_DIR/docs/favicon.png" "$APPDIR/onionpress.png"
-else
-    # Minimal 1x1 PNG placeholder
-    printf '\x89PNG\r\n\x1a\n' > "$APPDIR/onionpress.png"
-fi
-
-# .DirIcon symlink
-ln -sf onionpress.png "$APPDIR/.DirIcon"
-
-# Build the AppImage using appimagetool if available, otherwise create a
-# self-extracting archive as a fallback
-if command -v appimagetool >/dev/null 2>&1; then
-    appimagetool "$APPDIR" "$BUILD_DIR/${APPIMAGE_NAME}.AppImage"
-else
-    echo "  appimagetool not found — creating self-extracting archive instead"
-
-    # Create a tar.gz of the AppDir
-    ARCHIVE="$STAGE_DIR/appdir.tar.gz"
-    (cd "$APPDIR/.." && tar czf "$ARCHIVE" "$(basename "$APPDIR")")
-
-    # Create self-extracting script
-    cat > "$BUILD_DIR/${APPIMAGE_NAME}.AppImage" <<SFXHEADER
-#!/bin/bash
-# OnionPress v$VERSION — Self-extracting AppImage
-# Usage: ./$(basename "$BUILD_DIR/${APPIMAGE_NAME}.AppImage") [command]
-
-set -e
-EXTRACT_DIR="\${XDG_CACHE_HOME:-\$HOME/.cache}/onionpress-appimage"
-MARKER="\$EXTRACT_DIR/.version"
-
-# Extract only if version changed or not yet extracted
-if [ ! -f "\$MARKER" ] || [ "\$(cat "\$MARKER")" != "$VERSION" ]; then
-    rm -rf "\$EXTRACT_DIR"
-    mkdir -p "\$EXTRACT_DIR"
-    # Skip the header lines of this script and extract the archive
-    SKIP=\$(awk '/^__ARCHIVE_BELOW__\$/{print NR + 1; exit 0; }' "\$0")
-    tail -n +\$SKIP "\$0" | tar xzf - -C "\$EXTRACT_DIR" --strip-components=1
-    echo "$VERSION" > "\$MARKER"
-fi
-
-export ONIONPRESS_INSTALL_DIR="\$EXTRACT_DIR/opt/onionpress"
-exec "\$EXTRACT_DIR/AppRun" "\$@"
-__ARCHIVE_BELOW__
-SFXHEADER
-
-    cat "$ARCHIVE" >> "$BUILD_DIR/${APPIMAGE_NAME}.AppImage"
-    chmod +x "$BUILD_DIR/${APPIMAGE_NAME}.AppImage"
-fi
-
-APPIMAGE_SIZE=$(du -h "$BUILD_DIR/${APPIMAGE_NAME}.AppImage" | cut -f1)
-echo "  AppImage created: build/${APPIMAGE_NAME}.AppImage ($APPIMAGE_SIZE)"
+# Unversioned copy. GitHub's releases/latest/download/<filename> endpoint
+# requires an exact filename match, so the homepage button needs a name
+# that doesn't change with each release — same trick as onionpress.dmg.
+# The versioned .deb stays as the per-release archive copy.
+cp "$BUILD_DIR/${DEB_NAME}.deb" "$BUILD_DIR/onionpress.deb"
+echo "  .deb copied:  build/onionpress.deb (unversioned, for releases/latest/download/)"
 
 # ─── Clean up ───────────────────────────────────────────────────────────
 
 rm -rf "$STAGE_DIR"
 
 echo ""
-echo "✅ Linux packages built:"
-echo "   .deb:      build/${DEB_NAME}.deb"
-echo "   AppImage:  build/${APPIMAGE_NAME}.AppImage"
+echo "✅ Linux package built:"
+echo "   .deb (versioned):    build/${DEB_NAME}.deb"
+echo "   .deb (unversioned):  build/onionpress.deb"
 echo ""
-echo "Install .deb:     sudo apt-get install ./build/${DEB_NAME}.deb"
-echo "Run AppImage:     ./build/${APPIMAGE_NAME}.AppImage"
-echo "Install service:  ./build/${APPIMAGE_NAME}.AppImage install-service"
+echo "Install:     sudo apt install ./build/onionpress.deb"

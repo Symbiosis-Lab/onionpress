@@ -23,7 +23,7 @@ labels: bug
 - OnionPress version: <!-- e.g. v2.4.75 — visible at the top of WP admin or via `onionpress status` -->
 - OS: <!-- macOS 14.x / Ubuntu 24.04 / Debian 12 / etc. -->
 - Architecture: <!-- arm64 / x86_64 -->
-- Install method: <!-- DMG / .deb / AppImage -->
+- Install method: <!-- DMG / .deb / curl|bash -->
 
 ## Logs
 
