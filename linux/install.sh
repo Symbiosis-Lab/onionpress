@@ -241,6 +241,12 @@ if [ -d "$REPO_DIR/app/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/app/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
 
+# Icon for the per-user .desktop entry created at the end. Kept in INSTALL_DIR
+# so it survives temp-dir cleanup below.
+if [ -f "$REPO_DIR/app/Resources/app-icon.png" ]; then
+    $SUDO cp "$REPO_DIR/app/Resources/app-icon.png" "$INSTALL_DIR/app-icon.png"
+fi
+
 # Copy shared scripts
 $SUDO mkdir -p "$INSTALL_DIR/scripts"
 $SUDO cp "$REPO_DIR/src/onionpress/onion_auth.py" "$INSTALL_DIR/scripts/"
@@ -497,6 +503,52 @@ fi
 
 # Create symlink for easy CLI access
 $SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress 2>/dev/null || true
+
+# ─── Desktop entry (per-user) ────────────────────────────────────────
+# Puts OnionPress in the user's app drawer so they can launch the
+# dashboard from Activities like any other app (Signal, Firefox, etc.)
+# rather than memorizing a localhost URL. Per-user — no sudo, no /usr.
+
+DESKTOP_APPS_DIR="$REAL_HOME/.local/share/applications"
+DESKTOP_ICONS_DIR="$REAL_HOME/.local/share/icons/hicolor/512x512/apps"
+
+if [ -n "$SUDO_USER" ]; then
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DESKTOP_APPS_DIR"
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DESKTOP_ICONS_DIR"
+else
+    mkdir -p "$DESKTOP_APPS_DIR" "$DESKTOP_ICONS_DIR"
+fi
+
+cat > "$DESKTOP_APPS_DIR/onionpress.desktop" <<DESKTOP_EOF
+[Desktop Entry]
+Type=Application
+Name=OnionPress
+GenericName=Decentralized Blog
+Comment=Open your OnionPress dashboard
+Exec=xdg-open http://localhost:8080/wp-admin
+Icon=onionpress
+Categories=Network;Publishing;
+Keywords=blog;wordpress;tor;onion;
+StartupNotify=false
+DESKTOP_EOF
+
+if [ -f "$INSTALL_DIR/app-icon.png" ]; then
+    cp "$INSTALL_DIR/app-icon.png" "$DESKTOP_ICONS_DIR/onionpress.png"
+fi
+
+if [ -n "$SUDO_USER" ]; then
+    chown "$SUDO_USER:$SUDO_USER" "$DESKTOP_APPS_DIR/onionpress.desktop" 2>/dev/null || true
+    chown "$SUDO_USER:$SUDO_USER" "$DESKTOP_ICONS_DIR/onionpress.png" 2>/dev/null || true
+fi
+
+# Refresh GNOME's caches so the icon shows up without requiring a logout.
+# Best-effort — these tools aren't installed on every distro.
+if command -v update-desktop-database >/dev/null 2>&1; then
+    run_as_user update-desktop-database "$DESKTOP_APPS_DIR" >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    run_as_user gtk-update-icon-cache -t -f "$REAL_HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+fi
 
 # On a GUI desktop, launch the user's default browser straight to wp-admin so
 # they don't have to copy the URL. Headless boxes (no xdg-open, or no DISPLAY)

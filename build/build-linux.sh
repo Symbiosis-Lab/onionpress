@@ -102,8 +102,8 @@ cat > "$DEB_ROOT/usr/share/applications/onionpress.desktop" <<EOF
 Type=Application
 Name=OnionPress
 GenericName=Decentralized Blog
-Comment=Open your local OnionPress site
-Exec=xdg-open http://localhost:8080
+Comment=Open your OnionPress dashboard
+Exec=xdg-open http://localhost:8080/wp-admin
 Icon=onionpress
 Categories=Network;Publishing;
 Keywords=blog;wordpress;tor;onion;
