@@ -1479,6 +1479,19 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy onboarding wizard mu-plugin (first-run setup, replaces Mac AppKit window long-term)
+    if [ -f "$plugins_dir/onionpress-onboarding.php" ]; then
+        if docker cp "$plugins_dir/onionpress-onboarding.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-onboarding.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-onboarding.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-onboarding.php"
+            log "✓ onionpress-onboarding.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-onboarding.php"
+        fi
+    fi
+
     # Copy icon assets (used by onionpress-settings.php and onionpress-login-fix.php)
     for icon_file in onionpress-sidebar-icon.png onionpress-follow-icon.png; do
         if [ -f "$plugins_dir/$icon_file" ]; then

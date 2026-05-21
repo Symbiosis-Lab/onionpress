@@ -768,6 +768,7 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         "onionpress-avatar.php"
         "onionpress-blogroll.php"
         "onionpress-status-hint.php"
+        "onionpress-onboarding.php"
         "onionpress-social-archive.php"
         "onionpress-social-archive-twitter.php"
         "onionpress-social-archive-mastodon.php"

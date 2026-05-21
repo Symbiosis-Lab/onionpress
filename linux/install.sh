@@ -163,6 +163,16 @@ if ! command -v unzip >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq zip unzip
 fi
 
+# Install torbrowser-launcher (Tor Project's verifier wrapper) so users can
+# test their .onion site in real Tor Browser. Skip on headless boxes where
+# no GUI is present — GTK deps would waste disk on a server/Pi that won't
+# use them. xdg-open existence is a decent proxy for "has a desktop env".
+if command -v xdg-open >/dev/null 2>&1 && ! command -v torbrowser-launcher >/dev/null 2>&1; then
+    echo "  Installing torbrowser-launcher (for testing your .onion site)..."
+    $SUDO apt-get install -y -qq torbrowser-launcher \
+        || echo "  (torbrowser-launcher install failed — you can install it later: sudo apt install torbrowser-launcher)"
+fi
+
 # ─── Stop existing services (if reinstalling) ────────────────────────
 
 # Stop user services (rootless)
@@ -455,6 +465,9 @@ if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
         echo "                    (still being generated — try again in a moment)"
     fi
     echo ""
+    echo "    3. Follow the on-screen setup wizard to pick a site title,"
+    echo "       replace the random password, and test in Tor Browser."
+    echo ""
     echo "  Your public .onion address (visit from Tor Browser):"
     if [ "$onion_addr" != "Generating..." ] && [ -n "$onion_addr" ]; then
         echo "       http://${onion_addr}"
@@ -484,3 +497,11 @@ fi
 
 # Create symlink for easy CLI access
 $SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress 2>/dev/null || true
+
+# On a GUI desktop, launch the user's default browser straight to wp-admin so
+# they don't have to copy the URL. Headless boxes (no xdg-open, or no DISPLAY)
+# skip this and rely on the printed URL in the success message.
+if [ "$wp_ready" = "true" ] && command -v xdg-open >/dev/null 2>&1 \
+   && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+    run_as_user xdg-open "http://localhost:8080/wp-admin" >/dev/null 2>&1 &
+fi
