@@ -27,7 +27,7 @@ services:
     networks:
       - onionpress-network
     ports:
-      - "127.0.0.1:${ONIONPRESS_SOCKS_PORT:-9050}:9050"
+      - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_SOCKS_PORT:-9050}:9050"
 
   wordpress:
     image: ghcr.io/brewsterkahle/onionpress-wordpress:latest
@@ -82,7 +82,7 @@ services:
     networks:
       - onionpress-network
     ports:
-      - "127.0.0.1:${ONIONPRESS_WP_PORT:-8080}:80"
+      - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_WP_PORT:-8080}:80"
 
   db:
     image: mariadb:latest

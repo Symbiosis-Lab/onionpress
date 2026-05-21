@@ -77,12 +77,16 @@ DEB_ROOT="$STAGE_DIR/deb/$DEB_NAME"
 # Install files
 collect_files "$DEB_ROOT/opt/onionpress"
 
-# Systemd services
-mkdir -p "$DEB_ROOT/lib/systemd/system"
-cp "$PROJECT_DIR/linux/onionpress.service" "$DEB_ROOT/lib/systemd/system/"
-cp "$PROJECT_DIR/linux/onionpress-heartbeat.service" "$DEB_ROOT/lib/systemd/system/"
-cp "$PROJECT_DIR/linux/onionpress-watcher.service" "$DEB_ROOT/lib/systemd/system/"
-cp "$PROJECT_DIR/linux/onionpress-watcher.timer" "$DEB_ROOT/lib/systemd/system/"
+# Systemd user services. The unit files use user-unit idioms
+# (WantedBy=default.target, XDG_RUNTIME_DIR=/run/user/%U) — they belong
+# under /usr/lib/systemd/user/, not /lib/systemd/system/. The previous
+# layout enabled them as system units, which is a no-op for
+# default.target and meant services never actually started at boot.
+mkdir -p "$DEB_ROOT/usr/lib/systemd/user"
+cp "$PROJECT_DIR/linux/onionpress.service" "$DEB_ROOT/usr/lib/systemd/user/"
+cp "$PROJECT_DIR/linux/onionpress-heartbeat.service" "$DEB_ROOT/usr/lib/systemd/user/"
+cp "$PROJECT_DIR/linux/onionpress-watcher.service" "$DEB_ROOT/usr/lib/systemd/user/"
+cp "$PROJECT_DIR/linux/onionpress-watcher.timer" "$DEB_ROOT/usr/lib/systemd/user/"
 
 # CLI symlink
 mkdir -p "$DEB_ROOT/usr/local/bin"
@@ -107,17 +111,27 @@ Description: Your Decentralized Social Blog Site
  Built on WordPress + Tor + Wayback Machine.
 EOF
 
-# Post-install: set up data dir, generate secrets, enable services
+# Post-install: data dir + secrets (first install only), port-binding
+# override (idempotent), enable user units.
+#
+# Gating ($1=configure, $2 empty = fresh install; $2 set = upgrade from
+# that version). First-install logic must NOT re-run on upgrade or it
+# clobbers user-edited config and re-generates secrets that don't match
+# the running DB.
 cat > "$DEB_ROOT/DEBIAN/postinst" <<'POSTINST'
 #!/bin/bash
 set -e
 
-# Determine the real user (not root)
+# Detect the human user who invoked the install. SUDO_USER is set for
+# sudo invocations; logname falls back to the controlling terminal.
+# Both can be empty for non-interactive paths (cloud-init, GUI software
+# centers); in that case data goes to root's home and the user re-runs
+# setup as themselves.
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 DATA_DIR="$REAL_HOME/.onionpress"
 
-# Create data directory owned by real user
+# Idempotent: data dir creation runs on every postinst trigger.
 if [ "$REAL_USER" != "root" ]; then
     install -d -o "$REAL_USER" -g "$REAL_USER" "$DATA_DIR"
     install -d -o "$REAL_USER" -g "$REAL_USER" "$DATA_DIR/shared"
@@ -126,22 +140,22 @@ else
     mkdir -p "$DATA_DIR/shared/vanity-keys"
 fi
 
-# Generate secrets if they don't exist
-if [ ! -f "$DATA_DIR/secrets" ]; then
-    WP_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-    ROOT_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-    cat > "$DATA_DIR/secrets" <<EOF
+# First-install-only: random secrets + default config.
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    if [ ! -f "$DATA_DIR/secrets" ]; then
+        WP_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+        ROOT_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+        cat > "$DATA_DIR/secrets" <<EOF
 # Database passwords - generated on $(date)
 WORDPRESS_DB_PASSWORD='$WP_PASS'
 MYSQL_PASSWORD='$WP_PASS'
 MYSQL_ROOT_PASSWORD='$ROOT_PASS'
 EOF
-    chmod 600 "$DATA_DIR/secrets"
-fi
+        chmod 600 "$DATA_DIR/secrets"
+    fi
 
-# Create default config if it doesn't exist
-if [ ! -f "$DATA_DIR/config" ]; then
-    cat > "$DATA_DIR/config" <<EOF
+    if [ ! -f "$DATA_DIR/config" ]; then
+        cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
@@ -149,64 +163,83 @@ START_ON_BOOT=yes
 REGISTER_WITH_ONIONHEAVEN=yes
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
+    fi
 fi
 
-# Fix data dir ownership
+# Ownership fixup is idempotent.
 if [ "$REAL_USER" != "root" ]; then
     chown -R "$REAL_USER:$REAL_USER" "$DATA_DIR"
 fi
 
-# Configure systemd services to run as the real user
-if [ "$REAL_USER" != "root" ]; then
-    for svc in onionpress onionpress-heartbeat; do
-        if [ -f "/lib/systemd/system/$svc.service" ]; then
-            if ! grep -q "^User=" "/lib/systemd/system/$svc.service"; then
-                sed -i "/^\[Service\]/a User=$REAL_USER\nEnvironment=HOME=$REAL_HOME" \
-                    "/lib/systemd/system/$svc.service"
-            fi
-        fi
-    done
-    if [ -f "/lib/systemd/system/onionpress-watcher.service" ]; then
-        if ! grep -q "^User=" "/lib/systemd/system/onionpress-watcher.service"; then
-            sed -i "/^\[Service\]/a User=$REAL_USER" \
-                "/lib/systemd/system/onionpress-watcher.service"
-        fi
-    fi
+# Port-binding host. Compose now reads ${ONIONPRESS_BIND_HOST:-127.0.0.1}
+# from the environment, set by the launcher (linux/onionpress) — no
+# more sed-mutating docker-compose.yml in postinst. The launcher exports
+# 0.0.0.0 by default on Linux for headless-Pi LAN access; users wanting
+# localhost-only can set ONIONPRESS_BIND_HOST=127.0.0.1 in
+# ~/.onionpress/config.
+
+# Reload the user-unit catalog and enable the units globally so they
+# activate on the next login of any user. Per-user disable preferences
+# (a user who explicitly opted out with `systemctl --user disable`)
+# remain respected — --global only affects users whose state is unset.
+systemctl --global enable onionpress.service onionpress-heartbeat.service onionpress-watcher.timer 2>/dev/null || true
+systemctl --user daemon-reload 2>/dev/null || true
+
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    cat <<EOF
+
+OnionPress v$(cat /opt/onionpress/VERSION) installed.
+
+Next: open a shell as your normal user and run:
+    loginctl enable-linger \$USER
+    systemctl --user start onionpress
+
+CLI:  onionpress status | address | logs
+
+EOF
 fi
-
-# Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
-# users access from another device). The shipped compose file uses 127.0.0.1.
-sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' /opt/onionpress/docker/docker-compose.yml
-sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' /opt/onionpress/docker/docker-compose.yml
-
-# Enable services
-systemctl daemon-reload
-systemctl enable onionpress
-systemctl enable onionpress-heartbeat
-systemctl enable --now onionpress-watcher.timer
-
-echo ""
-echo "OnionPress v$(cat /opt/onionpress/VERSION) installed."
-echo ""
-echo "Start with:  sudo systemctl start onionpress"
-echo "CLI:         onionpress status | address | logs"
-echo ""
 POSTINST
 chmod 755 "$DEB_ROOT/DEBIAN/postinst"
 
-# Pre-remove: stop services
+# Pre-remove: only act on actual removal, not upgrade.
 cat > "$DEB_ROOT/DEBIAN/prerm" <<'PRERM'
 #!/bin/bash
 set -e
-systemctl stop onionpress-heartbeat 2>/dev/null || true
-systemctl stop onionpress-watcher.timer 2>/dev/null || true
-systemctl stop onionpress 2>/dev/null || true
-systemctl disable onionpress 2>/dev/null || true
-systemctl disable onionpress-heartbeat 2>/dev/null || true
-systemctl disable onionpress-watcher.timer 2>/dev/null || true
-systemctl daemon-reload
+
+case "$1" in
+    remove)
+        # Globally disable so the units don't relink on next login.
+        # Per-user running instances are left to the user to stop with
+        # `systemctl --user stop onionpress` — root can't reach into
+        # arbitrary user sessions from prerm reliably.
+        systemctl --global disable onionpress.service onionpress-heartbeat.service onionpress-watcher.timer 2>/dev/null || true
+        ;;
+    upgrade|deconfigure|failed-upgrade)
+        # No-op — preserve running state across upgrade.
+        ;;
+esac
 PRERM
 chmod 755 "$DEB_ROOT/DEBIAN/prerm"
+
+# Post-remove: clean up postinst-generated files on purge.
+cat > "$DEB_ROOT/DEBIAN/postrm" <<'POSTRM'
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        # Don't auto-remove ~/.onionpress/ — it holds the onion key and
+        # DB passwords. Tell the user what's still there.
+        cat <<EOF
+onionpress purged. User data preserved at:
+    ~/.onionpress/   (config, secrets, onion key, logs)
+    ~/OnionPress/    (Creations, backups)
+Remove manually if you no longer need them.
+EOF
+        ;;
+esac
+POSTRM
+chmod 755 "$DEB_ROOT/DEBIAN/postrm"
 
 # Build the .deb
 if command -v dpkg-deb >/dev/null 2>&1; then

@@ -123,6 +123,14 @@ export ONIONPRESS_WP_PORT=8080
 export ONIONPRESS_SOCKS_PORT=9050
 export ONIONPRESS_PROXY_PORT=9077
 
+# Bind host. Linux is typically headless (Pi accessed from a phone or
+# laptop on the LAN), so we bind to all interfaces by default. Desktop
+# users who want localhost-only can set ONIONPRESS_BIND_HOST=127.0.0.1
+# in ~/.onionpress/config before launch. Mac (Colima) doesn't run this
+# launcher and gets the safer 127.0.0.1 default from the compose file.
+: "${ONIONPRESS_BIND_HOST:=0.0.0.0}"
+export ONIONPRESS_BIND_HOST
+
 # Every OnionPress node is an OnionHeaven server (accepts registrations).
 # The API server runs inside the tor container (always on, ~15MB overhead).
 # The heartbeat monitor + takeover Arti container starts lazily on first
