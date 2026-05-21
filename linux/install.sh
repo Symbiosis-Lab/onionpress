@@ -525,7 +525,7 @@ Type=Application
 Name=OnionPress
 GenericName=Decentralized Blog
 Comment=Open your OnionPress dashboard
-Exec=xdg-open http://localhost:8080/wp-admin
+Exec=onionpress dashboard
 Icon=onionpress
 Categories=Network;Publishing;
 Keywords=blog;wordpress;tor;onion;
@@ -550,10 +550,11 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     run_as_user gtk-update-icon-cache -t -f "$REAL_HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
-# On a GUI desktop, launch the user's default browser straight to wp-admin so
-# they don't have to copy the URL. Headless boxes (no xdg-open, or no DISPLAY)
+# On a GUI desktop, launch the user's default browser straight to a
+# magic-link-auto-logged-in wp-admin so they don't have to copy the URL
+# or type the autogen password. Headless boxes (no xdg-open, or no DISPLAY)
 # skip this and rely on the printed URL in the success message.
 if [ "$wp_ready" = "true" ] && command -v xdg-open >/dev/null 2>&1 \
    && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
-    run_as_user xdg-open "http://localhost:8080/wp-admin" >/dev/null 2>&1 &
+    run_as_user /usr/local/bin/onionpress dashboard >/dev/null 2>&1 &
 fi
