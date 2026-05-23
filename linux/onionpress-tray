@@ -1,0 +1,750 @@
+#!/usr/bin/env python3
+"""OnionPress tray app for Ubuntu / Linux desktops.
+
+A thin presentation layer around the bash launcher + shared Python ops
+(src/onionpress/launcher_ops.py). Polls ~/.onionpress/status.json every
+2 seconds and reflects state via the AppIndicator. State changes are
+invoked through `/usr/local/bin/onionpress <subcommand>` so the
+headless / SSH-only path remains the single source of truth.
+
+The file deliberately stays one module — at ~700 lines it's easier to
+audit and ship than a sprawling package. Split if it grows past 1000.
+"""
+
+import os
+import sys
+
+# ─── 0. Display gate (runs BEFORE gi imports) ───────────────────────────
+# AppIndicator init touches D-Bus; on a tty-only system this would fail
+# in confusing ways. Bail before we pull GTK in.
+if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+    print("onionpress-tray: no display, exiting", file=sys.stderr)
+    sys.exit(0)
+
+import fcntl
+import json
+import logging
+import logging.handlers
+import signal
+import subprocess
+import threading
+import time
+from typing import Optional
+
+# Ensure the shared `onionpress` package is importable. The .deb installs
+# it at /opt/onionpress/lib/onionpress/; let callers override via PYTHONPATH.
+INSTALL_DIR = os.environ.get("ONIONPRESS_INSTALL_DIR", "/opt/onionpress")
+_LIB_DIR = os.path.join(INSTALL_DIR, "lib")
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("AyatanaAppIndicator3", "0.1")
+gi.require_version("Notify", "0.7")
+from gi.repository import Gtk, GLib, AyatanaAppIndicator3 as AppIndicator, Notify, Gdk  # noqa: E402
+
+try:
+    from onionpress import launcher_ops  # type: ignore
+except ImportError:
+    launcher_ops = None  # tray still runs; some features degrade gracefully
+
+
+# ─── Constants ──────────────────────────────────────────────────────────
+
+DATA_DIR = os.path.expanduser("~/.onionpress")
+STATUS_FILE = os.path.join(DATA_DIR, "status.json")
+PIDFILE = os.path.join(DATA_DIR, "tray.pid")
+TRAY_LOG = os.path.join(DATA_DIR, "tray.log")
+ASSETS_DIR = os.path.join(INSTALL_DIR, "assets")
+LAUNCHER = "/usr/local/bin/onionpress"
+
+ICON_RUNNING = os.path.join(ASSETS_DIR, "tray-running.svg")
+ICON_STARTING = os.path.join(ASSETS_DIR, "tray-starting.svg")
+ICON_STOPPED = os.path.join(ASSETS_DIR, "tray-stopped.svg")
+
+POLL_INTERVAL_SEC = 2
+NOTIFY_DEBOUNCE_SEC = 60
+
+
+# ─── Logging ────────────────────────────────────────────────────────────
+
+os.makedirs(DATA_DIR, exist_ok=True)
+_log_handler = logging.handlers.RotatingFileHandler(
+    TRAY_LOG, maxBytes=5 * 1024 * 1024, backupCount=3
+)
+_log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+logger = logging.getLogger("onionpress-tray")
+logger.setLevel(logging.INFO)
+logger.addHandler(_log_handler)
+logger.addHandler(logging.StreamHandler())
+
+
+def log(msg: str) -> None:
+    logger.info(msg)
+
+
+# ─── 1. Single-instance lock ────────────────────────────────────────────
+
+def acquire_single_instance_lock() -> Optional[int]:
+    """flock our PID file. Returns the fd on success, None if another
+    tray instance already holds the lock (we then exit quietly).
+    """
+    fd = os.open(PIDFILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    return fd
+
+
+# ─── 2. Status reader (host-side status.json poller) ────────────────────
+
+class Status:
+    """Owns the latest status.json snapshot. Polls every POLL_INTERVAL_SEC
+    seconds via GLib so callbacks fire on the GTK main thread.
+    """
+
+    def __init__(self, on_change):
+        self.state = "unknown"
+        self.onion_address = ""
+        self.wp_installed = False
+        self.onboarded = False
+        self.mkp224o_available = False
+        self.serving_from_wayback = False
+        self.bootstrap_pct = 0
+        self.uptime_seconds = 0
+        self.containers = {}
+        self.error_message = None
+        self.raw = {}
+        self._mtime = 0.0
+        self._on_change = on_change
+        GLib.timeout_add_seconds(POLL_INTERVAL_SEC, self._poll)
+
+    def _poll(self) -> bool:
+        try:
+            mtime = os.path.getmtime(STATUS_FILE)
+        except OSError:
+            return True
+        if mtime == self._mtime:
+            return True
+        self._mtime = mtime
+
+        try:
+            with open(STATUS_FILE) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log(f"status.json read failed: {e}")
+            return True
+
+        old = (self.state, self.wp_installed, self.onboarded,
+               self.onion_address, self.serving_from_wayback)
+        self.raw = data
+        self.state = data.get("state", "unknown")
+        self.onion_address = data.get("onion_address", "") or ""
+        self.wp_installed = bool(data.get("wp_installed"))
+        self.onboarded = bool(data.get("onboarded"))
+        self.mkp224o_available = bool(data.get("mkp224o_available"))
+        self.serving_from_wayback = bool(data.get("serving_from_wayback"))
+        self.bootstrap_pct = int(data.get("bootstrap_pct", 0))
+        self.uptime_seconds = int(data.get("uptime_seconds", 0))
+        self.containers = dict(data.get("containers", {}))
+        self.error_message = data.get("error_message")
+        new = (self.state, self.wp_installed, self.onboarded,
+               self.onion_address, self.serving_from_wayback)
+
+        if old != new:
+            try:
+                self._on_change(old, new)
+            except Exception as e:
+                log(f"on_change handler raised: {e}")
+        return True
+
+
+# ─── 3. Launcher wrapper ────────────────────────────────────────────────
+
+class Launcher:
+    """Subprocess wrapper around `/usr/local/bin/onionpress`."""
+
+    @staticmethod
+    def run(*args, capture: bool = False, timeout: int = 60) -> subprocess.CompletedProcess:
+        cmd = [LAUNCHER, *args]
+        log(f"launcher: {' '.join(cmd)}")
+        try:
+            return subprocess.run(
+                cmd, capture_output=capture, text=True, timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            log(f"launcher failed: {e}")
+            raise
+
+    @staticmethod
+    def run_async(*args) -> None:
+        """Fire and forget — used for actions where we don't wait."""
+        cmd = [LAUNCHER, *args]
+        log(f"launcher (async): {' '.join(cmd)}")
+        try:
+            subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except (OSError, FileNotFoundError) as e:
+            log(f"launcher async failed: {e}")
+
+
+# ─── 4. Notifier ────────────────────────────────────────────────────────
+
+class Notifier:
+    def __init__(self):
+        Notify.init("OnionPress")
+        self._last_fired: dict[str, float] = {}
+
+    def notify(self, category: str, title: str, body: str = "",
+               *, urgency: str = "normal",
+               actions: Optional[list] = None) -> None:
+        """Fire a notification, deduped by category for NOTIFY_DEBOUNCE_SEC.
+        actions: list of (action_id, label, callback) tuples.
+        """
+        now = time.time()
+        if now - self._last_fired.get(category, 0) < NOTIFY_DEBOUNCE_SEC:
+            return
+        self._last_fired[category] = now
+
+        try:
+            n = Notify.Notification.new(title, body, "onionpress")
+            urgency_map = {
+                "low": Notify.Urgency.LOW,
+                "normal": Notify.Urgency.NORMAL,
+                "critical": Notify.Urgency.CRITICAL,
+            }
+            n.set_urgency(urgency_map.get(urgency, Notify.Urgency.NORMAL))
+            if actions:
+                for aid, label, cb in actions:
+                    n.add_action(aid, label, lambda _n, _a, _cb=cb: _cb())
+            n.show()
+        except Exception as e:
+            log(f"notify failed: {e}")
+
+
+# ─── 5. Pi detection ────────────────────────────────────────────────────
+
+def is_raspberry_pi() -> bool:
+    try:
+        with open("/proc/cpuinfo") as f:
+            blob = f.read()
+        return "Raspberry Pi" in blob or "BCM2" in blob
+    except OSError:
+        return False
+
+
+# ─── 6. Dialogs ─────────────────────────────────────────────────────────
+
+def show_about_dialog():
+    version = "unknown"
+    try:
+        with open("/opt/onionpress/VERSION") as f:
+            version = f.read().strip()
+    except OSError:
+        pass
+
+    dlg = Gtk.AboutDialog()
+    dlg.set_program_name("OnionPress")
+    dlg.set_version(version)
+    dlg.set_comments("Your decentralized social blog, over Tor")
+    dlg.set_website("https://onionpress.org")
+    dlg.set_website_label("onionpress.org")
+    dlg.set_copyright("© Internet Archive")
+    dlg.set_logo_icon_name("onionpress")
+
+    rec_btn = Gtk.Button(label="Recovery info…")
+    rec_btn.connect("clicked", lambda _b: show_recovery_dialog(dlg))
+    dlg.get_content_area().pack_end(rec_btn, False, False, 6)
+    dlg.show_all()
+    dlg.run()
+    dlg.destroy()
+
+
+def show_recovery_dialog(parent=None):
+    pw_path = os.path.join(DATA_DIR, "wp-admin-password")
+    try:
+        with open(pw_path) as f:
+            pw = f.read().strip()
+    except OSError:
+        pw = ""
+
+    dlg = Gtk.Dialog(
+        title="OnionPress recovery info",
+        parent=parent, flags=0,
+        buttons=("Close", Gtk.ResponseType.CLOSE),
+    )
+    dlg.set_default_size(420, 0)
+    box = dlg.get_content_area()
+    box.set_spacing(8)
+    box.set_border_width(12)
+
+    if not pw:
+        lbl = Gtk.Label(label=(
+            "No bootstrap admin password file found. If you can no longer "
+            "log in, restore from a recent backup."))
+        lbl.set_line_wrap(True)
+        lbl.set_xalign(0)
+        box.add(lbl)
+    else:
+        intro = Gtk.Label(label=(
+            "Bootstrap admin account. Only needed if you lose access to "
+            "the user you created in the setup wizard."))
+        intro.set_line_wrap(True)
+        intro.set_xalign(0)
+        box.add(intro)
+
+        grid = Gtk.Grid(column_spacing=8, row_spacing=4)
+        grid.attach(Gtk.Label(label="Username:", xalign=1), 0, 0, 1, 1)
+        grid.attach(Gtk.Label(label="admin", xalign=0, selectable=True), 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="Password:", xalign=1), 0, 1, 1, 1)
+        pw_lbl = Gtk.Label(label=pw, xalign=0, selectable=True)
+        pw_lbl.set_use_markup(False)
+        grid.attach(pw_lbl, 1, 1, 1, 1)
+        box.add(grid)
+
+        copy_btn = Gtk.Button(label="Copy password")
+
+        def _copy(_b):
+            clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            clip.set_text(pw, -1)
+            clip.store()
+        copy_btn.connect("clicked", _copy)
+        box.add(copy_btn)
+
+    dlg.show_all()
+    dlg.run()
+    dlg.destroy()
+
+
+def show_log_viewer(parent=None):
+    log_file = os.path.expanduser("~/.onionpress/onionpress.log")
+    dlg = Gtk.Dialog(
+        title="OnionPress logs",
+        parent=parent, flags=0,
+        buttons=("Close", Gtk.ResponseType.CLOSE),
+    )
+    dlg.set_default_size(720, 480)
+
+    box = dlg.get_content_area()
+    box.set_border_width(8)
+
+    text_view = Gtk.TextView()
+    text_view.set_editable(False)
+    text_view.set_monospace(True)
+    text_view.set_wrap_mode(Gtk.WrapMode.NONE)
+    buf = text_view.get_buffer()
+
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_hexpand(True)
+    scrolled.set_vexpand(True)
+    scrolled.add(text_view)
+    box.pack_start(scrolled, True, True, 0)
+
+    try:
+        with open(log_file) as f:
+            lines = f.readlines()[-5000:]
+        buf.set_text("".join(lines))
+    except OSError:
+        buf.set_text(f"(log file {log_file} not found)")
+
+    end_iter = buf.get_end_iter()
+    text_view.scroll_to_iter(end_iter, 0.0, False, 0, 0)
+
+    dlg.show_all()
+    dlg.run()
+    dlg.destroy()
+
+
+def show_backup_dialog(parent=None):
+    dlg = Gtk.MessageDialog(
+        parent=parent, flags=0,
+        message_type=Gtk.MessageType.INFO,
+        buttons=Gtk.ButtonsType.OK_CANCEL,
+        text="Create OnionPress backup",
+    )
+    dlg.format_secondary_text(
+        "A password-protected .zip will be created in ~/OnionPress/backups/. "
+        "Enter your WordPress admin password to authorise the backup.")
+    entry = Gtk.Entry()
+    entry.set_visibility(False)
+    entry.set_activates_default(True)
+    entry.set_placeholder_text("admin password")
+    box = dlg.get_content_area()
+    box.pack_end(entry, False, False, 8)
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    dlg.show_all()
+    response = dlg.run()
+    password = entry.get_text()
+    dlg.destroy()
+    if response != Gtk.ResponseType.OK or not password:
+        return
+
+    def _run():
+        try:
+            r = Launcher.run("backup", password, capture=True, timeout=300)
+            if r.returncode == 0:
+                Notify.Notification.new(
+                    "Backup complete", r.stdout.strip() or "Saved.",
+                    "onionpress",
+                ).show()
+            else:
+                Notify.Notification.new(
+                    "Backup failed", (r.stderr or "")[:200], "onionpress",
+                ).show()
+        except Exception as e:
+            log(f"backup error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def show_restore_dialog(parent=None):
+    chooser = Gtk.FileChooserNative.new(
+        "Choose a backup .zip", parent, Gtk.FileChooserAction.OPEN,
+        "_Restore", "_Cancel",
+    )
+    filt = Gtk.FileFilter()
+    filt.set_name("OnionPress backups (.zip)")
+    filt.add_pattern("*.zip")
+    chooser.add_filter(filt)
+    chooser.set_current_folder(os.path.expanduser("~/OnionPress/backups"))
+    response = chooser.run()
+    backup_path = chooser.get_filename() if response == Gtk.ResponseType.ACCEPT else None
+    chooser.destroy()
+    if not backup_path:
+        return
+
+    pw_dlg = Gtk.MessageDialog(
+        parent=parent, flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.OK_CANCEL,
+        text="Restore from backup",
+    )
+    pw_dlg.format_secondary_text(
+        f"This will replace the current site with the contents of\n"
+        f"{os.path.basename(backup_path)}.\n\n"
+        f"Enter the password the backup was created with.")
+    entry = Gtk.Entry()
+    entry.set_visibility(False)
+    entry.set_activates_default(True)
+    pw_dlg.get_content_area().pack_end(entry, False, False, 8)
+    pw_dlg.set_default_response(Gtk.ResponseType.OK)
+    pw_dlg.show_all()
+    response = pw_dlg.run()
+    password = entry.get_text()
+    pw_dlg.destroy()
+    if response != Gtk.ResponseType.OK or not password:
+        return
+
+    def _run():
+        try:
+            r = Launcher.run("restore", password, backup_path,
+                             capture=True, timeout=600)
+            if r.returncode == 0:
+                Notify.Notification.new(
+                    "Restore complete",
+                    "OnionPress has been restored. Containers restarting.",
+                    "onionpress",
+                ).show()
+            else:
+                Notify.Notification.new(
+                    "Restore failed", (r.stderr or "")[:200], "onionpress",
+                ).show()
+        except Exception as e:
+            log(f"restore error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def confirm_quit(parent=None) -> bool:
+    dlg = Gtk.MessageDialog(
+        parent=parent, flags=0,
+        message_type=Gtk.MessageType.QUESTION,
+        buttons=Gtk.ButtonsType.OK_CANCEL,
+        text="Quit OnionPress?",
+    )
+    dlg.format_secondary_text(
+        "Your site will go offline until you start OnionPress again or reboot.")
+    response = dlg.run()
+    dlg.destroy()
+    return response == Gtk.ResponseType.OK
+
+
+def confirm_regenerate(parent=None) -> bool:
+    dlg = Gtk.MessageDialog(
+        parent=parent, flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.OK_CANCEL,
+        text="Regenerate .onion address?",
+    )
+    dlg.format_secondary_text(
+        "This generates a new vanity address. Any existing links to your "
+        "current address will stop working. Your WordPress content stays "
+        "the same.")
+    response = dlg.run()
+    dlg.destroy()
+    return response == Gtk.ResponseType.OK
+
+
+# ─── 7. The tray itself ────────────────────────────────────────────────
+
+class OnionPressTray:
+    def __init__(self):
+        self.indicator = AppIndicator.Indicator.new(
+            "onionpress",
+            ICON_STARTING,
+            AppIndicator.IndicatorCategory.APPLICATION_STATUS,
+        )
+        self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        self.indicator.set_title("OnionPress")
+
+        self.notifier = Notifier()
+        self.menu = Gtk.Menu()
+        self._build_menu()
+        self.indicator.set_menu(self.menu)
+
+        self.status = Status(on_change=self._on_status_change)
+
+        self._announced_starting = False
+        self._announced_online = False
+
+    def _build_menu(self):
+        self.menu_status = Gtk.MenuItem(label="OnionPress is starting…")
+        self.menu_status.set_sensitive(False)
+        self.menu.append(self.menu_status)
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        # Upstream's `onionpress dashboard` mints a one-shot op_login token
+        # via WP transient and opens /wp-admin/?op_login=<tok> — same auto-
+        # login UX as the Mac menubar. Two convenience items:
+        self._item("Open Dashboard",
+                   lambda *_: Launcher.run_async("dashboard"))
+        self._item("Copy .onion Address", self._on_copy_address)
+        self._item("Open .onion (Tor Browser)", self._on_open_onion)
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        self._item("Start", lambda *_: Launcher.run_async("start"))
+        self._item("Stop", lambda *_: Launcher.run_async("stop"))
+        self._item("Restart", lambda *_: Launcher.run_async("restart"))
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        self._item("View Logs…", lambda *_: show_log_viewer())
+        self._item("Reveal Data Folder", lambda *_: self._open_data_folder())
+        self._item("Backup…", lambda *_: show_backup_dialog())
+        self._item("Restore…", lambda *_: show_restore_dialog())
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        self._item("Regenerate Address…", self._on_regenerate)
+        self._item("Check for Updates…", self._on_check_updates)
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        self._item("About OnionPress", lambda *_: show_about_dialog())
+        self._item("Quit", self._on_quit)
+
+        self.menu.show_all()
+
+    def _item(self, label, callback):
+        it = Gtk.MenuItem(label=label)
+        it.connect("activate", callback)
+        self.menu.append(it)
+        return it
+
+    def _on_status_change(self, old_state, new_state):
+        log(f"status: {old_state} -> {new_state}")
+        self._update_icon()
+        self._update_status_line()
+        self._maybe_announce()
+
+    def _update_icon(self):
+        state = self.status.state
+        if state == "running" and not self.status.serving_from_wayback:
+            self.indicator.set_icon_full(ICON_RUNNING, "OnionPress running")
+        elif state == "starting":
+            self.indicator.set_icon_full(ICON_STARTING, "OnionPress starting")
+        else:
+            self.indicator.set_icon_full(ICON_STOPPED, "OnionPress stopped")
+
+    def _update_status_line(self):
+        if self.status.serving_from_wayback:
+            label = "Site offline — visitors see Wayback"
+        elif self.status.state == "running":
+            if self.status.onion_address:
+                label = f"● {self.status.onion_address}"
+            else:
+                label = "● OnionPress is running"
+        elif self.status.state == "starting":
+            if self.status.bootstrap_pct and self.status.bootstrap_pct < 100:
+                label = f"Starting… (Tor {self.status.bootstrap_pct}%)"
+            elif not self.status.wp_installed:
+                label = "Setting up WordPress…"
+            else:
+                label = "Starting…"
+        else:
+            label = "OnionPress stopped"
+        self.menu_status.set_label(label)
+
+    def _maybe_announce(self):
+        if not self._announced_starting and self.status.state in ("starting", "running"):
+            if not self.status.wp_installed:
+                self._announced_starting = True
+                if is_raspberry_pi():
+                    body = "First launch downloads ~500 MB of containers. Takes 5–8 minutes on a Pi."
+                else:
+                    body = "First launch downloads ~500 MB of containers. Takes 2–3 minutes."
+                self.notifier.notify(
+                    "starting", "OnionPress is setting up", body,
+                )
+
+        marker = os.path.join(DATA_DIR, ".first-online-notified")
+        if (not self._announced_online
+                and self.status.state == "running"
+                and self.status.onion_address
+                and not os.path.exists(marker)):
+            self._announced_online = True
+            try:
+                with open(marker, "w") as f:
+                    f.write("1")
+            except OSError:
+                pass
+            addr = self.status.onion_address
+            self.notifier.notify(
+                "address-ready",
+                "OnionPress is online",
+                f"Your site: {addr}",
+                actions=[
+                    ("open-dashboard", "Open Dashboard",
+                     lambda: Launcher.run_async("dashboard")),
+                ],
+            )
+
+    def _on_copy_address(self, *_):
+        addr = self.status.onion_address
+        if not addr:
+            return
+        clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clip.set_text(addr, -1)
+        clip.store()
+        self.notifier.notify(
+            "copied", "Onion address copied", addr, urgency="low",
+        )
+
+    def _on_open_onion(self, *_):
+        addr = self.status.onion_address
+        if not addr:
+            return
+        if launcher_ops is not None:
+            launcher_ops.open_in_browser(f"http://{addr}/", prefer_tor=True)
+        else:
+            subprocess.Popen(
+                ["xdg-open", f"http://{addr}/"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+    def _open_data_folder(self):
+        subprocess.Popen(
+            ["xdg-open", DATA_DIR],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    def _on_regenerate(self, *_):
+        if not confirm_regenerate():
+            return
+
+        def _run():
+            try:
+                Launcher.run("handle-action", "regenerate-vanity",
+                             capture=True, timeout=1800)
+            except Exception as e:
+                log(f"regenerate error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_check_updates(self, *_):
+        def _run():
+            try:
+                r = subprocess.run(
+                    [sys.executable, "-m", "onionpress.cli",
+                     "check-for-update", "--json"],
+                    capture_output=True, text=True, timeout=20,
+                    env={**os.environ, "PYTHONPATH": _LIB_DIR},
+                )
+                if r.returncode != 0:
+                    self.notifier.notify(
+                        "update-check", "Update check failed",
+                        (r.stderr or "")[:200],
+                    )
+                    return
+                data = json.loads(r.stdout)
+                if data.get("update_available"):
+                    self.notifier.notify(
+                        "update-available",
+                        f"OnionPress {data['latest']} is available",
+                        "Open the GitHub release page to download.",
+                        actions=[(
+                            "open-release", "View release",
+                            lambda url=data.get("release_url"):
+                                subprocess.Popen(["xdg-open", url]) if url else None,
+                        )],
+                    )
+                else:
+                    self.notifier.notify(
+                        "update-check", "Up to date",
+                        f"You're on the current version ({data.get('current')}).",
+                        urgency="low",
+                    )
+            except Exception as e:
+                log(f"update check error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_quit(self, *_):
+        if not confirm_quit():
+            return
+
+        def _run():
+            try:
+                Launcher.run("stop", capture=True, timeout=120)
+            except Exception as e:
+                log(f"stop on quit: {e}")
+            try:
+                subprocess.run(
+                    ["systemctl", "--user", "stop", "onionpress"],
+                    capture_output=True, text=True, timeout=30,
+                )
+            except Exception as e:
+                log(f"systemctl stop on quit: {e}")
+            GLib.idle_add(Gtk.main_quit)
+        threading.Thread(target=_run, daemon=True).start()
+
+
+# ─── 8. main ─────────────────────────────────────────────────────────────
+
+def main() -> int:
+    lock = acquire_single_instance_lock()
+    if lock is None:
+        log("another tray instance is running; exiting")
+        return 0
+
+    log(f"onionpress-tray starting (pid={os.getpid()})")
+
+    def _shutdown(*_):
+        log("received shutdown signal")
+        GLib.idle_add(Gtk.main_quit)
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    OnionPressTray()
+    Gtk.main()
+    log("onionpress-tray exiting")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

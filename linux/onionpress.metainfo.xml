@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.onionpress.OnionPress</id>
+  <name>OnionPress</name>
+  <summary>Your decentralized social blog, over Tor</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="org.onionpress">
+    <name>OnionPress</name>
+  </developer>
+  <launchable type="desktop-id">onionpress.desktop</launchable>
+  <description>
+    <p>
+      OnionPress turns your computer into a web server running WordPress,
+      accessible via the Tor network. Your site gets its own permanent
+      .onion address backed up by the Internet Archive&apos;s Wayback Machine.
+    </p>
+    <p>
+      Built on WordPress, Tor, and the Wayback Machine — for people who
+      want to publish without depending on a platform.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Native menubar / tray icon with site status at a glance</li>
+      <li>One-click setup wizard with optional social-media import (Twitter, Bluesky, Mastodon, Reddit, blog feeds)</li>
+      <li>Custom vanity .onion address (op2…)</li>
+      <li>Automatic Wayback Machine archival</li>
+      <li>OnionHeaven fallback: when your site is offline, visitors see your archived copy</li>
+      <li>Encrypted backup &amp; restore</li>
+    </ul>
+  </description>
+  <url type="homepage">https://onionpress.org</url>
+  <url type="bugtracker">https://github.com/brewsterkahle/onionpress/issues</url>
+  <url type="vcs-browser">https://github.com/brewsterkahle/onionpress</url>
+  <url type="help">https://onionpress.org/help</url>
+  <categories>
+    <category>Network</category>
+    <category>WebDevelopment</category>
+  </categories>
+  <keywords>
+    <keyword>blog</keyword>
+    <keyword>wordpress</keyword>
+    <keyword>tor</keyword>
+    <keyword>onion</keyword>
+    <keyword>publishing</keyword>
+    <keyword>decentralized</keyword>
+    <keyword>wayback</keyword>
+  </keywords>
+  <provides>
+    <binary>onionpress</binary>
+    <binary>onionpress-tray</binary>
+  </provides>
+  <screenshots>
+    <screenshot type="default">
+      <caption>OnionPress tray menu showing your live .onion address</caption>
+      <image>https://onionpress.org/screenshots/linux-tray.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>First-run setup wizard inside WordPress</caption>
+      <image>https://onionpress.org/screenshots/linux-setup-wizard.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Your blog at op2…onion/your-username/</caption>
+      <image>https://onionpress.org/screenshots/linux-blog.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="2.4.91" date="2026-05-23">
+      <description>
+        <p>First-class Linux release — feature parity with the macOS app.</p>
+        <ul>
+          <li>Native AppIndicator tray with site status</li>
+          <li>One-click setup wizard with social-archive imports</li>
+          <li>Vanity .onion addresses generated automatically on first run</li>
+          <li>Single .deb that works on amd64 and arm64</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

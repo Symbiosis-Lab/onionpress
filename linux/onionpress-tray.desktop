@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=OnionPress
+GenericName=OnionPress tray
+Comment=Status icon for your OnionPress site
+Exec=/usr/local/bin/onionpress-tray
+Icon=onionpress
+Categories=Network;
+StartupNotify=false
+NoDisplay=false
+X-GNOME-Autostart-Phase=Applications
+OnlyShowIn=GNOME;KDE;XFCE;MATE;Cinnamon;Unity;LXQt;LXDE;Budgie;Pantheon;

@@ -55,12 +55,30 @@ collect_files() {
         cp -r "$PROJECT_DIR/app/Resources/themes" "$dest/themes"
     fi
 
-    # Scripts
+    # Scripts (legacy — the heartbeat service imports from here).
     mkdir -p "$dest/scripts"
     cp "$PROJECT_DIR/src/onionpress/onion_auth.py" "$dest/scripts/"
     cp "$PROJECT_DIR/src/onionpress/key_manager.py" "$dest/scripts/"
     if [ -f "$PROJECT_DIR/linux/onionpress-heartbeat.py" ]; then
         cp "$PROJECT_DIR/linux/onionpress-heartbeat.py" "$dest/scripts/"
+    fi
+
+    # Shared Python package — the bash launcher (via `python3 -m
+    # onionpress.cli ...`) and the tray app both consume this. Ship the
+    # whole src/onionpress/ tree under lib/ (the name "onionpress" is
+    # taken at the top of $dest by the bash launcher binary).
+    # PYTHONPATH=$INSTALL_DIR/lib resolves the import.
+    mkdir -p "$dest/lib/onionpress"
+    cp -r "$PROJECT_DIR/src/onionpress/." "$dest/lib/onionpress/"
+    find "$dest/lib/onionpress" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+    # Tray app + its SVG icons.
+    if [ -f "$PROJECT_DIR/linux/onionpress-tray" ]; then
+        cp "$PROJECT_DIR/linux/onionpress-tray" "$dest/onionpress-tray"
+        chmod +x "$dest/onionpress-tray"
+    fi
+    if [ -d "$PROJECT_DIR/linux/assets" ]; then
+        cp -r "$PROJECT_DIR/linux/assets" "$dest/assets"
     fi
 
     # Version
@@ -89,9 +107,23 @@ cp "$PROJECT_DIR/linux/onionpress-heartbeat.service" "$DEB_ROOT/usr/lib/systemd/
 cp "$PROJECT_DIR/linux/onionpress-watcher.service" "$DEB_ROOT/usr/lib/systemd/user/"
 cp "$PROJECT_DIR/linux/onionpress-watcher.timer" "$DEB_ROOT/usr/lib/systemd/user/"
 
-# CLI symlink
+# CLI symlinks
 mkdir -p "$DEB_ROOT/usr/local/bin"
 ln -s /opt/onionpress/onionpress "$DEB_ROOT/usr/local/bin/onionpress"
+ln -s /opt/onionpress/onionpress-tray "$DEB_ROOT/usr/local/bin/onionpress-tray"
+
+# Autostart entry — spawns the tray icon at login for users in a graphical
+# session. OnlyShowIn= covers the Ubuntu flavours that have a tray; on a
+# headless system the entry sits dormant.
+mkdir -p "$DEB_ROOT/etc/xdg/autostart"
+cp "$PROJECT_DIR/linux/onionpress-tray.desktop" \
+    "$DEB_ROOT/etc/xdg/autostart/onionpress-tray.desktop"
+
+# AppStream metadata — drives GNOME Software presence (name, summary,
+# screenshots, release notes, "Open Application" button).
+mkdir -p "$DEB_ROOT/usr/share/metainfo"
+cp "$PROJECT_DIR/linux/onionpress.metainfo.xml" \
+    "$DEB_ROOT/usr/share/metainfo/org.onionpress.OnionPress.metainfo.xml"
 
 # Desktop entry — gives GUI users (Ubuntu Desktop, KDE) an icon in their
 # app menu that opens http://localhost:8080. xdg-open routes to the
@@ -124,7 +156,9 @@ Version: $VERSION
 Section: web
 Priority: optional
 Architecture: $DEB_ARCH
-Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose, jq, python3, zip, unzip
+Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose, jq, python3, zip, unzip,
+ python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
+Recommends: torbrowser-launcher
 Maintainer: Brewster Kahle <brewster@archive.org>
 Homepage: https://onionpress.org
 Description: Your Decentralized Social Blog Site
@@ -300,6 +334,19 @@ Then:
     Status:  onionpress status
 
 EOF
+    fi
+
+    # Spawn the tray for the user's active graphical session so the icon
+    # appears without making them log out and back in. Best-effort — if
+    # there's no graphical session, this is a no-op. The autostart entry
+    # in /etc/xdg/autostart/ handles all subsequent logins.
+    if loginctl show-user "$REAL_USER" 2>/dev/null | grep -q 'Display='; then
+        if ! pgrep -u "$REAL_USER" -f '/onionpress-tray$' >/dev/null 2>&1; then
+            (runuser -u "$REAL_USER" -- bash -lc \
+                'setsid /usr/local/bin/onionpress-tray >/dev/null 2>&1 < /dev/null &' \
+              || su - "$REAL_USER" -c \
+                'setsid /usr/local/bin/onionpress-tray >/dev/null 2>&1 < /dev/null &') 2>/dev/null || true
+        fi
     fi
 
     # Warn about a stale install.sh-style install if we detect one in the

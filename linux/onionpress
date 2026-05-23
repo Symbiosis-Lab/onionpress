@@ -15,6 +15,16 @@ SCRIPTS_DIR="$INSTALL_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
 DOCUMENTS_DIR="$HOME/OnionPress"
 
+# Shared Python package (also used by the tray app and, eventually, the Mac
+# menubar app). Lives at $INSTALL_DIR/lib/onionpress/ — install scripts
+# copy src/onionpress/ there. Setting PYTHONPATH lets us run `python3 -m
+# onionpress.cli` without a system-wide pip install.
+ONIONPRESS_PYTHONPATH="${ONIONPRESS_PYTHONPATH:-$INSTALL_DIR/lib}"
+op_py() {
+    # Run a subcommand of the shared Python CLI.
+    PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -m onionpress.cli "$@"
+}
+
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
@@ -1235,7 +1245,27 @@ start_containers() {
         fi
     fi
 
-    # Check for pre-existing imported key
+    # First-run vanity generation. mkp224o lives in the tor container image
+    # (see app/Resources/docker/tor/Dockerfile) so Docker's multi-arch
+    # manifest list handles amd64/arm64 transparently — the host .deb stays
+    # Architecture: all. Pre-pull the tor image so mkp224o is available,
+    # then hand off to the cross-platform Python op
+    # (src/onionpress/launcher_ops.py) which the Mac side will reuse.
+    if $FIRST_RUN && [ -n "$ADDRESS_PREFIX" ] \
+       && [ ${#ADDRESS_PREFIX} -ge 2 ] && [ ${#ADDRESS_PREFIX} -le 6 ] \
+       && ! find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" 2>/dev/null | grep -q .; then
+        log "First run with ADDRESS_PREFIX=$ADDRESS_PREFIX -- ensuring tor image is present for vanity generation..."
+        cd "$DOCKER_DIR"
+        docker compose pull --policy missing tor >> "$LOG_FILE" 2>&1 \
+            || log "WARNING: pre-pull of tor image failed; vanity generation may be skipped"
+        if op_py generate-vanity >> "$LOG_FILE" 2>&1; then
+            log "Vanity address generated; will be installed below"
+        else
+            log "Vanity generation skipped or failed; falling back to random address"
+        fi
+    fi
+
+    # Check for pre-existing imported key (or one we just generated)
     VANITY_DIR=""
     if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
         VANITY_DIR=$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)
@@ -2041,6 +2071,41 @@ except: print('false')
         host_uptime_seconds=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
     fi
 
+    # Extra fields for the Linux tray. Cheap probes that don't add measurable
+    # latency to the 10s watcher tick.
+    local wp_installed_str="false"
+    if wp_is_installed 2>/dev/null; then
+        wp_installed_str="true"
+    fi
+    local onboarded="false"
+    if [ "$wp_installed_str" = "true" ]; then
+        local _opt
+        _opt=$(docker exec onionpress-wordpress wp option get onionpress_onboarded --allow-root 2>/dev/null | tr -d '\r\n ')
+        case "$_opt" in
+            1|true|yes) onboarded="true" ;;
+        esac
+    fi
+    local mkp224o_available="false"
+    if docker image inspect ghcr.io/brewsterkahle/onionpress-tor:latest >/dev/null 2>&1; then
+        # Image presence is enough; we trust the build had mkp224o.
+        mkp224o_available="true"
+    fi
+    local wp_admin_password_file=""
+    if [ -f "$DATA_DIR/wp-admin-password" ]; then
+        wp_admin_password_file="$DATA_DIR/wp-admin-password"
+    fi
+    local vanity_in_progress="false"
+    if [ -f "$DATA_DIR/.vanity-running" ]; then
+        vanity_in_progress="true"
+    fi
+    # OnionHeaven "serving from Wayback" — for now treat this as the case
+    # where local state is not 'running' but the client is registered with
+    # a hub. A more precise signal will come from the hub heartbeat.
+    local serving_from_wayback="false"
+    if [ "$state" != "running" ] && [ "$oh_client_registered" = "true" ]; then
+        serving_from_wayback="true"
+    fi
+
     # Build status.json
     local status_json
     status_json=$(python3 -c "
@@ -2066,16 +2131,28 @@ status = {
         'client_registered': sys.argv[14] == 'true',
         'client_hub': sys.argv[15],
         'client_enabled': sys.argv[16] == 'yes',
-    }
+    },
+    'wp_installed': sys.argv[19] == 'true',
+    'onboarded': sys.argv[20] == 'true',
+    'mkp224o_available': sys.argv[21] == 'true',
+    'wp_admin_password_path': sys.argv[22] or None,
+    'vanity_in_progress': sys.argv[23] == 'true',
+    'serving_from_wayback': sys.argv[24] == 'true',
 }
 print(json.dumps(status, indent=2))
 " "$state" "$ONIONPRESS_VERSION" "$onion_addr" "$uptime_seconds" "$bootstrap_pct" "$containers_json" "$wayback_queue" "$now_iso" \
   "$oh_server_active" "$oh_registered_count" "$oh_online_count" "$oh_taken_over_count" "$oh_takeover_containers" \
   "$oh_client_registered" "$oh_client_hub" "$oh_config_enabled" \
-  "$load_avg_json" "$host_uptime_seconds")
+  "$load_avg_json" "$host_uptime_seconds" \
+  "$wp_installed_str" "$onboarded" "$mkp224o_available" \
+  "$wp_admin_password_file" "$vanity_in_progress" "$serving_from_wayback")
 
-    # Write to shared volume
+    # Write to shared volume (consumed by the WP settings/status page)
     echo "$status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
+    # Also write to the host data dir — the tray app reads this directly,
+    # without going through docker exec on every poll.
+    printf '%s\n' "$status_json" > "$DATA_DIR/status.json.tmp" 2>>"$LOG_FILE" \
+        && mv -f "$DATA_DIR/status.json.tmp" "$DATA_DIR/status.json" 2>>"$LOG_FILE"
 
     # Write version file for the settings page update checker
     echo "$ONIONPRESS_VERSION" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/version' 2>>"$LOG_FILE"
@@ -2374,6 +2451,23 @@ main() {
 
         import-key)
             import_key "$2"
+            ;;
+
+        # ── Vanity + admin-password — thin wrappers around the Python CLI
+        # (src/onionpress/launcher_ops.py). Code lives there so the Mac
+        # menubar can reuse it; bash just hands off.
+        generate-vanity)
+            # Generate a vanity onion address via mkp224o inside the tor
+            # container. On success, prints the new address on stdout and
+            # writes the key bundle to ~/.onionpress/shared/vanity-keys/.
+            # The next container start picks the key up automatically.
+            op_py generate-vanity
+            ;;
+
+        admin-password)
+            # Read the recovery admin password (only used if the user has
+            # lost the credentials they set up via the onboarding wizard).
+            op_py admin-password
             ;;
 
         logs)

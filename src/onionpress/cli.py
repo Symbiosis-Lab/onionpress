@@ -296,6 +296,69 @@ class OnionPressCLI:
             print("Already up to date.")
         return 0
 
+    # ─── Vanity address + admin-password (shared with Mac/tray) ─────────
+
+    def cmd_generate_vanity(self) -> int:
+        """Generate a vanity .onion address using mkp224o inside the tor container.
+
+        Reads `ADDRESS_PREFIX` from config (default `op2`). On success the
+        key bundle lands in `~/.onionpress/shared/vanity-keys/<addr>.onion/`,
+        ready for the existing key-install path in start_containers.
+        """
+        from .launcher_ops import (
+            tor_image_has_mkp224o, generate_vanity_in_container,
+            DEFAULT_TOR_IMAGE,
+        )
+        prefix = read_value(self.paths.config_file, "ADDRESS_PREFIX", "op2")
+        if not (2 <= len(prefix) <= 6):
+            self.log(f"ADDRESS_PREFIX must be 2-6 chars (got {prefix!r}); skipping")
+            return 2
+
+        if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE):
+            self.log("Tor image is missing or has no mkp224o; "
+                     "skipping vanity generation")
+            return 3
+
+        vanity_dir = os.path.join(self.paths.shared_dir, "vanity-keys")
+        running_marker = os.path.join(self.paths.data_dir, ".vanity-running")
+        try:
+            with open(running_marker, "w") as f:
+                f.write(str(os.getpid()))
+            addr = generate_vanity_in_container(
+                prefix=prefix,
+                vanity_dir=vanity_dir,
+                log_func=self.log,
+            )
+        finally:
+            try:
+                os.remove(running_marker)
+            except OSError:
+                pass
+
+        if not addr:
+            return 1
+
+        # Derive Arti key format from the C Tor secret key that mkp224o
+        # produced. The existing helper handles this in-place.
+        try:
+            from . import key_manager
+            key_manager.ensure_key_formats(os.path.join(vanity_dir, addr))
+        except Exception as e:
+            self.log(f"WARNING: ensure_key_formats failed: {e}")
+
+        print(addr)
+        return 0
+
+    def cmd_admin_password(self) -> int:
+        """Print the auto-generated admin password (recovery hatch)."""
+        from .launcher_ops import get_admin_password
+        pw = get_admin_password(self.paths.data_dir)
+        if not pw:
+            print("No admin password file found", file=sys.stderr)
+            return 1
+        print(pw)
+        return 0
+
     def cmd_reset(self, yes: bool = False) -> int:
         """Reset OnionPress — wipe all data and start fresh."""
         if not yes:
@@ -421,6 +484,12 @@ def main(argv: list[str] = None) -> int:
         help="Publish a throwaway post and verify it got archived to the Wayback Machine",
     )
 
+    sub.add_parser("generate-vanity",
+                   help="Generate a vanity .onion via mkp224o in the tor container")
+
+    sub.add_parser("admin-password",
+                   help="Print the recovery admin password (if any)")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -449,6 +518,10 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_smoke_test_wayback()
     elif args.command == "check-for-update":
         return cli.cmd_check_for_update(json_output=args.json, current=args.current)
+    elif args.command == "generate-vanity":
+        return cli.cmd_generate_vanity()
+    elif args.command == "admin-password":
+        return cli.cmd_admin_password()
     else:
         parser.print_help()
         return 1
