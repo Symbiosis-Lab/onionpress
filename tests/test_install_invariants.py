@@ -245,6 +245,14 @@ class TestLinuxInstallTray(unittest.TestCase):
     def setUp(self):
         self.script = _read("linux/install.sh")
 
+    def test_tray_binary_copied_to_install_dir(self):
+        self.assertRegex(
+            self.script,
+            r'cp\s+.*linux/onionpress-tray.*INSTALL_DIR',
+            "install.sh must copy linux/onionpress-tray into INSTALL_DIR — "
+            "without it the symlink and tray launch both fail silently.",
+        )
+
     def test_tray_symlink_created(self):
         self.assertRegex(
             self.script,

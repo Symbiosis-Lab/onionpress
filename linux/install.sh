@@ -233,6 +233,8 @@ fi
 # Copy files
 $SUDO cp "$REPO_DIR/linux/onionpress" "$INSTALL_DIR/onionpress"
 $SUDO chmod +x "$INSTALL_DIR/onionpress"
+$SUDO cp "$REPO_DIR/linux/onionpress-tray" "$INSTALL_DIR/onionpress-tray"
+$SUDO chmod +x "$INSTALL_DIR/onionpress-tray"
 
 $SUDO cp -r "$REPO_DIR/app/Resources/docker" "$INSTALL_DIR/docker"
 $SUDO cp -r "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
