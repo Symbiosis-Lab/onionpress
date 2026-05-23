@@ -582,6 +582,7 @@ class OnionPressTray:
 
         self._item("Check for Updates…", self._on_check_updates)
         self._item("About OnionPress", lambda *_: show_about_dialog())
+        self._item("Uninstall OnionPress…", self._on_uninstall)
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("Quit", self._on_quit)
@@ -771,6 +772,12 @@ class OnionPressTray:
             launcher_ops.open_in_browser(url, prefer_tor=False)
             return
 
+        # Clean up stale lock files from a previous Tor Browser session
+        # that crashed / was force-killed. Otherwise torbrowser-launcher
+        # refuses to start and pops the "already running" dialog.
+        if launcher_ops.cleanup_stale_tor_browser_locks():
+            log("Removed stale Tor Browser lock files before launching")
+
         try:
             subprocess.Popen(
                 ["torbrowser-launcher"],
@@ -866,6 +873,69 @@ class OnionPressTray:
                     )
             except Exception as e:
                 log(f"update check error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_uninstall(self, *_):
+        """Confirm + apt-remove via pkexec.
+
+        pkexec triggers PolicyKit's standard password prompt (the same one
+        GNOME Settings shows for "Unlock"), so we get the same one-click
+        UX as the Mac's Uninstall... without dropping into a terminal.
+        The user's data at ~/.onionpress and ~/OnionPress is preserved
+        (apt remove --purge clears /opt/onionpress but not the home dir).
+        """
+        dlg = Gtk.MessageDialog(
+            parent=None, flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Uninstall OnionPress?",
+        )
+        dlg.format_secondary_text(
+            "This removes OnionPress from your computer. Your data is preserved:\n"
+            "  ~/.onionpress    (config, secrets, .onion key, logs)\n"
+            "  ~/OnionPress     (backups, Creations)\n"
+            "Delete those manually later if you don't need them.\n\n"
+            "You'll be prompted for your password."
+        )
+        response = dlg.run()
+        dlg.destroy()
+        if response != Gtk.ResponseType.OK:
+            return
+
+        def _run():
+            try:
+                r = subprocess.run(
+                    ["pkexec", "apt", "remove", "--purge", "-y", "onionpress"],
+                    capture_output=True, text=True, timeout=180,
+                )
+                if r.returncode == 0:
+                    try:
+                        Notify.Notification.new(
+                            "OnionPress uninstalled",
+                            "Containers stopped. ~/.onionpress and ~/OnionPress preserved.",
+                            "onionpress",
+                        ).show()
+                    except Exception:
+                        pass
+                    # apt remove disables the service; the systemd
+                    # tray-spawn block is gone too. Exit cleanly so the
+                    # icon disappears from the panel.
+                    GLib.idle_add(Gtk.main_quit)
+                else:
+                    # 126/127 from pkexec = user cancelled the password
+                    # prompt or PolicyKit refused. Quiet that path; surface
+                    # real errors otherwise.
+                    if r.returncode not in (126, 127):
+                        log(f"uninstall failed: {r.stderr}")
+                        try:
+                            Notify.Notification.new(
+                                "Uninstall failed",
+                                (r.stderr or "")[:200], "onionpress",
+                            ).show()
+                        except Exception:
+                            pass
+            except Exception as e:
+                log(f"uninstall error: {e}")
         threading.Thread(target=_run, daemon=True).start()
 
     def _on_quit(self, *_):

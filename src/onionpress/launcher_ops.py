@@ -25,6 +25,63 @@ from typing import Optional
 DEFAULT_TOR_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 
 
+def _tor_browser_lock_paths() -> list:
+    """Return the standard torbrowser-launcher lock-file paths under the
+    user's home, regardless of which actually exist right now."""
+    base = os.path.expanduser(
+        "~/.local/share/torbrowser/tbb/x86_64/tor-browser/Browser")
+    return [
+        os.path.join(base, "TorBrowser/Data/Browser/profile.default/lock"),
+        os.path.join(base, "TorBrowser/Data/Browser/profile.default/.parentlock"),
+        os.path.join(base, "TorBrowser/Data/Tor/lock"),
+        os.path.join(base, "TorBrowser/UpdateInfo/.parentlock"),
+    ]
+
+
+def cleanup_stale_tor_browser_locks() -> bool:
+    """If lock files exist but no Tor Browser is running, remove them.
+
+    Firefox's `lock` symlink encodes the holding PID as `host:+PID`. If
+    that PID is gone (browser crashed / was force-killed) the lock is
+    stale, and torbrowser-launcher's next run will refuse to start with
+    a blocking "Tor Browser is already running" dialog. We probe the
+    lock target's PID; if it's dead, all locks under the profile are
+    removed so the next launch is clean.
+
+    Returns True if we removed anything (caller can log it).
+    """
+    # If a live Tor Browser is running, locks are valid — leave them.
+    if _tor_browser_running():
+        return False
+
+    # Check the profile.default/lock symlink target — that's the
+    # authoritative "is the previous process still alive?" signal.
+    base = os.path.expanduser(
+        "~/.local/share/torbrowser/tbb/x86_64/tor-browser/Browser")
+    lock_path = os.path.join(
+        base, "TorBrowser/Data/Browser/profile.default/lock")
+    if os.path.islink(lock_path):
+        try:
+            target = os.readlink(lock_path)  # e.g. "127.0.0.1:+1789690"
+            pid_str = target.rsplit("+", 1)[-1]
+            pid = int(pid_str)
+            if os.path.exists(f"/proc/{pid}"):
+                # Process is still alive — odd that _tor_browser_running()
+                # didn't see it, but defer to that check and don't clean.
+                return False
+        except (OSError, ValueError, IndexError):
+            pass
+
+    removed = False
+    for path in _tor_browser_lock_paths():
+        try:
+            os.unlink(path)
+            removed = True
+        except OSError:
+            pass
+    return removed
+
+
 def _tor_browser_running() -> Optional[str]:
     """If Tor Browser is already running, return the path to its
     firefox.real binary. Used so we open URLs in the existing instance
