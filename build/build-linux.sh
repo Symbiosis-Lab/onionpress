@@ -72,7 +72,7 @@ collect_files() {
     cp -r "$PROJECT_DIR/src/onionpress/." "$dest/lib/onionpress/"
     find "$dest/lib/onionpress" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
-    # Tray app + its SVG icons.
+    # Tray app + its icon assets (hicolor theme tree).
     if [ -f "$PROJECT_DIR/linux/onionpress-tray" ]; then
         cp "$PROJECT_DIR/linux/onionpress-tray" "$dest/onionpress-tray"
         chmod +x "$dest/onionpress-tray"

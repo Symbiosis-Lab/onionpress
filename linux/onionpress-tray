@@ -57,11 +57,19 @@ STATUS_FILE = os.path.join(DATA_DIR, "status.json")
 PIDFILE = os.path.join(DATA_DIR, "tray.pid")
 TRAY_LOG = os.path.join(DATA_DIR, "tray.log")
 ASSETS_DIR = os.path.join(INSTALL_DIR, "assets")
+# Icons live under assets/hicolor/<size>x<size>/apps/<name>.png — the
+# standard XDG icon-theme layout. AppIndicator's IconThemePath points
+# at the hicolor parent and the icon engine resolves by name + size.
+ICON_THEME_PATH = os.path.join(ASSETS_DIR, "hicolor")
 LAUNCHER = "/usr/local/bin/onionpress"
 
-ICON_RUNNING = os.path.join(ASSETS_DIR, "tray-running.svg")
-ICON_STARTING = os.path.join(ASSETS_DIR, "tray-starting.svg")
-ICON_STOPPED = os.path.join(ASSETS_DIR, "tray-stopped.svg")
+# AyatanaAppIndicator's icon API takes icon NAMES (looked up via
+# set_icon_theme_path), not paths. The StatusNotifier D-Bus protocol
+# enforces this — passing a file path lands in IconName verbatim and
+# fails to render on GNOME-Wayland (ubuntu-appindicators extension).
+ICON_RUNNING = "tray-running"
+ICON_STARTING = "tray-starting"
+ICON_STOPPED = "tray-stopped"
 
 POLL_INTERVAL_SEC = 2
 NOTIFY_DEBOUNCE_SEC = 60
@@ -499,10 +507,16 @@ def confirm_regenerate(parent=None) -> bool:
 
 class OnionPressTray:
     def __init__(self):
-        self.indicator = AppIndicator.Indicator.new(
+        # Use AppIndicator.Indicator.new_with_path so the SVGs in
+        # /opt/onionpress/assets/ are findable by NAME. The 4th argument
+        # is propagated to the StatusNotifier's IconThemePath property —
+        # without it, ubuntu-appindicators on Wayland can't render our
+        # icons at all.
+        self.indicator = AppIndicator.Indicator.new_with_path(
             "onionpress",
             ICON_STARTING,
             AppIndicator.IndicatorCategory.APPLICATION_STATUS,
+            ICON_THEME_PATH,
         )
         self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
         self.indicator.set_title("OnionPress")
@@ -511,6 +525,15 @@ class OnionPressTray:
         self.menu = Gtk.Menu()
         self._build_menu()
         self.indicator.set_menu(self.menu)
+
+        # Wire middle-click (and on some shells, left-click) to "Open
+        # Dashboard" — the single most-likely action on a routine click.
+        # Right-click on the icon still shows the full menu. (On GNOME's
+        # ubuntu-appindicators extension, the default is right-click =
+        # menu; left-click does nothing by default. set_secondary_activate
+        # _target() promotes one menu item to the click action.)
+        if hasattr(self, "menu_open_dashboard"):
+            self.indicator.set_secondary_activate_target(self.menu_open_dashboard)
 
         self.status = Status(on_change=self._on_status_change)
 
@@ -526,8 +549,9 @@ class OnionPressTray:
         # Upstream's `onionpress dashboard` mints a one-shot op_login token
         # via WP transient and opens /wp-admin/?op_login=<tok> — same auto-
         # login UX as the Mac menubar. Two convenience items:
-        self._item("Open Dashboard",
-                   lambda *_: Launcher.run_async("dashboard"))
+        self.menu_open_dashboard = self._item(
+            "Open Dashboard",
+            lambda *_: Launcher.run_async("dashboard"))
         self._item("Copy .onion Address", self._on_copy_address)
         self._item("Open .onion (Tor Browser)", self._on_open_onion)
         self.menu.append(Gtk.SeparatorMenuItem())
@@ -572,6 +596,10 @@ class OnionPressTray:
             self.indicator.set_icon_full(ICON_STARTING, "OnionPress starting")
         else:
             self.indicator.set_icon_full(ICON_STOPPED, "OnionPress stopped")
+        # Trigger a redraw — some shells (Ubuntu Wayland) cache the previous
+        # IconName and only refresh when properties change. Calling
+        # set_status() with the same value forces a NewIcon signal.
+        self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
 
     def _update_status_line(self):
         if self.status.serving_from_wayback:
