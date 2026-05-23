@@ -545,18 +545,26 @@ class OnionPressTray:
         self._announced_online = False
 
     def _build_menu(self):
+        # Layout mirrors the Mac menubar (src/menubar.py:472) so users
+        # switching between platforms see the same options in the same
+        # order. Linux-specific tweaks: "Open in Browser" routes through
+        # `onionpress dashboard` for one-click auto-login (same magic-
+        # link plugin the Mac uses); "Open .onion (Tor Browser)" sits
+        # alongside it as a Linux convenience since torbrowser-launcher
+        # is a Recommends.
         self.menu_status = Gtk.MenuItem(label="OnionPress is starting…")
         self.menu_status.set_sensitive(False)
         self.menu.append(self.menu_status)
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        # Upstream's `onionpress dashboard` mints a one-shot op_login token
-        # via WP transient and opens /wp-admin/?op_login=<tok> — same auto-
-        # login UX as the Mac menubar. Two convenience items:
+        self._item("Copy Onion Address", self._on_copy_address)
         self.menu_open_dashboard = self._item(
-            "Open Dashboard",
+            "Open in Browser",
             lambda *_: Launcher.run_async("dashboard"))
-        self._item("Copy .onion Address", self._on_copy_address)
+        self._item("Open Local Site",
+                    lambda *_: subprocess.Popen(
+                        ["xdg-open", "http://localhost:8080/"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         self._item("Open .onion (Tor Browser)", self._on_open_onion)
         self.menu.append(Gtk.SeparatorMenuItem())
 
@@ -565,17 +573,19 @@ class OnionPressTray:
         self._item("Restart", lambda *_: Launcher.run_async("restart"))
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        self._item("View Logs…", lambda *_: show_log_viewer())
-        self._item("Reveal Data Folder", lambda *_: self._open_data_folder())
+        self._item("View Logs", lambda *_: show_log_viewer())
+        self._item("Settings…",
+                    lambda *_: Launcher.run_async("dashboard"))
+        self.menu.append(Gtk.SeparatorMenuItem())
+
         self._item("Backup…", lambda *_: show_backup_dialog())
         self._item("Restore…", lambda *_: show_restore_dialog())
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        self._item("Regenerate Address…", self._on_regenerate)
         self._item("Check for Updates…", self._on_check_updates)
+        self._item("About OnionPress", lambda *_: show_about_dialog())
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        self._item("About OnionPress", lambda *_: show_about_dialog())
         self._item("Quit", self._on_quit)
 
         self.menu.show_all()
