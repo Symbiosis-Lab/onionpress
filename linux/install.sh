@@ -560,7 +560,7 @@ Type=Application
 Name=OnionPress
 GenericName=OnionPress tray
 Comment=Status icon for your OnionPress site
-Exec=/usr/local/bin/onionpress-tray
+Exec=$INSTALL_DIR/onionpress-tray
 Icon=onionpress
 Categories=Network;
 StartupNotify=false
@@ -588,9 +588,9 @@ if { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
     # Kill any stale tray before relaunching (handles reinstall).
     pkill -u "$REAL_USER" -f onionpress-tray 2>/dev/null || true
     sleep 0.5
-    run_as_user /usr/local/bin/onionpress-tray >/dev/null 2>&1 &
+    run_as_user "$INSTALL_DIR/onionpress-tray" >/dev/null 2>&1 &
 
     if [ "$wp_ready" = "true" ] && command -v xdg-open >/dev/null 2>&1; then
-        run_as_user /usr/local/bin/onionpress dashboard >/dev/null 2>&1 &
+        run_as_user "$INSTALL_DIR/onionpress" dashboard >/dev/null 2>&1 &
     fi
 fi

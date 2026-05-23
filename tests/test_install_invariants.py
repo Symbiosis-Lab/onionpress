@@ -280,10 +280,10 @@ class TestLinuxInstallTray(unittest.TestCase):
             re.search(r'cat\s*>.*onionpress-tray\.desktop.*<<TRAY_EOF', self.script),
             "install.sh must write onionpress-tray.desktop via a heredoc.",
         )
-        self.assertIn(
-            "Exec=/usr/local/bin/onionpress-tray",
+        self.assertRegex(
             self.script,
-            "The autostart .desktop Exec= must point at /usr/local/bin/onionpress-tray.",
+            r'Exec=.*onionpress-tray',
+            "The autostart .desktop Exec= must point at the onionpress-tray binary.",
         )
 
     def test_tray_launched_on_gui_install(self):
