@@ -136,8 +136,8 @@ def _get_own_address():
             if ONION_RE.match(addr):
                 OWN_ONION_ADDRESS = addr
                 log(f"Own onion address: {addr}")
-        except FileNotFoundError:
-            pass  # hostname file not written yet, Arti still starting
+        except OSError:
+            pass  # file not written yet, or not readable (e.g. outside container)
     return OWN_ONION_ADDRESS
 
 
