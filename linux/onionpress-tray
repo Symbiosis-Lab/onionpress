@@ -526,6 +526,11 @@ class OnionPressTray:
         self.indicator.set_title("OnionPress")
 
         self.notifier = Notifier()
+        # Re-entrancy guards so impatient clicks during Tor Browser
+        # bootstrap (a 30-60s window) don't spawn a second torbrowser-
+        # launcher — which would hit the lock file and pop the "Tor
+        # Browser is already running" dialog at the user.
+        self._tor_launch_in_progress = False
         self.menu = Gtk.Menu()
         self._build_menu()
         self.indicator.set_menu(self.menu)
@@ -710,13 +715,103 @@ class OnionPressTray:
         if not addr:
             return
         url = self._build_login_url(f"http://{addr}/")
-        if launcher_ops is not None:
-            launcher_ops.open_in_browser(url, prefer_tor=True)
-        else:
+
+        if launcher_ops is None:
             subprocess.Popen(
                 ["xdg-open", url],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
+            return
+
+        # If Tor Browser is already running, just open the URL as a new tab.
+        # Mac path also does this — the auto-login token is honoured by the
+        # onionpress-auto-login.php mu-plugin once Tor delivers the request.
+        existing = launcher_ops._tor_browser_running()
+        if existing:
+            launcher_ops.open_in_browser(url, prefer_tor=True)
+            return
+
+        # Already mid-launch from a previous click? Don't kick off a
+        # second torbrowser-launcher — it would hit the profile lock
+        # file and pop "Tor Browser is already running" at the user.
+        # The first launch's wait-thread will still open the URL once
+        # firefox.real comes up.
+        if self._tor_launch_in_progress:
+            self.notifier.notify(
+                "tor-launching", "Tor Browser is starting",
+                "Already loading — your site will open once Tor connects.",
+            )
+            return
+
+        # Belt-and-braces: also check the process table for an in-flight
+        # torbrowser-launcher (handles the case where the user restarted
+        # the tray between clicks, losing our in-process flag).
+        try:
+            tbl = subprocess.run(["pgrep", "-x", "torbrowser-launcher"],
+                                  capture_output=True, timeout=3)
+            if tbl.returncode == 0:
+                self.notifier.notify(
+                    "tor-launching", "Tor Browser is starting",
+                    "Already loading — your site will open once Tor connects.",
+                )
+                return
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+
+        # Cold launch: passing a URL on the torbrowser-launcher command line
+        # fails silently if Tor hasn't bootstrapped yet — Tor Browser tries
+        # the request immediately, the request errors during bootstrap, and
+        # the URL is never retried. Instead, launch with no URL so the user
+        # gets the connect dialog cleanly, then in a background thread wait
+        # for firefox.real to appear and send the URL as a -new-tab. The
+        # tab itself will reload after Tor finishes bootstrapping.
+        import shutil as _sh
+        if not _sh.which("torbrowser-launcher"):
+            # Fall back to whatever xdg-open routes the .onion to.
+            launcher_ops.open_in_browser(url, prefer_tor=False)
+            return
+
+        try:
+            subprocess.Popen(
+                ["torbrowser-launcher"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except (OSError, FileNotFoundError) as e:
+            log(f"failed to launch torbrowser-launcher: {e}")
+            return
+
+        self._tor_launch_in_progress = True
+        self.notifier.notify(
+            "tor-launching", "Tor Browser is starting",
+            "Once it connects to Tor, your site will load automatically.",
+        )
+
+        def _wait_then_open():
+            try:
+                # Up to 6 minutes — enough for a first-time install (~80 MB
+                # download + signature verify + Tor bootstrap).
+                for _ in range(180):
+                    time.sleep(2)
+                    fr = launcher_ops._tor_browser_running()
+                    if fr:
+                        # firefox.real is up; -new-tab takes effect even while
+                        # Tor is still bootstrapping — the tab waits for the
+                        # circuit and then loads.
+                        try:
+                            subprocess.Popen(
+                                [fr, "-new-tab", url],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL,
+                                start_new_session=True,
+                            )
+                        except OSError as e:
+                            log(f"failed to send tab to Tor Browser: {e}")
+                        return
+            finally:
+                self._tor_launch_in_progress = False
+        threading.Thread(target=_wait_then_open, daemon=True).start()
 
     def _open_data_folder(self):
         subprocess.Popen(
