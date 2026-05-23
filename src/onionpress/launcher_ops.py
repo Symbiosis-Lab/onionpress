@@ -89,13 +89,18 @@ def generate_vanity_in_container(
         log_func(f"[STAGE] vanity Starting mkp224o for prefix '{prefix}' "
                  f"with {jobs} threads...")
 
-    # Run as the host user so the resulting files are owned correctly.
+    # Override the image's entrypoint so we don't trigger the tor service's
+    # setup steps (which require root inside the container). We don't pass
+    # --user: under rootless Docker, in-container UID 1000 maps to a subuid
+    # that doesn't own the bind mount, whereas in-container root maps to
+    # the host user — exactly what we want for file ownership of the keys.
+    # Under rootful Docker, files end up root-owned but the next pass
+    # of start_containers fixes that with a chown.
     cmd = [
         "docker", "run", "--rm",
-        "--user", f"{os.getuid()}:{os.getgid()}",
         "-v", f"{vanity_dir}:/out",
+        "--entrypoint", "/usr/local/bin/mkp224o",
         image,
-        "/usr/local/bin/mkp224o",
         "-n", "1", "-j", str(jobs), "-d", "/out", prefix,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)

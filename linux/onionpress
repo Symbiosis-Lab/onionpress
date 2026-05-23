@@ -1248,16 +1248,19 @@ start_containers() {
     # First-run vanity generation. mkp224o lives in the tor container image
     # (see app/Resources/docker/tor/Dockerfile) so Docker's multi-arch
     # manifest list handles amd64/arm64 transparently — the host .deb stays
-    # Architecture: all. Pre-pull the tor image so mkp224o is available,
-    # then hand off to the cross-platform Python op
-    # (src/onionpress/launcher_ops.py) which the Mac side will reuse.
+    # Architecture: all. We deliberately do NOT pre-pull the tor image
+    # here: `docker compose pull` with the registry's manifest-list image
+    # would overwrite any locally-built image (the digest differs), which
+    # is the wrong thing during development and harmless but unnecessary
+    # in production (the main container-start pull below covers it).
+    # Strategy: if mkp224o is already in the local image, generate vanity
+    # now; otherwise log and continue, the user gets a random address
+    # this run and can run `onionpress handle-action regenerate-vanity`
+    # later once the next-published tor image bundles mkp224o.
     if $FIRST_RUN && [ -n "$ADDRESS_PREFIX" ] \
        && [ ${#ADDRESS_PREFIX} -ge 2 ] && [ ${#ADDRESS_PREFIX} -le 6 ] \
        && ! find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" 2>/dev/null | grep -q .; then
-        log "First run with ADDRESS_PREFIX=$ADDRESS_PREFIX -- ensuring tor image is present for vanity generation..."
-        cd "$DOCKER_DIR"
-        docker compose pull --policy missing tor >> "$LOG_FILE" 2>&1 \
-            || log "WARNING: pre-pull of tor image failed; vanity generation may be skipped"
+        log "First run with ADDRESS_PREFIX=$ADDRESS_PREFIX -- checking tor image for mkp224o..."
         if op_py generate-vanity >> "$LOG_FILE" 2>&1; then
             log "Vanity address generated; will be installed below"
         else
