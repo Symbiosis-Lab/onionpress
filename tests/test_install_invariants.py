@@ -233,5 +233,98 @@ class TestSubsiteSetsPrimaryBlog(unittest.TestCase):
             "varies per install) rather than hardcoding a literal.")
 
 
+class TestLinuxInstallTray(unittest.TestCase):
+    """Guard against regressions in the Linux install tray setup.
+
+    Incident: after a reinstall the tray icon never appeared because
+    install.sh (a) had no symlink for onionpress-tray, (b) never wrote
+    an autostart .desktop file, and (c) never launched the tray process.
+    All three were added together; these checks ensure they stay wired up.
+    """
+
+    def setUp(self):
+        self.script = _read("linux/install.sh")
+
+    def test_tray_symlink_created(self):
+        self.assertRegex(
+            self.script,
+            r'ln\s+-sf\s+["\$\w/]*onionpress-tray["\s]+/usr/local/bin/onionpress-tray',
+            "install.sh must symlink onionpress-tray into /usr/local/bin/ — "
+            "without it the autostart .desktop Exec= path doesn't resolve.",
+        )
+
+    def test_autostart_desktop_file_written(self):
+        self.assertIn(
+            "onionpress-tray.desktop",
+            self.script,
+            "install.sh must write ~/.config/autostart/onionpress-tray.desktop "
+            "so the tray relaunches on every login.",
+        )
+        self.assertRegex(
+            self.script,
+            r'AUTOSTART_DIR.*\.config/autostart',
+            "install.sh must place the autostart file under ~/.config/autostart/.",
+        )
+
+    def test_autostart_desktop_exec_points_at_tray(self):
+        # The heredoc block must contain an Exec= pointing at the tray binary.
+        self.assertIsNotNone(
+            re.search(r'cat\s*>.*onionpress-tray\.desktop.*<<TRAY_EOF', self.script),
+            "install.sh must write onionpress-tray.desktop via a heredoc.",
+        )
+        self.assertIn(
+            "Exec=/usr/local/bin/onionpress-tray",
+            self.script,
+            "The autostart .desktop Exec= must point at /usr/local/bin/onionpress-tray.",
+        )
+
+    def test_tray_launched_on_gui_install(self):
+        # The display guard and tray launch may be on separate lines, so use
+        # re.DOTALL explicitly rather than assertRegex (which doesn't set it).
+        self.assertIsNotNone(
+            re.search(
+                r'DISPLAY.*WAYLAND_DISPLAY.*onionpress-tray',
+                self.script,
+                re.DOTALL,
+            ),
+            "install.sh must launch onionpress-tray immediately when a "
+            "display is present — otherwise the icon only appears after the "
+            "next login.",
+        )
+
+    def test_stale_tray_killed_before_relaunch(self):
+        self.assertRegex(
+            self.script,
+            r'pkill.*onionpress-tray',
+            "install.sh must kill any running tray before relaunching — "
+            "on reinstall the old process would otherwise persist alongside "
+            "the new one.",
+        )
+
+
+class TestLinuxReinstallBrowserOpen(unittest.TestCase):
+    """Guard the fix for browser not auto-opening after reinstall.
+
+    Incident: on reinstall the launcher imports the existing onion key and
+    writes ~/.onionpress/onion_address before Python starts, so
+    _had_cached_address=True even on a first run.  The old guard
+    `auto_opened_browser = self._had_cached_address` then silently skipped
+    the browser open.  The fix ANDs in `not self._is_first_run` so a first
+    run always opens the browser regardless of a pre-written address file.
+    """
+
+    def test_auto_opened_browser_respects_first_run(self):
+        src = _read("src/menubar.py")
+        # The assignment must include the _is_first_run guard.
+        self.assertRegex(
+            src,
+            r'self\.auto_opened_browser\s*=\s*self\._had_cached_address\s+and\s+not\s+self\._is_first_run',
+            "auto_opened_browser must be False when _is_first_run is True, "
+            "regardless of _had_cached_address — a reinstall imports the "
+            "existing key before Python starts, making _had_cached_address "
+            "True even on a fresh install, which suppressed the browser open.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
