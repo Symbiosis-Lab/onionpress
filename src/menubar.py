@@ -410,7 +410,9 @@ class OnionPressApp(rumps.App):
         self.last_status_logged = None  # Track last logged status to avoid spam
         # Only auto-open browser on first-ever run; on restarts the user
         # already knows their address so opening the browser is unwanted.
-        self.auto_opened_browser = self._had_cached_address
+        # On reinstall, _is_first_run is True even if a key was imported and
+        # wrote a cached address before Python started — always open then.
+        self.auto_opened_browser = self._had_cached_address and not self._is_first_run
         self.setup_dialog_showing = False  # Track if setup dialog is currently showing
         self.setup_alert = None  # Reference to NSAlert for programmatic dismissal
         self.monitoring_tor_install = False  # Track if we're monitoring for Tor Browser installation

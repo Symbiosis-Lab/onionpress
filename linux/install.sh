@@ -501,8 +501,9 @@ else
     echo ""
 fi
 
-# Create symlink for easy CLI access
+# Create symlinks for easy CLI access
 $SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress 2>/dev/null || true
+$SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray 2>/dev/null || true
 
 # ─── Desktop entry (per-user) ────────────────────────────────────────
 # Puts OnionPress in the user's app drawer so they can launch the
@@ -541,6 +542,35 @@ if [ -n "$SUDO_USER" ]; then
     chown "$SUDO_USER:$SUDO_USER" "$DESKTOP_ICONS_DIR/onionpress.png" 2>/dev/null || true
 fi
 
+# ─── Tray autostart (per-user) ───────────────────────────────────────
+# Installs the tray so it starts on every login, and launches it now
+# if a display is available. Headless boxes skip this silently.
+AUTOSTART_DIR="$REAL_HOME/.config/autostart"
+if [ -n "$SUDO_USER" ]; then
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$AUTOSTART_DIR"
+else
+    mkdir -p "$AUTOSTART_DIR"
+fi
+
+cat > "$AUTOSTART_DIR/onionpress-tray.desktop" <<TRAY_EOF
+[Desktop Entry]
+Type=Application
+Name=OnionPress
+GenericName=OnionPress tray
+Comment=Status icon for your OnionPress site
+Exec=/usr/local/bin/onionpress-tray
+Icon=onionpress
+Categories=Network;
+StartupNotify=false
+NoDisplay=true
+X-GNOME-Autostart-Phase=Applications
+OnlyShowIn=GNOME;KDE;XFCE;MATE;Cinnamon;Unity;LXQt;LXDE;Budgie;Pantheon;
+TRAY_EOF
+
+if [ -n "$SUDO_USER" ]; then
+    chown "$SUDO_USER:$SUDO_USER" "$AUTOSTART_DIR/onionpress-tray.desktop" 2>/dev/null || true
+fi
+
 # Refresh GNOME's caches so the icon shows up without requiring a logout.
 # Best-effort — these tools aren't installed on every distro.
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -550,11 +580,15 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     run_as_user gtk-update-icon-cache -t -f "$REAL_HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
-# On a GUI desktop, launch the user's default browser straight to a
-# magic-link-auto-logged-in wp-admin so they don't have to copy the URL
-# or type the autogen password. Headless boxes (no xdg-open, or no DISPLAY)
-# skip this and rely on the printed URL in the success message.
-if [ "$wp_ready" = "true" ] && command -v xdg-open >/dev/null 2>&1 \
-   && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
-    run_as_user /usr/local/bin/onionpress dashboard >/dev/null 2>&1 &
+# On a GUI desktop: start the tray now and open the browser to wp-admin.
+# Headless boxes (no DISPLAY/WAYLAND_DISPLAY) skip both silently.
+if { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+    # Kill any stale tray before relaunching (handles reinstall).
+    pkill -u "$REAL_USER" -f onionpress-tray 2>/dev/null || true
+    sleep 0.5
+    run_as_user /usr/local/bin/onionpress-tray >/dev/null 2>&1 &
+
+    if [ "$wp_ready" = "true" ] && command -v xdg-open >/dev/null 2>&1; then
+        run_as_user /usr/local/bin/onionpress dashboard >/dev/null 2>&1 &
+    fi
 fi
