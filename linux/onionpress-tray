@@ -531,13 +531,13 @@ class OnionPressTray:
         self.indicator.set_menu(self.menu)
 
         # Wire middle-click (and on some shells, left-click) to "Open
-        # Dashboard" — the single most-likely action on a routine click.
+        # Local Site" — the single most-likely action on a routine click.
         # Right-click on the icon still shows the full menu. (On GNOME's
         # ubuntu-appindicators extension, the default is right-click =
         # menu; left-click does nothing by default. set_secondary_activate
         # _target() promotes one menu item to the click action.)
-        if hasattr(self, "menu_open_dashboard"):
-            self.indicator.set_secondary_activate_target(self.menu_open_dashboard)
+        if hasattr(self, "menu_open_local"):
+            self.indicator.set_secondary_activate_target(self.menu_open_local)
 
         self.status = Status(on_change=self._on_status_change)
 
@@ -558,14 +558,8 @@ class OnionPressTray:
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("Copy Onion Address", self._on_copy_address)
-        self.menu_open_dashboard = self._item(
-            "Open in Browser",
-            lambda *_: Launcher.run_async("dashboard"))
-        self._item("Open Local Site",
-                    lambda *_: subprocess.Popen(
-                        ["xdg-open", "http://localhost:8080/"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        self._item("Open .onion (Tor Browser)", self._on_open_onion)
+        self.menu_open_local = self._item("Open Local Site", self._on_open_local)
+        self._item("Open in Tor Browser", self._on_open_onion)
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("Start", lambda *_: Launcher.run_async("start"))
@@ -574,8 +568,7 @@ class OnionPressTray:
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("View Logs", lambda *_: show_log_viewer())
-        self._item("Settings…",
-                    lambda *_: Launcher.run_async("dashboard"))
+        self._item("Settings…", self._on_open_settings)
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("Backup…", lambda *_: show_backup_dialog())
@@ -679,15 +672,49 @@ class OnionPressTray:
             "copied", "Onion address copied", addr, urgency="low",
         )
 
+    def _build_login_url(self, base_url: str) -> str:
+        """Append a freshly-minted op_login token to base_url for auto-login.
+        Falls back to plain base_url if token minting fails (e.g. wp_user
+        list takes too long, transient set errors)."""
+        if launcher_ops is None:
+            return base_url
+        tok = launcher_ops.mint_op_login_token()
+        if not tok:
+            return base_url
+        sep = "&" if "?" in base_url else "?"
+        return f"{base_url}{sep}op_login={tok}"
+
+    def _on_open_settings(self, *_):
+        url = self._build_login_url(
+            "http://localhost:8080/wp-admin/admin.php?page=onionpress-settings")
+        if launcher_ops is not None:
+            launcher_ops.open_in_browser(url)
+        else:
+            subprocess.Popen(
+                ["xdg-open", url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+    def _on_open_local(self, *_):
+        url = self._build_login_url("http://localhost:8080/")
+        if launcher_ops is not None:
+            launcher_ops.open_in_browser(url)
+        else:
+            subprocess.Popen(
+                ["xdg-open", url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
     def _on_open_onion(self, *_):
         addr = self.status.onion_address
         if not addr:
             return
+        url = self._build_login_url(f"http://{addr}/")
         if launcher_ops is not None:
-            launcher_ops.open_in_browser(f"http://{addr}/", prefer_tor=True)
+            launcher_ops.open_in_browser(url, prefer_tor=True)
         else:
             subprocess.Popen(
-                ["xdg-open", f"http://{addr}/"],
+                ["xdg-open", url],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 

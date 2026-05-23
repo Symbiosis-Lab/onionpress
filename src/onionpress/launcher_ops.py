@@ -25,14 +25,52 @@ from typing import Optional
 DEFAULT_TOR_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 
 
+def _tor_browser_running() -> Optional[str]:
+    """If Tor Browser is already running, return the path to its
+    firefox.real binary. Used so we open URLs in the existing instance
+    instead of letting torbrowser-launcher pop an "already running"
+    dialog at the user.
+    """
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-af", "tor-browser/Browser/firefox.real"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in proc.stdout.splitlines():
+            # `pgrep -af` lines are "<pid> <cmdline>"; first whitespace token
+            # in the cmdline is the binary path.
+            parts = line.split(maxsplit=1)
+            if len(parts) < 2:
+                continue
+            bin_path = parts[1].split()[0]
+            if bin_path.endswith("/firefox.real") and os.path.exists(bin_path):
+                return bin_path
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    return None
+
+
 def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
     """Spawn a browser at `url`. Detached — does not wait."""
-    if prefer_tor and shutil.which("torbrowser-launcher"):
-        cmd = ["torbrowser-launcher", url]
+    cmd: list[str]
+    if prefer_tor:
+        running = _tor_browser_running()
+        if running:
+            # Existing Tor Browser session — open the URL as a new tab in
+            # it rather than relaunching (which would trigger torbrowser-
+            # launcher's "already running" dialog).
+            cmd = [running, "-new-tab", url]
+        elif shutil.which("torbrowser-launcher"):
+            cmd = ["torbrowser-launcher", url]
+        elif sys.platform == "darwin":
+            cmd = ["open", url]
+        else:
+            cmd = ["xdg-open", url]
     elif sys.platform == "darwin":
         cmd = ["open", url]
     else:
         cmd = ["xdg-open", url]
+
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
@@ -127,6 +165,49 @@ def generate_vanity_in_container(
     if log_func:
         log_func(f"[STAGE] vanity Generated address: {addr}")
     return addr
+
+
+def mint_op_login_token(container: str = "onionpress-wordpress",
+                        ttl_seconds: int = 120) -> Optional[str]:
+    """Mint a one-shot magic-link token for auto-login.
+
+    Mirrors `onionpress dashboard` (linux/onionpress:2390) in Python so
+    both Mac and Linux clients can build any localhost-or-.onion URL with
+    `?op_login=<tok>` appended. The `onionpress-auto-login.php` mu-plugin
+    validates the token, sets the auth cookie, deletes the transient,
+    and redirects to the same URL minus the query param.
+
+    Returns the 32-char hex token, or None on any failure (caller should
+    fall back to opening the URL without auto-login).
+    """
+    try:
+        # Find the first admin user
+        proc = subprocess.run(
+            ["docker", "exec", container, "wp", "user", "list",
+             "--role=administrator", "--field=ID", "--allow-root"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            return None
+        admin_uid = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
+        if not admin_uid.isdigit():
+            return None
+        token = secrets.token_hex(16)  # 32 hex chars
+        # Set transient
+        proc = subprocess.run(
+            ["docker", "exec", container, "wp", "transient", "set",
+             f"op_login_{token}", admin_uid, str(ttl_seconds), "--allow-root"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            return None
+        return token
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+
+# Lazy import — only needed by mint_op_login_token
+import secrets  # noqa: E402
 
 
 def get_admin_password(data_dir: str) -> Optional[str]:
