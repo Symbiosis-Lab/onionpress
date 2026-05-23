@@ -1486,6 +1486,15 @@ get_healthcheck_address() {
 CONTAINER_LOG_DIR="$DATA_DIR/logs"
 CONTAINER_LOG_PIDS=""
 
+_status_poll_loop() {
+    # Transient failures (docker hiccup, network blip) must not kill this loop.
+    set +e
+    while true; do
+        sleep 30
+        write_status
+    done
+}
+
 start_container_log_capture() {
     mkdir -p "$CONTAINER_LOG_DIR"
     for container in onionpress-tor onionheaven; do
@@ -2344,10 +2353,12 @@ main() {
 
             # Keep main process alive so systemd (KillMode=control-group)
             # doesn't kill our background monitors (farm, activation watcher).
-            # Signal readiness to systemd, then wait on background children.
+            # Signal readiness to systemd, then poll status every 30s so the
+            # tray icon and reachability state stay current.
             if [ "${NOTIFY_SOCKET:-}" ]; then
                 systemd-notify --ready 2>/dev/null || true
             fi
+            _status_poll_loop &
             wait
             ;;
 
