@@ -2032,6 +2032,29 @@ print(json.dumps(containers))
         echo "$state" > "$state_file"
     fi
 
+    # One-shot WEDGE WARNING after 10+ min in "starting" without reaching
+    # "running". Mirrors src/menubar.py's wedge-recovery hint so a user
+    # whose Docker daemon or rootless socket is stuck gets actionable
+    # guidance in the log instead of an indefinitely yellow tray icon.
+    local yellow_since_file="$DATA_DIR/.yellow-since"
+    local wedge_marker="$DATA_DIR/.wedge-warning-fired"
+    if [ "$state" = "running" ]; then
+        rm -f "$yellow_since_file" "$wedge_marker" 2>/dev/null || true
+    elif [ "$state" = "starting" ]; then
+        if [ ! -f "$yellow_since_file" ]; then
+            date +%s > "$yellow_since_file"
+        elif [ ! -f "$wedge_marker" ]; then
+            local yellow_since now_epoch elapsed
+            yellow_since=$(cat "$yellow_since_file" 2>/dev/null || echo 0)
+            now_epoch=$(date +%s)
+            elapsed=$((now_epoch - yellow_since))
+            if [ "$elapsed" -ge 600 ]; then
+                log "WEDGE WARNING: WordPress unreachable for 10+ min. Try restarting the OnionPress service: \`systemctl --user restart onionpress\` (or the system equivalent). If still wedged, the Docker daemon may be stuck — restart it with \`systemctl --user restart docker\` (rootless) or \`sudo systemctl restart docker\` (system Docker)."
+                : > "$wedge_marker"
+            fi
+        fi
+    fi
+
     # Get uptime (seconds since tor container started)
     local uptime_seconds=0
     local started_at
