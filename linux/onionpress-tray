@@ -70,7 +70,12 @@ ASSETS_DIR = os.path.join(INSTALL_DIR, "assets")
 # resolves the bare name there directly. We also ship the hicolor tree
 # so /usr/share/icons consumers (e.g. GNOME Software) find icons too.
 ICON_THEME_PATH = ASSETS_DIR
-LAUNCHER = "/usr/local/bin/onionpress"
+# Point at the binary directly, not /usr/local/bin/onionpress. The
+# install.sh symlink to /usr/local/bin is for human CLI use; if it
+# fails to land (e.g. install.sh aborts before reaching that step,
+# or /usr/local/bin isn't writable), SetupDialog's provision-post-
+# install subprocess would silently fail with FileNotFoundError.
+LAUNCHER = os.path.join(INSTALL_DIR, "onionpress")
 
 # AyatanaAppIndicator's icon API takes icon NAMES (looked up via
 # set_icon_theme_path), not paths. The StatusNotifier D-Bus protocol

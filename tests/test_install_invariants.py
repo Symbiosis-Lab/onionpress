@@ -294,16 +294,25 @@ class TestLinuxInstallTray(unittest.TestCase):
         error-suppressing `|| true` so a genuine symlink failure aborts the
         install instead of producing a half-working state.
         """
-        # mkdir must appear before the symlink lines.
+        # mkdir must appear before the symlink lines. Match the actual
+        # `ln -sf … /usr/local/bin/onionpress…` command, not just any
+        # mention of the path (comments referring to the symlink target
+        # earlier in the file would otherwise pass-through-pollute this).
+        import re
         mkdir_pos = self.script.find("mkdir -p /usr/local/bin")
-        ln_pos = self.script.find("/usr/local/bin/onionpress")
+        ln_match = re.search(
+            r'ln\s+-sf\s+[^\n]*\s/usr/local/bin/onionpress', self.script)
         self.assertGreaterEqual(
             mkdir_pos, 0,
             "install.sh must `mkdir -p /usr/local/bin` — that dir doesn't "
             "exist on minimal Ubuntu/Debian images.",
         )
+        self.assertIsNotNone(
+            ln_match,
+            "install.sh must `ln -sf … /usr/local/bin/onionpress`.",
+        )
         self.assertLess(
-            mkdir_pos, ln_pos,
+            mkdir_pos, ln_match.start(),
             "`mkdir -p /usr/local/bin` must come BEFORE the `ln -sf` lines.",
         )
         # The symlink lines must NOT swallow errors any more — otherwise a
@@ -364,6 +373,111 @@ class TestLinuxInstallTray(unittest.TestCase):
             "on reinstall the old process would otherwise persist alongside "
             "the new one.",
         )
+
+
+class TestLinuxSymlinkBeforeTrayLaunch(unittest.TestCase):
+    """Guard against the SetupDialog → provision-post-install race.
+
+    Incident: install.sh launched the tray (which exposes a Setup dialog
+    that the user can click into immediately) before it created the
+    /usr/local/bin/onionpress symlink. A fast user could complete Setup
+    while the symlink still didn't exist; setup_logic.install_fresh_
+    wordpress then ran `subprocess.run(["/usr/local/bin/onionpress",
+    "provision-post-install"])`, which raised FileNotFoundError. The
+    error got swallowed into the dialog's log buffer (not onionpress.log),
+    install_fresh_wordpress still returned True, and WP came up themeless
+    and single-site. Pin the order so this can't regress.
+    """
+
+    def test_symlink_created_before_tray_launch(self):
+        script = _read("linux/install.sh")
+        ln_match = re.search(
+            r'ln\s+-sf\s+[^\n]*\s/usr/local/bin/onionpress\b', script)
+        tray_launch = re.search(
+            r'run_as_user\s+["\$\w/]*onionpress-tray', script)
+        self.assertIsNotNone(
+            ln_match,
+            "install.sh must symlink onionpress into /usr/local/bin/.",
+        )
+        self.assertIsNotNone(
+            tray_launch,
+            "install.sh must launch the tray via run_as_user.",
+        )
+        self.assertLess(
+            ln_match.start(), tray_launch.start(),
+            "/usr/local/bin/onionpress symlink must be created BEFORE the "
+            "tray is launched — SetupDialog shells out to that path to "
+            "install the theme + convert to multisite. If the symlink "
+            "isn't there yet and the user clicks Setup fast, the post-"
+            "install step silently fails and WP comes up themeless.",
+        )
+
+
+class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
+    """Guard the ensure_multisite → install_multisite_domain_map order.
+
+    Incident: provision-post-install ran install_multisite_domain_map
+    (which sets SUNRISE=true and drops sunrise.php) BEFORE ensure_multisite
+    (which runs `wp core multisite-convert`). sunrise.php queries wp_site
+    on every WP load; with the constant set but the table missing, every
+    subsequent wp-cli call errored, ensure_multisite's wp_is_installed
+    guard returned false, and install_onionpress_theme silently skipped.
+    The Mac launcher has the correct order; the Linux one didn't.
+    """
+
+    def _ordered_calls(self, body):
+        # Position of the first ensure_multisite vs install_multisite_domain_map
+        # call inside the given body of bash. Skip comments.
+        em = re.search(r'^\s*ensure_multisite\b', body, re.MULTILINE)
+        mdm = re.search(r'^\s*install_multisite_domain_map\b', body, re.MULTILINE)
+        theme = re.search(r'^\s*install_onionpress_theme\b', body, re.MULTILINE)
+        return em, mdm, theme
+
+    def test_provision_post_install_subcommand_order(self):
+        script = _read("linux/onionpress")
+        # Carve out the `provision-post-install)` case body.
+        m = re.search(
+            r'provision-post-install\)(.*?);;', script, re.DOTALL)
+        self.assertIsNotNone(
+            m, "provision-post-install subcommand must exist in linux/onionpress")
+        em, mdm, theme = self._ordered_calls(m.group(1))
+        for name, match in [
+            ("ensure_multisite", em),
+            ("install_multisite_domain_map", mdm),
+            ("install_onionpress_theme", theme),
+        ]:
+            self.assertIsNotNone(
+                match, f"{name} must be called from provision-post-install")
+        self.assertLess(
+            em.start(), mdm.start(),
+            "ensure_multisite must run BEFORE install_multisite_domain_map — "
+            "the latter sets SUNRISE+sunrise.php, which queries wp_site on "
+            "every WP load. Reversed, every subsequent wp-cli call breaks.",
+        )
+        self.assertLess(
+            mdm.start(), theme.start(),
+            "install_multisite_domain_map must run before install_onionpress_"
+            "theme (sunrise.php needed for the per-onion domain rewrites).",
+        )
+
+    def test_start_containers_runs_provision_steps_in_order(self):
+        script = _read("linux/onionpress")
+        m = re.search(
+            r'start_containers\(\)\s*\{(.*?)^\}', script, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(
+            m, "start_containers function must exist in linux/onionpress")
+        em, mdm, theme = self._ordered_calls(m.group(1))
+        # All three should be called inside start_containers (gated on
+        # wp_is_installed). Order must match provision-post-install.
+        for name, match in [
+            ("ensure_multisite", em),
+            ("install_multisite_domain_map", mdm),
+            ("install_onionpress_theme", theme),
+        ]:
+            self.assertIsNotNone(
+                match, f"{name} must be called from start_containers")
+        self.assertLess(em.start(), mdm.start())
+        self.assertLess(mdm.start(), theme.start())
 
 
 class TestLinuxReinstallBrowserOpen(unittest.TestCase):

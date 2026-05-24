@@ -500,8 +500,16 @@ def provision_interactive(data_dir: str | None = None) -> bool:
         # SetupWindow now use. Pick up the live onion address so wp
         # core install's --url matches reality.
         onion_addr = _read_onion_address() or "localhost"
-        launcher_bin = os.environ.get(
-            "ONIONPRESS_LAUNCHER_BIN", "/usr/local/bin/onionpress")
+        # Prefer the real binary at /opt/onionpress/onionpress over the
+        # /usr/local/bin symlink, which install.sh creates late enough
+        # that a quick Setup run can miss it. Honor an explicit override.
+        launcher_bin = os.environ.get("ONIONPRESS_LAUNCHER_BIN") or next(
+            (p for p in (
+                "/opt/onionpress/onionpress",
+                "/usr/local/bin/onionpress",
+            ) if os.path.exists(p)),
+            "/usr/local/bin/onionpress",
+        )
         ok = install_fresh_wordpress(
             site_title=title,
             onionname=onionname,

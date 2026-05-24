@@ -238,6 +238,16 @@ $SUDO chmod +x "$INSTALL_DIR/onionpress"
 $SUDO cp "$REPO_DIR/linux/onionpress-tray" "$INSTALL_DIR/onionpress-tray"
 $SUDO chmod +x "$INSTALL_DIR/onionpress-tray"
 
+# Create /usr/local/bin symlinks NOW, before the tray is started below —
+# the tray's SetupDialog shells out to `/usr/local/bin/onionpress
+# provision-post-install` to install the theme + convert to multisite,
+# and a quick user can complete Setup before we'd otherwise reach the
+# symlink step at the bottom of this script. Missing symlink = silent
+# provision-post-install failure = WP comes up themeless and single-site.
+$SUDO mkdir -p /usr/local/bin
+$SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress
+$SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray
+
 $SUDO cp -r "$REPO_DIR/app/Resources/docker" "$INSTALL_DIR/docker"
 $SUDO cp -r "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
 
@@ -516,12 +526,9 @@ else
     echo ""
 fi
 
-# Create symlinks for easy CLI access. /usr/local/bin doesn't exist on
-# minimal Ubuntu/Debian images, and `ln -sf` with `|| true` would silently
-# swallow the failure — so `mkdir -p` first while we still hold sudo.
-$SUDO mkdir -p /usr/local/bin
-$SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress
-$SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray
+# CLI symlinks are created earlier (right after copying the binaries),
+# before the tray is started, so SetupDialog's provision-post-install
+# subprocess hop resolves even when a user clicks Setup fast.
 
 # ─── Desktop entry (per-user) ────────────────────────────────────────
 # Puts OnionPress in the user's app drawer so they can launch the

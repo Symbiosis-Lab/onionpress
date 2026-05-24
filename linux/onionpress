@@ -1456,8 +1456,11 @@ start_containers() {
     configure_ia_plugin
     deactivate_wp_statistics
     if wp_is_installed; then
-        install_multisite_domain_map
+        # ensure_multisite MUST come before install_multisite_domain_map —
+        # the latter sets SUNRISE and drops sunrise.php, which reads
+        # wp_site on every WP load. See provision-post-install above.
         ensure_multisite
+        install_multisite_domain_map
         install_onionpress_theme
     fi
     fix_onionpress_permissions
@@ -2539,8 +2542,17 @@ sys.exit(0 if provision_interactive() else 1)
             # Idempotent — every step skips or no-ops when its work is
             # already done. Stays a bash subcommand for now; planned to
             # be ported to src/onionpress/multisite.py as a follow-up.
-            install_multisite_domain_map
+            #
+            # Order matters: ensure_multisite MUST run before
+            # install_multisite_domain_map, because the latter sets
+            # SUNRISE=true and drops sunrise.php — and sunrise.php
+            # queries wp_site WHERE domain='localhost' on every WP load.
+            # If wp_site doesn't exist yet (multisite-convert hasn't run),
+            # every subsequent wp-cli call fails, ensure_multisite itself
+            # bails out via its wp_is_installed guard, and the theme
+            # install silently skips. Match the Mac ordering.
             ensure_multisite
+            install_multisite_domain_map
             install_onionpress_theme
             fix_onionpress_permissions
             fix_wordpress_uploads_permissions
