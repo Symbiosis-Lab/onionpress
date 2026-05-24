@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 # Add src/ to path so we can import both onionpress.backup and key_manager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -636,6 +637,66 @@ class TestEnsureMultisiteConstants(unittest.TestCase):
 
         # Should NOT have called wp config set
         self.assertNotIn("config set", calls)
+
+
+class TestVerifyWpAdminPasswordAny(unittest.TestCase):
+    """verify_wp_admin_password_any() loops admins under WP-CLI."""
+
+    def _make_result(self, returncode=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr,
+        )
+
+    def test_match_returns_username(self):
+        with mock.patch(
+            "onionpress.backup.subprocess.run",
+            return_value=self._make_result(stdout="alice\n"),
+        ):
+            ok, info = backup_manager.verify_wp_admin_password_any("hunter2")
+        self.assertTrue(ok)
+        self.assertEqual(info, "alice")
+
+    def test_no_match_returns_failure(self):
+        # WP-CLI exits 1 with no stdout when no admin password matches.
+        with mock.patch(
+            "onionpress.backup.subprocess.run",
+            return_value=self._make_result(returncode=1, stdout=""),
+        ):
+            ok, info = backup_manager.verify_wp_admin_password_any("wrong")
+        self.assertFalse(ok)
+        self.assertIn("does not match", info)
+
+    def test_timeout_returns_failure(self):
+        with mock.patch(
+            "onionpress.backup.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="wp eval", timeout=15),
+        ):
+            ok, info = backup_manager.verify_wp_admin_password_any("anything")
+        self.assertFalse(ok)
+        self.assertIn("Timed out", info)
+
+    def test_generic_exception_returns_failure(self):
+        # Anything not TimeoutExpired (e.g. FileNotFoundError if docker
+        # isn't installed) should surface as an error message rather
+        # than propagating.
+        with mock.patch(
+            "onionpress.backup.subprocess.run",
+            side_effect=FileNotFoundError("docker"),
+        ):
+            ok, info = backup_manager.verify_wp_admin_password_any("anything")
+        self.assertFalse(ok)
+        self.assertIn("Error verifying password", info)
+
+    def test_empty_stdout_returns_failure(self):
+        # Defensive: exit 0 but no username on stdout should not be
+        # treated as a successful verify.
+        with mock.patch(
+            "onionpress.backup.subprocess.run",
+            return_value=self._make_result(returncode=0, stdout=""),
+        ):
+            ok, info = backup_manager.verify_wp_admin_password_any("anything")
+        self.assertFalse(ok)
+        self.assertIn("does not match", info)
 
 
 if __name__ == "__main__":

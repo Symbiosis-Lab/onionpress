@@ -16,6 +16,7 @@ from onionpress.health import (
     RESTART_COOLDOWN_SECONDS, RECLAIM_RETRY_SECONDS,
     POLL_READY_SECONDS, POLL_STARTING_SECONDS, POLL_OFFLINE_SECONDS,
     WEDGE_LOAD_WARN, WEDGE_LOAD_ALARM, WEDGE_FAILING_STREAK_ALARM,
+    decode_curl_reason,
 )
 
 
@@ -612,6 +613,29 @@ class TestCheckVMWedge(unittest.TestCase):
                 call.args[0], "onionpress-wordpress",
                 "wedge probe must never exec into wordpress (would hang)",
             )
+
+
+class TestDecodeCurlReason(unittest.TestCase):
+    """decode_curl_reason maps '000rc=N' http_codes to human strings."""
+
+    def test_known_codes(self):
+        self.assertEqual(decode_curl_reason("000rc=6"),
+                         "DNS resolution failed")
+        self.assertEqual(decode_curl_reason("000rc=28"), "timeout (30s)")
+        self.assertEqual(decode_curl_reason("000rc=97"),
+                         "SOCKS handshake failed (descriptor not yet available)")
+
+    def test_unknown_rc_falls_back_to_raw(self):
+        self.assertEqual(decode_curl_reason("000rc=999"), "curl rc=999")
+
+    def test_no_rc_suffix(self):
+        # "000" with no rc= means curl gave us nothing to decode.
+        self.assertEqual(decode_curl_reason("000"), "unknown")
+
+    def test_empty_rc(self):
+        # Pathological "rc=" with no number — treat as unknown rather
+        # than crashing or returning a confusing "curl rc=".
+        self.assertEqual(decode_curl_reason("000rc="), "unknown")
 
 
 if __name__ == "__main__":
