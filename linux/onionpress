@@ -3225,30 +3225,71 @@ sys.exit(0 if provision_interactive() else 1)
                 docker exec onionpress-tor curl -s -X POST http://127.0.0.1:9077/unregister 2>/dev/null || true
             fi
 
-            echo "Stopping services..."
+            USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
+            AUTOSTART_DIR="$HOME/.config/autostart"
+            APPS_DIR="$HOME/.local/share/applications"
+            ICONS_DIR="$HOME/.local/share/icons"
+
+            echo "Stopping user services..."
+            # Current installs use user-level systemd; legacy installs used
+            # system-level. Stop both — whichever doesn't exist is a no-op.
+            systemctl --user stop onionpress-heartbeat 2>/dev/null || true
+            systemctl --user stop onionpress-watcher.timer 2>/dev/null || true
+            systemctl --user stop onionpress 2>/dev/null || true
             sudo systemctl stop onionpress-heartbeat 2>/dev/null || true
             sudo systemctl stop onionpress-watcher.timer 2>/dev/null || true
             sudo systemctl stop onionpress 2>/dev/null || true
+
+            echo "Killing tray process..."
+            # The tray runs in the user session, not via systemd — it has
+            # to be killed explicitly or the icon stays until logout.
+            pkill -u "$(whoami)" -f onionpress-tray 2>/dev/null || true
+            # Also kill any orphaned systemd-inhibit / dbus-monitor children
+            # left behind if the service was force-killed earlier.
+            pkill -u "$(whoami)" -f "systemd-inhibit.*OnionPress" 2>/dev/null || true
+            pkill -u "$(whoami)" -f "dbus-monitor.*PrepareForSleep" 2>/dev/null || true
 
             echo "Removing containers and volumes..."
             setup_db_passwords 2>/dev/null || true
             cd "$DOCKER_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
 
-            echo "Disabling and removing systemd services..."
+            echo "Disabling user services..."
+            systemctl --user disable onionpress 2>/dev/null || true
+            systemctl --user disable onionpress-heartbeat 2>/dev/null || true
+            systemctl --user disable onionpress-watcher.timer 2>/dev/null || true
+            rm -f "$USER_SYSTEMD_DIR/onionpress.service" \
+                  "$USER_SYSTEMD_DIR/onionpress-heartbeat.service" \
+                  "$USER_SYSTEMD_DIR/onionpress-watcher.service" \
+                  "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
+            systemctl --user daemon-reload 2>/dev/null || true
+
+            echo "Disabling and removing legacy system services..."
             sudo systemctl disable onionpress 2>/dev/null || true
             sudo systemctl disable onionpress-heartbeat 2>/dev/null || true
             sudo systemctl disable onionpress-watcher.timer 2>/dev/null || true
-            sudo rm -f /etc/systemd/system/onionpress.service
-            sudo rm -f /etc/systemd/system/onionpress-heartbeat.service
-            sudo rm -f /etc/systemd/system/onionpress-watcher.service
-            sudo rm -f /etc/systemd/system/onionpress-watcher.timer
+            sudo rm -f /etc/systemd/system/onionpress.service \
+                       /etc/systemd/system/onionpress-heartbeat.service \
+                       /etc/systemd/system/onionpress-watcher.service \
+                       /etc/systemd/system/onionpress-watcher.timer
             sudo systemctl daemon-reload
 
             echo "Removing /opt/onionpress..."
             sudo rm -rf /opt/onionpress
 
-            echo "Removing /usr/local/bin/onionpress symlink..."
-            sudo rm -f /usr/local/bin/onionpress
+            echo "Removing /usr/local/bin symlinks..."
+            sudo rm -f /usr/local/bin/onionpress /usr/local/bin/onionpress-tray
+
+            echo "Removing per-user desktop entries, icons, and autostart..."
+            rm -f "$AUTOSTART_DIR/onionpress-tray.desktop"
+            rm -f "$APPS_DIR/onionpress.desktop" "$APPS_DIR/onionpress-tray.desktop"
+            # Hicolor icons may live under several size dirs (512x512, scalable).
+            find "$ICONS_DIR/hicolor" -type f -name 'onionpress*' \
+                -delete 2>/dev/null || true
+            # Refresh caches so the launcher / icon theme drop stale entries.
+            command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+                gtk-update-icon-cache -t -f "$ICONS_DIR/hicolor" >/dev/null 2>&1 || true
+            command -v update-desktop-database >/dev/null 2>&1 && \
+                update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
 
             echo "Removing data directory ($DATA_DIR)..."
             rm -rf "$DATA_DIR"
