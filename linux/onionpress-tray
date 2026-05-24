@@ -662,10 +662,25 @@ class SetupDialog:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         box.set_border_width(24)
 
+        # Icon-left-of-heading header — same layout idea as the Mac
+        # NSAlert About dialog. Falls back to a heading-only row if the
+        # bundled app-icon.png can't be loaded for some reason.
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        if os.path.exists(APP_ICON_PATH):
+            try:
+                from gi.repository import GdkPixbuf  # noqa: WPS433
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_size(
+                    APP_ICON_PATH, 64, 64)
+                img = Gtk.Image.new_from_pixbuf(pix)
+                header.add(img)
+            except Exception as e:
+                log(f"setup dialog icon load failed: {e}")
         heading = Gtk.Label()
         heading.set_markup("<big><b>Set up your OnionPress site</b></big>")
         heading.set_xalign(0)
-        box.add(heading)
+        heading.set_valign(Gtk.Align.CENTER)
+        header.pack_start(heading, True, True, 0)
+        box.add(header)
 
         if _setup_logic is None:
             note = Gtk.Label(label=(
@@ -702,13 +717,22 @@ class SetupDialog:
 
         row += 1
         grid.attach(Gtk.Label(label="Username:", xalign=1), 0, row, 1, 1)
+        # Username + Suggest button share row 1 column 1 via an HBox.
+        # The Suggest button re-rolls the adjective-noun onionname,
+        # matching the Mac SetupWindow's "Suggest" affordance.
+        name_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self._name_entry = Gtk.Entry()
         self._name_entry.set_hexpand(True)
         suggestion = _setup_logic.suggest_onionname() or ""
         self._name_entry.set_text(suggestion)
         self._name_entry.set_placeholder_text("letters and numbers only")
         self._name_entry.connect("changed", self._on_name_changed)
-        grid.attach(self._name_entry, 1, row, 1, 1)
+        name_row.pack_start(self._name_entry, True, True, 0)
+        suggest_btn = Gtk.Button(label="Suggest")
+        suggest_btn.set_tooltip_text("Suggest a random onionname")
+        suggest_btn.connect("clicked", self._on_suggest_clicked)
+        name_row.pack_start(suggest_btn, False, False, 0)
+        grid.attach(name_row, 1, row, 1, 1)
 
         row += 1
         self._name_error = Gtk.Label(label="")
@@ -753,6 +777,15 @@ class SetupDialog:
         self._stack.add_named(box, "welcome")
         # Trigger initial validation so the button state is correct.
         self._validate_form()
+
+    def _on_suggest_clicked(self, *_):
+        if _setup_logic is None:
+            return
+        name = _setup_logic.suggest_onionname() or ""
+        if name:
+            # Triggers _on_name_changed via the "changed" signal, which
+            # revalidates and updates the inline hint.
+            self._name_entry.set_text(name)
 
     def _on_name_changed(self, *_):
         name = self._name_entry.get_text().strip()
