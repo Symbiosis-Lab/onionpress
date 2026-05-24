@@ -115,8 +115,21 @@ def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
         if running:
             # Existing Tor Browser session — open the URL as a new tab in
             # it rather than relaunching (which would trigger torbrowser-
-            # launcher's "already running" dialog).
-            cmd = [running, "-new-tab", url]
+            # launcher's "already running" dialog). Must go through the
+            # `start-tor-browser` wrapper (sibling of firefox.real), not
+            # firefox.real directly: the wrapper sets HOME/cwd/env so
+            # Firefox's remoting finds the running profile. Without it,
+            # firefox.real spawns a fresh instance, hits the profile
+            # lock, and pops the "already running" dialog at the user.
+            wrapper = os.path.join(os.path.dirname(running),
+                                   "start-tor-browser")
+            if os.path.exists(wrapper) and os.access(wrapper, os.X_OK):
+                cmd = [wrapper, "-new-tab", url]
+            else:
+                # Fall back to direct firefox.real (older builds may not
+                # ship the wrapper). Still better than torbrowser-launcher
+                # since the live instance check above already passed.
+                cmd = [running, "-new-tab", url]
         elif shutil.which("torbrowser-launcher"):
             cmd = ["torbrowser-launcher", url]
         elif sys.platform == "darwin":

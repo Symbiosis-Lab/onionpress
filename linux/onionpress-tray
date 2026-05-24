@@ -369,15 +369,70 @@ def show_log_viewer(parent=None):
     scrolled.add(text_view)
     box.pack_start(scrolled, True, True, 0)
 
+    # Initial load: last 5000 lines. Track byte position so the poller
+    # can append new content incrementally.
+    last_pos = 0
     try:
         with open(log_file) as f:
+            f.seek(0, os.SEEK_END)
+            last_pos = f.tell()
+            f.seek(0)
             lines = f.readlines()[-5000:]
-        buf.set_text("".join(lines))
+            buf.set_text("".join(lines))
     except OSError:
         buf.set_text(f"(log file {log_file} not found)")
 
-    end_iter = buf.get_end_iter()
-    text_view.scroll_to_iter(end_iter, 0.0, False, 0, 0)
+    vadj = scrolled.get_vadjustment()
+
+    def is_at_bottom() -> bool:
+        # ~20px tolerance so micro-jitter doesn't break follow mode.
+        return vadj.get_value() + vadj.get_page_size() >= vadj.get_upper() - 20.0
+
+    def scroll_to_end() -> bool:
+        # Use a temporary mark + scroll_mark_onscreen so the scroll
+        # happens once GTK has laid out any text we just inserted.
+        end_iter = buf.get_end_iter()
+        mark = buf.create_mark(None, end_iter, False)
+        text_view.scroll_mark_onscreen(mark)
+        buf.delete_mark(mark)
+        return False  # one-shot idle callback
+
+    # scroll_to_iter pre-show_all is a no-op (the widget has no real
+    # viewport yet); defer until GTK has realised the dialog.
+    GLib.idle_add(scroll_to_end)
+
+    def poll() -> bool:
+        nonlocal last_pos
+        try:
+            with open(log_file) as f:
+                f.seek(0, os.SEEK_END)
+                end = f.tell()
+                if end < last_pos:
+                    # Log rotated/truncated — reload tail.
+                    f.seek(0)
+                    lines = f.readlines()[-5000:]
+                    buf.set_text("".join(lines))
+                    last_pos = end
+                    GLib.idle_add(scroll_to_end)
+                elif end > last_pos:
+                    # Sticky-tail: snapshot whether we *were* at the
+                    # bottom before mutating the buffer; only re-scroll
+                    # if so. Once the user scrolls up, we stop following
+                    # until they scroll back to the bottom themselves.
+                    follow = is_at_bottom()
+                    f.seek(last_pos)
+                    new = f.read()
+                    last_pos = end
+                    if new:
+                        buf.insert(buf.get_end_iter(), new)
+                        if follow:
+                            GLib.idle_add(scroll_to_end)
+        except OSError:
+            pass
+        return True  # keep polling
+
+    timer_id = GLib.timeout_add(500, poll)
+    dlg.connect("destroy", lambda *_: GLib.source_remove(timer_id))
 
     dlg.show_all()
     dlg.run()
