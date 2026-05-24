@@ -475,13 +475,6 @@ if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     # Try to get the onion address
     onion_addr=$("$INSTALL_DIR/onionpress" address 2>/dev/null) || true
 
-    # Read the auto-generated WP admin password (written by start_containers
-    # during headless first-run setup).
-    wp_pass=""
-    if [ -f "$DATA_DIR/wp-admin-password" ]; then
-        wp_pass=$(cat "$DATA_DIR/wp-admin-password" 2>/dev/null)
-    fi
-
     echo ""
     echo "  ══════════════════════════════════════════════════════════"
     echo "  OnionPress is running."
@@ -489,26 +482,12 @@ if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     echo ""
     echo "  NEXT — set up your site:"
     echo ""
-    echo "    1. Open a browser to:"
-    if [ "$local_ip" = "localhost" ] || [ -z "$local_ip" ]; then
-        echo "         http://localhost:8080/wp-admin"
-    else
-        echo "         http://localhost:8080/wp-admin       (from this machine)"
-        echo "         http://${local_ip}:8080/wp-admin   (from any device on your LAN)"
-    fi
+    echo "    • On a desktop: open the OnionPress tray icon and click"
+    echo "      Setup… to pick your site title, username, and password."
+    echo "    • From SSH or a terminal: run  onionpress setup"
     echo ""
-    echo "    2. Log in with:"
-    echo "         Username:  admin"
-    if [ -n "$wp_pass" ]; then
-        echo "         Password:  $wp_pass"
-        echo "                    (also saved to $DATA_DIR/wp-admin-password)"
-    else
-        echo "         Password:  see $DATA_DIR/wp-admin-password"
-        echo "                    (still being generated — try again in a moment)"
-    fi
-    echo ""
-    echo "    3. Follow the on-screen setup wizard to pick a site title,"
-    echo "       replace the random password, and test in Tor Browser."
+    echo "    The wizard installs WordPress with your chosen credentials,"
+    echo "    so there's no auto-generated password to copy down."
     echo ""
     echo "  Your public .onion address (visit from Tor Browser):"
     if [ "$onion_addr" != "Generating..." ] && [ -n "$onion_addr" ]; then

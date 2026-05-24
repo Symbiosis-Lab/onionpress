@@ -1433,30 +1433,18 @@ start_containers() {
         wp_check=$((wp_check + 1))
     done
 
+    # WordPress install is no longer driven by the launcher — both the
+    # GTK tray's SetupDialog and `onionpress setup` (SSH/TUI) call
+    # setup_logic.install_fresh_wordpress with user-typed credentials.
+    # This matches the Mac architecture where containers come up empty
+    # and the user's setup wizard does `wp core install`. See the plan
+    # discussion in commit 25c285fa / fbfcc4b2 era.
     if $wp_installed; then
         log "WordPress is installed -- starting Tor"
-        docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
     else
-        if [ -t 0 ]; then
-            # Interactive terminal — prompt for credentials
-            log "WordPress not yet installed -- running first-time setup"
-            setup_wordpress_interactive
-            # Now that WP is installed, start Tor
-            docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
-        else
-            # Non-interactive (systemd) — auto-setup with generated credentials
-            log "WordPress not yet installed -- running automatic setup"
-            local auto_pass
-            auto_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
-            setup_wordpress_interactive --user admin --pass "$auto_pass" --title "OnionPress"
-            log "Auto-generated admin password saved to $DATA_DIR/wp-admin-password"
-            echo "$auto_pass" > "$DATA_DIR/wp-admin-password"
-            chmod 600 "$DATA_DIR/wp-admin-password"
-            log "WordPress auto-setup complete (user: admin, password in $DATA_DIR/wp-admin-password)"
-            # Now start Tor
-            docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
-        fi
+        log "WordPress not installed -- run 'onionpress setup' or open the OnionPress tray's Setup dialog to configure"
     fi
+    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
 
     # OnionHeaven: the API server runs inside the tor container (always on).
     # The heartbeat monitor + takeover Arti container starts lazily when the
@@ -2540,6 +2528,22 @@ import sys
 from onionpress.setup_logic import provision_interactive
 sys.exit(0 if provision_interactive() else 1)
 "
+            ;;
+
+        provision-post-install)
+            # Run the post-`wp core install` provisioning steps —
+            # multisite conversion, sunrise.php + mu-plugins + .htaccess,
+            # OnionPress theme + bundled plugins, and permission fixes.
+            # Called by setup_logic.install_fresh_wordpress after a fresh
+            # wp core install completes; also safe to re-run by hand.
+            # Idempotent — every step skips or no-ops when its work is
+            # already done. Stays a bash subcommand for now; planned to
+            # be ported to src/onionpress/multisite.py as a follow-up.
+            install_multisite_domain_map
+            ensure_multisite
+            install_onionpress_theme
+            fix_onionpress_permissions
+            fix_wordpress_uploads_permissions
             ;;
 
         import-key)

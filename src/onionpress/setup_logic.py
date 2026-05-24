@@ -190,6 +190,137 @@ def provision_primary_subsite(
     return True
 
 
+def install_fresh_wordpress(
+    *,
+    site_title: str,
+    onionname: str,
+    password: str,
+    language: str = "en_US",
+    onion_addr: str = "localhost",
+    docker_bin: str = "docker",
+    launcher_bin: str | None = None,
+    log_func: Callable[[str], None] | None = None,
+    data_dir: str | None = None,
+) -> bool:
+    """Install WordPress from scratch with the user's chosen credentials.
+
+    The cross-platform replacement for the old "bash auto-bootstraps with a
+    random password, wizard then renames the user" dance on Linux: now the
+    GTK SetupDialog, Mac SetupWindow, and `onionpress setup` SSH path all
+    funnel through this single function with the user-typed creds.
+
+    Steps:
+      1. wp core install (admin_user=onionname, admin_password=password)
+      2. wp user update — set user_url to per-user subsite path
+      3. Set blogname (site title) explicitly — wp core install accepts it
+         but some hardened WP images sandbox the option write.
+      4. Set language (best-effort).
+      5. Invoke `<launcher_bin> provision-post-install` — runs multisite
+         conversion, sunrise.php + mu-plugins, theme, permission fixes.
+         The bash subcommand stays bash for now; planned Python port in
+         src/onionpress/multisite.py as a follow-up.
+      6. provision_primary_subsite() — per-user subsite at /<onionname>/.
+      7. Mark onboarded; persist onionname to ~/.onionpress/config.
+
+    Returns True on success (best-effort — individual sub-steps may log
+    warnings without failing the overall install).
+    """
+    def log(msg: str) -> None:
+        if log_func:
+            log_func(msg)
+
+    def wp(*args, timeout: int = 60, **kwargs) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "--allow-root"] + list(args),
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=timeout, **kwargs,
+        )
+
+    log(f"Installing WordPress: title={site_title!r} onionname={onionname!r}")
+
+    # 1. wp core install — fails if already installed, which is fine here
+    # because callers (SetupDialog, CLI setup) branch on wp_installed
+    # before choosing this path.
+    r = wp(
+        "core", "install",
+        f"--url=http://{onion_addr}",
+        f"--title={site_title}",
+        f"--admin_user={onionname}",
+        f"--admin_password={password}",
+        "--admin_email=admin@onionpress.local",
+        "--skip-email",
+    )
+    if r.returncode != 0:
+        log(f"ERROR: wp core install failed: {r.stderr.strip()[:200]}")
+        return False
+    log("WordPress installed")
+
+    # 2. Per-user subsite URL on the user's profile — matches Mac UX where
+    # the "Website" link on profile.php points somewhere useful.
+    r = wp(
+        "user", "update", onionname,
+        f"--user_url=http://{onion_addr}/{onionname}/",
+        "--skip-email",
+    )
+    if r.returncode != 0:
+        log(f"WARNING: user_url update failed: {r.stderr.strip()[:100]}")
+
+    # 3. Site title — wp core install sets it, but re-asserting is cheap
+    # and survives images that mangle the option during install.
+    wp("option", "update", "blogname", site_title)
+
+    # 4. Language (best-effort)
+    if language and language != "en_US":
+        r = wp("language", "core", "install", language)
+        if r.returncode == 0:
+            wp("option", "update", "WPLANG", language)
+            log(f"Language set: {language}")
+        else:
+            log(f"Language install skipped: {r.stderr.strip()[:80]}")
+
+    # 5. Post-install steps via the platform's bash launcher. Stays a
+    # subprocess hop until the bash multisite-init is ported to Python.
+    if launcher_bin is None:
+        log("WARNING: launcher_bin not provided — skipping post-install steps")
+    else:
+        try:
+            r = subprocess.run(
+                [launcher_bin, "provision-post-install"],
+                capture_output=True, text=True, timeout=180,
+            )
+            if r.returncode == 0:
+                log("Post-install (multisite, mu-plugins, theme) complete")
+            else:
+                log(f"WARNING: provision-post-install rc={r.returncode}: "
+                    f"{(r.stderr or '').strip()[:200]}")
+        except subprocess.TimeoutExpired:
+            log("WARNING: provision-post-install timed out")
+        except Exception as e:
+            log(f"WARNING: provision-post-install failed: {e}")
+
+    # 6. Per-user subsite (shared with the legacy provision_existing path)
+    provision_primary_subsite(
+        onionname=onionname,
+        site_title=site_title,
+        onion_addr=onion_addr,
+        docker_bin=docker_bin,
+        log_func=log_func,
+    )
+
+    # 7. Mark onboarded + persist onionname
+    wp("option", "update", "onionpress_onboarded", "1")
+    log("Marked as onboarded")
+
+    if data_dir is None:
+        data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    _write_config(data_dir, "ONIONNAME", onionname)
+    log(f"Onionname saved to config: {onionname}")
+
+    return True
+
+
 def provision_existing_wordpress(
     *,
     site_title: str,
@@ -353,17 +484,62 @@ def provision_interactive(data_dir: str | None = None) -> bool:
 
     print()
     print("  Applying settings…")
-    ok = provision_existing_wordpress(
-        site_title=title,
-        onionname=onionname,
-        password=pw,
-        data_dir=data_dir,
-        log_func=lambda msg: print(f"  {msg}"),
-    )
+    log_fn = lambda msg: print(f"  {msg}")
+    if _wp_is_installed():
+        # Legacy install path — WP was already configured by a previous
+        # auto-bootstrap (older Linux installs). Rename + change password.
+        ok = provision_existing_wordpress(
+            site_title=title,
+            onionname=onionname,
+            password=pw,
+            data_dir=data_dir,
+            log_func=log_fn,
+        )
+    else:
+        # Fresh install path — same as the GTK SetupDialog and Mac
+        # SetupWindow now use. Pick up the live onion address so wp
+        # core install's --url matches reality.
+        onion_addr = _read_onion_address() or "localhost"
+        launcher_bin = os.environ.get(
+            "ONIONPRESS_LAUNCHER_BIN", "/usr/local/bin/onionpress")
+        ok = install_fresh_wordpress(
+            site_title=title,
+            onionname=onionname,
+            password=pw,
+            onion_addr=onion_addr,
+            launcher_bin=launcher_bin,
+            data_dir=data_dir,
+            log_func=log_fn,
+        )
     if ok:
         print()
         print("  Setup complete!")
     return ok
+
+
+def _wp_is_installed() -> bool:
+    """Cheap wp-cli probe for the SSH/CLI setup path."""
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "onionpress-wordpress",
+             "wp", "--allow-root", "core", "is-installed"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _read_onion_address() -> str:
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "onionpress-tor",
+             "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.stdout.strip()
+    except Exception:
+        return ""
 
 
 def _write_config(data_dir: str, key: str, value: str) -> None:

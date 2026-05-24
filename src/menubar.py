@@ -59,7 +59,6 @@ from onionpress.log_rotation import RotatingLog
 from onionpress import analytics_sharing
 from onionpress import redact
 from onionpress.power import CaffeineManager
-from onionpress import setup_logic
 from onionpress import launcher_ops
 
 
@@ -3379,12 +3378,18 @@ class OnionPressApp(rumps.App):
             self.log(f"WordPress admin rename failed: {result.stderr.strip()}")
 
     def _wp_core_install(self, sw):
-        """Run wp core install with credentials from the setup window."""
+        """Delegate to setup_logic.install_fresh_wordpress() (shared with Linux).
+
+        Was a 70-line inline wp-cli sequence; now a thin wrapper that
+        bundles the SetupWindow's fields and points install_fresh_
+        wordpress at the Mac launcher for the provision-post-install
+        bash step. The two platforms share one install path now.
+        """
         if not sw or not sw.admin_pass:
             return
         try:
+            from onionpress.setup_logic import install_fresh_wordpress
             docker_bin = os.path.join(self.bin_dir, "docker")
-            # Get the onion address for --url
             addr_result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor", "cat",
                  "/var/lib/tor/hidden_service/wordpress/hostname"],
@@ -3393,81 +3398,28 @@ class OnionPressApp(rumps.App):
             )
             onion_addr = addr_result.stdout.strip() or "localhost"
 
-            self.log(f"Running wp core install (title={sw.site_title}, user={sw.admin_user})")
+            def _log(msg):
+                self.log(msg)
+                if sw:
+                    sw.add_log(msg)
+
             if sw:
                 sw.set_status("Configuring WordPress...")
                 sw.add_log(f"Installing WordPress as '{sw.admin_user}'...")
-
-            result = subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "core", "install",
-                 f"--url=http://{onion_addr}",
-                 f"--title={sw.site_title}",
-                 f"--admin_user={sw.admin_user}",
-                 f"--admin_password={sw.admin_pass}",
-                 "--admin_email=admin@onionpress.local",
-                 "--allow-root", "--skip-email"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=60
+            install_fresh_wordpress(
+                site_title=sw.site_title,
+                onionname=sw.admin_user,
+                password=sw.admin_pass,
+                language=getattr(sw, "language", "en_US") or "en_US",
+                onion_addr=onion_addr,
+                docker_bin=docker_bin,
+                launcher_bin=self.launcher_script,
+                log_func=_log,
             )
-            if result.returncode == 0:
-                self.log("WordPress installed successfully via wp core install")
-                if sw:
-                    sw.add_log("WordPress configured successfully")
-                    sw.set_status("Installing plugins...")
-                    sw.add_log("Installing plugins and themes...")
-                # Set admin user's Website to their per-user page
-                # (http://<onion>/<login>/) rather than the bare onion root,
-                # so the "Website" link on profile.php points somewhere useful.
-                subprocess.run(
-                    [docker_bin, "exec", "onionpress-wordpress",
-                     "wp", "user", "update", sw.admin_user,
-                     f"--user_url=http://{onion_addr}/{sw.admin_user}/",
-                     "--allow-root"],
-                    capture_output=True, text=True, encoding='utf-8',
-                    errors='replace', timeout=30
-                )
-                # Re-run launcher start to install mu-plugins, multisite, etc.
-                subprocess.run(
-                    [self.launcher_script, "start"],
-                    capture_output=True, text=True, encoding='utf-8',
-                    errors='replace', timeout=120
-                )
-                self.log("Plugins and mu-plugins installed")
-                if sw:
-                    sw.add_log("Plugins installed")
-                # After multisite is up, either create the primary user's
-                # subsite at /<onionname>/ or mark this as a branded site
-                # (blog_id=1 stays canonical). See issue #187.
-                self._provision_primary_subsite(sw, onion_addr)
-            else:
-                self.log(f"wp core install failed: {result.stderr[-200:]}")
-                if sw:
-                    sw.add_log("WordPress setup may need manual configuration")
+            if sw:
+                sw.add_log("WordPress installed and configured")
         except Exception as e:
             self.log(f"wp core install error: {e}")
-
-    def _provision_primary_subsite(self, sw, onion_addr):
-        """Delegate to setup_logic.provision_primary_subsite() (shared with Linux)."""
-        if not sw or not sw.admin_user:
-            return
-        docker_bin = os.path.join(self.bin_dir, "docker")
-
-        def _log(msg):
-            self.log(msg)
-            if sw:
-                sw.add_log(msg)
-
-        if sw:
-            sw.set_status(f"Creating your blog at /{sw.admin_user}/...")
-
-        setup_logic.provision_primary_subsite(
-            onionname=sw.admin_user,
-            site_title=sw.site_title or sw.admin_user,
-            onion_addr=onion_addr,
-            docker_bin=docker_bin,
-            log_func=_log,
-        )
 
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.

@@ -1013,14 +1013,49 @@ class SetupDialog:
         except Exception as e:
             self._log(f"warn: failed to persist analytics pref: {e}")
 
-        ok = _setup_logic.provision_existing_wordpress(
-            site_title=title,
-            onionname=onionname,
-            password=password,
-            language=language,
-            log_func=self._log,
-        )
+        # Branch on whether WordPress was already installed by a legacy
+        # bash-launcher auto-bootstrap (older installs) or is empty and
+        # waiting for us to do `wp core install` ourselves (the Mac-
+        # parity flow used by all new installs).
+        wp_already_installed = bool(self._status_wp_installed())
+        if wp_already_installed:
+            ok = _setup_logic.provision_existing_wordpress(
+                site_title=title,
+                onionname=onionname,
+                password=password,
+                language=language,
+                log_func=self._log,
+            )
+        else:
+            onion_addr = (self._status_onion_address() or "localhost")
+            ok = _setup_logic.install_fresh_wordpress(
+                site_title=title,
+                onionname=onionname,
+                password=password,
+                language=language,
+                onion_addr=onion_addr,
+                launcher_bin=LAUNCHER,
+                log_func=self._log,
+            )
         GLib.idle_add(self._done, ok)
+
+    def _status_wp_installed(self) -> bool:
+        # The tray's Status snapshot lives on a different thread; this
+        # helper reads the raw dict to avoid races during provisioning.
+        try:
+            import json as _json
+            with open(STATUS_FILE) as f:
+                return bool(_json.load(f).get("wp_installed"))
+        except Exception:
+            return False
+
+    def _status_onion_address(self) -> str:
+        try:
+            import json as _json
+            with open(STATUS_FILE) as f:
+                return _json.load(f).get("onion_address", "") or ""
+        except Exception:
+            return ""
 
     # ── Thread-safe UI helpers ────────────────────────────────────────
 
@@ -1205,7 +1240,10 @@ class OnionPressTray:
             if self.status.bootstrap_pct and self.status.bootstrap_pct < 100:
                 label = f"Starting… (Tor {self.status.bootstrap_pct}%)"
             elif not self.status.wp_installed:
-                label = "Setting up WordPress…"
+                # Containers are up but WP hasn't been configured yet —
+                # the new architecture defers wp core install to the
+                # SetupDialog, so this state is the "click Setup" cue.
+                label = "Setup required — click Setup to finish installing"
             else:
                 label = "Starting…"
         else:
@@ -1249,9 +1287,13 @@ class OnionPressTray:
     def _maybe_show_setup(self):
         if self._setup_shown:
             return
-        if not self.status.wp_installed:
-            return
         if self.status.onboarded:
+            return
+        # Trigger as soon as containers are up — WP may or may not be
+        # installed. SetupDialog's _provision branches on wp_installed
+        # to either install_fresh_wordpress (new path) or
+        # provision_existing_wordpress (legacy auto-bootstrap path).
+        if self.status.state not in ("running", "starting"):
             return
         self._setup_shown = True
         self._show_setup_dialog()

@@ -2859,6 +2859,22 @@ main() {
             _validate_oh_address "$2"
             ;;
 
+        provision-post-install)
+            # Run the post-`wp core install` provisioning steps —
+            # multisite conversion, sunrise.php + mu-plugins + .htaccess,
+            # OnionPress theme + bundled plugins, and permission fixes.
+            # Called by setup_logic.install_fresh_wordpress after a fresh
+            # wp core install completes; also safe to re-run by hand.
+            # Idempotent — every step skips or no-ops when its work is
+            # already done. Stays a bash subcommand for now; planned to
+            # be ported to src/onionpress/multisite.py as a follow-up.
+            ensure_multisite
+            install_multisite_domain_map
+            install_onionpress_theme
+            fix_onionpress_permissions
+            fix_wordpress_uploads_permissions
+            ;;
+
         setup)
             # Usage: onionpress setup [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE]
             #        onionpress setup --from-backup <password> <backup.zip>
