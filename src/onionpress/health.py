@@ -486,15 +486,31 @@ class HealthChecker:
         # Aggressive auto-restart disrupted stress tests; default to waiting.
         return False
 
-    def full_check(self, expected_address: str = "") -> HealthResult:
+    def full_check(self, expected_address: str = "",
+                   wordpress_confirmed: bool = False) -> HealthResult:
         """Run all five health checks.
+
+        Args:
+            expected_address: Onion address to compare against the
+                hostname file (warns on mismatch).
+            wordpress_confirmed: If True, skip the local WordPress
+                probe — WP responds reliably once it has come up
+                inside Docker (Mac menubar's `_wordpress_confirmed`
+                optimization). Caller should track this via
+                `HealthMonitor.state.wordpress_confirmed` and reset
+                it on system wake.
 
         Returns a HealthResult with all fields populated.
         """
         hr = HealthResult()
 
-        # Check 1: WordPress local health
-        hr.wp_healthy = self.check_wordpress_local()
+        # Check 1: WordPress local health. Once confirmed once, skip
+        # subsequent probes — WP doesn't flap inside the container, and
+        # the docker exec adds ~100ms per poll cycle for no information.
+        if wordpress_confirmed:
+            hr.wp_healthy = True
+        else:
+            hr.wp_healthy = self.check_wordpress_local()
 
         # Check 2: Tor bootstrap
         hr.tor_bootstrapped, hr.bootstrap_pct = self.check_tor_bootstrap()
@@ -529,6 +545,7 @@ class HealthChecker:
 
 YELLOW_TO_STUCK_SECONDS = 300      # 5 min in yellow → display "stuck"
 YELLOW_TO_RESTART_SECONDS = 120    # 2 min in yellow → eligible for restart
+YELLOW_TO_WEDGE_WARNING_SECONDS = 600   # 10 min in yellow → emit wedge warning
 RESTART_COOLDOWN_SECONDS = 300     # 5 min between auto-restarts
 RECLAIM_RETRY_SECONDS = 60         # Retry OnionHeaven reclaim every 60s
 POLL_READY_SECONDS = 30            # Poll interval when ready
@@ -551,6 +568,8 @@ class HealthState:
     reclaim_succeeded: bool = False
     reclaim_in_flight: bool = False
     reclaim_last_attempt: float = 0
+    # Wedge warning: one-shot per yellow episode. Reset when ready.
+    wedge_warning_fired: bool = False
 
 
 class HealthMonitor:
@@ -599,6 +618,8 @@ class HealthMonitor:
             self.state.bootstrap_stall_count = 0
             self.state.reclaim_succeeded = False
             self.state.reclaim_in_flight = False
+            # Re-arm the wedge warning so the next yellow episode can fire it.
+            self.state.wedge_warning_fired = False
             return ServiceState.AVAILABLE
 
         if self.state.was_ready and not result.ready:
@@ -656,6 +677,25 @@ class HealthMonitor:
             return True
 
         return False
+
+    def should_emit_wedge_warning(self) -> bool:
+        """Return True exactly once per yellow episode after 10+ min in yellow.
+
+        Mirrors the Mac menubar's one-shot wedge hint (src/menubar.py
+        check_status). The caller logs a platform-appropriate recovery
+        message — on Linux that's `systemctl --user restart onionpress`
+        or restarting Docker; on Mac it's killing Colima.
+
+        Resets when the service becomes ready again (in evaluate()).
+        """
+        if self.state.wedge_warning_fired:
+            return False
+        if self.state.yellow_since is None:
+            return False
+        if (time.time() - self.state.yellow_since) <= YELLOW_TO_WEDGE_WARNING_SECONDS:
+            return False
+        self.state.wedge_warning_fired = True
+        return True
 
     def should_reclaim(self) -> bool:
         """Decide whether to send OnionHeaven /online reclaim.

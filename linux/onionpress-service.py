@@ -60,6 +60,7 @@ try:
         ensure_config, ensure_secrets, read_value, detect_port_offset,
     )
     from onionpress import launcher_ops, system_metrics
+    from onionpress.power import SystemdInhibitor
 except ImportError as e:
     print(f"ERROR: onionpress package not found in {_LIB_DIR}: {e}", file=sys.stderr)
     sys.exit(1)
@@ -306,6 +307,105 @@ def write_status(
 
 _stop_event = threading.Event()
 
+# Sleep/wake (mirrors Mac handle_sleep/handle_wake in src/menubar.py).
+# _sleeping_event is set while the system is suspended so the poll loop
+# throttles and skips Docker exec calls that would just time out.
+# _wake_event is used as a "kick" so the poll loop runs an immediate
+# iteration on wake (and on shutdown) rather than sleeping out the
+# remaining poll interval.
+_sleeping_event = threading.Event()
+_wake_event = threading.Event()
+_dbus_proc: Optional[subprocess.Popen] = None
+
+# Sleep inhibitor (systemd-inhibit). Created in _start() and accessed by
+# the sleep/wake handlers — released before suspend so the system can
+# actually sleep, re-acquired on wake. Mirrors Mac's CaffeineManager.
+_inhibitor: Optional["SystemdInhibitor"] = None
+
+
+def _read_config_value(key: str, default: str) -> str:
+    """Read a single value from ~/.onionpress/config."""
+    return read_value(os.path.join(DATA_DIR, "config"), key, default)
+
+
+def _handle_sleep(docker: Docker) -> None:
+    """DEL_ONION via watchdogs so the OnionHeaven hub can take over without
+    competing descriptors — same as src/menubar.py handle_sleep()."""
+    log("System going to sleep — DEL_ONION via watchdogs")
+    _sleeping_event.set()
+    _wake_event.clear()
+    for container in ("onionpress-tor", "onionheaven"):
+        if launcher_ops.signal_watchdog(docker, container, "USR1"):
+            log(f"Sent USR1 (sleep) to {container} watchdog")
+    # Release the sleep inhibitor so the kernel can actually suspend.
+    if _inhibitor is not None:
+        _inhibitor.stop()
+
+
+def _handle_wake(docker: Docker) -> None:
+    """ADD_ONION via watchdogs and kick the poll loop into an immediate
+    iteration — same as src/menubar.py handle_wake()."""
+    log("System wake — ADD_ONION via watchdogs")
+    _sleeping_event.clear()
+    for container in ("onionpress-tor", "onionheaven"):
+        if launcher_ops.signal_watchdog(docker, container, "USR2"):
+            log(f"Sent USR2 (wake) to {container} watchdog")
+    # Re-acquire the inhibitor (no-op if PREVENT_SLEEP=normal).
+    if _inhibitor is not None:
+        _inhibitor.start()
+    # Kick the poll loop so it doesn't sit out the remaining interval.
+    _wake_event.set()
+
+
+def _start_sleep_wake_monitor(docker: Docker) -> None:
+    """Watch system D-Bus for org.freedesktop.login1 PrepareForSleep signals.
+
+    Uses `dbus-monitor` (always present on systemd distros) rather than
+    pulling in python-dbus. PrepareForSleep fires with `true` immediately
+    before suspend and `false` immediately after resume.
+    """
+    def _watch() -> None:
+        global _dbus_proc
+        try:
+            _dbus_proc = subprocess.Popen(
+                ["dbus-monitor", "--system",
+                 "type='signal',interface='org.freedesktop.login1.Manager',"
+                 "member='PrepareForSleep'"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1,
+            )
+        except FileNotFoundError:
+            log("dbus-monitor not available — sleep/wake handling disabled")
+            return
+
+        try:
+            in_signal = False
+            for line in _dbus_proc.stdout:
+                if _stop_event.is_set():
+                    break
+                line = line.strip()
+                if line.startswith("signal ") and "PrepareForSleep" in line:
+                    in_signal = True
+                    continue
+                if in_signal and line.startswith("boolean "):
+                    going_to_sleep = line.endswith("true")
+                    in_signal = False
+                    try:
+                        if going_to_sleep:
+                            _handle_sleep(docker)
+                        else:
+                            _handle_wake(docker)
+                    except Exception as e:
+                        log(f"sleep/wake handler error: {e}")
+        finally:
+            if _dbus_proc:
+                try:
+                    _dbus_proc.terminate()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_watch, daemon=True, name="sleep-wake").start()
+
 
 def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
     """Background thread: health-check + write status.json on each interval.
@@ -319,10 +419,43 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
     onion_address = ""
     service_state = ServiceState.STARTING
     _shared_volume_written = False
+    _was_sleeping = False
 
     while not _stop_event.is_set():
+        # Detect sleep→wake transition: re-verify WordPress on the next poll
+        # (mirrors src/menubar.py handle_wake setting _wordpress_confirmed=False).
+        # The wedge warning is intentionally NOT reset here — it's sticky across
+        # sleep and only clears when the service becomes fully ready.
+        is_sleeping_now = _sleeping_event.is_set()
+        if _was_sleeping and not is_sleeping_now:
+            monitor.state.wordpress_confirmed = False
+            log("Wake transition — will re-verify WordPress on next poll")
+        _was_sleeping = is_sleeping_now
+
+        # While the system is suspended, skip the docker exec calls (they
+        # just time out) and write a lightweight status snapshot every 30s
+        # so the tray sees "asleep" rather than stale data.
+        if is_sleeping_now:
+            try:
+                write_status(
+                    docker=docker,
+                    manager=manager,
+                    health_result=None,
+                    service_state=ServiceState.OFFLINE,
+                    onion_address=onion_address,
+                )
+            except Exception as e:
+                log(f"Status poll (sleeping) error: {e}")
+            # Wait up to 30s, but break out immediately on wake or shutdown.
+            _wake_event.wait(timeout=30)
+            _wake_event.clear()
+            continue
+
         try:
-            hr = checker.full_check(expected_address=onion_address)
+            hr = checker.full_check(
+                expected_address=onion_address,
+                wordpress_confirmed=monitor.state.wordpress_confirmed,
+            )
 
             # When we first learn the onion address, copy it to the shared
             # volume so WP plugins (domain-map, etc.) can pick it up.
@@ -343,6 +476,20 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
 
             service_state = monitor.evaluate(hr, is_running=True)
 
+            # One-shot wedge hint after 10+ min yellow — mirrors src/menubar.py.
+            # On Linux the recovery is restarting the user service or the Docker
+            # daemon, not killing Colima.
+            if monitor.should_emit_wedge_warning():
+                log(
+                    "WEDGE WARNING: WordPress unreachable for 10+ min. "
+                    "Try restarting the OnionPress service: "
+                    "`systemctl --user restart onionpress` "
+                    "(or the system equivalent). If still wedged, the Docker "
+                    "daemon may be stuck — restart it with "
+                    "`systemctl --user restart docker` (rootless) or "
+                    "`sudo systemctl restart docker` (system Docker)."
+                )
+
             if monitor.should_restart_tor(checker.tor_container_unhealthy()):
                 log("Auto-restarting Tor container")
                 docker.run(["restart", "onionpress-tor"], timeout=30)
@@ -359,11 +506,17 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
             log(f"Status poll error: {e}")
 
         interval = monitor.poll_interval(service_state)
-        _stop_event.wait(interval)
+        # Use _wake_event as a "kick" — set on system wake and on shutdown
+        # so the loop runs an immediate iteration rather than sitting out
+        # the remaining interval.
+        _wake_event.wait(timeout=interval)
+        _wake_event.clear()
 
 
 def _start(manager: ContainerManager, docker: Docker) -> None:
     """Full startup sequence."""
+    global _inhibitor
+
     # PID lock
     pid_fd = open(PID_FILE, "w")
     try:
@@ -377,6 +530,17 @@ def _start(manager: ContainerManager, docker: Docker) -> None:
 
     def _cleanup(*_):
         _stop_event.set()
+        # Kick the poll loop out of its wait so shutdown is prompt.
+        _wake_event.set()
+        # Release the sleep inhibitor so it doesn't outlive the service.
+        if _inhibitor is not None:
+            _inhibitor.stop()
+        # Terminate the dbus-monitor subprocess if it's running.
+        if _dbus_proc is not None:
+            try:
+                _dbus_proc.terminate()
+            except Exception:
+                pass
         try:
             os.unlink(PID_FILE)
         except OSError:
@@ -408,6 +572,16 @@ def _start(manager: ContainerManager, docker: Docker) -> None:
         target=_poll_loop, args=(docker, manager), daemon=True,
     )
     _poll_loop_thread.start()
+
+    # Watch for system sleep/wake so we DEL_ONION before suspend (lets the
+    # OnionHeaven hub take over without competing descriptors) and ADD_ONION
+    # immediately on resume. Mirrors src/menubar.py handle_sleep/handle_wake.
+    _start_sleep_wake_monitor(docker)
+
+    # Optional sleep inhibitor (no-op when PREVENT_SLEEP=normal). Mirrors
+    # the Mac CaffeineManager started in src/menubar.py:1873.
+    _inhibitor = SystemdInhibitor(DATA_DIR, log, _read_config_value)
+    _inhibitor.start()
 
     # Notify systemd that the service is up (containers are starting)
     notify = os.environ.get("NOTIFY_SOCKET")

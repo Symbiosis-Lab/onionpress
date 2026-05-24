@@ -108,45 +108,43 @@ class TestSubsiteGetsOnionPressTheme(unittest.TestCase):
     so without an explicit per-subsite activation users see the onionpress
     theme flash briefly and then — once the subsite is created and
     onionpress-root-redirect.php starts bouncing / → /<onionname>/ — the
-    default theme takes over. This test parses the AST of
-    `_provision_primary_subsite` and asserts both calls are present.
+    default theme takes over.
+
+    The logic now lives in setup_logic.provision_primary_subsite() which is
+    shared between Mac and Linux. This test parses that function's AST and
+    asserts both calls are present.
     """
 
     def setUp(self):
-        src = _read("src/menubar.py")
+        src = _read("src/onionpress/setup_logic.py")
         tree = ast.parse(src)
         self.func = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_provision_primary_subsite":
+            if isinstance(node, ast.FunctionDef) and node.name == "provision_primary_subsite":
                 self.func = node
                 break
         self.assertIsNotNone(
             self.func,
-            "Could not find _provision_primary_subsite in src/menubar.py — "
-            "has it been renamed? Update this test.",
+            "Could not find provision_primary_subsite in "
+            "src/onionpress/setup_logic.py — has it been renamed? Update this test.",
         )
 
     def _subprocess_run_calls(self):
-        """Return every subprocess.run(...) call inside the function as a
-        list of the string literals found in its first positional arg."""
-        calls = []
-        for node in ast.walk(self.func):
-            if not isinstance(node, ast.Call):
-                continue
-            # Match subprocess.run(...) and .run(...)
-            func = node.func
-            name = None
-            if isinstance(func, ast.Attribute) and func.attr == "run":
-                name = func.attr
-            if name != "run" or not node.args:
-                continue
-            arg = node.args[0]
-            if not isinstance(arg, ast.List):
-                continue
-            literals = []
-            for elt in arg.elts:
+        """Return every wp-cli call inside the function.
+
+        Handles two call patterns:
+          1. subprocess.run(["docker", "exec", ..., "wp", ...], ...)
+             — used by old menubar.py inline style
+          2. wp("site", "create", ...)
+             — used by setup_logic.py's inner wp() helper
+        Both are normalised to a flat list of string tokens so the
+        same is_wp_cli() checks work for both patterns.
+        """
+        def _extract_str_args(nodes):
+            result = []
+            for elt in nodes:
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                    literals.append(elt.value)
+                    result.append(elt.value)
                 elif isinstance(elt, ast.JoinedStr):  # f-string
                     pieces = []
                     for v in elt.values:
@@ -154,8 +152,32 @@ class TestSubsiteGetsOnionPressTheme(unittest.TestCase):
                             pieces.append(str(v.value))
                         elif isinstance(v, ast.FormattedValue):
                             pieces.append("{__fmt__}")
-                    literals.append("".join(pieces))
-            calls.append(literals)
+                    result.append("".join(pieces))
+            return result
+
+        calls = []
+        for node in ast.walk(self.func):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+
+            # Pattern 1: subprocess.run(["docker", "exec", ...], ...)
+            if isinstance(func, ast.Attribute) and func.attr == "run" and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.List):
+                    calls.append(_extract_str_args(arg.elts))
+
+            # Pattern 2: wp("site", "create", ...) — inner helper used by
+            # setup_logic.provision_primary_subsite(). Prepend a canonical
+            # docker-exec prefix so is_wp_cli() matches the same way.
+            elif isinstance(func, ast.Name) and func.id == "wp" and node.args:
+                tokens = _extract_str_args(node.args)
+                if tokens:
+                    calls.append(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "wp", "--allow-root"] + tokens
+                    )
+
         return calls
 
     def test_creates_subsite_and_activates_theme(self):
@@ -204,15 +226,17 @@ class TestSubsiteSetsPrimaryBlog(unittest.TestCase):
     primary_blog usermeta points at the subsite. Observed on a fresh
     install where `+ New → Post` routed to http://<onion>/wp-admin/
     instead of http://<onion>/<onionname>/wp-admin/.
+
+    The logic now lives in setup_logic.provision_primary_subsite().
     """
 
     def test_primary_blog_is_set_on_new_subsite(self):
-        src = _read("src/menubar.py")
+        src = _read("src/onionpress/setup_logic.py")
         import ast
         tree = ast.parse(src)
         func = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_provision_primary_subsite":
+            if isinstance(node, ast.FunctionDef) and node.name == "provision_primary_subsite":
                 func = node
                 break
         self.assertIsNotNone(func)

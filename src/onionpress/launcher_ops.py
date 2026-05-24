@@ -267,6 +267,26 @@ def mint_op_login_token(container: str = "onionpress-wordpress",
 import secrets  # noqa: E402
 
 
+def signal_watchdog(docker, container: str, sig: str) -> bool:
+    """Send a Unix signal to the tor-watchdog inside a container.
+
+    Used on both Mac and Linux around sleep/wake (USR1 = DEL_ONION,
+    USR2 = ADD_ONION). The [t]or-watchdog bracket prevents pgrep from
+    matching its own sh -c invocation.
+
+    `docker` is an onionpress.docker.Docker instance (or anything with
+    a compatible .exec(container, argv, timeout=...) method whose
+    result has a truthy `.ok` on success).
+    """
+    result = docker.exec(
+        container,
+        ["sh", "-c",
+         f"kill -{sig} $(pgrep -f '[t]or-watchdog') 2>/dev/null"],
+        timeout=10,
+    )
+    return bool(getattr(result, "ok", False))
+
+
 def get_admin_password(data_dir: str) -> Optional[str]:
     """Read the auto-generated WP admin password (`~/.onionpress/wp-admin-password`).
 

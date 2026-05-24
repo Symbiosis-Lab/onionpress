@@ -58,21 +58,9 @@ from onionpress.log_rotation import RotatingLog
 from onionpress import analytics_sharing
 from onionpress import redact
 from onionpress.power import CaffeineManager
+from onionpress import setup_logic
+from onionpress import launcher_ops
 
-
-# Branded onion addresses — canonical owners of special brand names.
-# Installs whose .onion matches one of these are "branded sites" where
-# blog_id=1 is the visible public surface (product pages, directory),
-# so first-run skips creating a /<onionname>/ subsite for the primary
-# user. Set onionpress_root_site=yes on the blog so the root-redirect
-# mu-plugin short-circuits too.
-#
-# Keep this list in sync with BRAND_NAMES in
-# app/Resources/docker/tor/onionnames.py.
-_BRANDED_ONIONS = frozenset({
-    "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",  # OnionHome / onionpress.org
-    "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",  # OnionHeaven
-})
 
 
 class OnionPressApp(rumps.App):
@@ -2364,14 +2352,9 @@ class OnionPressApp(rumps.App):
         self.log("Registered for reopen distributed notification")
 
     def _signal_watchdog(self, container, sig):
-        """Send a Unix signal to the tor-watchdog process inside a container."""
-        # [t]or-watchdog bracket trick prevents pgrep from matching the sh -c command itself
-        result = self._docker.exec(
-            container,
-            ["sh", "-c", f'kill -{sig} $(pgrep -f "[t]or-watchdog") 2>/dev/null'],
-            timeout=10,
-        )
-        return result.ok
+        """Send a Unix signal to the tor-watchdog process inside a container.
+        Thin delegate to launcher_ops.signal_watchdog() — shared with Linux."""
+        return launcher_ops.signal_watchdog(self._docker, container, sig)
 
     def handle_sleep(self):
         """Handle system sleep — DEL_ONION via watchdog, notify hub, release caffeinate.
@@ -3476,144 +3459,26 @@ class OnionPressApp(rumps.App):
             self.log(f"wp core install error: {e}")
 
     def _provision_primary_subsite(self, sw, onion_addr):
-        """Create a subsite at /<onionname>/ for the primary user.
-
-        Unless this install is a branded site (matches `_BRANDED_ONIONS`) —
-        in which case blog_id=1 is the canonical public site (product
-        pages / directory), and we just set `onionpress_root_site=yes` so
-        the root-redirect mu-plugin leaves `/` alone.
-
-        Runs once during first-run after multisite conversion completes.
-        Idempotent: if a subsite at /<onionname>/ already exists the second
-        call is a no-op.
-        """
+        """Delegate to setup_logic.provision_primary_subsite() (shared with Linux)."""
         if not sw or not sw.admin_user:
             return
         docker_bin = os.path.join(self.bin_dir, "docker")
-        onionname = sw.admin_user
-        branded = onion_addr in _BRANDED_ONIONS
 
-        if branded:
-            self.log(
-                f"Branded install ({onion_addr}); skipping /{onionname}/ "
-                "subsite, keeping blog_id=1 as the canonical surface"
-            )
-            # `--url=http://localhost/` routes wp-cli to blog_id=1 via
-            # sunrise.php (which keys on domain='localhost' path='/').
-            subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "option", "update", "onionpress_root_site", "yes",
-                 "--url=http://localhost/", "--allow-root"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=30,
-            )
-            return
-
-        # Non-branded: create the subsite at /<onionname>/ and make the
-        # primary user its admin. wp site create needs --url to identify
-        # an existing site in the network; we use localhost/ which routes
-        # to blog_id=1.
-        self.log(f"Creating primary subsite /{onionname}/")
-        if sw:
-            sw.set_status(f"Creating your blog at /{onionname}/...")
-            sw.add_log(f"Creating subsite /{onionname}/...")
-        result = subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "site", "create",
-             f"--slug={onionname}",
-             f"--title={sw.site_title or onionname}",
-             "--email=admin@onionpress.local",
-             "--url=http://localhost/", "--allow-root"],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=60,
-        )
-        if result.returncode != 0:
-            # "already exists" is fine; anything else we log and move on —
-            # the install is still usable, primary user just lives on
-            # blog_id=1 until they retry.
-            stderr = (result.stderr or "")[-300:]
-            if "already exists" in stderr.lower():
-                self.log(f"Subsite /{onionname}/ already exists — ok")
-            else:
-                self.log(f"wp site create failed: {stderr}")
-                if sw:
-                    sw.add_log("Subsite creation failed — your blog lives at /")
-                return
-        else:
-            self.log(f"Subsite /{onionname}/ created")
-
-        # `wp site create --email=...` adds the user as admin of the new
-        # subsite when the email matches an existing user, but belt-and-
-        # suspenders: explicitly grant administrator role on the subsite.
-        subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "user", "add-role", onionname, "administrator",
-             f"--url=http://localhost/{onionname}/", "--allow-root"],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=30,
-        )
-
-        # Point the user's primary_blog at the new subsite. Otherwise WP's
-        # admin bar "+ New", wp-admin/ redirects, and the "My Sites" default
-        # all resolve to blog_id=1 (the network root) — users end up posting
-        # to http://<onion>/wp-admin/ instead of their own
-        # http://<onion>/<onionname>/wp-admin/, which is wrong and confusing.
-        # `wp site list --path=...` collides with wp-cli's global --path flag,
-        # and --site__in= wants blog IDs, so we use wp eval to call
-        # get_blog_id_from_url() directly — which returns 0 if not found.
-        blog_id_result = subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "eval",
-             f'echo get_blog_id_from_url("localhost", "/{onionname}/");',
-             "--allow-root"],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=30,
-        )
-        # Strip any leading PHP warnings (e.g. the recurring HTTP_HOST one)
-        # and take the last non-empty line as the blog_id.
-        lines = [l.strip() for l in (blog_id_result.stdout or "").splitlines() if l.strip()]
-        blog_id = lines[-1] if lines else ""
-        if blog_id.isdigit() and int(blog_id) > 0:
-            subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "user", "meta", "update", onionname, "primary_blog",
-                 blog_id, "--allow-root"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=30,
-            )
-        else:
-            self.log(
-                f"Could not resolve blog_id for /{onionname}/ — "
-                f"primary_blog not updated (got: {blog_id!r})"
-            )
-
-        # wp site create assigns WP_DEFAULT_THEME (twentytwentyfive), and the
-        # launcher's earlier `wp theme activate onionpress` only touched
-        # blog_id=1 — so without this the subsite renders unthemed. Since
-        # root-redirect.php bounces / → /<onionname>/ once the subsite exists,
-        # the user otherwise never sees OnionPress at all.
-        subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "theme", "activate", "onionpress",
-             f"--url=http://localhost/{onionname}/", "--allow-root"],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=30,
-        )
-
-        # Hide LLAR's admin-bar badge on the user's subsite. Onionpress
-        # sites are Tor-only, so IP-based lockout counters are mostly
-        # noise — the plugin stays active for protection, but the count
-        # lives where users expect it: Settings → Limit Login Attempts.
-        subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "option", "update", "limit_login_show_top_bar_menu_item", "0",
-             f"--url=http://localhost/{onionname}/", "--allow-root"],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=30,
-        )
+        def _log(msg):
+            self.log(msg)
+            if sw:
+                sw.add_log(msg)
 
         if sw:
-            sw.add_log(f"Your blog is at /{onionname}/")
+            sw.set_status(f"Creating your blog at /{sw.admin_user}/...")
+
+        setup_logic.provision_primary_subsite(
+            onionname=sw.admin_user,
+            site_title=sw.site_title or sw.admin_user,
+            onion_addr=onion_addr,
+            docker_bin=docker_bin,
+            log_func=_log,
+        )
 
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.

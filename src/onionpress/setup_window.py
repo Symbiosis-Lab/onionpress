@@ -26,9 +26,9 @@ import threading
 import os
 
 try:
-    from onionpress import onionnames_client
+    from onionpress import setup_logic as _setup_logic
 except ImportError:
-    onionnames_client = None
+    _setup_logic = None
 
 
 # ---------------------------------------------------------------------------
@@ -117,17 +117,8 @@ STEPS = [
 ]
 
 def _default_site_title():
-    """Generate default site title from macOS user's initials."""
-    try:
-        import subprocess
-        result = subprocess.run(['id', '-F'], capture_output=True, text=True, timeout=5)
-        full_name = result.stdout.strip()
-        if full_name:
-            initials = ''.join(w[0].upper() for w in full_name.split() if w)
-            if initials:
-                return f"{initials} OnionPress"
-    except Exception:
-        pass
+    if _setup_logic is not None:
+        return _setup_logic.default_site_title()
     return "My OnionPress Site"
 
 
@@ -585,20 +576,14 @@ class SetupProgressWindow(AppKit.NSObject):
 
     def regenerateOnionname_(self, sender):
         """Pick a fresh local adjective-noun suggestion in the current language."""
-        if onionnames_client is None:
+        if _setup_logic is None:
             return
-        # Use the currently-selected language so the suggestion matches what
-        # the user just chose in the popup.
         try:
             lang_idx = self._language_popup.indexOfSelectedItem()
         except Exception:
             lang_idx = -1
         lang = self._language_codes[lang_idx] if lang_idx >= 0 else "en_US"
-        try:
-            name = onionnames_client.suggest_name_local(lang) \
-                or onionnames_client.suggest_name_local("en")
-        except Exception:
-            name = None
+        name = _setup_logic.suggest_onionname(lang)
         if name and self._user_field:
             self._user_field.setStringValue_(name)
             self.admin_user = name
@@ -633,8 +618,8 @@ class SetupProgressWindow(AppKit.NSObject):
                 })
             self._user_field.setPlaceholderAttributedString_(red_placeholder)
             missing = True
-        elif onionnames_client is not None:
-            ok, reason = onionnames_client.validate_name(self.admin_user)
+        elif _setup_logic is not None:
+            ok, reason = _setup_logic.validate_onionname(self.admin_user)
             if not ok:
                 self._show_user_hint({
                     "too_short": "Onionname must be at least 5 characters.",

@@ -1,17 +1,23 @@
-"""Mac sleep prevention via the `caffeinate` utility.
+"""Cross-platform sleep prevention.
 
-Wraps a single caffeinate subprocess whose lifetime follows the OnionPress
-service. Config mode (PREVENT_SLEEP) selects the flavor:
+Mac:   CaffeineManager wraps `caffeinate -s | -i`.
+Linux: SystemdInhibitor wraps `systemd-inhibit --what=idle:sleep`.
 
-    normal      — no caffeinate; Mac sleeps normally
-    on-battery  — `caffeinate -s`; stays awake only on AC power
-    never       — `caffeinate -i`; never sleeps while OnionPress runs
+Both classes share the same interface (`start()` / `stop()` /
+`is_running()`) so the menubar / service can swap them freely. Both
+read the `PREVENT_SLEEP` key from `~/.onionpress/config`:
 
-Also reaps orphaned caffeinate processes left behind by a previous crash
-or force-quit (PID file in app_support).
+    normal      — no inhibit; system sleeps normally
+    on-battery  — Mac: caffeinate -s (AC only); Linux: idle inhibit
+                  (best-effort; Linux can't easily condition on AC)
+    never       — Mac: caffeinate -i; Linux: idle+sleep inhibit
+
+Both reap orphaned inhibitor processes from prior crashes via the
+shared PID file in app_support / data_dir.
 """
 
 import os
+import shutil
 import subprocess
 from typing import Callable, Optional
 
@@ -107,6 +113,133 @@ class CaffeineManager:
             try:
                 self._process.kill()
                 self._log("Force killed caffeinate process")
+            except Exception:
+                pass
+        finally:
+            self._process = None
+            try:
+                os.remove(self.pid_file)
+            except OSError:
+                pass
+
+
+class SystemdInhibitor:
+    """Linux equivalent of CaffeineManager — wraps systemd-inhibit.
+
+    `systemd-inhibit --what=<locks> sleep infinity` holds an inhibitor
+    lock as long as its child sleep process is alive. We Popen() that
+    command and store the PID; on stop() we terminate it and the lock
+    releases.
+
+    `what` modes:
+      idle       — prevents idle suspend (screensaver / auto-suspend)
+      sleep      — prevents systemd-initiated suspend / hibernate
+      idle:sleep — both
+
+    Manual sleep (lid close, `systemctl suspend`) is governed by
+    different locks (`handle-lid-switch`, etc.) which we deliberately
+    do NOT block — the user must always be able to put the machine
+    to sleep deliberately.
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        log_func: Callable[[str], None],
+        read_config: Callable[[str, str], str],
+    ):
+        self.data_dir = data_dir
+        self._log = log_func
+        self._read_config = read_config
+        self._process: Optional[subprocess.Popen] = None
+
+    @property
+    def pid_file(self) -> str:
+        return os.path.join(self.data_dir, "systemd-inhibit.pid")
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def _cleanup_stale(self) -> None:
+        if not os.path.exists(self.pid_file):
+            return
+        try:
+            with open(self.pid_file) as f:
+                old_pid = int(f.read().strip())
+            # Confirm it's actually systemd-inhibit before killing — PIDs recycle.
+            try:
+                with open(f"/proc/{old_pid}/comm") as f:
+                    comm = f.read().strip()
+            except OSError:
+                comm = ""
+            if "systemd-inhibit" in comm or comm == "systemd-inhibi":
+                os.kill(old_pid, 15)
+                self._log(f"Cleaned up orphaned systemd-inhibit (PID {old_pid})")
+            os.remove(self.pid_file)
+        except (ValueError, OSError):
+            try:
+                os.remove(self.pid_file)
+            except OSError:
+                pass
+
+    def start(self) -> None:
+        """Start systemd-inhibit per configured mode. No-op if already running."""
+        if self.is_running():
+            return
+
+        if not shutil.which("systemd-inhibit"):
+            return  # No systemd on this host — silently skip.
+
+        self._cleanup_stale()
+
+        mode = self._read_config("PREVENT_SLEEP", "normal").lower()
+        if mode == "yes":
+            mode = "on-battery"
+        elif mode == "no":
+            mode = "normal"
+
+        if mode == "on-battery":
+            what = "idle"
+            msg = "blocking idle suspend while OnionPress runs"
+        elif mode == "never":
+            what = "idle:sleep"
+            msg = "blocking idle and auto-suspend while OnionPress runs"
+        else:
+            return  # "normal" — Linux sleeps normally
+
+        try:
+            self._process = subprocess.Popen(
+                ["systemd-inhibit",
+                 f"--what={what}",
+                 "--who=OnionPress",
+                 "--why=Serving onion site",
+                 "--mode=block",
+                 "sleep", "infinity"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            try:
+                with open(self.pid_file, "w") as f:
+                    f.write(str(self._process.pid))
+            except OSError:
+                pass
+            self._log(f"Started systemd-inhibit (PID {self._process.pid}) - {msg}")
+        except Exception as e:
+            self._log(f"Failed to start systemd-inhibit: {e}")
+
+    def stop(self) -> None:
+        """Terminate systemd-inhibit and remove the PID file."""
+        if self._process is None:
+            return
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=2)
+            self._log("Stopped systemd-inhibit - system can sleep normally")
+        except Exception:
+            try:
+                self._process.kill()
+                self._log("Force killed systemd-inhibit process")
             except Exception:
                 pass
         finally:

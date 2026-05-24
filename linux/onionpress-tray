@@ -49,6 +49,11 @@ try:
 except ImportError:
     launcher_ops = None  # tray still runs; some features degrade gracefully
 
+try:
+    from onionpress import setup_logic as _setup_logic  # type: ignore
+except ImportError:
+    _setup_logic = None
+
 
 # ─── Constants ──────────────────────────────────────────────────────────
 
@@ -507,6 +512,299 @@ def confirm_regenerate(parent=None) -> bool:
     return response == Gtk.ResponseType.OK
 
 
+# ─── 6b. First-run setup dialog ─────────────────────────────────────────
+
+class SetupDialog:
+    """First-run wizard: welcome form → provisioning progress.
+
+    Shown by the tray when status.json transitions to
+    wp_installed=True, onboarded=False.  Calls
+    setup_logic.provision_existing_wordpress() in a background thread;
+    GLib.idle_add bridges thread → GTK.
+
+    on_done(success: bool) is called on the GTK thread after provisioning
+    completes.  If _setup_logic is unavailable (import failed), the dialog
+    shows a fallback directing the user to `onionpress provision` in a
+    terminal.
+    """
+
+    _STEPS = [
+        "Configuring your site title",
+        "Creating your account",
+        "Setting up your blog",
+        "Finishing up",
+    ]
+
+    def __init__(self, parent=None, on_done=None):
+        self._on_done = on_done
+        self._step_idx = 0
+
+        self._dlg = Gtk.Dialog(title="Welcome to OnionPress", parent=parent,
+                               flags=0)
+        self._dlg.set_deletable(False)
+        self._dlg.set_default_size(480, -1)
+
+        self._stack = Gtk.Stack()
+        self._stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT)
+        self._stack.set_transition_duration(300)
+
+        self._build_welcome()
+        self._build_progress()
+
+        content = self._dlg.get_content_area()
+        content.set_border_width(0)
+        content.add(self._stack)
+        self._dlg.show_all()
+        self._stack.set_visible_child_name("welcome")
+
+    def run(self):
+        self._dlg.run()
+
+    def destroy(self):
+        self._dlg.destroy()
+
+    # ── Welcome phase ─────────────────────────────────────────────────
+
+    def _build_welcome(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_border_width(24)
+
+        heading = Gtk.Label()
+        heading.set_markup("<big><b>Set up your OnionPress site</b></big>")
+        heading.set_xalign(0)
+        box.add(heading)
+
+        if _setup_logic is None:
+            note = Gtk.Label(label=(
+                "The onionpress Python package is not installed.\n"
+                "Run  onionpress provision  in a terminal to finish setup."))
+            note.set_line_wrap(True)
+            note.set_xalign(0)
+            box.add(note)
+            close_btn = Gtk.Button(label="Close")
+            close_btn.connect("clicked",
+                              lambda *_: self._dlg.response(Gtk.ResponseType.CANCEL))
+            box.add(close_btn)
+            self._setup_btn = None
+            self._stack.add_named(box, "welcome")
+            return
+
+        sub = Gtk.Label(label=(
+            "Choose a username and password for your WordPress account. "
+            "You can change these later from the dashboard."))
+        sub.set_line_wrap(True)
+        sub.set_xalign(0)
+        box.add(sub)
+
+        grid = Gtk.Grid(column_spacing=12, row_spacing=8)
+
+        row = 0
+        grid.attach(Gtk.Label(label="Site title:", xalign=1), 0, row, 1, 1)
+        self._title_entry = Gtk.Entry()
+        self._title_entry.set_hexpand(True)
+        self._title_entry.set_text(_setup_logic.default_site_title())
+        self._title_entry.set_placeholder_text("e.g. Alice's OnionPress")
+        self._title_entry.connect("changed", self._validate_form)
+        grid.attach(self._title_entry, 1, row, 1, 1)
+
+        row += 1
+        grid.attach(Gtk.Label(label="Username:", xalign=1), 0, row, 1, 1)
+        self._name_entry = Gtk.Entry()
+        self._name_entry.set_hexpand(True)
+        suggestion = _setup_logic.suggest_onionname() or ""
+        self._name_entry.set_text(suggestion)
+        self._name_entry.set_placeholder_text("letters and numbers only")
+        self._name_entry.connect("changed", self._on_name_changed)
+        grid.attach(self._name_entry, 1, row, 1, 1)
+
+        row += 1
+        self._name_error = Gtk.Label(label="")
+        self._name_error.set_xalign(0)
+        grid.attach(self._name_error, 1, row, 1, 1)
+
+        row += 1
+        grid.attach(Gtk.Label(label="Password:", xalign=1), 0, row, 1, 1)
+        self._pw_entry = Gtk.Entry()
+        self._pw_entry.set_hexpand(True)
+        self._pw_entry.set_visibility(False)
+        self._pw_entry.set_placeholder_text("choose a strong password")
+        self._pw_entry.connect("changed", self._validate_form)
+        grid.attach(self._pw_entry, 1, row, 1, 1)
+
+        row += 1
+        grid.attach(Gtk.Label(label="Confirm:", xalign=1), 0, row, 1, 1)
+        self._pw2_entry = Gtk.Entry()
+        self._pw2_entry.set_hexpand(True)
+        self._pw2_entry.set_visibility(False)
+        self._pw2_entry.set_placeholder_text("repeat password")
+        self._pw2_entry.connect("changed", self._validate_form)
+        self._pw2_entry.connect("activate", self._on_setup_clicked)
+        grid.attach(self._pw2_entry, 1, row, 1, 1)
+
+        row += 1
+        self._pw_error = Gtk.Label(label="")
+        self._pw_error.set_xalign(0)
+        grid.attach(self._pw_error, 1, row, 1, 1)
+
+        box.add(grid)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        btn_box.set_halign(Gtk.Align.END)
+        self._setup_btn = Gtk.Button(label="Set Up My Site")
+        self._setup_btn.get_style_context().add_class("suggested-action")
+        self._setup_btn.connect("clicked", self._on_setup_clicked)
+        self._setup_btn.set_sensitive(False)
+        btn_box.pack_end(self._setup_btn, False, False, 0)
+        box.add(btn_box)
+
+        self._stack.add_named(box, "welcome")
+        # Trigger initial validation so the button state is correct.
+        self._validate_form()
+
+    def _on_name_changed(self, *_):
+        name = self._name_entry.get_text().strip()
+        if name and _setup_logic:
+            ok, reason = _setup_logic.validate_onionname(name)
+            if not ok:
+                _msgs = {
+                    "too_short": "Too short (min 2 characters)",
+                    "too_long": "Too long (max 63 characters)",
+                    "invalid_chars": "Letters and numbers only",
+                    "all_numeric": "Cannot be all numbers",
+                }
+                self._name_error.set_text(_msgs.get(reason, "Invalid username"))
+            else:
+                self._name_error.set_text("")
+        else:
+            self._name_error.set_text("")
+        self._validate_form()
+
+    def _validate_form(self, *_):
+        title_ok = bool(self._title_entry.get_text().strip())
+        name = self._name_entry.get_text().strip()
+        name_ok = bool(name)
+        if name_ok and _setup_logic:
+            name_ok, _ = _setup_logic.validate_onionname(name)
+        pw = self._pw_entry.get_text()
+        pw2 = self._pw2_entry.get_text()
+        pw_ok = len(pw) >= 6
+        match_ok = pw == pw2
+        if pw2 and not match_ok:
+            self._pw_error.set_text("Passwords don't match")
+        elif pw and not pw_ok:
+            self._pw_error.set_text("Password too short (min 6 characters)")
+        else:
+            self._pw_error.set_text("")
+        if self._setup_btn:
+            self._setup_btn.set_sensitive(
+                title_ok and name_ok and pw_ok and match_ok)
+
+    # ── Progress phase ────────────────────────────────────────────────
+
+    def _build_progress(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_border_width(24)
+
+        heading = Gtk.Label()
+        heading.set_markup("<big><b>Setting up your site…</b></big>")
+        heading.set_xalign(0)
+        box.add(heading)
+
+        self._step_labels = []
+        for step in self._STEPS:
+            lbl = Gtk.Label(label=f"  · {step}")
+            lbl.set_xalign(0)
+            box.add(lbl)
+            self._step_labels.append(lbl)
+
+        self._progress_bar = Gtk.ProgressBar()
+        box.add(self._progress_bar)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_size_request(-1, 120)
+        scrolled.set_hexpand(True)
+        self._log_view = Gtk.TextView()
+        self._log_view.set_editable(False)
+        self._log_view.set_monospace(True)
+        self._log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        scrolled.add(self._log_view)
+        box.add(scrolled)
+
+        self._stack.add_named(box, "progress")
+
+    # ── Button click / provisioning ───────────────────────────────────
+
+    def _on_setup_clicked(self, *_):
+        if _setup_logic is None:
+            return
+        title = self._title_entry.get_text().strip()
+        onionname = self._name_entry.get_text().strip()
+        password = self._pw_entry.get_text()
+        if not (title and onionname and len(password) >= 6
+                and password == self._pw2_entry.get_text()):
+            return
+        ok, _ = _setup_logic.validate_onionname(onionname)
+        if not ok:
+            return
+
+        self._stack.set_visible_child_name("progress")
+        threading.Thread(
+            target=self._provision,
+            args=(title, onionname, password),
+            daemon=True,
+        ).start()
+
+    def _provision(self, title, onionname, password):
+        ok = _setup_logic.provision_existing_wordpress(
+            site_title=title,
+            onionname=onionname,
+            password=password,
+            log_func=self._log,
+        )
+        GLib.idle_add(self._done, ok)
+
+    # ── Thread-safe UI helpers ────────────────────────────────────────
+
+    def _log(self, msg: str) -> None:
+        GLib.idle_add(self._append_log, msg)
+        if "Site title set" in msg:
+            GLib.idle_add(self._advance_step)
+        elif "Username set" in msg or "Username update" in msg:
+            GLib.idle_add(self._advance_step)
+        elif "Subsite /" in msg and "ready" in msg:
+            GLib.idle_add(self._advance_step)
+        elif "Marked as onboarded" in msg:
+            GLib.idle_add(self._advance_step)
+
+    def _append_log(self, msg: str) -> bool:
+        buf = self._log_view.get_buffer()
+        buf.insert(buf.get_end_iter(), f"{msg}\n")
+        self._log_view.scroll_to_mark(buf.get_insert(), 0.0, False, 0, 0)
+        return False
+
+    def _advance_step(self) -> bool:
+        if self._step_idx > 0:
+            i = self._step_idx - 1
+            self._step_labels[i].set_label(f"  ✓ {self._STEPS[i]}")
+        if self._step_idx < len(self._step_labels):
+            self._step_labels[self._step_idx].set_label(
+                f"  ⟳ {self._STEPS[self._step_idx]}")
+        self._step_idx += 1
+        self._progress_bar.set_fraction(
+            min(self._step_idx / len(self._STEPS), 1.0))
+        return False
+
+    def _done(self, success: bool) -> bool:
+        if self._step_idx > 0 and self._step_idx <= len(self._step_labels):
+            i = self._step_idx - 1
+            self._step_labels[i].set_label(f"  ✓ {self._STEPS[i]}")
+        self._progress_bar.set_fraction(1.0)
+        if self._on_done:
+            self._on_done(success)
+        self._dlg.response(Gtk.ResponseType.OK)
+        return False
+
+
 # ─── 7. The tray itself ────────────────────────────────────────────────
 
 class OnionPressTray:
@@ -548,6 +846,7 @@ class OnionPressTray:
 
         self._announced_starting = False
         self._announced_online = False
+        self._setup_shown = False
 
     def _build_menu(self):
         # Layout mirrors the Mac menubar (src/menubar.py:472) so users
@@ -573,6 +872,7 @@ class OnionPressTray:
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("View Logs", lambda *_: show_log_viewer())
+        self._item("Setup…", lambda *_: self._show_setup_dialog())
         self._item("Settings…", self._on_open_settings)
         self.menu.append(Gtk.SeparatorMenuItem())
 
@@ -600,6 +900,7 @@ class OnionPressTray:
         self._update_icon()
         self._update_status_line()
         self._maybe_announce()
+        self._maybe_show_setup()
 
     def _update_icon(self):
         state = self.status.state
@@ -666,6 +967,37 @@ class OnionPressTray:
                      lambda: Launcher.run_async("dashboard")),
                 ],
             )
+
+    def _maybe_show_setup(self):
+        if self._setup_shown:
+            return
+        if not self.status.wp_installed:
+            return
+        if self.status.onboarded:
+            return
+        self._setup_shown = True
+        self._show_setup_dialog()
+
+    def _show_setup_dialog(self):
+        """Run SetupDialog synchronously on the GTK main thread.
+
+        gtk.Dialog.run() runs a nested event loop, so status polling
+        continues while the dialog is open.
+        """
+        def _on_done(success):
+            if success:
+                url = self._build_login_url("http://localhost:8080/")
+                if launcher_ops is not None:
+                    launcher_ops.open_in_browser(url)
+                else:
+                    subprocess.Popen(
+                        ["xdg-open", url],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+
+        dlg = SetupDialog(on_done=_on_done)
+        dlg.run()
+        dlg.destroy()
 
     def _on_copy_address(self, *_):
         addr = self.status.onion_address

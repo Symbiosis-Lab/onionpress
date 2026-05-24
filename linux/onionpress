@@ -2463,6 +2463,22 @@ main() {
             echo "  Status page: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}/onionpress-status"
             ;;
 
+        provision)
+            # Provision an already-installed WordPress with user-chosen
+            # site title, username, and password.  Used in headless / SSH
+            # installs after the auto-install bootstrap (systemd path where
+            # the container auto-installs WP with a random admin password).
+            # Unlike `setup`, this works when WP is already installed.
+            #
+            # Usage: onionpress provision
+            #   → interactive terminal prompts
+            PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -c "
+import sys
+from onionpress.setup_logic import provision_interactive
+sys.exit(0 if provision_interactive() else 1)
+"
+            ;;
+
         import-key)
             import_key "$2"
             ;;
