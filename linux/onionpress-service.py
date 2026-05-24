@@ -284,6 +284,7 @@ def write_status(
         "wp_admin_password_path": wp_admin_password_path,
         "vanity_in_progress": vanity_in_progress,
         "serving_from_wayback": serving_from_wayback,
+        "wp_port": manager.port_config.wp_port,
     }
 
     payload = json.dumps(status, indent=2)

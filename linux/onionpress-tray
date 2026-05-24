@@ -139,6 +139,7 @@ class Status:
         self.uptime_seconds = 0
         self.containers = {}
         self.error_message = None
+        self.wp_port = 8080
         self.raw = {}
         self._mtime = 0.0
         self._on_change = on_change
@@ -173,6 +174,13 @@ class Status:
         self.uptime_seconds = int(data.get("uptime_seconds", 0))
         self.containers = dict(data.get("containers", {}))
         self.error_message = data.get("error_message")
+        # wp_port reflects the launcher's port-offset detection so the
+        # tray opens the right localhost URL on multi-user / port-conflict
+        # installs (e.g. system tor on 9050 pushes WP to 18080).
+        try:
+            self.wp_port = int(data.get("wp_port", 8080))
+        except (TypeError, ValueError):
+            self.wp_port = 8080
         new = (self.state, self.wp_installed, self.onboarded,
                self.onion_address, self.serving_from_wayback)
 
@@ -1041,7 +1049,7 @@ class OnionPressTray:
         """
         def _on_done(success):
             if success:
-                url = self._build_login_url("http://localhost:8080/")
+                url = self._build_login_url(f"http://localhost:{self.status.wp_port}/")
                 if launcher_ops is not None:
                     launcher_ops.open_in_browser(url)
                 else:
@@ -1135,7 +1143,7 @@ class OnionPressTray:
 
     def _on_open_settings(self, *_):
         url = self._build_login_url(
-            "http://localhost:8080/wp-admin/admin.php?page=onionpress-settings")
+            f"http://localhost:{self.status.wp_port}/wp-admin/admin.php?page=onionpress-settings")
         if launcher_ops is not None:
             launcher_ops.open_in_browser(url)
         else:
@@ -1145,7 +1153,7 @@ class OnionPressTray:
             )
 
     def _on_open_local(self, *_):
-        url = self._build_login_url("http://localhost:8080/")
+        url = self._build_login_url(f"http://localhost:{self.status.wp_port}/")
         if launcher_ops is not None:
             launcher_ops.open_in_browser(url)
         else:

@@ -2188,6 +2188,7 @@ status = {
     'wp_admin_password_path': sys.argv[22] or None,
     'vanity_in_progress': sys.argv[23] == 'true',
     'serving_from_wayback': sys.argv[24] == 'true',
+    'wp_port': int(sys.argv[25]),
 }
 print(json.dumps(status, indent=2))
 " "$state" "$ONIONPRESS_VERSION" "$onion_addr" "$uptime_seconds" "$bootstrap_pct" "$containers_json" "$wayback_queue" "$now_iso" \
@@ -2195,7 +2196,8 @@ print(json.dumps(status, indent=2))
   "$oh_client_registered" "$oh_client_hub" "$oh_config_enabled" \
   "$load_avg_json" "$host_uptime_seconds" \
   "$wp_installed_str" "$onboarded" "$mkp224o_available" \
-  "$wp_admin_password_file" "$vanity_in_progress" "$serving_from_wayback")
+  "$wp_admin_password_file" "$vanity_in_progress" "$serving_from_wayback" \
+  "${ONIONPRESS_WP_PORT:-8080}")
 
     # Write to shared volume (consumed by the WP settings/status page)
     echo "$status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
