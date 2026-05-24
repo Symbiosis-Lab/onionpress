@@ -8,5 +8,6 @@ Icon=onionpress
 Categories=Network;
 StartupNotify=false
 NoDisplay=false
+StartupWMClass=onionpress-tray
 X-GNOME-Autostart-Phase=Applications
 OnlyShowIn=GNOME;KDE;XFCE;MATE;Cinnamon;Unity;LXQt;LXDE;Budgie;Pantheon;

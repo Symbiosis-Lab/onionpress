@@ -550,13 +550,26 @@ $SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray
 # rather than memorizing a localhost URL. Per-user — no sudo, no /usr.
 
 DESKTOP_APPS_DIR="$REAL_HOME/.local/share/applications"
-DESKTOP_ICONS_DIR="$REAL_HOME/.local/share/icons/hicolor/512x512/apps"
+DESKTOP_HICOLOR_DIR="$REAL_HOME/.local/share/icons/hicolor"
+# Ship the same app-icon.png at every dock-relevant size so GNOME's
+# StatusNotifier / dash-to-dock pick up the rainbow gradient instead of
+# falling back to the generic gear icon (the fallback fires whenever the
+# theme search misses the size the shell asks for). gtk-update-icon-cache
+# below picks these up. We install identical copies and let GTK scale —
+# avoids an ImageMagick dep on minimal Pi installs.
+DESKTOP_ICON_SIZES="48 64 128 256 512"
 
 if [ -n "$SUDO_USER" ]; then
     install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DESKTOP_APPS_DIR"
-    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DESKTOP_ICONS_DIR"
+    for _size in $DESKTOP_ICON_SIZES; do
+        install -d -o "$SUDO_USER" -g "$SUDO_USER" \
+            "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps"
+    done
 else
-    mkdir -p "$DESKTOP_APPS_DIR" "$DESKTOP_ICONS_DIR"
+    mkdir -p "$DESKTOP_APPS_DIR"
+    for _size in $DESKTOP_ICON_SIZES; do
+        mkdir -p "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps"
+    done
 fi
 
 cat > "$DESKTOP_APPS_DIR/onionpress.desktop" <<DESKTOP_EOF
@@ -573,12 +586,18 @@ StartupNotify=false
 DESKTOP_EOF
 
 if [ -f "$INSTALL_DIR/app-icon.png" ]; then
-    cp "$INSTALL_DIR/app-icon.png" "$DESKTOP_ICONS_DIR/onionpress.png"
+    for _size in $DESKTOP_ICON_SIZES; do
+        cp "$INSTALL_DIR/app-icon.png" \
+            "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps/onionpress.png"
+    done
 fi
 
 if [ -n "$SUDO_USER" ]; then
     chown "$SUDO_USER:$SUDO_USER" "$DESKTOP_APPS_DIR/onionpress.desktop" 2>/dev/null || true
-    chown "$SUDO_USER:$SUDO_USER" "$DESKTOP_ICONS_DIR/onionpress.png" 2>/dev/null || true
+    for _size in $DESKTOP_ICON_SIZES; do
+        chown "$SUDO_USER:$SUDO_USER" \
+            "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps/onionpress.png" 2>/dev/null || true
+    done
 fi
 
 # ─── Tray autostart (per-user) ───────────────────────────────────────
@@ -602,6 +621,7 @@ Icon=onionpress
 Categories=Network;
 StartupNotify=false
 NoDisplay=true
+StartupWMClass=onionpress-tray
 X-GNOME-Autostart-Phase=Applications
 OnlyShowIn=GNOME;KDE;XFCE;MATE;Cinnamon;Unity;LXQt;LXDE;Budgie;Pantheon;
 TRAY_EOF

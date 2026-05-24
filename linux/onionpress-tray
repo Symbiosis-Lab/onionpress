@@ -80,6 +80,14 @@ ICON_RUNNING = "tray-running"
 ICON_STARTING = "tray-starting"
 ICON_STOPPED = "tray-stopped"
 
+# Full-resolution app icon used for dialog windows (About, Setup, Backup,
+# Recovery, etc.). Without this, GNOME's dock has no way to associate a
+# dialog window's WM_CLASS with the `onionpress` theme icon and falls
+# back to a generic gray gear. Setting it as the default window icon at
+# startup means every GtkWindow we open inherits the rainbow gradient
+# logo automatically.
+APP_ICON_PATH = os.path.join(INSTALL_DIR, "app-icon.png")
+
 POLL_INTERVAL_SEC = 2
 NOTIFY_DEBOUNCE_SEC = 60
 
@@ -1491,6 +1499,27 @@ def main() -> int:
         return 0
 
     log(f"onionpress-tray starting (pid={os.getpid()})")
+
+    # Dock identity: prgname becomes the window WM_CLASS, which is what
+    # GNOME matches against StartupWMClass= in our .desktop file to pick
+    # the dock icon. Application name is the human label shown next to
+    # it. set_default_icon_from_file is the belt-and-braces fallback for
+    # shells whose icon theme can't find a sized "onionpress" entry.
+    try:
+        GLib.set_prgname("onionpress-tray")
+        GLib.set_application_name("OnionPress")
+    except Exception as e:
+        log(f"setting prgname/app-name failed: {e}")
+    if os.path.exists(APP_ICON_PATH):
+        try:
+            Gtk.Window.set_default_icon_from_file(APP_ICON_PATH)
+        except Exception as e:
+            log(f"set_default_icon_from_file failed: {e}")
+    else:
+        try:
+            Gtk.Window.set_default_icon_name("onionpress")
+        except Exception as e:
+            log(f"set_default_icon_name failed: {e}")
 
     def _shutdown(*_):
         log("received shutdown signal")
