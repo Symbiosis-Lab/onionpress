@@ -565,9 +565,43 @@ StartupNotify=false
 DESKTOP_EOF
 
 if [ -f "$INSTALL_DIR/app-icon.png" ]; then
+    # Resize to each target dimension. Plain `cp` of the 1024x1024
+    # source into a "48x48" directory leaves the file at native size,
+    # and GNOME's panel renders it at native dimensions inside the
+    # ~22px cell — zoomed and clipped. Prefer ImageMagick `convert`
+    # (pre-installed on most desktops); fall back to Python+PIL; fall
+    # back further to GdkPixbuf via python3-gi (the tray's runtime dep
+    # is already python3-gi, so this is guaranteed available); last
+    # resort, copy unscaled and accept the rendering bug rather than
+    # leaving the icon directories empty.
+    _resize_icon() {
+        local src="$1" dst="$2" size="$3"
+        if command -v convert >/dev/null 2>&1; then
+            convert "$src" -resize "${size}x${size}" "$dst" 2>/dev/null && return 0
+        fi
+        if python3 -c 'from PIL import Image' 2>/dev/null; then
+            python3 -c "
+from PIL import Image
+img = Image.open('$src')
+img.thumbnail(($size, $size), Image.LANCZOS)
+img.save('$dst', 'PNG')
+" 2>/dev/null && return 0
+        fi
+        if python3 -c 'import gi; gi.require_version(\"GdkPixbuf\", \"2.0\"); from gi.repository import GdkPixbuf' 2>/dev/null; then
+            python3 -c "
+import gi
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import GdkPixbuf
+pix = GdkPixbuf.Pixbuf.new_from_file_at_size('$src', $size, $size)
+pix.savev('$dst', 'png', [], [])
+" 2>/dev/null && return 0
+        fi
+        cp "$src" "$dst"
+    }
     for _size in $DESKTOP_ICON_SIZES; do
-        cp "$INSTALL_DIR/app-icon.png" \
-            "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps/onionpress.png"
+        _resize_icon "$INSTALL_DIR/app-icon.png" \
+            "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps/onionpress.png" \
+            "$_size"
     done
 fi
 
