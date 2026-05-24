@@ -1474,6 +1474,26 @@ class OnionPressTray:
         if not confirm_quit():
             return
 
+        # Tear the UI down NOW, before launching the background stop.
+        # The Launcher.run / systemctl-stop chain can take up to ~30s
+        # (longer if the launcher binary is missing post-uninstall and
+        # systemctl waits for a non-existent unit), and Gtk.main_quit
+        # alone only unwinds one nested loop — any open About / Setup /
+        # Backup / Log dialog would keep its own dlg.run() loop alive
+        # and the tray icon would linger via the AppIndicator's D-Bus
+        # name. Hiding the indicator + destroying every toplevel makes
+        # the click feel instant; the background thread still finishes
+        # the stop and then hard-exits the process.
+        try:
+            self.indicator.set_status(AppIndicator.IndicatorStatus.PASSIVE)
+        except Exception as e:
+            log(f"hiding indicator on quit: {e}")
+        for w in Gtk.Window.list_toplevels():
+            try:
+                w.destroy()
+            except Exception as e:
+                log(f"destroying window on quit: {e}")
+
         def _run():
             try:
                 Launcher.run("stop", capture=True, timeout=120)
@@ -1486,7 +1506,10 @@ class OnionPressTray:
                 )
             except Exception as e:
                 log(f"systemctl stop on quit: {e}")
-            GLib.idle_add(Gtk.main_quit)
+            # os._exit (not Gtk.main_quit) — guarantees the process
+            # terminates and the StatusNotifierItem D-Bus name drops
+            # even if some other main loop is still on the stack.
+            os._exit(0)
         threading.Thread(target=_run, daemon=True).start()
 
 
