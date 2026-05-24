@@ -503,9 +503,12 @@ else
     echo ""
 fi
 
-# Create symlinks for easy CLI access
-$SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress 2>/dev/null || true
-$SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray 2>/dev/null || true
+# Create symlinks for easy CLI access. /usr/local/bin doesn't exist on
+# minimal Ubuntu/Debian images, and `ln -sf` with `|| true` would silently
+# swallow the failure — so `mkdir -p` first while we still hold sudo.
+$SUDO mkdir -p /usr/local/bin
+$SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress
+$SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray
 
 # ─── Desktop entry (per-user) ────────────────────────────────────────
 # Puts OnionPress in the user's app drawer so they can launch the

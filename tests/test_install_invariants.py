@@ -285,6 +285,38 @@ class TestLinuxInstallTray(unittest.TestCase):
             "without it the autostart .desktop Exec= path doesn't resolve.",
         )
 
+    def test_usr_local_bin_created_before_symlink(self):
+        """Guard against the install completing but `onionpress` being absent
+        from PATH because /usr/local/bin didn't exist on a minimal image and
+        the original `ln -sf … 2>/dev/null || true` swallowed the failure.
+
+        The fix: mkdir -p /usr/local/bin while sudo is held, and remove the
+        error-suppressing `|| true` so a genuine symlink failure aborts the
+        install instead of producing a half-working state.
+        """
+        # mkdir must appear before the symlink lines.
+        mkdir_pos = self.script.find("mkdir -p /usr/local/bin")
+        ln_pos = self.script.find("/usr/local/bin/onionpress")
+        self.assertGreaterEqual(
+            mkdir_pos, 0,
+            "install.sh must `mkdir -p /usr/local/bin` — that dir doesn't "
+            "exist on minimal Ubuntu/Debian images.",
+        )
+        self.assertLess(
+            mkdir_pos, ln_pos,
+            "`mkdir -p /usr/local/bin` must come BEFORE the `ln -sf` lines.",
+        )
+        # The symlink lines must NOT swallow errors any more — otherwise a
+        # real failure (filesystem read-only, etc.) silently produces a
+        # broken install.
+        self.assertNotRegex(
+            self.script,
+            r'ln\s+-sf\s+[^\n]*/usr/local/bin/onionpress[^\n]*\|\|\s*true',
+            "Symlink command must NOT end with `|| true` — that was the bug "
+            "that hid the missing /usr/local/bin and produced an install "
+            "with no `onionpress` on PATH.",
+        )
+
     def test_autostart_desktop_file_written(self):
         self.assertIn(
             "onionpress-tray.desktop",
