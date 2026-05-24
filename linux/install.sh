@@ -241,6 +241,13 @@ $SUDO chmod +x "$INSTALL_DIR/onionpress-tray"
 $SUDO cp -r "$REPO_DIR/app/Resources/docker" "$INSTALL_DIR/docker"
 $SUDO cp -r "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
 
+# OnionPress theme (header w/ @onionname, Follow/Directory templates).
+# The launcher's install_onionpress_theme() silently skips if the
+# directory is missing, leaving WP on a default theme.
+if [ -d "$REPO_DIR/app/Resources/themes" ]; then
+    $SUDO cp -r "$REPO_DIR/app/Resources/themes" "$INSTALL_DIR/themes"
+fi
+
 if [ -d "$REPO_DIR/app/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/app/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
@@ -289,10 +296,11 @@ $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.service" "$INSTALL_DIR/"
 $SUDO cp "$REPO_DIR/linux/onionpress-watcher.service" "$INSTALL_DIR/"
 $SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" "$INSTALL_DIR/"
 
-# Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
-# users access from another device). The main compose file uses 127.0.0.1.
-$SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
-$SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
+# LAN bind: the compose file defaults to 127.0.0.1, but the Linux launcher
+# exports ONIONPRESS_BIND_HOST=0.0.0.0 (linux/onionpress) so a headless
+# Pi can be reached from another device on the LAN. The compose template
+# interpolates ${ONIONPRESS_BIND_HOST:-127.0.0.1}, so no sed rewrite is
+# needed — the env var handles it at compose-up time.
 
 # Write version file (VERSION file is the single source of truth)
 VERSION="unknown"

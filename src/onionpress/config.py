@@ -299,31 +299,44 @@ def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str) -> None:
 
 
 def detect_port_offset() -> PortConfig:
-    """Detect available port offset for multi-user support.
+    """Detect available port offset for multi-user / port-conflict support.
 
-    Tries to bind the WordPress port (8080); if in use, bumps offset
-    by 10000 until a free port is found. Uses real socket binding,
-    which detects ports bound by any user (unlike lsof).
+    Probes all three host-exposed ports (WP 8080, SOCKS 9050, PROXY 9077);
+    if ANY is in use, bumps the offset by 10000 and retries. Uses real
+    socket binding so it detects ports bound by other users or system
+    services (e.g. a system tor on 9050 from torbrowser-launcher's apt
+    deps) — not just other OnionPress instances. lsof would only show
+    the current user's processes.
     """
     offset = 0
     while True:
-        test_port = 8080 + offset
-        if test_port > 65535:
+        ports = (8080 + offset, 9050 + offset, 9077 + offset)
+        if max(ports) > 65535:
             offset = 0  # fall back to default
             break
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        all_free = True
+        for p in ports:
             try:
-                s.bind(("127.0.0.1", test_port))
-                break
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             except OSError:
-                offset += 10000
-            finally:
+                # Can't even create a socket — give up
+                offset = 0
+                return PortConfig(
+                    offset=offset,
+                    wp_port=8080 + offset,
+                    socks_port=9050 + offset,
+                    proxy_port=9077 + offset,
+                )
+            try:
+                s.bind(("127.0.0.1", p))
+            except OSError:
+                all_free = False
                 s.close()
-        except OSError:
-            # Can't even create socket — fall back to default
-            offset = 0
+                break
+            s.close()
+        if all_free:
             break
+        offset += 10000
 
     return PortConfig(
         offset=offset,

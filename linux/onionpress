@@ -127,11 +127,49 @@ if [ -S "$_rootless_sock" ]; then
     export DOCKER_SOCK="$_rootless_sock"
 fi
 
-# Default ports (no multi-user offset on Linux — single-purpose server)
-export ONIONPRESS_PORT_OFFSET=0
-export ONIONPRESS_WP_PORT=8080
-export ONIONPRESS_SOCKS_PORT=9050
-export ONIONPRESS_PROXY_PORT=9077
+# Port-offset detection. Mirrors app/MacOS/onionpress's detect_port_offset
+# (Mac multi-user). Probes all three host-exposed ports — WP 8080, SOCKS
+# 9050, proxy 9077 — and bumps the offset by 10000 if any is in use. The
+# common Linux collision is a system tor on 9050 (apt-installed by
+# torbrowser-launcher); offset 10000 publishes OnionPress SOCKS on 19050
+# instead. The container internally still listens on 9050, so the onion
+# service is unaffected. Uses real socket bind (not lsof) so it sees
+# ports owned by other users / system services.
+detect_port_offset() {
+    local offset=0
+    while true; do
+        local wp=$((8080 + offset))
+        local socks=$((9050 + offset))
+        local proxy=$((9077 + offset))
+        if [ $proxy -gt 65535 ]; then
+            offset=0
+            break
+        fi
+        if python3 -c '
+import socket, sys
+for p in sys.argv[1:]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", int(p)))
+    except OSError:
+        sys.exit(1)
+    finally:
+        s.close()
+' "$wp" "$socks" "$proxy" 2>/dev/null; then
+            break
+        fi
+        offset=$((offset + 10000))
+    done
+    echo "$offset"
+}
+
+if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
+    ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
+fi
+export ONIONPRESS_PORT_OFFSET
+export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
+export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
+export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
 
 # Bind host. Linux is typically headless (Pi accessed from a phone or
 # laptop on the LAN), so we bind to all interfaces by default. Desktop
