@@ -135,6 +135,88 @@ class TestInstallFreshWordpress(unittest.TestCase):
         self.assertIn("--user_url=http://abc.onion/alice/", argv)
 
 
+class TestProvisionInteractiveRouting(unittest.TestCase):
+    """provision_interactive (the SSH/TUI path) routes through the right
+    install fn based on whether WP is already installed."""
+
+    def setUp(self):
+        # Stub input/getpass to feed deterministic values into the
+        # interactive prompts so we can run the function headless.
+        patches = [
+            mock.patch("builtins.input", side_effect=["My Blog", "alice"]),
+            mock.patch("getpass.getpass", side_effect=["hunter22", "hunter22"]),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_routes_to_install_fresh_when_wp_not_installed(self):
+        with mock.patch(
+            "onionpress.setup_logic._wp_is_installed", return_value=False,
+        ), mock.patch(
+            "onionpress.setup_logic._read_onion_address",
+            return_value="abc.onion",
+        ), mock.patch(
+            "onionpress.setup_logic.install_fresh_wordpress",
+            return_value=True,
+        ) as m_fresh, mock.patch(
+            "onionpress.setup_logic.provision_existing_wordpress",
+            return_value=True,
+        ) as m_existing:
+            ok = setup_logic.provision_interactive()
+        self.assertTrue(ok)
+        m_fresh.assert_called_once()
+        m_existing.assert_not_called()
+        # The fresh path must pass the live onion address through.
+        self.assertEqual(m_fresh.call_args.kwargs["onion_addr"], "abc.onion")
+        self.assertEqual(m_fresh.call_args.kwargs["onionname"], "alice")
+
+    def test_routes_to_existing_when_wp_already_installed(self):
+        with mock.patch(
+            "onionpress.setup_logic._wp_is_installed", return_value=True,
+        ), mock.patch(
+            "onionpress.setup_logic.install_fresh_wordpress",
+            return_value=True,
+        ) as m_fresh, mock.patch(
+            "onionpress.setup_logic.provision_existing_wordpress",
+            return_value=True,
+        ) as m_existing:
+            ok = setup_logic.provision_interactive()
+        self.assertTrue(ok)
+        m_existing.assert_called_once()
+        m_fresh.assert_not_called()
+
+
+class TestProvisionPostInstallSubcommandPresent(unittest.TestCase):
+    """Invariant: both bash launchers must expose a
+    `provision-post-install` subcommand. install_fresh_wordpress shells
+    out to `<launcher> provision-post-install` after `wp core install`,
+    so deleting it from either launcher silently breaks the install
+    path on that platform.
+    """
+
+    def _read(self, *path_parts):
+        full = os.path.join(os.path.dirname(__file__), "..", *path_parts)
+        with open(full) as f:
+            return f.read()
+
+    def test_linux_launcher_has_subcommand(self):
+        src = self._read("linux", "onionpress")
+        self.assertIn(
+            "provision-post-install)", src,
+            "linux/onionpress is missing the `provision-post-install)` "
+            "case — install_fresh_wordpress's post-install hop will fail",
+        )
+
+    def test_mac_launcher_has_subcommand(self):
+        src = self._read("app", "MacOS", "onionpress")
+        self.assertIn(
+            "provision-post-install)", src,
+            "app/MacOS/onionpress is missing the `provision-post-install)` "
+            "case — install_fresh_wordpress's post-install hop will fail",
+        )
+
+
 class TestNoBootstrapPasswordOnNewInstalls(unittest.TestCase):
     """Invariant: the bash launcher must no longer auto-write
     ~/.onionpress/wp-admin-password on non-interactive (systemd) start.
