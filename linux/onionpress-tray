@@ -478,27 +478,100 @@ def show_log_viewer(parent=None):
 
 
 def show_backup_dialog(parent=None):
-    dlg = Gtk.MessageDialog(
-        parent=parent, flags=0,
-        message_type=Gtk.MessageType.INFO,
-        buttons=Gtk.ButtonsType.OK_CANCEL,
-        text="Create OnionPress backup",
+    # Custom Gtk.Dialog (not MessageDialog) so we can verify the password
+    # inline against WordPress before kicking off the long-running backup
+    # — matches the Mac flow where `verify_wp_admin` runs before the zip
+    # work starts. Bash already re-verifies inside create_backup, so this
+    # is purely a UX improvement: the user sees "Password does not match"
+    # in 1-2s instead of waiting for the full backup to fail.
+    dlg = Gtk.Dialog(
+        title="Create OnionPress backup",
+        parent=parent,
+        flags=0,
     )
-    dlg.format_secondary_text(
-        "A password-protected .zip will be created in ~/OnionPress/backups/. "
-        "Enter your WordPress admin password to authorise the backup.")
+    dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+    ok_btn = dlg.add_button("_Back Up", Gtk.ResponseType.OK)
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    ok_btn.get_style_context().add_class("suggested-action")
+
+    body = dlg.get_content_area()
+    body.set_border_width(16)
+    body.set_spacing(8)
+
+    blurb = Gtk.Label(label=(
+        "A password-protected .zip will be created in "
+        "~/OnionPress/backups/. Enter your WordPress admin password to "
+        "authorise the backup."))
+    blurb.set_line_wrap(True)
+    blurb.set_xalign(0)
+    body.add(blurb)
+
     entry = Gtk.Entry()
     entry.set_visibility(False)
     entry.set_activates_default(True)
     entry.set_placeholder_text("admin password")
-    box = dlg.get_content_area()
-    box.pack_end(entry, False, False, 8)
-    dlg.set_default_response(Gtk.ResponseType.OK)
-    dlg.show_all()
-    response = dlg.run()
-    password = entry.get_text()
+    body.add(entry)
+
+    error_lbl = Gtk.Label()
+    error_lbl.set_xalign(0)
+    error_lbl.set_line_wrap(True)
+    body.add(error_lbl)
+
+    body.show_all()
+
+    def _verify_then_start():
+        password = entry.get_text()
+        if not password:
+            error_lbl.set_markup(
+                "<span foreground='red'>"
+                "Please enter your admin password.</span>")
+            return False
+        # Disable input + button during verification so accidental
+        # double-clicks don't fire a second wp eval.
+        ok_btn.set_sensitive(False)
+        entry.set_sensitive(False)
+        error_lbl.set_markup(
+            "<i>Verifying password…</i>")
+
+        def _verify():
+            ok, msg = False, "verification unavailable"
+            try:
+                from onionpress import backup as _b  # type: ignore
+                ok, msg = _b.verify_wp_admin_password_any(password)
+            except Exception as e:
+                msg = f"verification failed: {e}"
+                log(f"backup verify: {e}")
+
+            def _apply():
+                if ok:
+                    dlg.response(Gtk.ResponseType.APPLY)
+                    return False
+                error_lbl.set_markup(
+                    f"<span foreground='red'>{GLib.markup_escape_text(msg)}</span>")
+                ok_btn.set_sensitive(True)
+                entry.set_sensitive(True)
+                entry.grab_focus()
+                return False
+            GLib.idle_add(_apply)
+        threading.Thread(target=_verify, daemon=True).start()
+        return True
+
+    password = None
+    while True:
+        response = dlg.run()
+        if response == Gtk.ResponseType.OK:
+            if _verify_then_start():
+                continue  # wait for APPLY/error
+            # Empty password — just keep dialog open.
+            continue
+        if response == Gtk.ResponseType.APPLY:
+            password = entry.get_text()
+            break
+        # Cancel / close.
+        break
     dlg.destroy()
-    if response != Gtk.ResponseType.OK or not password:
+
+    if not password:
         return
 
     def _run():
@@ -972,6 +1045,7 @@ class OnionPressTray:
 
         self._announced_starting = False
         self._announced_online = False
+        self._port_offset_announced = False
         self._setup_shown = False
 
     def _build_menu(self):
@@ -1026,7 +1100,39 @@ class OnionPressTray:
         self._update_icon()
         self._update_status_line()
         self._maybe_announce()
+        self._maybe_announce_port_offset()
         self._maybe_show_setup()
+
+    def _maybe_announce_port_offset(self):
+        # One-shot Notify when the launcher had to dodge the default
+        # ports (8080/9050/9077). The common Linux trigger is a system
+        # tor on 9050 from torbrowser-launcher's apt deps — the launcher
+        # silently bumps to 18080/19050/19077, and without this hint the
+        # user sees the dashboard URL change and has no idea why.
+        if self._port_offset_announced:
+            return
+        if self.status.wp_port == 8080:
+            self._port_offset_announced = True
+            return
+        marker = os.path.join(DATA_DIR, ".port-offset-notified")
+        if os.path.exists(marker):
+            self._port_offset_announced = True
+            return
+        self.notifier.notify(
+            "port-offset",
+            f"OnionPress is using port {self.status.wp_port}",
+            "Another service is bound to 8080/9050 (commonly a system "
+            "tor installed alongside Tor Browser). OnionPress moved "
+            "off the defaults so the two don't collide — your site "
+            "still works the same.",
+            urgency="low",
+        )
+        try:
+            with open(marker, "w") as f:
+                f.write("1\n")
+        except OSError as e:
+            log(f"port-offset marker write: {e}")
+        self._port_offset_announced = True
 
     def _update_icon(self):
         state = self.status.state

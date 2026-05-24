@@ -213,6 +213,45 @@ def verify_wp_admin(username, password):
     return (True, None)
 
 
+def verify_wp_admin_password_any(password):
+    """Verify *password* matches any WordPress administrator's account.
+
+    Returns (True, username) on success, or (False, error_message).
+
+    Mirrors the bash launcher's pre-flight check in create_backup
+    (linux/onionpress) so password-only UI flows (e.g. the Linux tray's
+    backup dialog) can give inline feedback without asking the user to
+    remember their admin username. Uses wp_check_password directly so
+    it bypasses login rate-limiting and session cookies.
+    """
+    php_code = (
+        "$pw = trim(file_get_contents('php://stdin'));"
+        "$users = get_users(array('role' => 'administrator'));"
+        "foreach ($users as $u) {"
+        "  if (wp_check_password($pw, $u->user_pass)) {"
+        "    echo $u->user_login;"
+        "    exit;"
+        "  }"
+        "}"
+        "exit(1);"
+    )
+    try:
+        result = subprocess.run(
+            ['docker', 'exec', '-i', 'onionpress-wordpress',
+             'wp', 'eval', php_code, '--allow-root'],
+            input=password,
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return (True, result.stdout.strip())
+        return (False, "Password does not match any administrator account.")
+    except subprocess.TimeoutExpired:
+        return (False, "Timed out verifying password.")
+    except Exception as e:
+        return (False, f"Error verifying password: {e}")
+
+
 def get_admin_username(data_dir=None):
     """Return the WordPress admin user's login.
 
