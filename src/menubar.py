@@ -4548,8 +4548,8 @@ Features:
 Created by the Internet Archive
 License: AGPL v3"""
 
-        github_url = "https://github.com/brewsterkahle/onionpress"
-        link_label = "GitHub: github.com/brewsterkahle/onionpress"
+        web_url = "https://onionpress.org"
+        link_label = "onionpress.org"
 
         def show_dialog():
             alert = AppKit.NSAlert.alloc().init()
@@ -4567,7 +4567,7 @@ License: AGPL v3"""
                 if icon:
                     alert.setIcon_(icon)
 
-            # Create clickable GitHub link as accessory view
+            # Clickable website link as accessory view
             link_field = AppKit.NSTextField.labelWithString_("")
             link_field.setSelectable_(True)
             link_field.setAllowsEditingTextAttributes_(True)
@@ -4576,11 +4576,10 @@ License: AGPL v3"""
 
             # Build attributed string with clickable link
             attr_str = AppKit.NSMutableAttributedString.alloc().initWithString_(link_label)
-            url = AppKit.NSURL.URLWithString_(github_url)
-            link_range = AppKit.NSMakeRange(len("GitHub: "), len(link_label) - len("GitHub: "))
-            attr_str.addAttribute_value_range_(AppKit.NSLinkAttributeName, url, link_range)
-            font = AppKit.NSFont.systemFontOfSize_(AppKit.NSFont.smallSystemFontSize())
+            url = AppKit.NSURL.URLWithString_(web_url)
             full_range = AppKit.NSMakeRange(0, len(link_label))
+            attr_str.addAttribute_value_range_(AppKit.NSLinkAttributeName, url, full_range)
+            font = AppKit.NSFont.systemFontOfSize_(AppKit.NSFont.smallSystemFontSize())
             attr_str.addAttribute_value_range_(AppKit.NSFontAttributeName, font, full_range)
 
             link_field.setAttributedStringValue_(attr_str)

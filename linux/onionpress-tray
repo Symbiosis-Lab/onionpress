@@ -280,14 +280,36 @@ def show_about_dialog():
     except OSError:
         pass
 
+    # Mirrors the Mac menubar "About OnionPress" copy (src/menubar.py
+    # show_about) so users get the same pitch regardless of platform.
+    comments = (
+        "Run your own website from your computer.\n"
+        "Just Works. Free, forever.\n"
+        "WordPress + Tor Onion Service\n"
+        "\n"
+        "• Full WordPress that you own and run\n"
+        "• Internet Archive's Wayback Machine integration\n"
+        "• Tor Onion Service with an address you own, forever\n"
+        "• Requires visitors to use Tor or Brave browsers\n"
+        "• Privacy-first design\n"
+        "• Free and open source"
+    )
+
     dlg = Gtk.AboutDialog()
     dlg.set_program_name("OnionPress")
     dlg.set_version(version)
-    dlg.set_comments("Your decentralized social blog, over Tor")
+    dlg.set_comments(comments)
     dlg.set_website("https://onionpress.org")
     dlg.set_website_label("onionpress.org")
-    dlg.set_copyright("© Internet Archive")
+    # GtkAboutDialog has no dedicated "credits" line, but the copyright
+    # slot renders as plain text under the title — re-use it for the
+    # attribution line that matches the Mac About body.
+    dlg.set_copyright("Created by the Internet Archive")
+    # AGPL_3_0 surfaces a "License" button in the dialog footer that
+    # opens the full text — matches the "License: AGPL v3" line on Mac.
+    dlg.set_license_type(Gtk.License.AGPL_3_0)
     dlg.set_logo_icon_name("onionpress")
+    dlg.set_authors(["Internet Archive"])
 
     rec_btn = Gtk.Button(label="Recovery info…")
     rec_btn.connect("clicked", lambda _b: show_recovery_dialog(dlg))
