@@ -250,6 +250,25 @@ fi
 $SUDO mkdir -p "$INSTALL_DIR/lib"
 $SUDO cp -r "$REPO_DIR/src/onionpress" "$INSTALL_DIR/lib/onionpress"
 
+# Tray icons (tray-running/-starting/-stopped.png). The tray's ICON_THEME_PATH
+# points at $INSTALL_DIR/assets; without these the indicator falls back to the
+# distro's missing-icon glyph.
+if [ -d "$REPO_DIR/linux/assets" ]; then
+    $SUDO cp -r "$REPO_DIR/linux/assets" "$INSTALL_DIR/assets"
+fi
+
+# Bring up the tray immediately — with the binary, shared lib, and icons in
+# place it can show a gray "stopped" icon and a working "View Logs" menu
+# while the rest of install (Docker pulls, container startup, WordPress
+# configuration) is still running. Headless boxes silently skip this; the
+# late dashboard-open block below also no longer relaunches the tray.
+if { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+    pkill -u "$REAL_USER" -f onionpress-tray 2>/dev/null || true
+    sleep 0.3
+    run_as_user "$INSTALL_DIR/onionpress-tray" >/dev/null 2>&1 &
+    echo "  Tray icon launched — use it to view logs during install."
+fi
+
 # Icon for the per-user .desktop entry created at the end. Kept in INSTALL_DIR
 # so it survives temp-dir cleanup below.
 if [ -f "$REPO_DIR/app/Resources/app-icon.png" ]; then
@@ -592,14 +611,10 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     run_as_user gtk-update-icon-cache -t -f "$REAL_HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
-# On a GUI desktop: start the tray now and open the browser to wp-admin.
-# Headless boxes (no DISPLAY/WAYLAND_DISPLAY) skip both silently.
+# On a GUI desktop: open the browser to wp-admin. The tray itself was
+# launched right after the file copies so the user could open View Logs
+# during the long Docker/WP setup; we don't relaunch it here.
 if { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
-    # Kill any stale tray before relaunching (handles reinstall).
-    pkill -u "$REAL_USER" -f onionpress-tray 2>/dev/null || true
-    sleep 0.5
-    run_as_user "$INSTALL_DIR/onionpress-tray" >/dev/null 2>&1 &
-
     if [ "$wp_ready" = "true" ] && command -v xdg-open >/dev/null 2>&1; then
         run_as_user "$INSTALL_DIR/onionpress" dashboard >/dev/null 2>&1 &
     fi
