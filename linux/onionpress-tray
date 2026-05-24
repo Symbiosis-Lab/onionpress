@@ -1065,6 +1065,62 @@ class OnionPressTray:
             "copied", "Onion address copied", addr, urgency="low",
         )
 
+    def _show_url_copy_dialog(self, url: str) -> None:
+        """Pop a small modal showing the URL in a selectable entry, with a
+        Copy button. Used when Tor Browser is already running and we
+        can't inject a tab via Firefox remoting (TB suppresses DBus
+        registration). Window ownership of the clipboard is what makes
+        the Copy reliable on Wayland; window-less Gtk.Clipboard.set_text
+        from the tray silently no-ops there.
+        """
+        dlg = Gtk.Dialog(
+            title="Open in Tor Browser",
+            parent=None, flags=0,
+        )
+        dlg.set_default_size(560, -1)
+        copy_btn = dlg.add_button("Copy URL", 1)
+        dlg.add_button("Close", Gtk.ResponseType.CLOSE)
+        dlg.set_default_response(1)
+
+        box = dlg.get_content_area()
+        box.set_border_width(12)
+        box.set_spacing(8)
+
+        label = Gtk.Label(
+            label=("Tor Browser is already running.\n"
+                   "Copy this URL and paste (Ctrl-V) into a new tab.\n"
+                   "The auto-login token is included."),
+            xalign=0.0,
+        )
+        label.set_line_wrap(True)
+        box.pack_start(label, False, False, 0)
+
+        entry = Gtk.Entry()
+        entry.set_text(url)
+        entry.set_editable(False)
+        entry.set_can_focus(True)
+        # Select all so a Ctrl-C immediately works even without the button.
+        entry.select_region(0, -1)
+        box.pack_start(entry, False, False, 0)
+
+        def on_copy(_btn):
+            try:
+                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                clipboard.set_text(url, -1)
+                # The dialog window owns the clipboard while it's open;
+                # store() asks any running clipboard manager to keep the
+                # data alive after the dialog closes (no-op if none).
+                clipboard.store()
+            except Exception as e:
+                log(f"clipboard set failed: {e}")
+        copy_btn.connect("clicked", on_copy)
+
+        dlg.show_all()
+        entry.grab_focus()
+        entry.select_region(0, -1)
+        dlg.run()
+        dlg.destroy()
+
     def _build_login_url(self, base_url: str) -> str:
         """Append a freshly-minted op_login token to base_url for auto-login.
         Falls back to plain base_url if token minting fails (e.g. wp_user
@@ -1118,23 +1174,15 @@ class OnionPressTray:
         # the new-instance code path, hits the profile lock, and pops
         # "Tor Browser is already running" at the user. start-tor-browser
         # via the wrapper doesn't help — same firefox, same missing IPC.
-        # Best UX we can offer: copy the URL to the clipboard via GTK so a
-        # single Ctrl-V in the open TB tab finishes the job, and notify
-        # the user. The auto-login token in the URL still works once they
-        # paste — it's the URL itself the mu-plugin honours.
+        # Setting the GTK clipboard from a window-less tray on Wayland
+        # silently no-ops too (no focused window to own it; no clipboard
+        # manager installed on this box). So we pop a tiny dialog whose
+        # window DOES own the clipboard, with the URL pre-selected and a
+        # Copy button. The auto-login token in the URL is honoured by
+        # the onionpress-auto-login.php mu-plugin once pasted.
         existing = launcher_ops._tor_browser_running()
         if existing:
-            try:
-                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-                clipboard.set_text(url, -1)
-                clipboard.store()  # persist after the tray exits
-            except Exception as e:
-                log(f"clipboard set failed: {e}")
-            self.notifier.notify(
-                "tor-already-running", "URL copied for Tor Browser",
-                "Tor Browser is already open — paste with Ctrl-V into a "
-                "new tab. (Auto-login token preserved.)",
-            )
+            self._show_url_copy_dialog(url)
             return
 
         # Already mid-launch from a previous click? Don't kick off a
