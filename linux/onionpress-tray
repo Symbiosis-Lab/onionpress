@@ -1045,7 +1045,6 @@ class OnionPressTray:
 
         self._announced_starting = False
         self._announced_online = False
-        self._port_offset_announced = False
         self._setup_shown = False
 
     def _build_menu(self):
@@ -1100,39 +1099,7 @@ class OnionPressTray:
         self._update_icon()
         self._update_status_line()
         self._maybe_announce()
-        self._maybe_announce_port_offset()
         self._maybe_show_setup()
-
-    def _maybe_announce_port_offset(self):
-        # One-shot Notify when the launcher had to dodge the default
-        # ports (8080/9050/9077). The common Linux trigger is a system
-        # tor on 9050 from torbrowser-launcher's apt deps — the launcher
-        # silently bumps to 18080/19050/19077, and without this hint the
-        # user sees the dashboard URL change and has no idea why.
-        if self._port_offset_announced:
-            return
-        if self.status.wp_port == 8080:
-            self._port_offset_announced = True
-            return
-        marker = os.path.join(DATA_DIR, ".port-offset-notified")
-        if os.path.exists(marker):
-            self._port_offset_announced = True
-            return
-        self.notifier.notify(
-            "port-offset",
-            f"OnionPress is using port {self.status.wp_port}",
-            "Another service is bound to 8080/9050 (commonly a system "
-            "tor installed alongside Tor Browser). OnionPress moved "
-            "off the defaults so the two don't collide — your site "
-            "still works the same.",
-            urgency="low",
-        )
-        try:
-            with open(marker, "w") as f:
-                f.write("1\n")
-        except OSError as e:
-            log(f"port-offset marker write: {e}")
-        self._port_offset_announced = True
 
     def _update_icon(self):
         state = self.status.state
