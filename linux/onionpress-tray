@@ -1111,12 +1111,30 @@ class OnionPressTray:
             )
             return
 
-        # If Tor Browser is already running, just open the URL as a new tab.
-        # Mac path also does this — the auto-login token is honoured by the
-        # onionpress-auto-login.php mu-plugin once Tor delivers the request.
+        # If Tor Browser is already running, we cannot inject a new tab:
+        # Tor Browser ships without DBus remoting registration (none of
+        # mozilla/firefox/torbrowser bus names appear under the user's
+        # session bus), so `firefox -new-tab URL` always falls through to
+        # the new-instance code path, hits the profile lock, and pops
+        # "Tor Browser is already running" at the user. start-tor-browser
+        # via the wrapper doesn't help — same firefox, same missing IPC.
+        # Best UX we can offer: copy the URL to the clipboard via GTK so a
+        # single Ctrl-V in the open TB tab finishes the job, and notify
+        # the user. The auto-login token in the URL still works once they
+        # paste — it's the URL itself the mu-plugin honours.
         existing = launcher_ops._tor_browser_running()
         if existing:
-            launcher_ops.open_in_browser(url, prefer_tor=True)
+            try:
+                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                clipboard.set_text(url, -1)
+                clipboard.store()  # persist after the tray exits
+            except Exception as e:
+                log(f"clipboard set failed: {e}")
+            self.notifier.notify(
+                "tor-already-running", "URL copied for Tor Browser",
+                "Tor Browser is already open — paste with Ctrl-V into a "
+                "new tab. (Auto-login token preserved.)",
+            )
             return
 
         # Already mid-launch from a previous click? Don't kick off a
