@@ -217,6 +217,26 @@ class TestProvisionPostInstallSubcommandPresent(unittest.TestCase):
         )
 
 
+class TestDebPrermKillsTray(unittest.TestCase):
+    """Invariant: the .deb's prerm script must kill the running tray.
+
+    Without it, `apt remove onionpress` leaves the in-memory tray
+    process up; its indicator keeps painting and every status poll
+    ENOENTs on the now-deleted /opt/onionpress files until logout.
+    """
+
+    def test_prerm_pkill_onionpress_tray(self):
+        build_script = os.path.join(
+            os.path.dirname(__file__), "..", "build", "build-linux.sh",
+        )
+        with open(build_script) as f:
+            src = f.read()
+        self.assertIn(
+            "pkill -f /opt/onionpress/onionpress-tray", src,
+            "build-linux.sh's prerm must pkill the tray on remove",
+        )
+
+
 class TestNoBootstrapPasswordOnNewInstalls(unittest.TestCase):
     """Invariant: the bash launcher must no longer auto-write
     ~/.onionpress/wp-admin-password on non-interactive (systemd) start.

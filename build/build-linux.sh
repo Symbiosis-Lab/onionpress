@@ -377,10 +377,22 @@ set -e
 case "$1" in
     remove)
         # Globally disable so the units don't relink on next login.
-        # Per-user running instances are left to the user to stop with
-        # `systemctl --user stop onionpress` — root can't reach into
-        # arbitrary user sessions from prerm reliably.
         systemctl --global disable onionpress.service onionpress-heartbeat.service onionpress-watcher.timer 2>/dev/null || true
+
+        # Kill any running tray across all users. Without this, the
+        # in-memory tray keeps painting its indicator icon and hitting
+        # ENOENT on every poll after /opt/onionpress is removed, until
+        # the user logs out. root can pkill by command line regardless
+        # of which session owns the process.
+        pkill -f /opt/onionpress/onionpress-tray 2>/dev/null || true
+        # Sleep briefly so the StatusNotifier D-Bus name drops before
+        # the next step (the data.tar.gz removal). Otherwise some
+        # shells redraw the stale icon for a few extra seconds.
+        sleep 1
+        # Also stop any user-session OnionPress launcher / heartbeat
+        # that's actively running — same rationale, root knows the
+        # binary path.
+        pkill -f /opt/onionpress/onionpress 2>/dev/null || true
         ;;
     upgrade|deconfigure|failed-upgrade)
         # No-op — preserve running state across upgrade.
