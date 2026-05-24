@@ -47,3 +47,6 @@ extension-firefox/
 # Stress test results (contain secret keys)
 onionheaven-stress-results/
 tests/onionheaven-stress-results/
+
+# Per-user Claude Code config (local permissions, hooks, etc.)
+.claude/
