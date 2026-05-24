@@ -211,8 +211,10 @@ $SUDO mkdir -p "$INSTALL_DIR"
 
 # Determine source: if we're in the repo, use local files; otherwise clone
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/onionpress" ] && [ -d "$SCRIPT_DIR/../OnionPress.app" ]; then
-    # Running from cloned repo
+if [ -f "$SCRIPT_DIR/onionpress" ] && [ -d "$SCRIPT_DIR/../src/onionpress" ]; then
+    # Running from cloned repo. (We previously gated on OnionPress.app/ but
+    # that's macOS-only build output and gitignored — it never exists on a
+    # Linux dev clone, so the check fell through to a fresh GitHub clone.)
     REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     echo "  Source: local repo at $REPO_DIR"
 else
@@ -242,6 +244,11 @@ $SUDO cp -r "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
 if [ -d "$REPO_DIR/app/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/app/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
+
+# Shared Python package — required by `op_py` in the launcher (PYTHONPATH=$INSTALL_DIR/lib)
+# and by onionpress-tray which inserts $INSTALL_DIR/lib into sys.path.
+$SUDO mkdir -p "$INSTALL_DIR/lib"
+$SUDO cp -r "$REPO_DIR/src/onionpress" "$INSTALL_DIR/lib/onionpress"
 
 # Icon for the per-user .desktop entry created at the end. Kept in INSTALL_DIR
 # so it survives temp-dir cleanup below.
