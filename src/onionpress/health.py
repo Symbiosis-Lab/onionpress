@@ -15,6 +15,33 @@ from typing import Callable, Optional
 from .docker import Docker
 
 
+# Curl exit-code → human reason map. When an external reachability probe
+# fails before getting an HTTP response, check_status formats the result
+# as "000rc=N" so the rc travels with the http_code through the same
+# logging path. Centralising the dict here means the Mac MenubarApp and
+# any future Linux health-check path log the same wording.
+CURL_RC_REASONS = {
+    "1": "protocol error (descriptor not yet available)",
+    "6": "DNS resolution failed",
+    "7": "connection refused",
+    "28": "timeout (30s)",
+    "35": "TLS handshake failed",
+    "52": "empty reply",
+    "56": "connection reset",
+    "97": "SOCKS handshake failed (descriptor not yet available)",
+}
+
+
+def decode_curl_reason(http_code: str) -> str:
+    """Decode a 'rc=N' suffix on a 000-style http_code into a human reason.
+
+    Returns a short phrase suitable for log output, falling back to
+    "curl rc=N" for unknown codes or "unknown" if no rc is present.
+    """
+    rc = http_code.split("rc=")[1] if "rc=" in http_code else ""
+    return CURL_RC_REASONS.get(rc, f"curl rc={rc}" if rc else "unknown")
+
+
 class ServiceState(Enum):
     """Overall OnionPress service state."""
     STOPPED = "stopped"

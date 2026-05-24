@@ -40,6 +40,7 @@ from onionpress.health import (
     WEDGE_LOAD_WARN,
     WEDGE_LOAD_ALARM,
     WEDGE_FAILING_STREAK_ALARM,
+    decode_curl_reason,
 )
 from onionpress import config as op_config
 from onionpress.reachability_stats import ReachabilityStats
@@ -1375,19 +1376,7 @@ class OnionPressApp(rumps.App):
                     elif http_code == "302":
                         self.log("✗ Onion service returning 302 (OnionHeaven takeover active)")
                     elif http_code.startswith("000"):
-                        # Decode curl exit code for debugging
-                        _curl_reasons = {
-                            "1": "protocol error (descriptor not yet available)",
-                            "6": "DNS resolution failed",
-                            "7": "connection refused",
-                            "28": "timeout (30s)",
-                            "35": "TLS handshake failed",
-                            "52": "empty reply",
-                            "56": "connection reset",
-                            "97": "SOCKS handshake failed (descriptor not yet available)",
-                        }
-                        rc = http_code.split("rc=")[1] if "rc=" in http_code else ""
-                        reason = _curl_reasons.get(rc, f"curl rc={rc}" if rc else "unknown")
+                        reason = decode_curl_reason(http_code)
                         self.log(f"✗ Our onion service not yet reachable through Tor network ({reason})")
                     else:
                         self.log(f"✗ Onion service returned HTTP {http_code}")
