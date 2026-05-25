@@ -490,6 +490,17 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("admin-password",
                    help="Print the recovery admin password (if any)")
 
+    p_ppi = sub.add_parser(
+        "provision-post-install",
+        help="Run the WordPress post-install steps (multisite + theme + mu-plugins)",
+    )
+    p_ppi.add_argument(
+        "--themes-dir", required=True,
+        help="Source directory containing the onionpress theme dir")
+    p_ppi.add_argument(
+        "--plugins-dir", required=True,
+        help="Source directory containing mu-plugins, sunrise.php, icons")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -522,6 +533,13 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_generate_vanity()
     elif args.command == "admin-password":
         return cli.cmd_admin_password()
+    elif args.command == "provision-post-install":
+        from . import multisite
+        return multisite.provision_post_install(
+            themes_dir=args.themes_dir,
+            plugins_dir=args.plugins_dir,
+            log_func=print,
+        )
     else:
         parser.print_help()
         return 1

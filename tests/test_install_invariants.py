@@ -433,32 +433,39 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         theme = re.search(r'^\s*install_onionpress_theme\b', body, re.MULTILINE)
         return em, mdm, theme
 
-    def test_provision_post_install_subcommand_order(self):
-        script = _read("linux/onionpress")
-        # Carve out the `provision-post-install)` case body.
-        m = re.search(
-            r'provision-post-install\)(.*?);;', script, re.DOTALL)
-        self.assertIsNotNone(
-            m, "provision-post-install subcommand must exist in linux/onionpress")
-        em, mdm, theme = self._ordered_calls(m.group(1))
-        for name, match in [
-            ("ensure_multisite", em),
-            ("install_multisite_domain_map", mdm),
-            ("install_onionpress_theme", theme),
-        ]:
+    def test_provision_post_install_subcommand_delegates_to_python(self):
+        """The bash provision-post-install case used to inline all the
+        step calls; it now delegates to src/onionpress/multisite.py via
+        the python CLI. The step-ordering invariant lives in
+        tests/test_multisite.py:test_provision_runs_steps_in_order.
+        This test just verifies the delegation is wired up correctly
+        on both platforms.
+        """
+        for path, py_cmd in (
+            ("linux/onionpress", r'op_py\s+provision-post-install'),
+            ("app/MacOS/onionpress",
+             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+        ):
+            script = _read(path)
+            m = re.search(
+                r'provision-post-install\)(.*?);;', script, re.DOTALL)
             self.assertIsNotNone(
-                match, f"{name} must be called from provision-post-install")
-        self.assertLess(
-            em.start(), mdm.start(),
-            "ensure_multisite must run BEFORE install_multisite_domain_map — "
-            "the latter sets SUNRISE+sunrise.php, which queries wp_site on "
-            "every WP load. Reversed, every subsequent wp-cli call breaks.",
-        )
-        self.assertLess(
-            mdm.start(), theme.start(),
-            "install_multisite_domain_map must run before install_onionpress_"
-            "theme (sunrise.php needed for the per-onion domain rewrites).",
-        )
+                m, f"provision-post-install case must exist in {path}")
+            self.assertRegex(
+                m.group(1), py_cmd,
+                f"{path}: provision-post-install must delegate to the "
+                f"Python module (multisite.provision_post_install) — "
+                f"the step ordering invariant now lives there, not "
+                f"in two parallel bash copies that can silently drift.",
+            )
+            self.assertRegex(
+                m.group(1), r'--themes-dir',
+                f"{path}: must pass --themes-dir to the python CLI",
+            )
+            self.assertRegex(
+                m.group(1), r'--plugins-dir',
+                f"{path}: must pass --plugins-dir to the python CLI",
+            )
 
     def test_start_containers_runs_provision_steps_in_order(self):
         script = _read("linux/onionpress")
@@ -631,13 +638,19 @@ class TestLinuxOnionAddressSharedToWp(unittest.TestCase):
         )
 
     def test_provision_post_install_writes_shared_address(self):
-        script = _read("linux/onionpress")
+        # provision-post-install delegates to multisite.provision_post_install
+        # in Python; that function must call write_shared_onion_address as
+        # the last step. The bash case body is now just an op_py call so
+        # we read the Python module directly.
+        py = _read("src/onionpress/multisite.py")
         m = re.search(
-            r'provision-post-install\)(.*?);;', script, re.DOTALL)
-        self.assertIsNotNone(m)
+            r'def\s+provision_post_install\([^)]*\)[^:]*:(.*?)(?=^def\s|\Z)',
+            py, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(
+            m, "provision_post_install must exist in src/onionpress/multisite.py")
         self.assertIn(
             "write_shared_onion_address", m.group(1),
-            "provision-post-install must call write_shared_onion_address — "
+            "provision_post_install must call write_shared_onion_address — "
             "this is the post-Setup belt-and-braces for the WP theme's "
             "header on localhost.",
         )

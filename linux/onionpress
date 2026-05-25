@@ -2639,24 +2639,15 @@ sys.exit(0 if provision_interactive() else 1)
             # already done. Stays a bash subcommand for now; planned to
             # be ported to src/onionpress/multisite.py as a follow-up.
             #
-            # Order matters: ensure_multisite MUST run before
-            # install_multisite_domain_map, because the latter sets
-            # SUNRISE=true and drops sunrise.php — and sunrise.php
-            # queries wp_site WHERE domain='localhost' on every WP load.
-            # If wp_site doesn't exist yet (multisite-convert hasn't run),
-            # every subsequent wp-cli call fails, ensure_multisite itself
-            # bails out via its wp_is_installed guard, and the theme
-            # install silently skips. Match the Mac ordering.
-            ensure_multisite
-            install_multisite_domain_map
-            install_onionpress_theme
-            fix_onionpress_permissions
-            fix_wordpress_uploads_permissions
-            # Ensure the WP container can read its own .onion via the
-            # shared volume. On fresh installs wait_for_services bails
-            # early (no WP yet) before reaching the file-write — this is
-            # the post-Setup belt-and-braces.
-            write_shared_onion_address || true
+            # Delegated to src/onionpress/multisite.py:provision_post_install.
+            # The previous bash implementation lived here AND in
+            # app/MacOS/onionpress as parallel copies; the Python module
+            # is shared so the two platforms can't drift. Step ordering
+            # (ensure_multisite BEFORE install_multisite_domain_map) is
+            # enforced inside the module — see its docstring for why.
+            op_py provision-post-install \
+                --themes-dir "$THEMES_DIR" \
+                --plugins-dir "$PLUGINS_DIR"
             ;;
 
         import-key)

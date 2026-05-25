@@ -2860,19 +2860,15 @@ main() {
             ;;
 
         provision-post-install)
-            # Run the post-`wp core install` provisioning steps —
-            # multisite conversion, sunrise.php + mu-plugins + .htaccess,
-            # OnionPress theme + bundled plugins, and permission fixes.
-            # Called by setup_logic.install_fresh_wordpress after a fresh
-            # wp core install completes; also safe to re-run by hand.
-            # Idempotent — every step skips or no-ops when its work is
-            # already done. Stays a bash subcommand for now; planned to
-            # be ported to src/onionpress/multisite.py as a follow-up.
-            ensure_multisite
-            install_multisite_domain_map
-            install_onionpress_theme
-            fix_onionpress_permissions
-            fix_wordpress_uploads_permissions
+            # Delegated to src/onionpress/multisite.py:provision_post_install
+            # so Mac and Linux share one implementation. The bash sub-
+            # functions (ensure_multisite, install_multisite_domain_map,
+            # etc.) still exist below and are still called by start_
+            # containers — only this subcommand entry point goes through
+            # Python for now.
+            bundled_python -m onionpress.cli provision-post-install \
+                --themes-dir "$RESOURCES_DIR/themes" \
+                --plugins-dir "$RESOURCES_DIR/plugins"
             ;;
 
         setup)
