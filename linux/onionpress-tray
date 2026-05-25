@@ -1328,24 +1328,36 @@ class OnionPressTray:
         addr = self.status.onion_address
         if not addr:
             return
+        # Match the Mac menubar's copy_address(): full URL including the
+        # /<onionname>/ subsite path so the copied URL takes the recipient
+        # straight to the user's site, not to the network root. NO login
+        # token is appended — copied URLs are for sharing, and a token
+        # would log anyone who follows the link in as admin. Use
+        # "Open in Tor Browser" for the personal auto-login flow.
+        try:
+            from onionpress import config as _op_config  # type: ignore
+            name = _op_config.read_value(
+                os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
+        except Exception:
+            name = ""
+        url = f"http://{addr}/{name}/" if name else f"http://{addr}/"
+
         # Gtk.Clipboard.set_text() from a window-less tray callback is
         # a silent no-op on Wayland (no window to own the clipboard;
-        # no clipboard manager wired up by default). The notification
-        # would lie and the user would paste whatever was already in
-        # the clipboard. Try the in-process set first, then pop the
-        # same window-having dialog the "Open in Tor Browser" path
-        # uses — its window owns the clipboard so the Copy button
-        # actually lands the bytes.
+        # no clipboard manager wired up by default). Pop the same
+        # window-having dialog the "Open in Tor Browser" path uses —
+        # its window owns the clipboard so the Copy button actually
+        # lands the bytes.
         try:
             clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-            clip.set_text(addr, -1)
+            clip.set_text(url, -1)
             clip.store()
         except Exception as e:
             log(f"clipboard set failed: {e}")
         self._show_text_copy_dialog(
             title="Copy Onion Address",
-            heading="Your .onion address",
-            text=addr,
+            heading="Your .onion site URL\n(share this link — no auto-login token)",
+            text=url,
         )
 
     def _show_text_copy_dialog(self, title: str, heading: str, text: str) -> None:
@@ -1431,7 +1443,17 @@ class OnionPressTray:
             )
 
     def _on_open_local(self, *_):
-        url = self._build_login_url(f"http://localhost:{self.status.wp_port}/")
+        # Include /<onionname>/ so localhost takes the user to their
+        # subsite, not the network root. Matches Open in Tor Browser.
+        try:
+            from onionpress import config as _op_config  # type: ignore
+            name = _op_config.read_value(
+                os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
+        except Exception:
+            name = ""
+        base = (f"http://localhost:{self.status.wp_port}/{name}/"
+                if name else f"http://localhost:{self.status.wp_port}/")
+        url = self._build_login_url(base)
         if launcher_ops is not None:
             launcher_ops.open_in_browser(url)
         else:
@@ -1444,7 +1466,18 @@ class OnionPressTray:
         addr = self.status.onion_address
         if not addr:
             return
-        url = self._build_login_url(f"http://{addr}/")
+        # Include /<onionname>/ so the URL lands the user on their own
+        # subsite, matching what Copy Onion Address and "Open Local Site"
+        # already do. Login token IS included here (this is the
+        # "view my own site" flow, not the share-with-others flow).
+        try:
+            from onionpress import config as _op_config  # type: ignore
+            name = _op_config.read_value(
+                os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
+        except Exception:
+            name = ""
+        base = f"http://{addr}/{name}/" if name else f"http://{addr}/"
+        url = self._build_login_url(base)
 
         if launcher_ops is None:
             subprocess.Popen(
