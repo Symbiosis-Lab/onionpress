@@ -203,6 +203,16 @@ def install_multisite_domain_map(
     """
     log = log_func or _noop_log
 
+    # Gate on WordPress being installed — sunrise.php queries wp_site on
+    # every WP load, and SUNRISE=true tells WP to load it. If we drop
+    # sunrise.php before `wp core install` has created the multisite
+    # tables (which only happens AFTER ensure_multisite), the next
+    # `wp core install` itself errors out trying to load sunrise.php,
+    # leaving an unrecoverable install (#284).
+    if not wp_is_installed(docker_bin):
+        log("WordPress not installed yet -- skipping sunrise.php install")
+        return False
+
     # 1. sunrise.php — must run before SUNRISE constant takes effect.
     sunrise_src = os.path.join(plugins_dir, "onionpress-sunrise.php")
     if os.path.isfile(sunrise_src):
