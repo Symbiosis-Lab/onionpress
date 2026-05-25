@@ -306,6 +306,13 @@ $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.service" "$INSTALL_DIR/"
 $SUDO cp "$REPO_DIR/linux/onionpress-watcher.service" "$INSTALL_DIR/"
 $SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" "$INSTALL_DIR/"
 
+# system-sleep hook so the suspend/resume cycle notifies the hub +
+# DEL_ONION/ADD_ONION. Without this, a laptop close-lid leaves a stale
+# descriptor on the DHT for minutes until missed heartbeats finally
+# trigger the hub takeover. See linux/onionpress-sleep-hook for details.
+$SUDO install -m 0755 "$REPO_DIR/linux/onionpress-sleep-hook" \
+    /usr/lib/systemd/system-sleep/onionpress
+
 # LAN bind: the compose file defaults to 127.0.0.1, but the Linux launcher
 # exports ONIONPRESS_BIND_HOST=0.0.0.0 (linux/onionpress) so a headless
 # Pi can be reached from another device on the LAN. The compose template

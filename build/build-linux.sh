@@ -107,6 +107,13 @@ cp "$PROJECT_DIR/linux/onionpress-heartbeat.service" "$DEB_ROOT/usr/lib/systemd/
 cp "$PROJECT_DIR/linux/onionpress-watcher.service" "$DEB_ROOT/usr/lib/systemd/user/"
 cp "$PROJECT_DIR/linux/onionpress-watcher.timer" "$DEB_ROOT/usr/lib/systemd/user/"
 
+# system-sleep hook — system-scope (not user-scope), runs as root, fires
+# around every suspend/hibernate. Notifies the hub + DEL_ONION before
+# suspend, re-publishes + sends immediate /online after resume.
+mkdir -p "$DEB_ROOT/usr/lib/systemd/system-sleep"
+install -m 0755 "$PROJECT_DIR/linux/onionpress-sleep-hook" \
+    "$DEB_ROOT/usr/lib/systemd/system-sleep/onionpress"
+
 # CLI symlinks
 mkdir -p "$DEB_ROOT/usr/local/bin"
 ln -s /opt/onionpress/onionpress "$DEB_ROOT/usr/local/bin/onionpress"

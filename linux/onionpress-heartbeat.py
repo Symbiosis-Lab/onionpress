@@ -390,17 +390,43 @@ def _signal_handler(signum, frame):
     _running = False
 
 
+# Pre-sleep (USR1) and post-wake (USR2) async kicks. The system-sleep hook
+# (/usr/lib/systemd/system-sleep/onionpress) sends USR1 to flush /offline
+# before suspend and USR2 after resume to send an immediate /online instead
+# of waiting up to HEARTBEAT_INTERVAL. Signal handlers must not do network
+# I/O directly (signal-safety), so they just flip flags and the main loop
+# acts on them — time.sleep() is interrupted by the signal on Linux, so
+# the loop wakes up immediately.
+_pending_offline = False
+_pending_online = False
+
+
+def _usr1_handler(signum, frame):
+    global _pending_offline
+    log.info("Received SIGUSR1 — will flush /offline this cycle")
+    _pending_offline = True
+
+
+def _usr2_handler(signum, frame):
+    global _pending_online
+    log.info("Received SIGUSR2 — will send /online immediately")
+    _pending_online = True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     global _current_hub, _content_addr, _hc_addr, _priv_key, _pub_key, _running
+    global _pending_offline, _pending_online
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGUSR1, _usr1_handler)
+    signal.signal(signal.SIGUSR2, _usr2_handler)
 
     log.info("heartbeat client starting...")
 
@@ -439,6 +465,23 @@ def main():
         time.sleep(HEARTBEAT_INTERVAL)
         if not _running:
             break
+
+        # Async sleep/wake kicks from the system-sleep hook. USR1 means the
+        # laptop is about to suspend — flush /offline so the hub takes over
+        # without waiting for missed heartbeats to time out. USR2 means we
+        # just woke — send /online right now instead of waiting up to a
+        # full HEARTBEAT_INTERVAL for the regular cycle to fire.
+        if _pending_offline and registered and _content_addr != _current_hub:
+            _pending_offline = False
+            log.info("USR1: sending /offline before suspend...")
+            send_offline(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+        elif _pending_offline:
+            _pending_offline = False  # nothing to do, swallow the flag
+        if _pending_online:
+            _pending_online = False
+            if registered and _content_addr != _current_hub:
+                log.info("USR2: sending immediate /online after wake")
+                heartbeat(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
 
         # Re-read config each cycle
         config = read_config()

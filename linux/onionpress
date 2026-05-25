@@ -1391,14 +1391,26 @@ start_containers() {
     # --policy missing avoids a 5-min network hang on every start when images
     # are already cached. update_images (gated by UPDATE_ON_LAUNCH=yes) is the
     # path for refreshing images to latest.
+    #
+    # Tee docker's output so per-image "Pulling"/"Pulled" lines reach stdout
+    # → systemd journal → install.sh's live tail. Without the tee, the user
+    # sees 2-3 minutes of silence on first run while a few hundred MB land.
+    # `set -o pipefail` is not enabled in this script, so we rely on
+    # PIPESTATUS to get the docker exit code through the pipe.
     log "Pulling pre-built images (missing only)..."
-    docker compose pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will use cached)"
+    docker compose pull --policy missing 2>&1 | tee -a "$LOG_FILE"
+    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+        log "WARNING: Failed to pull images (will use cached)"
+    fi
 
     # Start WordPress, DB, and OnionHeaven first
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d wordpress db onionheaven >> "$LOG_FILE" 2>&1; then
+        # tee for the same reason as docker compose pull above — keeps the
+        # journal tail visible while compose creates networks/volumes/containers.
+        docker compose up -d wordpress db onionheaven 2>&1 | tee -a "$LOG_FILE"
+        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
             break
         fi
         log "WARNING: docker compose up failed (attempt $attempt/$max_attempts)"
@@ -1548,6 +1560,17 @@ stop_container_log_capture() {
     CONTAINER_LOG_PIDS=""
 }
 
+# Copy the tor hostname into the shared volume so WP code (theme,
+# mu-plugins, REST endpoints) can answer "what's my .onion?" without
+# parsing Host headers — needed when the site is hit via localhost.
+# Idempotent; safe to call from multiple places.
+write_shared_onion_address() {
+    docker exec onionpress-tor sh -c \
+        'cp /var/lib/tor/hidden_service/wordpress/hostname \
+            /var/lib/onionpress/onion_address 2>/dev/null' \
+        >/dev/null 2>&1
+}
+
 wait_for_services() {
     cd "$DOCKER_DIR"
     local max_wait=120
@@ -1572,6 +1595,14 @@ wait_for_services() {
 
                 if ! wp_is_installed; then
                     log "WordPress not installed -- setup required, skipping Tor wait"
+                    # Even on the early-bail path, write the address so
+                    # the Setup dialog (and later, the theme accessed via
+                    # localhost) can read it.  No-op if hostname not yet
+                    # generated.
+                    if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+                        write_shared_onion_address && \
+                            log "Onion address written to shared volume" || true
+                    fi
                     return 0
                 fi
                 log "Waiting for Tor to bootstrap and onion service to be reachable..."
@@ -1594,7 +1625,7 @@ wait_for_services() {
             ONION_ADDR="$onion_addr"
 
             # Write onion address to shared volume for WordPress plugins
-            docker exec onionpress-tor cp /var/lib/tor/hidden_service/wordpress/hostname /var/lib/onionpress/onion_address 2>>"$LOG_FILE" && \
+            write_shared_onion_address && \
                 log "Onion address written to shared volume" || \
                 log "WARNING: Failed to write onion address to shared volume"
 
@@ -2556,10 +2587,50 @@ sys.exit(0 if provision_interactive() else 1)
             install_onionpress_theme
             fix_onionpress_permissions
             fix_wordpress_uploads_permissions
+            # Ensure the WP container can read its own .onion via the
+            # shared volume. On fresh installs wait_for_services bails
+            # early (no WP yet) before reaching the file-write — this is
+            # the post-Setup belt-and-braces.
+            write_shared_onion_address || true
             ;;
 
         import-key)
             import_key "$2"
+            ;;
+
+        sleep-pre|sleep-post)
+            # Called by /usr/lib/systemd/system-sleep/onionpress immediately
+            # before suspend (sleep-pre) and after resume (sleep-post).
+            # Budget: ~4s total — the hook script wraps us in `timeout 4`,
+            # because systemd will kill the system-sleep handler eventually
+            # and we mustn't block the suspend.
+            #
+            # On the host side, the heartbeat client runs as a user systemd
+            # service. We poke it with USR1 (flush /offline) or USR2 (send
+            # immediate /online) so the hub state matches reality fast,
+            # rather than waiting up to a heartbeat interval to converge.
+            #
+            # On the container side, the tor-watchdog inside each Tor-
+            # carrying container responds to USR1 with DEL_ONION and USR2
+            # with ADD_ONION — same primitive Mac uses (signal_watchdog).
+            phase="${1#sleep-}"
+            log "system-sleep $phase: notifying hub + ${phase/pre/DEL_ONION}${phase/post/ADD_ONION}"
+            case "$phase" in
+                pre)  hb_sig="USR1"; td_sig="USR1" ;;
+                post) hb_sig="USR2"; td_sig="USR2" ;;
+            esac
+            # Heartbeat client (user-scope systemd unit). XDG_RUNTIME_DIR
+            # must be set for `systemctl --user` to find the user bus.
+            if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+                systemctl --user kill -s "SIG${hb_sig}" onionpress-heartbeat \
+                    >/dev/null 2>&1 || true
+            fi
+            # Watchdog inside each Tor container.
+            for c in onionpress-tor onionheaven; do
+                docker exec "$c" sh -c \
+                    "kill -${td_sig} \$(pgrep -f '[t]or-watchdog') 2>/dev/null" \
+                    >/dev/null 2>&1 || true
+            done
             ;;
 
         # ── Vanity + admin-password — thin wrappers around the Python CLI

@@ -480,6 +480,169 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         self.assertLess(mdm.start(), theme.start())
 
 
+class TestLinuxSleepHookWiring(unittest.TestCase):
+    """Guard the suspend/resume → OnionHeaven notification path.
+
+    Without this wiring, a laptop close-lid leaves a stale onion descriptor
+    on the DHT for minutes (until the hub's missed-heartbeat timeout fires)
+    and resume takes a full 60s heartbeat tick before the hub stops fronting
+    our site via Wayback fallback. Mac fires `notify_onionheaven_offline()`
+    in `handle_sleep`; Linux mirrors that via a systemd system-sleep hook.
+    """
+
+    def test_sleep_hook_script_exists(self):
+        hook = _read("linux/onionpress-sleep-hook")
+        self.assertRegex(
+            hook, r'#!/bin/bash', "Hook must be a bash script.")
+        # Hook must call the launcher with sleep-pre and sleep-post.
+        self.assertRegex(
+            hook, r'sleep-\$ACTION',
+            "Hook must invoke /opt/onionpress/onionpress sleep-$ACTION so "
+            "pre and post both reach the launcher subcommand.",
+        )
+        # Bound to systemd's pre/post + sleep/hibernate contract.
+        self.assertIn(
+            "suspend|hibernate|hybrid-sleep|suspend-then-hibernate", hook,
+            "Hook must cover every sleep type systemd-logind dispatches.",
+        )
+        # Per-user timeout so a stuck Docker can't hold up suspend.
+        self.assertRegex(
+            hook, r'timeout\s+\d+',
+            "Hook must wrap the per-user launcher invocation in `timeout` "
+            "so a hung Docker can't block the suspend.",
+        )
+
+    def test_install_sh_installs_sleep_hook(self):
+        script = _read("linux/install.sh")
+        # The install command can wrap across lines via `\` continuation,
+        # so match with DOTALL and `.` allowed to span newlines.
+        self.assertRegex(
+            script,
+            r'install\s+-m\s+0755[\s\S]*?onionpress-sleep-hook[\s\S]*?'
+            r'/usr/lib/systemd/system-sleep/onionpress',
+            "install.sh must drop linux/onionpress-sleep-hook into "
+            "/usr/lib/systemd/system-sleep/onionpress (mode 0755).",
+        )
+
+    def test_deb_packages_sleep_hook(self):
+        script = _read("build/build-linux.sh")
+        self.assertIn(
+            "/usr/lib/systemd/system-sleep", script,
+            "build-linux.sh must stage the sleep hook into the .deb's "
+            "/usr/lib/systemd/system-sleep/ directory.",
+        )
+        self.assertRegex(
+            script, r'onionpress-sleep-hook',
+            "build-linux.sh must reference linux/onionpress-sleep-hook.",
+        )
+
+    def test_launcher_has_sleep_pre_and_post_subcommands(self):
+        script = _read("linux/onionpress")
+        self.assertRegex(
+            script, r'sleep-pre\|sleep-post\)',
+            "linux/onionpress must dispatch a sleep-pre|sleep-post case so "
+            "the system-sleep hook has something to call.",
+        )
+        # Both signals must reach the heartbeat client (USR1 = /offline,
+        # USR2 = immediate /online).
+        self.assertIn(
+            "onionpress-heartbeat", script,
+            "Sleep subcommand must kill -s SIGUSR{1,2} the heartbeat unit.",
+        )
+
+    def test_heartbeat_handles_usr1_and_usr2(self):
+        src = _read("linux/onionpress-heartbeat.py")
+        self.assertRegex(
+            src, r'signal\.signal\(signal\.SIGUSR1',
+            "Heartbeat client must register a SIGUSR1 handler — sleep-pre "
+            "uses it to flush /offline before suspend.",
+        )
+        self.assertRegex(
+            src, r'signal\.signal\(signal\.SIGUSR2',
+            "Heartbeat client must register a SIGUSR2 handler — sleep-post "
+            "uses it to send an immediate /online after resume.",
+        )
+        # The flag-based pattern: handler sets a global, main loop reacts.
+        # Direct send_offline() inside a signal handler would be unsafe.
+        self.assertRegex(
+            src, r'_pending_offline\s*=\s*True',
+            "USR1 handler should flip a flag and let the main loop send "
+            "/offline — network I/O inside a signal handler is unsafe.",
+        )
+        self.assertRegex(
+            src, r'_pending_online\s*=\s*True',
+            "USR2 handler should flip a flag for the same reason.",
+        )
+
+
+class TestLinuxWaitThenOpenUsesWrapper(unittest.TestCase):
+    """Guard against the firefox.real-direct regression.
+
+    Incident: _wait_then_open spawned `firefox.real -new-tab URL` directly,
+    but Tor Browser's remoting only works via the start-tor-browser wrapper
+    (which sets HOME/cwd/env so the running profile is found). Without the
+    wrapper, -new-tab spawns a fresh process, hits the profile lock, and
+    Tor Browser pops its native "Tor Browser is already running" dialog
+    instead of opening the URL in a new tab. The wrapper path is already
+    the canonical pattern in src/onionpress/launcher_ops.py's
+    open_in_browser(); _wait_then_open just copy-pasted the wrong binary.
+    """
+
+    def test_wait_then_open_prefers_start_tor_browser_wrapper(self):
+        src = _read("linux/onionpress-tray")
+        # Carve the _wait_then_open function body so we don't accidentally
+        # match an unrelated `firefox.real` reference elsewhere in the file.
+        m = re.search(
+            r'def\s+_wait_then_open\(\)[^\n]*:(.*?)(?=\n\s{0,8}def\s+\w|\Z)',
+            src, re.DOTALL)
+        self.assertIsNotNone(
+            m, "_wait_then_open helper must exist in linux/onionpress-tray")
+        body = m.group(1)
+        # Wrapper path must be referenced.
+        self.assertRegex(
+            body, r'start-tor-browser',
+            "_wait_then_open must launch the URL via the start-tor-browser "
+            "wrapper. Spawning firefox.real with -new-tab directly hits "
+            "the profile lock and pops Tor Browser's native 'already "
+            "running' dialog instead of opening the URL in a new tab.",
+        )
+
+
+class TestLinuxOnionAddressSharedToWp(unittest.TestCase):
+    """Guard against the missing @onion-host on the theme header.
+
+    Incident: when the site is hit via localhost:18080 (the menu's "Open
+    Local Site"), the theme's onionpress_follow_get_own_address() can't
+    read the .onion from the Host header — it falls back to reading
+    /var/lib/onionpress/onion_address inside the WP container. That file
+    is mounted from the shared volume; it's written by the launcher.
+    The bash launcher only wrote it on the both-services-ready code path
+    in wait_for_services, which bails early when WP isn't yet installed.
+    Result: on fresh installs the file was never written, the theme
+    header showed "ubuntupress" without "@op2…onion".
+    """
+
+    def test_launcher_defines_write_shared_onion_address(self):
+        script = _read("linux/onionpress")
+        self.assertRegex(
+            script, r'write_shared_onion_address\(\)\s*\{',
+            "linux/onionpress must define a write_shared_onion_address "
+            "helper that copies hostname into the shared volume.",
+        )
+
+    def test_provision_post_install_writes_shared_address(self):
+        script = _read("linux/onionpress")
+        m = re.search(
+            r'provision-post-install\)(.*?);;', script, re.DOTALL)
+        self.assertIsNotNone(m)
+        self.assertIn(
+            "write_shared_onion_address", m.group(1),
+            "provision-post-install must call write_shared_onion_address — "
+            "this is the post-Setup belt-and-braces for the WP theme's "
+            "header on localhost.",
+        )
+
+
 class TestLinuxReinstallBrowserOpen(unittest.TestCase):
     """Guard the fix for browser not auto-opening after reinstall.
 
