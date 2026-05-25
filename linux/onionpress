@@ -286,8 +286,10 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 
 # ─── Parse global flags ────────────────────────────────────────────
-# --yes / -y skips interactive confirmations (for scripted/automated use)
-ONIONPRESS_YES=false
+# --yes / -y skips interactive confirmations (for scripted/automated use).
+# Honour ONIONPRESS_YES inherited from the environment so callers like
+# scrub's phase_uninstall (which exports it) can suppress prompts.
+ONIONPRESS_YES=${ONIONPRESS_YES:-false}
 _filtered_args=()
 for _arg in "$@"; do
     case "$_arg" in
