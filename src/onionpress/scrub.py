@@ -200,9 +200,14 @@ class _SudoKeepAlive:
 def _get_onion_address() -> str:
     """Read the current onion hostname from the running tor container.
     Empty string if not available (containers down, address not minted).
+
+    Uses `docker exec onionpress-tor` (not `docker compose exec tor`)
+    because scrub runs from wherever the user invoked it — typically
+    not the compose project directory — and `docker compose` would
+    silently fail without a docker-compose.yml in cwd.
     """
     r = _run(
-        ["docker", "compose", "exec", "-T", "tor",
+        ["docker", "exec", "onionpress-tor",
          "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
         capture=True, timeout=10,
     )
