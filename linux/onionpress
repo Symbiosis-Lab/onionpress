@@ -2858,12 +2858,12 @@ sys.exit(0 if provision_interactive() else 1)
                     fi
                 fi
 
-                # Final confirmation — require typing DELETE
-                read -r -p "Type DELETE to confirm uninstall: " confirm
-                if [ "$confirm" != "DELETE" ]; then
-                    echo "Uninstall cancelled."
-                    exit 0
-                fi
+                # No separate "type DELETE" gate — the uninstall needs
+                # sudo to remove /opt/onionpress + system unit files,
+                # and that sudo password prompt is the actual "are you
+                # sure" moment. Two confirmations (backup y/N + sudo
+                # password) is friction without added safety. Mac's
+                # uninstall doesn't have a DELETE prompt either.
             fi
 
             echo ""
