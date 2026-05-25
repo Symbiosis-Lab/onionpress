@@ -708,18 +708,16 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     the sweep loop found posts and submitted zero of them forever.
     """
 
-    # Functions that should exist on BOTH platforms. Not exhaustive —
-    # additions welcome whenever a new shared launcher helper lands.
+    # Functions that should exist on BOTH bash launchers. Most of the
+    # WP-provisioning helpers (ensure_multisite, install_onionpress_theme,
+    # etc.) USED to be here but have been ported to
+    # src/onionpress/multisite.py — see TestMultisiteModuleExports below
+    # for the equivalent assertion at the Python level. What stays bash:
+    # install_ia_plugin (shells out to install_plugin.sh + activate_
+    # plugin.sh helpers; bigger lift to port) and detect_port_offset
+    # (needs to run before the Python lib path is set up).
     REQUIRED_ON_BOTH = {
-        "ensure_archive_s3_keys",
-        "ensure_multisite",
-        "install_multisite_domain_map",
-        "install_onionpress_theme",
-        "fix_onionpress_permissions",
-        "fix_wordpress_uploads_permissions",
-        "deactivate_wp_statistics",
         "install_ia_plugin",
-        "configure_ia_plugin",
         "detect_port_offset",
     }
     # `fetch_archive_s3_keys` exists only on Linux: it's a helper used by
@@ -746,6 +744,43 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
             "exactly this: ensure_archive_s3_keys existed on Mac for a long "
             "time and was never ported, so fresh Linux installs never got "
             "Archive.org credentials.",
+        )
+
+
+class TestMultisiteModuleExports(unittest.TestCase):
+    """The WP-provisioning helpers used to live as parallel bash
+    implementations in app/MacOS/onionpress and linux/onionpress.
+    They've moved to src/onionpress/multisite.py; this test asserts the
+    module exports the expected functions so the bash launchers don't
+    have to (the bash side calls them via op_py / bundled_python).
+
+    Pairs with TestMacLinuxFunctionParity above: anything we removed
+    from the REQUIRED_ON_BOTH set there should appear here instead.
+    """
+
+    REQUIRED_PY_FUNCTIONS = {
+        "ensure_multisite",
+        "install_multisite_domain_map",
+        "install_onionpress_theme",
+        "fix_onionpress_permissions",
+        "fix_wordpress_uploads_permissions",
+        "write_shared_onion_address",
+        "configure_ia_plugin",
+        "deactivate_wp_statistics",
+        "ensure_archive_s3_keys",
+        "provision_post_install",  # orchestrator
+    }
+
+    def test_multisite_module_exports(self):
+        from onionpress import multisite
+        actual = {name for name in dir(multisite)
+                  if not name.startswith("_") and callable(getattr(multisite, name))}
+        missing = self.REQUIRED_PY_FUNCTIONS - actual
+        self.assertFalse(
+            missing,
+            f"Required functions missing from src/onionpress/multisite.py: "
+            f"{missing}. Either re-add them or update REQUIRED_PY_FUNCTIONS "
+            f"(but each removed function needs new callers wired up).",
         )
 
 
