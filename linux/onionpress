@@ -1256,9 +1256,6 @@ start_containers() {
         --themes-dir "$THEMES_DIR" \
         --plugins-dir "$PLUGINS_DIR"
 
-    # Tor-routed archive.org login can take 10-30s — background it so
-    # start_containers returns promptly. No-op if keys are already set.
-    op_py ensure-archive-s3-keys &
 }
 
 stop_containers() {
@@ -2347,6 +2344,9 @@ main() {
                 op_py provision-post-install \
                     --themes-dir "$THEMES_DIR" \
                     --plugins-dir "$PLUGINS_DIR" >> "$LOG_FILE" 2>&1 || true
+                # Fetch archive.org S3 keys now that Tor is up and WP is
+                # installed — same timing as the Mac setup flow.
+                op_py ensure-archive-s3-keys >> "$LOG_FILE" 2>&1 &
             fi
             write_status
             echo ""

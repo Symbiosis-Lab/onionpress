@@ -1105,16 +1105,15 @@ class SetupDialog:
 
 class OnionPressTray:
     def __init__(self):
-        # Use AppIndicator.Indicator.new_with_path so the SVGs in
-        # /opt/onionpress/assets/ are findable by NAME. The 4th argument
-        # is propagated to the StatusNotifier's IconThemePath property —
-        # without it, ubuntu-appindicators on Wayland can't render our
-        # icons at all.
-        self.indicator = AppIndicator.Indicator.new_with_path(
+        # Icons are registered in the standard user hicolor theme by
+        # install.sh (tray-running/starting/stopped at 16/22/24/32px),
+        # so GNOME Shell finds them by name without a custom theme path.
+        # new_with_path + a custom path caused GNOME to render at native
+        # pixel size rather than scaling to the panel slot, causing clipping.
+        self.indicator = AppIndicator.Indicator.new(
             "onionpress",
             ICON_STARTING,
             AppIndicator.IndicatorCategory.APPLICATION_STATUS,
-            ICON_THEME_PATH,
         )
         self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
         self.indicator.set_title("OnionPress")

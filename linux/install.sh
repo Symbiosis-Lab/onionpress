@@ -657,6 +657,33 @@ if [ -n "$SUDO_USER" ]; then
     chown "$SUDO_USER:$SUDO_USER" "$AUTOSTART_DIR/onionpress-tray.desktop" 2>/dev/null || true
 fi
 
+# Tray status icons (tray-running/starting/stopped) — installed into the
+# standard user hicolor theme so GNOME Shell finds them by name at the
+# exact requested size (typically 24px) without a custom IconThemePath.
+# A custom IconThemePath causes GNOME to render icons at native pixel size
+# rather than scaling to the panel slot, which clips a 22px icon in a 24px
+# slot. Providing exact sizes avoids any scaling artefact.
+TRAY_ICON_SIZES="16 22 24 32"
+for _size in $TRAY_ICON_SIZES; do
+    if [ -n "$SUDO_USER" ]; then
+        install -d -o "$SUDO_USER" -g "$SUDO_USER" \
+            "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps"
+    else
+        mkdir -p "$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps"
+    fi
+    for _name in tray-running tray-starting tray-stopped; do
+        _src="$INSTALL_DIR/assets/hicolor/${_size}x${_size}/apps/${_name}.png"
+        _dst="$DESKTOP_HICOLOR_DIR/${_size}x${_size}/apps/${_name}.png"
+        if [ -f "$_src" ]; then
+            if [ -n "$SUDO_USER" ]; then
+                install -o "$SUDO_USER" -g "$SUDO_USER" "$_src" "$_dst"
+            else
+                cp "$_src" "$_dst"
+            fi
+        fi
+    done
+done
+
 # Refresh GNOME's caches so the icon shows up without requiring a logout.
 # Best-effort — these tools aren't installed on every distro.
 if command -v update-desktop-database >/dev/null 2>&1; then
