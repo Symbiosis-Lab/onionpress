@@ -309,8 +309,13 @@ def install_fresh_wordpress(
         log_func=log_func,
     )
 
-    # 7. Mark onboarded + persist onionname
-    wp("option", "update", "onionpress_onboarded", "1")
+    # 7. Mark onboarded + persist onionname.
+    # `wp option update` writes wp_options (per-blog). The
+    # onionpress-onboarding mu-plugin reads via get_site_option(), which
+    # on multisite goes to wp_sitemeta (network-wide). Set via
+    # update_site_option() so the right table is hit on both single-site
+    # and multisite — single-site falls back to update_option in core.
+    wp("eval", "update_site_option('onionpress_onboarded', time());")
     log("Marked as onboarded")
 
     if data_dir is None:
@@ -418,8 +423,10 @@ def provision_existing_wordpress(
         log_func=log_func,
     )
 
-    # 6. Mark onboarded — service's write_status() picks this up within 30s
-    wp("option", "update", "onionpress_onboarded", "1")
+    # 6. Mark onboarded — service's write_status() picks this up within 30s.
+    # Use update_site_option so the network-scoped onboarding mu-plugin
+    # (which reads via get_site_option) sees the marker on multisite.
+    wp("eval", "update_site_option('onionpress_onboarded', time());")
     log("Marked as onboarded")
 
     # 7. Persist onionname to config so wp-cli calls and tray can reuse it

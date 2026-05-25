@@ -2174,11 +2174,17 @@ except: print('false')
     fi
     local onboarded="false"
     if [ "$wp_installed_str" = "true" ]; then
+        # Read via get_site_option — same call the onionpress-onboarding
+        # mu-plugin uses to decide whether to redirect the admin. Reading
+        # wp_options here would diverge after multisite-convert: per-blog
+        # options stay set, but the network-wide table (wp_sitemeta) is
+        # what the plugin checks, and that's where install_fresh_wordpress
+        # now writes the marker.
         local _opt
-        _opt=$(docker exec onionpress-wordpress wp option get onionpress_onboarded --allow-root 2>/dev/null | tr -d '\r\n ')
-        case "$_opt" in
-            1|true|yes) onboarded="true" ;;
-        esac
+        _opt=$(docker exec onionpress-wordpress wp eval 'echo (string) get_site_option("onionpress_onboarded", "");' --allow-root 2>/dev/null | tr -d '\r\n ')
+        if [ -n "$_opt" ] && [ "$_opt" != "0" ] && [ "$_opt" != "false" ]; then
+            onboarded="true"
+        fi
     fi
     local mkp224o_available="false"
     if docker image inspect ghcr.io/brewsterkahle/onionpress-tor:latest >/dev/null 2>&1; then
