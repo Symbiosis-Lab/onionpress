@@ -1510,26 +1510,31 @@ start_containers() {
     # first registration arrives (signaled by an activation flag file).
     start_onionheaven_activation_watcher
 
-    # Install plugins and mu-plugins
+    # install_ia_plugin stays bash for now — it shells out to two helper
+    # scripts (install_plugin.sh, activate_plugin.sh) that handle the
+    # WordPress.org download + SHA verify + wp-cli activation. That's a
+    # bigger lift to port; tracking as a follow-up.
     install_ia_plugin
-    configure_ia_plugin
-    deactivate_wp_statistics
-    if wp_is_installed; then
-        # ensure_multisite MUST come before install_multisite_domain_map —
-        # the latter sets SUNRISE and drops sunrise.php, which reads
-        # wp_site on every WP load. See provision-post-install above.
-        ensure_multisite
-        install_multisite_domain_map
-        install_onionpress_theme
-    fi
-    fix_onionpress_permissions
-    fix_wordpress_uploads_permissions
 
-    # Fetch baked-in archive.org S3 keys so the Wayback sweep can submit
-    # without each user setting up their own credentials. Background —
-    # the request goes via onionheaven's Tor SOCKS proxy and can take
-    # 10-30s; no need to block start. No-op if keys are already set.
-    ensure_archive_s3_keys &
+    # Everything else is now in src/onionpress/multisite.py. Each call
+    # used to be a bash function defined later in this file; the bash
+    # implementations are kept for now (called from no one but ourselves)
+    # and can be deleted in a follow-up once we're confident the Python
+    # ports cover every scenario.
+    op_py configure-ia-plugin
+    op_py deactivate-wp-statistics
+    # provision-post-install handles the wp_is_installed gating
+    # internally — the multisite/theme steps short-circuit when WP
+    # isn't yet set up; the permission fixes run unconditionally so
+    # the Setup dialog's later wp-cli calls can write under
+    # /var/lib/onionpress and wp-content/uploads.
+    op_py provision-post-install \
+        --themes-dir "$THEMES_DIR" \
+        --plugins-dir "$PLUGINS_DIR"
+
+    # Tor-routed archive.org login can take 10-30s — background it so
+    # start_containers returns promptly. No-op if keys are already set.
+    op_py ensure-archive-s3-keys &
 }
 
 stop_containers() {

@@ -501,6 +501,16 @@ def main(argv: list[str] = None) -> int:
         "--plugins-dir", required=True,
         help="Source directory containing mu-plugins, sunrise.php, icons")
 
+    # Individual post-start provisioning steps. These are the helpers
+    # start_containers used to inline as bash function calls; the bash
+    # launchers now delegate each one through here.
+    sub.add_parser("configure-ia-plugin",
+                   help="Configure the IA Wayback Machine Link Fixer plugin")
+    sub.add_parser("deactivate-wp-statistics",
+                   help="Remove WP-Statistics if present (clearnet leak)")
+    sub.add_parser("ensure-archive-s3-keys",
+                   help="Fetch shared archive.org S3 keys for Wayback archiving")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -540,6 +550,15 @@ def main(argv: list[str] = None) -> int:
             plugins_dir=args.plugins_dir,
             log_func=print,
         )
+    elif args.command == "configure-ia-plugin":
+        from . import multisite
+        return 0 if multisite.configure_ia_plugin(log_func=print) else 1
+    elif args.command == "deactivate-wp-statistics":
+        from . import multisite
+        return 0 if multisite.deactivate_wp_statistics(log_func=print) else 1
+    elif args.command == "ensure-archive-s3-keys":
+        from . import multisite
+        return 0 if multisite.ensure_archive_s3_keys(log_func=print) else 1
     else:
         parser.print_help()
         return 1

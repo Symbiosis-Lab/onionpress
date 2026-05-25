@@ -218,5 +218,119 @@ class TestMuPluginsList(unittest.TestCase):
         )
 
 
+class TestConfigureIaPlugin(unittest.TestCase):
+    def test_skips_when_wp_not_installed(self):
+        with mock.patch.object(multisite, "wp_is_installed", return_value=False), \
+             mock.patch.object(multisite, "_wp") as wp:
+            multisite.configure_ia_plugin(log_func=lambda _: None)
+        wp.assert_not_called()
+
+    def test_skips_when_already_configured(self):
+        # wizard_completed = "1" → short-circuit, no option-update calls.
+        def fake_wp(*args, **kwargs):
+            if "get" in args and "iawmlf_setup_wizard_completed" in args:
+                return subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="1\n", stderr="")
+            return _ok()
+
+        update_calls = []
+        def tracker(*args, **kwargs):
+            r = fake_wp(*args, **kwargs)
+            if "update" in args:
+                update_calls.append(args)
+            return r
+
+        with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
+             mock.patch.object(multisite, "_exec_sh", return_value=_ok()), \
+             mock.patch.object(multisite, "_wp", side_effect=tracker):
+            multisite.configure_ia_plugin(log_func=lambda _: None)
+        self.assertEqual(
+            update_calls, [],
+            "must NOT re-write IA plugin options when wizard already done",
+        )
+
+
+class TestDeactivateWpStatistics(unittest.TestCase):
+    def test_noop_when_plugin_absent(self):
+        # test -f returns 1 → plugin not present → no wp calls.
+        wp_calls = []
+        def tracker(*args, **kwargs):
+            wp_calls.append(args)
+            return _ok()
+        with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
+             mock.patch.object(multisite, "_exec_sh", return_value=_err()), \
+             mock.patch.object(multisite, "_wp", side_effect=tracker):
+            multisite.deactivate_wp_statistics(log_func=lambda _: None)
+        self.assertEqual(
+            wp_calls, [],
+            "must not deactivate/delete a plugin that isn't installed",
+        )
+
+    def test_removes_when_plugin_present(self):
+        wp_calls = []
+        def tracker(*args, **kwargs):
+            wp_calls.append(args)
+            return _ok()
+        with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
+             mock.patch.object(multisite, "_exec_sh", return_value=_ok()), \
+             mock.patch.object(multisite, "_wp", side_effect=tracker):
+            multisite.deactivate_wp_statistics(log_func=lambda _: None)
+        # Must have deactivated AND deleted the plugin.
+        deactivates = [a for a in wp_calls
+                       if "deactivate" in a and "wp-statistics" in a]
+        deletes = [a for a in wp_calls
+                   if "delete" in a and "wp-statistics" in a]
+        self.assertTrue(deactivates, "must call `wp plugin deactivate wp-statistics`")
+        self.assertTrue(deletes, "must call `wp plugin delete wp-statistics`")
+
+
+class TestEnsureArchiveS3Keys(unittest.TestCase):
+    def test_skips_when_keys_already_set(self):
+        def fake_wp(*args, **kwargs):
+            if "get" in args and "onionpress_archive_s3_access" in args:
+                return subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="ALREADY_SET\n", stderr="")
+            return _ok()
+        with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
+             mock.patch.object(multisite, "_wp", side_effect=fake_wp), \
+             mock.patch("subprocess.run") as srun:
+            multisite.ensure_archive_s3_keys(log_func=lambda _: None)
+        # Must NOT have hit archive.org if keys were already set.
+        srun.assert_not_called()
+
+    def test_writes_keys_on_successful_login(self):
+        wp_updates = []
+        def fake_wp(*args, **kwargs):
+            if "update" in args:
+                wp_updates.append(args)
+            return _ok()  # get returns empty stdout → keys not set
+        login_response = (
+            '{"success": true, "values": {"s3": '
+            '{"access": "AKEY", "secret": "SKEY"}}}'
+        )
+        with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
+             mock.patch.object(multisite, "_wp", side_effect=fake_wp), \
+             mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                 args=[], returncode=0, stdout=login_response, stderr="")):
+            result = multisite.ensure_archive_s3_keys(log_func=lambda _: None)
+        self.assertTrue(result)
+        access = [a for a in wp_updates
+                  if "onionpress_archive_s3_access" in a and "AKEY" in a]
+        secret = [a for a in wp_updates
+                  if "onionpress_archive_s3_secret" in a and "SKEY" in a]
+        self.assertTrue(access, "must update onionpress_archive_s3_access")
+        self.assertTrue(secret, "must update onionpress_archive_s3_secret")
+
+    def test_handles_tor_login_failure_gracefully(self):
+        logs = []
+        with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
+             mock.patch.object(multisite, "_wp", return_value=_ok()), \
+             mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                 args=[], returncode=0, stdout="", stderr="")):
+            result = multisite.ensure_archive_s3_keys(log_func=logs.append)
+        self.assertFalse(result)
+        self.assertTrue(any("Could not reach archive.org" in s for s in logs))
+
+
 if __name__ == "__main__":
     unittest.main()

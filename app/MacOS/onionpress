@@ -2050,47 +2050,35 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     log "Starting Tor containers..."
     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
 
-    # Install Internet Archive Wayback Machine Link Fixer plugin
+    # Install Internet Archive Wayback Machine Link Fixer plugin —
+    # stays bash for now (uses install_plugin.sh + activate_plugin.sh
+    # helpers; bigger lift to port).
     install_ia_plugin
 
-    # Configure IA plugin options (link fixer, wizard completion)
-    configure_ia_plugin
-
     # Install and configure Cache Enabler page-caching plugin
+    # (Mac-only — no Linux equivalent at present)
     install_cache_enabler
     configure_cache_enabler
 
-    # Ensure archive.org S3 keys are set for Wayback Machine archiving
-    # Run in background — network call to archive.org via Tor can be slow
-    # and should not block the rest of the setup
-    ensure_archive_s3_keys &
+    # The WP-side post-start provisioning is shared with Linux now:
+    # configure-ia-plugin, deactivate-wp-statistics, then
+    # provision-post-install (which internally handles ensure_multisite,
+    # install_multisite_domain_map, install_onionpress_theme, the perm
+    # fixes, and the shared-onion-address write — in the right order).
+    # See src/onionpress/multisite.py.
+    bundled_python -m onionpress.cli configure-ia-plugin
+    bundled_python -m onionpress.cli deactivate-wp-statistics
+    bundled_python -m onionpress.cli provision-post-install \
+        --themes-dir "$RESOURCES_DIR/themes" \
+        --plugins-dir "$RESOURCES_DIR/plugins"
 
-    # Remove WP-Statistics if left over from a previous version
-    deactivate_wp_statistics
-
-    # Install multisite and domain mapping
-    # Order matters: ensure_multisite MUST run before SUNRISE is set,
-    # because SUNRISE loads ms-settings.php which queries wp_site table.
-    # That table only exists after multisite-convert runs.
-    if wp_is_installed; then
-        ensure_multisite
-        install_multisite_domain_map
-    fi
-
-    # Install OnionPress theme and plugins
-    install_onionpress_theme
+    # Tor-routed archive.org login can take 30s — background it so the
+    # rest of start_containers returns promptly. No-op if keys are set.
+    bundled_python -m onionpress.cli ensure-archive-s3-keys &
 
     # Configure site timezones to match the host machine so imported
     # social-media timestamps display in local time. Idempotent.
     configure_site_timezones
-
-    # Fix permissions for onionpress persistent data directory
-    fix_onionpress_permissions
-
-    # Ensure wp-content/uploads is writable by www-data (WP multisite
-    # creates sites/<id>/<YYYY>/<MM>/ on demand — root-owned uploads/
-    # breaks media uploads from the admin UI).
-    fix_wordpress_uploads_permissions
 
     # Install iptables rules to log clearnet access from non-Tor containers
     install_clearnet_logging

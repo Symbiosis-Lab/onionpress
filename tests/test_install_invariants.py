@@ -467,24 +467,30 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
                 f"{path}: must pass --plugins-dir to the python CLI",
             )
 
-    def test_start_containers_runs_provision_steps_in_order(self):
-        script = _read("linux/onionpress")
-        m = re.search(
-            r'start_containers\(\)\s*\{(.*?)^\}', script, re.DOTALL | re.MULTILINE)
-        self.assertIsNotNone(
-            m, "start_containers function must exist in linux/onionpress")
-        em, mdm, theme = self._ordered_calls(m.group(1))
-        # All three should be called inside start_containers (gated on
-        # wp_is_installed). Order must match provision-post-install.
-        for name, match in [
-            ("ensure_multisite", em),
-            ("install_multisite_domain_map", mdm),
-            ("install_onionpress_theme", theme),
-        ]:
+    def test_start_containers_delegates_wp_provisioning_to_python(self):
+        """start_containers used to inline 5 bash function calls
+        (ensure_multisite, install_multisite_domain_map, install_onionpress_
+        theme, fix_onionpress_permissions, fix_wordpress_uploads_permissions).
+        It now delegates to the Python module via op_py / bundled_python.
+        Step ordering is enforced inside multisite.provision_post_install
+        — see tests/test_multisite.py.
+        """
+        for path, py_cmd in (
+            ("linux/onionpress", r'op_py\s+provision-post-install'),
+            ("app/MacOS/onionpress",
+             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+        ):
+            script = _read(path)
+            m = re.search(
+                r'start_containers\(\)\s*\{(.*?)^\}', script,
+                re.DOTALL | re.MULTILINE)
             self.assertIsNotNone(
-                match, f"{name} must be called from start_containers")
-        self.assertLess(em.start(), mdm.start())
-        self.assertLess(mdm.start(), theme.start())
+                m, f"start_containers must exist in {path}")
+            self.assertRegex(
+                m.group(1), py_cmd,
+                f"{path}: start_containers must delegate WP provisioning to "
+                "the Python module — keeps Mac and Linux in sync.",
+            )
 
 
 class TestLinuxSleepHookWiring(unittest.TestCase):

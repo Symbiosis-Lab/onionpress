@@ -459,6 +459,144 @@ def write_shared_onion_address(
     return False
 
 
+def configure_ia_plugin(
+    *,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Configure the Internet Archive Wayback Machine Link Fixer plugin
+    if it's installed and WP is set up. Skips silently if either is not
+    yet the case (the bash launcher used to run this every start; we
+    preserve the no-op-when-not-ready semantics).
+    """
+    log = log_func or _noop_log
+    if not wp_is_installed(docker_bin):
+        return True
+
+    plugin_file = (
+        "/var/www/html/wp-content/plugins/"
+        "internet-archive-wayback-machine-link-fixer/"
+        "internet-archive-wayback-machine-link-fixer.php"
+    )
+    if _exec_sh(f"test -f {plugin_file}",
+                docker_bin=docker_bin).returncode != 0:
+        return True  # Plugin not installed; nothing to configure
+
+    done = _wp("option", "get", "iawmlf_setup_wizard_completed",
+               docker_bin=docker_bin)
+    if done.returncode == 0 and done.stdout.strip() == "1":
+        log("Internet Archive plugin already configured")
+        return True
+
+    log("Configuring Internet Archive Wayback Machine Link Fixer plugin...")
+    options = (
+        ("iawmlf_process_links", "1"),
+        ("iawmlf_fixer_option", "replace_link"),
+        ("iawmlf_scan_existing_posts", "1"),
+        ("iawmlf_setup_wizard_completed", "1"),
+    )
+    for name, value in options:
+        r = _wp("option", "update", name, value, docker_bin=docker_bin)
+        if r.returncode != 0:
+            log(f"WARNING: Failed to set {name}: {r.stderr.strip()[:200]}")
+
+    log("Internet Archive plugin configured (link fixer enabled, wizard completed)")
+    return True
+
+
+def deactivate_wp_statistics(
+    *,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Remove the WP-Statistics plugin if it's present. It phoned home
+    to connect.wp-statistics.com even with telemetry disabled — a hard
+    clearnet leak on an onion site. OnionPress ships its own hit counter
+    (onionpress-hit-counter) that doesn't talk to anyone.
+    """
+    log = log_func or _noop_log
+    if not wp_is_installed(docker_bin):
+        return True
+    plugin_file = "/var/www/html/wp-content/plugins/wp-statistics/wp-statistics.php"
+    if _exec_sh(f"test -f {plugin_file}",
+                docker_bin=docker_bin).returncode != 0:
+        return True  # Not present; nothing to do
+
+    log("Removing WP-Statistics plugin (clearnet leak — replaced by built-in hit counter)...")
+    _wp("plugin", "deactivate", "wp-statistics", "--network", docker_bin=docker_bin)
+    _wp("plugin", "delete", "wp-statistics", docker_bin=docker_bin)
+    log("WP-Statistics plugin removed")
+    return True
+
+
+# Shared archive.org credentials baked into OnionPress. Used by
+# ensure_archive_s3_keys to fetch per-instance S3 keys for the Wayback
+# sweep. Note: these creds belong to a low-value "upload quota" account
+# whose only purpose is allowing OnionPress installs to submit to SPN.
+# Compromise impact is bounded by archive.org's rate limit on that
+# account; rotating it is the maintainer's call, not a user concern.
+_ARCHIVE_LOGIN_EMAIL = "onionpress@internetarchive.eu"
+_ARCHIVE_LOGIN_PASS = "aat:aep7"
+
+
+def ensure_archive_s3_keys(
+    *,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Fetch archive.org S3 keys for the shared OnionPress account and
+    stash them in WP options so the Wayback Machine sweep can submit.
+    Idempotent — no-ops if the keys are already set. Best-effort: any
+    failure (no network, archive.org throttling the Tor exit, etc.)
+    logs a warning but doesn't error — the user can set their own
+    creds later in Settings.
+    """
+    log = log_func or _noop_log
+    if not wp_is_installed(docker_bin):
+        return True
+
+    current = _wp("option", "get", "onionpress_archive_s3_access",
+                  docker_bin=docker_bin)
+    if current.returncode == 0 and current.stdout.strip():
+        return True  # Already configured
+
+    log("Fetching archive.org S3 keys for Wayback Machine archiving...")
+    # Route through onionheaven's bundled Tor SOCKS so we don't leak
+    # the instance's clearnet IP just for credential bootstrap.
+    login = subprocess.run(
+        [docker_bin, "exec", "onionheaven",
+         "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
+         "--max-time", "30", "-X", "POST",
+         "-d", f"email={_ARCHIVE_LOGIN_EMAIL}&password={_ARCHIVE_LOGIN_PASS}",
+         "https://archive.org/services/xauthn/?op=login"],
+        capture_output=True, text=True, timeout=45,
+    )
+    if login.returncode != 0 or not login.stdout:
+        log("WARNING: Could not reach archive.org to fetch S3 keys")
+        return False
+
+    import json as _json
+    try:
+        body = _json.loads(login.stdout)
+    except _json.JSONDecodeError:
+        log("WARNING: archive.org login returned non-JSON")
+        return False
+
+    s3 = (body.get("values") or {}).get("s3") or {}
+    access = s3.get("access", "")
+    secret = s3.get("secret", "")
+    if not access or not secret:
+        log("WARNING: archive.org login succeeded but S3 keys were empty")
+        return False
+
+    _wp("option", "update", "onionpress_archive_s3_access", access,
+        docker_bin=docker_bin)
+    _wp("option", "update", "onionpress_archive_s3_secret", secret,
+        docker_bin=docker_bin)
+    log("Archive.org S3 keys configured for Wayback archiving")
+    return True
+
+
 def provision_post_install(
     *,
     themes_dir: str,
