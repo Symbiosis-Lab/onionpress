@@ -1062,6 +1062,7 @@ class SetupDialog:
     # ── Thread-safe UI helpers ────────────────────────────────────────
 
     def _log(self, msg: str) -> None:
+        logger.info("setup: %s", msg)
         GLib.idle_add(self._append_log, msg)
         if "Site title set" in msg:
             GLib.idle_add(self._advance_step)
@@ -1091,6 +1092,7 @@ class SetupDialog:
         return False
 
     def _done(self, success: bool) -> bool:
+        logger.info("setup %s", "PASSED" if success else "FAILED")
         if self._step_idx > 0 and self._step_idx <= len(self._step_labels):
             i = self._step_idx - 1
             self._step_labels[i].set_label(f"  ✓ {self._STEPS[i]}")
