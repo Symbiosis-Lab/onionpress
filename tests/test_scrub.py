@@ -148,7 +148,9 @@ class TestPhaseBackup(unittest.TestCase):
         self.assertEqual(state.onion_address, "op2happy.onion")
         self.assertEqual(state.wp_port, 18080)
         self.assertEqual(state.repo_dir, "/home/x/onionpress")
-        self.assertTrue(state.backup_path.startswith("/tmp/onionpress-scrub-"))
+        expected_dir = os.path.expanduser("~/OnionPress/backups")
+        self.assertTrue(state.backup_path.startswith(
+            os.path.join(expected_dir, "onionpress-scrub-")))
         self.assertTrue(state.backup_path.endswith(".zip"))
 
     def test_aborts_when_no_repo_dir(self):
