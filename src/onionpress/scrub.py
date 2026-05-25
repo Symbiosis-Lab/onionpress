@@ -282,6 +282,12 @@ def phase_uninstall(log: Callable[[str], None]) -> None:
     """
     log("")
     log("── Step 2/5: Uninstall ──")
+    # Kill the tray before the rest of uninstall — it runs in the user
+    # session (not systemd) and would otherwise poll a deleted DATA_DIR
+    # for hours if left running.
+    subprocess.run(
+        ["pkill", "-u", getpass.getuser(), "-f", "onionpress-tray"],
+        capture_output=True)
     env = {**os.environ, "ONIONPRESS_YES": "true"}
     r = subprocess.run([LAUNCHER_BIN, "uninstall"], env=env)
     if r.returncode != 0:
