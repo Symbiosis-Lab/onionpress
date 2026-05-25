@@ -2989,6 +2989,16 @@ sys.exit(0 if provision_interactive() else 1)
             setup_db_passwords 2>/dev/null || true
             cd "$DOCKER_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
 
+            # `compose down -v` only removes volumes Compose created.
+            # Volumes pre-created by the launcher via `docker volume
+            # create` (arti-state, tor-state, tor-keys) are treated as
+            # external and skipped — leaving the onion private key
+            # behind across a supposed "PERMANENTLY DELETE" uninstall.
+            # Sweep all onionpress-* volumes by name filter.
+            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
+                docker volume rm "$vol" 2>/dev/null || true
+            done
+
             echo "Disabling user services..."
             systemctl --user disable onionpress 2>/dev/null || true
             systemctl --user disable onionpress-heartbeat 2>/dev/null || true

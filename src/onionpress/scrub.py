@@ -17,7 +17,6 @@ import getpass
 import glob
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -27,9 +26,6 @@ from typing import Callable, Optional
 
 LAUNCHER_BIN = "/opt/onionpress/onionpress"
 DATA_DIR = os.path.expanduser("~/.onionpress")
-USER_SYSTEMD_DIR = os.path.expanduser("~/.config/systemd/user")
-INSTALL_DIR = "/opt/onionpress"
-SYMLINK_PATH = "/usr/local/bin/onionpress"
 
 # Default password if the user doesn't pass one and we're not connected
 # to a TTY — used by automated CI. Production runs always prompt.
@@ -260,90 +256,18 @@ def phase_backup(password: str, log: Callable[[str], None]) -> PreScrubState:
 # ── Phase 2: Uninstall ────────────────────────────────────────────────
 
 
-def _systemctl_user(*args: str, ignore_errors: bool = True) -> None:
-    """Run `systemctl --user <args>`, optionally silent."""
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    r = subprocess.run(
-        ["systemctl", "--user", *args],
-        env=env, capture_output=True, text=True,
-    )
-    if r.returncode != 0 and not ignore_errors:
-        raise RuntimeError(f"systemctl --user {' '.join(args)} failed: {r.stderr}")
-
-
-def _sudo_systemctl(*args: str) -> None:
-    """Run `sudo systemctl <args>`. Silent on failure (legacy cleanup)."""
-    subprocess.run(["sudo", "systemctl", *args],
-                   capture_output=True)
-
-
 def phase_uninstall(log: Callable[[str], None]) -> None:
-    """Tear down the user-scope service + system-scope legacy units +
-    docker compose volumes + install dir + data dir.
+    """Shell out to the launcher's `uninstall` subcommand with
+    ONIONPRESS_YES=true to skip the backup-prompt (we already took
+    one in phase_backup). Single source of truth — any fix to
+    uninstall reaches scrub automatically.
     """
     log("")
     log("── Step 2/5: Uninstall ──")
-
-    # User-scope services
-    for unit in ("onionpress-heartbeat", "onionpress-watcher.timer", "onionpress"):
-        _systemctl_user("stop", unit)
-
-    # Legacy system-scope (most users won't have these)
-    for unit in ("onionpress-heartbeat", "onionpress-watcher.timer", "onionpress"):
-        _sudo_systemctl("stop", unit)
-
-    # Remove containers AND volumes — scrub is the one place we
-    # deliberately do `down -v`. The backup captured everything; this
-    # is the "fresh install" precondition.
-    docker_dir = os.path.join(INSTALL_DIR, "docker")
-    if os.path.isdir(docker_dir):
-        subprocess.run(
-            ["docker", "compose", "down", "-v"],
-            cwd=docker_dir, capture_output=True,
-        )
-
-    # Disable and remove user-scope unit files
-    for unit in ("onionpress", "onionpress-heartbeat", "onionpress-watcher.timer"):
-        _systemctl_user("disable", unit)
-    for unit_file in (
-        "onionpress.service",
-        "onionpress-heartbeat.service",
-        "onionpress-watcher.service",
-        "onionpress-watcher.timer",
-    ):
-        path = os.path.join(USER_SYSTEMD_DIR, unit_file)
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-    _systemctl_user("daemon-reload")
-
-    # Legacy system-scope cleanup
-    for unit in ("onionpress", "onionpress-heartbeat", "onionpress-watcher.timer"):
-        _sudo_systemctl("disable", unit)
-    for unit_file in (
-        "/etc/systemd/system/onionpress.service",
-        "/etc/systemd/system/onionpress-heartbeat.service",
-        "/etc/systemd/system/onionpress-watcher.service",
-        "/etc/systemd/system/onionpress-watcher.timer",
-    ):
-        subprocess.run(["sudo", "rm", "-f", unit_file], capture_output=True)
-    subprocess.run(["sudo", "systemctl", "daemon-reload"], capture_output=True)
-
-    # Kill the tray. It's a separate user process — stopping the service
-    # doesn't touch it. Without this, the tray polls a deleted DATA_DIR
-    # and displays a stale icon for the whole uninstall window. Mirrors
-    # what the .deb's prerm does.
-    subprocess.run(
-        ["pkill", "-u", os.environ.get("USER", ""), "-f", "onionpress-tray"],
-        capture_output=True,
-    )
-
-    # Remove install dir + data dir
-    subprocess.run(["sudo", "rm", "-rf", INSTALL_DIR], capture_output=True)
-    subprocess.run(["sudo", "rm", "-f", SYMLINK_PATH], capture_output=True)
-    shutil.rmtree(DATA_DIR, ignore_errors=True)
+    env = {**os.environ, "ONIONPRESS_YES": "true"}
+    r = subprocess.run([LAUNCHER_BIN, "uninstall"], env=env)
+    if r.returncode != 0:
+        raise RuntimeError(f"uninstall exited {r.returncode} — aborting scrub.")
     log("  Uninstall complete.")
 
 
