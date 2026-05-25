@@ -1179,7 +1179,6 @@ class OnionPressTray:
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("View Logs", lambda *_: show_log_viewer())
-        self._item("Setup…", lambda *_: self._show_setup_dialog())
         self._item("Settings…", self._on_open_settings)
         self.menu.append(Gtk.SeparatorMenuItem())
 
@@ -1308,6 +1307,11 @@ class OnionPressTray:
                         ["xdg-open", url],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
+            else:
+                # Mirror the Mac menubar: keep re-showing the dialog
+                # until setup succeeds. There's no "Setup…" menu item
+                # to recover with, so the auto-popup is the only path.
+                self._setup_shown = False
 
         dlg = SetupDialog(on_done=_on_done)
         dlg.run()
