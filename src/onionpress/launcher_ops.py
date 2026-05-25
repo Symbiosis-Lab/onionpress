@@ -87,20 +87,29 @@ def _tor_browser_running() -> Optional[str]:
     firefox.real binary. Used so we open URLs in the existing instance
     instead of letting torbrowser-launcher pop an "already running"
     dialog at the user.
+
+    The previous implementation matched cmdline with `pgrep -af
+    tor-browser/Browser/firefox.real`, but Tor Browser invokes its
+    binary as `./firefox.real` (relative path) from cwd=…/tor-browser/
+    Browser/. So pgrep never matched and the function always said "not
+    running" — even with multiple live instances. The tray would then
+    launch yet another, locks stacked up, and torbrowser-launcher
+    started popping its "already running" dialog. Fix: enumerate
+    processes by basename, then confirm via /proc/<pid>/exe (the
+    resolved binary path) that they're actually the Tor Browser build,
+    not some unrelated firefox.real.
     """
     try:
         proc = subprocess.run(
-            ["pgrep", "-af", "tor-browser/Browser/firefox.real"],
+            ["pgrep", "-x", "firefox.real"],
             capture_output=True, text=True, timeout=5,
         )
-        for line in proc.stdout.splitlines():
-            # `pgrep -af` lines are "<pid> <cmdline>"; first whitespace token
-            # in the cmdline is the binary path.
-            parts = line.split(maxsplit=1)
-            if len(parts) < 2:
+        for pid in proc.stdout.split():
+            try:
+                bin_path = os.readlink(f"/proc/{pid}/exe")
+            except OSError:
                 continue
-            bin_path = parts[1].split()[0]
-            if bin_path.endswith("/firefox.real") and os.path.exists(bin_path):
+            if "tor-browser" in bin_path and bin_path.endswith("/firefox.real"):
                 return bin_path
     except (subprocess.SubprocessError, FileNotFoundError):
         pass
