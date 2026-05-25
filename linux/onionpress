@@ -924,6 +924,53 @@ install_onionpress_theme() {
 
 # ─── Archive.org credential exchange ─────────────────────────────────
 
+# Ensure the WordPress install has Archive.org S3 keys configured for
+# Wayback Machine archiving. Mirrors app/MacOS/onionpress:ensure_archive_
+# s3_keys — uses the shared `onionpress@internetarchive.eu` account so
+# every install can archive without each user setting up their own
+# archive.org credentials. The login request goes through onionheaven's
+# bundled Tor SOCKS proxy so the launch isn't a clearnet leak.
+#
+# Idempotent: skips entirely if onionpress_archive_s3_access is already
+# set. Best-effort: any failure (no network, archive.org down, parse
+# error) is logged but doesn't block startup — the user can set their
+# own credentials later in Settings, and the wayback sweep silently
+# skips until one path or the other lands keys.
+ensure_archive_s3_keys() {
+    if ! wp_is_installed; then
+        return 0
+    fi
+
+    local current_access
+    current_access=$(docker exec onionpress-wordpress wp option get onionpress_archive_s3_access --allow-root 2>/dev/null || echo "")
+    if [ -n "$current_access" ]; then
+        return 0  # Already configured
+    fi
+
+    log "Fetching archive.org S3 keys for Wayback Machine archiving..."
+    local login_response
+    login_response=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 -X POST \
+        -d 'email=onionpress@internetarchive.eu&password=aat:aep7' \
+        'https://archive.org/services/xauthn/?op=login' 2>/dev/null)
+
+    if [ -z "$login_response" ]; then
+        log "WARNING: Could not reach archive.org to fetch S3 keys"
+        return 0
+    fi
+
+    local s3_access s3_secret
+    s3_access=$(echo "$login_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('values',{}).get('s3',{}).get('access',''))" 2>/dev/null)
+    s3_secret=$(echo "$login_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('values',{}).get('s3',{}).get('secret',''))" 2>/dev/null)
+
+    if [ -n "$s3_access" ] && [ -n "$s3_secret" ]; then
+        docker exec onionpress-wordpress wp option update onionpress_archive_s3_access "$s3_access" --allow-root >> "$LOG_FILE" 2>&1
+        docker exec onionpress-wordpress wp option update onionpress_archive_s3_secret "$s3_secret" --allow-root >> "$LOG_FILE" 2>&1
+        log "Archive.org S3 keys configured for Wayback archiving"
+    else
+        log "WARNING: archive.org login succeeded but S3 keys were empty"
+    fi
+}
+
 # Convert Archive.org login (email/username + password) into S3 API keys.
 # Sets ia_s3_access and ia_s3_secret on success, empty on failure.
 fetch_archive_s3_keys() {
@@ -1477,6 +1524,12 @@ start_containers() {
     fi
     fix_onionpress_permissions
     fix_wordpress_uploads_permissions
+
+    # Fetch baked-in archive.org S3 keys so the Wayback sweep can submit
+    # without each user setting up their own credentials. Background —
+    # the request goes via onionheaven's Tor SOCKS proxy and can take
+    # 10-30s; no need to block start. No-op if keys are already set.
+    ensure_archive_s3_keys &
 }
 
 stop_containers() {
@@ -1487,6 +1540,12 @@ stop_containers() {
     cd "$DOCKER_DIR"
     docker compose down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
+    # Write a final stopped status.json so any surviving tray process
+    # (the tray runs as its own user process, not under our service)
+    # flips its icon to gray instead of holding the previous "running"
+    # snapshot indefinitely. write_status's `docker compose ps` will
+    # return empty here, which the state derivation maps to "stopped".
+    write_status 2>/dev/null || true
 }
 
 # ─── Status queries ──────────────────────────────────────────────────
@@ -3143,6 +3202,40 @@ sys.exit(0 if provision_interactive() else 1)
 
             confirm_or_skip "Continue? [y/N] " || { echo "Cancelled."; exit 0; }
 
+            # ── Pre-auth sudo and keep it alive for the duration ────────
+            #
+            # Uninstall needs root for `sudo systemctl disable …` and
+            # `sudo rm -rf /opt/onionpress`. Install needs root for
+            # `sudo bash linux/install.sh`. Sudo's password cache (default
+            # 5-15 min) is normally enough — except scrub's backup step
+            # takes a minute or two of network/disk work, after which
+            # the next sudo blocks on a password prompt that nobody is
+            # watching, times out, and the script gives up half-uninstalled.
+            #
+            # Fix: ask for the password now, then refresh the sudo
+            # timestamp in the background every 60s so subsequent sudo
+            # calls inherit a valid cache without blocking.
+            echo "── Authenticating sudo (needed for uninstall + install) ──"
+            if ! sudo -v; then
+                echo "ERROR: sudo authentication failed — aborting scrub."
+                exit 1
+            fi
+            (
+                # Trap exits the keep-alive when the parent shell goes away
+                # (script done / Ctrl-C / kill). `sudo -nv` refreshes the
+                # cached credential without prompting; if the cache has
+                # genuinely expired or the password changed, this fails
+                # silently and the next interactive sudo will prompt.
+                while true; do
+                    sleep 60
+                    kill -0 "$$" 2>/dev/null || exit 0
+                    sudo -nv 2>/dev/null || true
+                done
+            ) &
+            _scrub_sudo_keepalive_pid=$!
+            # Make sure the keep-alive dies even on early exit.
+            trap 'kill "$_scrub_sudo_keepalive_pid" 2>/dev/null || true' EXIT INT TERM
+
             # ── Step 1: Backup ──────────────────────────────────────────
             echo ""
             echo "── Step 1/5: Backup ──"
@@ -3224,6 +3317,14 @@ sys.exit(0 if provision_interactive() else 1)
             sudo rm -f /etc/systemd/system/onionpress-watcher.service
             sudo rm -f /etc/systemd/system/onionpress-watcher.timer
             sudo systemctl daemon-reload
+
+            # Kill the tray. It runs as its own user process (launched by
+            # the autostart .desktop at login), not under the onionpress
+            # systemd unit, so stopping the service doesn't touch it.
+            # Without this, the tray sits there polling a deleted DATA_DIR
+            # and displaying a stale icon for the whole uninstall window.
+            # Mirrors what the .deb's prerm does (build/build-linux.sh).
+            pkill -u "$USER" -f onionpress-tray 2>/dev/null || true
 
             # Remove install dir and data
             sudo rm -rf /opt/onionpress
