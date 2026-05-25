@@ -2463,7 +2463,8 @@ sys.exit(0 if provision_interactive() else 1)
                 exit 1
             fi
             if [ -z "$backup_path" ]; then
-                backup_path="/tmp/onionpress-$(date +%Y-%m-%d)-$$.zip"
+                mkdir -p "$HOME/OnionPress/backups"
+                backup_path="$HOME/OnionPress/backups/onionpress-$(date +%Y-%m-%d)-$$.zip"
             fi
             create_backup "$backup_pass" "$backup_path"
             echo "Backup saved to: $backup_path"
@@ -2953,7 +2954,8 @@ sys.exit(0 if provision_interactive() else 1)
                             echo "Cancelled — install untouched."
                             exit 1
                         fi
-                        bp_path="/tmp/OnionPress-backup-$(date +%Y-%m-%d-%H-%M).zip"
+                        mkdir -p "$HOME/OnionPress/backups"
+                        bp_path="$HOME/OnionPress/backups/OnionPress-backup-$(date +%Y-%m-%d-%H-%M).zip"
                         if create_backup "$PROMPTED_WP_PASS" "$bp_path"; then
                             echo "Backup saved to: $bp_path"
                             echo ""

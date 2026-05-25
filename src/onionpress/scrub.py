@@ -157,9 +157,25 @@ class _SudoKeepAlive:
         """Prompt for the sudo password once, then start the refresh
         thread. Returns False if authentication failed.
         """
-        r = subprocess.run(["sudo", "-v"])
+        # If SUDO_ASKPASS is set in the environment, use it (-A flag) so
+        # non-TTY callers (e.g. Claude Code, CI) can still authenticate.
+        if os.environ.get("SUDO_ASKPASS"):
+            r = subprocess.run(["sudo", "-A", "-v"], capture_output=True)
+            if r.returncode == 0:
+                self._thread = threading.Thread(target=self._loop, daemon=True)
+                self._thread.start()
+                return True
+        # Try non-interactive first (succeeds if credentials are cached).
+        # Fall back to interactive `sudo -v` only when stdin is a tty —
+        # subprocess.run(["sudo", "-v"]) without a tty hangs/fails even
+        # with a warm cache on systems where timestamp_type=tty.
+        r = subprocess.run(["sudo", "-nv"], capture_output=True)
         if r.returncode != 0:
-            return False
+            if not sys.stdin.isatty():
+                return False
+            r = subprocess.run(["sudo", "-v"])
+            if r.returncode != 0:
+                return False
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         return True
@@ -240,7 +256,9 @@ def phase_backup(password: str, log: Callable[[str], None]) -> PreScrubState:
             "/opt/onionpress-src.")
 
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    state.backup_path = f"/tmp/onionpress-scrub-{timestamp}.zip"
+    backups_dir = os.path.expanduser("~/OnionPress/backups")
+    os.makedirs(backups_dir, exist_ok=True)
+    state.backup_path = os.path.join(backups_dir, f"onionpress-scrub-{timestamp}.zip")
 
     # Backup is still a bash subcommand. Shell out to it.
     r = _run([LAUNCHER_BIN, "backup", password, state.backup_path])
