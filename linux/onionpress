@@ -614,9 +614,8 @@ install_ia_plugin() {
 # despite telemetry settings being disabled.  OnionPress's built-in hit counter
 # (onionpress-hit-counter plugin) provides the same functionality without
 # any clearnet leaks.  On existing installs the plugin is deactivated on the
-# next launch (see deactivate_wp_statistics below).
-
-# ─── Permissions ──────────────────────────────────────────────────────
+# next launch via src/onionpress/multisite.py:deactivate_wp_statistics
+# (called from start_containers as `op_py deactivate-wp-statistics`).
 
 # ─── Image updates ────────────────────────────────────────────────────
 
