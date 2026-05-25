@@ -84,6 +84,7 @@ OPTIONS = {
                  'onionpress.reachability_stats',
                  'onionpress.system_metrics',
                  'onionpress.multisite',
+                 'onionpress.scrub',
                  'onionpress.redact'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon

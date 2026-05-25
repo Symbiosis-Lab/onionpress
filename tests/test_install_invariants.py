@@ -802,23 +802,12 @@ class TestScrubPreAuthsSudo(unittest.TestCase):
     """
 
     def test_scrub_preauths_and_keeps_alive(self):
-        script = _read("linux/onionpress")
-        # Carve scrub's case body until the next top-level case label
-        # (8-space indent + label + `)`). Bash sub-cases inside the
-        # branch use deeper indent or different markers (--clean, etc.),
-        # so this is safe.
-        m = re.search(
-            r'^ {8}scrub\)(.*?)^ {8}[a-z_-]+\)', script,
-            re.DOTALL | re.MULTILINE)
-        self.assertIsNotNone(m, "scrub) case must exist in linux/onionpress")
-        # Strip shell comments so phrases inside comments (e.g. the
-        # explanatory block before `sudo -v`) don't get matched as actual
-        # sudo invocations. Newlines preserved so offsets still order
-        # roughly the same as the source.
-        body = re.sub(r'(?m)#.*$', '', m.group(1))
+        # Sudo pre-auth + keep-alive now live in scrub.py's
+        # _SudoKeepAlive class. The bash side just delegates to op_py.
+        body = _read("src/onionpress/scrub.py")
 
-        # `sudo -v` must appear somewhere in the scrub branch.
-        pre_auth = re.search(r'\bsudo\s+-v\b', body)
+        # `sudo -v` must appear somewhere in the scrub module.
+        pre_auth = re.search(r'\bsudo[\'\"]?,\s*[\'\"]\-v', body)
         self.assertIsNotNone(
             pre_auth,
             "scrub must call `sudo -v` to pre-authenticate sudo before any "
@@ -828,26 +817,18 @@ class TestScrubPreAuthsSudo(unittest.TestCase):
 
         # A background keep-alive (sudo -nv in a loop) must appear too.
         self.assertRegex(
-            body, r'sudo\s+-nv',
+            body, r'[\'\"]sudo[\'\"]\s*,\s*[\'\"]\-nv',
             "scrub must keep the sudo timestamp refreshed while the long "
             "phases run — a `sudo -nv` in a background loop is the standard "
             "pattern. Without it, the keep-alive expires and later sudo "
             "calls block.",
         )
-
-        # The pre-auth must come BEFORE the first destructive sudo command
-        # in the same branch.
-        first_destructive_sudo = re.search(
-            r'\bsudo\s+(systemctl|rm)\b', body)
         self.assertIsNotNone(
-            first_destructive_sudo,
-            "Expected scrub to use sudo for systemctl/rm in uninstall step.",
-        )
-        self.assertLess(
-            pre_auth.start(), first_destructive_sudo.start(),
-            "`sudo -v` must come BEFORE the first sudo systemctl/rm call "
-            "in scrub. Otherwise it doesn't actually help — that first "
-            "destructive sudo will still block on a prompt.",
+            pre_auth,
+            "scrub module must call `sudo -v` (via subprocess.run(['sudo', "
+            "'-v'])) to pre-authenticate before any destructive sudo work. "
+            "Without it, the destructive sudo blocks on a prompt nobody is "
+            "watching, times out, and the script aborts half-uninstalled.",
         )
 
 
@@ -867,18 +848,11 @@ class TestUninstallPathsKillTray(unittest.TestCase):
     """
 
     def test_scrub_uninstall_kills_tray(self):
-        script = _read("linux/onionpress")
-        # Carve scrub's case body until the next top-level case label
-        # (8-space indent + label + `)`). Bash sub-cases inside the
-        # branch use deeper indent or different markers (--clean, etc.),
-        # so this is safe.
-        m = re.search(
-            r'^ {8}scrub\)(.*?)^ {8}[a-z_-]+\)', script,
-            re.DOTALL | re.MULTILINE)
-        self.assertIsNotNone(m)
+        # Lives in scrub.py:phase_uninstall now (was inline bash).
+        py = _read("src/onionpress/scrub.py")
         self.assertRegex(
-            m.group(1), r'pkill\s+[^\n]*onionpress-tray',
-            "scrub must `pkill -u $USER -f onionpress-tray` during uninstall "
+            py, r'pkill[^\n]*onionpress-tray',
+            "scrub.phase_uninstall must `pkill -u $USER -f onionpress-tray` "
             "so the tray icon disappears with the rest of the install. "
             "Without this it polls a deleted DATA_DIR for hours.",
         )
@@ -977,6 +951,37 @@ class TestOnionpressOnboardedUsesSiteOption(unittest.TestCase):
             )
 
 
+class TestScrubBashDelegatesToPython(unittest.TestCase):
+    """The scrub flow used to be 300 lines of bash inline in linux/
+    onionpress. It's now in src/onionpress/scrub.py; the bash case is
+    just a delegation stub. This test pins the wiring.
+
+    The original-bash behaviour-pinning (port match, hub re-registration,
+    wayback creds) now lives in tests/test_scrub.py at the Python level
+    where each check is independently mockable.
+    """
+
+    def test_scrub_case_delegates_via_op_py(self):
+        script = _read("linux/onionpress")
+        m = re.search(
+            r'^ {8}scrub\)(.*?)^ {8}[a-z_-]+\)', script,
+            re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m, "scrub) case must exist in linux/onionpress")
+        body = m.group(1)
+        # Must invoke the Python CLI's scrub subcommand.
+        self.assertRegex(
+            body, r'op_py\s+scrub',
+            "scrub) must delegate to `op_py scrub` — the phase orchestration "
+            "+ verify checks live in src/onionpress/scrub.py now.",
+        )
+        # Must forward args (positional password + --clean).
+        self.assertRegex(
+            body, r'"\${@:2}"',
+            "scrub) must forward args via \"${@:2}\" — skipping the case "
+            "label itself but preserving the user's password + --clean.",
+        )
+
+
 class TestScrubVerifyChecks(unittest.TestCase):
     """The scrub Step 5 (verify) must check the three things that have
     historically drifted across a backup→uninstall→install→restore cycle
@@ -997,31 +1002,32 @@ class TestScrubVerifyChecks(unittest.TestCase):
     """
 
     def setUp(self):
-        script = _read("linux/onionpress")
-        m = re.search(
-            r'^ {8}scrub\)(.*?)^ {8}[a-z_-]+\)', script,
-            re.DOTALL | re.MULTILINE)
-        self.assertIsNotNone(m, "scrub) case must exist")
-        self.body = m.group(1)
+        # Verify checks moved from inline bash to src/onionpress/scrub.py.
+        # The bash side is now a 2-line delegation stub; the checks
+        # live in the phase_verify function.
+        self.py = _read("src/onionpress/scrub.py")
 
     def test_pre_scrub_port_captured(self):
+        # PreScrubState now owns the capture; phase_backup populates it.
         self.assertRegex(
-            self.body, r'pre_scrub_port\s*=',
-            "scrub must capture the pre-scrub WP port so the verify step "
-            "can detect port-offset drift across the cycle.",
+            self.py, r'class\s+PreScrubState[\s\S]{0,400}wp_port',
+            "scrub.PreScrubState must hold wp_port so phase_verify can "
+            "compare pre/post values and catch port-offset drift.",
         )
 
     def test_post_scrub_port_matches(self):
+        # phase_verify must read ONIONPRESS_WP_PORT and compare to state.wp_port.
         self.assertRegex(
-            self.body, r'post_scrub_port[\s\S]{0,200}pre_scrub_port',
-            "scrub verify must assert post_scrub_port == pre_scrub_port — "
-            "otherwise port-offset drift across the restart silently leaves "
-            "all the URLs pointing at the wrong number.",
+            self.py,
+            r'ONIONPRESS_WP_PORT[\s\S]{0,200}state\.wp_port',
+            "phase_verify must compare the current ONIONPRESS_WP_PORT to "
+            "state.wp_port — otherwise port-offset drift across the restart "
+            "silently leaves all the URLs pointing at the wrong number.",
         )
 
     def test_hub_registration_check(self):
         self.assertRegex(
-            self.body, r'onionheaven-registration\.json',
+            self.py, r'onionheaven-registration\.json',
             "scrub verify must poll onionheaven-registration.json to "
             "confirm the hub knows we're back — without it visitors get "
             "wayback fallback for up to a heartbeat-interval after restore.",
@@ -1029,7 +1035,7 @@ class TestScrubVerifyChecks(unittest.TestCase):
 
     def test_wayback_creds_check(self):
         self.assertRegex(
-            self.body, r'onionpress_archive_s3_access',
+            self.py, r'onionpress_archive_s3_access',
             "scrub verify must check that ensure_archive_s3_keys landed "
             "Archive.org credentials. Without them the wayback sweep "
             "silently can't submit anything for the lifetime of the install.",

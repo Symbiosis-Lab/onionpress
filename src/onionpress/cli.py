@@ -511,6 +511,17 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("ensure-archive-s3-keys",
                    help="Fetch shared archive.org S3 keys for Wayback archiving")
 
+    p_scrub = sub.add_parser(
+        "scrub",
+        help="Full lifecycle test: backup → uninstall → install → restore → verify",
+    )
+    p_scrub.add_argument(
+        "password", nargs="?",
+        help="WordPress admin password (prompts if omitted)")
+    p_scrub.add_argument(
+        "--clean", action="store_true",
+        help="Delete the backup zip after a successful scrub")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -559,6 +570,12 @@ def main(argv: list[str] = None) -> int:
     elif args.command == "ensure-archive-s3-keys":
         from . import multisite
         return 0 if multisite.ensure_archive_s3_keys(log_func=print) else 1
+    elif args.command == "scrub":
+        from . import scrub as _scrub
+        return _scrub.run_scrub(
+            password=args.password,
+            clean=args.clean,
+        )
     else:
         parser.print_help()
         return 1

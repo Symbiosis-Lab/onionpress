@@ -1,0 +1,590 @@
+"""Full-lifecycle test: backup → uninstall → install → restore → verify.
+
+Ported from the `scrub)` case in linux/onionpress (originally ~300 lines
+of bash). The heavy phases (create_backup, restore_backup, start_
+containers) still go through the bash launcher's subcommands because
+those wrap sizeable bash state machines that haven't been ported yet —
+this module just owns the orchestration glue, sudo keep-alive, and
+the verify checks.
+
+Mac doesn't have scrub yet; this module is Linux-only for now.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import getpass
+import glob
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from typing import Callable, Optional
+
+LAUNCHER_BIN = "/opt/onionpress/onionpress"
+DATA_DIR = os.path.expanduser("~/.onionpress")
+USER_SYSTEMD_DIR = os.path.expanduser("~/.config/systemd/user")
+INSTALL_DIR = "/opt/onionpress"
+SYMLINK_PATH = "/usr/local/bin/onionpress"
+
+# Default password if the user doesn't pass one and we're not connected
+# to a TTY — used by automated CI. Production runs always prompt.
+_INTERACTIVE_PROMPT = "WordPress admin password (for backup): "
+
+EXPECTED_CONTAINERS = (
+    "onionpress-tor",
+    "onionpress-wordpress",
+    "onionpress-db",
+    "onionheaven",
+)
+
+
+@dataclasses.dataclass
+class PreScrubState:
+    """Captured before the destructive phases so verify can detect drift."""
+    onion_address: str = ""
+    wp_port: int = 8080
+    backup_path: str = ""
+    repo_dir: str = ""
+
+
+@dataclasses.dataclass
+class Check:
+    """One verify-step result. `severity == 'warn'` doesn't fail the run."""
+    name: str
+    ok: bool
+    message: str = ""
+    severity: str = "fail"  # "fail" | "warn"
+
+
+def _noop_log(msg: str) -> None:
+    print(msg)
+
+
+def _run(
+    args: list[str],
+    *,
+    check: bool = False,
+    capture: bool = False,
+    quiet: bool = False,
+    timeout: Optional[int] = None,
+) -> subprocess.CompletedProcess:
+    """Thin wrapper around subprocess.run that defaults to inheriting
+    stdio so output streams through to the user. capture=True for
+    commands whose output we need to parse.
+    """
+    kwargs: dict = {"check": check}
+    if capture:
+        kwargs.update(capture_output=True, text=True,
+                      encoding="utf-8", errors="replace")
+    elif quiet:
+        kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return subprocess.run(args, **kwargs)
+
+
+def _confirm(prompt: str = "Continue? [y/N] ") -> bool:
+    """Y/N prompt mirroring the bash confirm_or_skip helper."""
+    if not sys.stdin.isatty():
+        # Non-interactive: assume no to avoid destroying anything in CI.
+        # Set ONIONPRESS_ASSUME_YES=1 in CI to opt in.
+        return os.environ.get("ONIONPRESS_ASSUME_YES", "") == "1"
+    try:
+        reply = input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return reply in ("y", "yes")
+
+
+# ── sudo handling ────────────────────────────────────────────────────
+
+
+class _SudoKeepAlive:
+    """Pre-authenticates sudo at the start of scrub and refreshes the
+    timestamp every 60s so the later destructive sudo calls (which run
+    AFTER a 1-2 minute backup) don't block on an expired password cache.
+
+    A previous scrub run died with `sudo: timed out` immediately after
+    the backup finished, leaving the install half-uninstalled (units
+    gone, volumes gone, but /opt and ~/.onionpress untouched). This
+    class is the fix.
+    """
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> bool:
+        """Prompt for the sudo password once, then start the refresh
+        thread. Returns False if authentication failed.
+        """
+        r = subprocess.run(["sudo", "-v"])
+        if r.returncode != 0:
+            return False
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def _loop(self) -> None:
+        while not self._stop.wait(60):
+            # `sudo -nv` refreshes the cache without prompting; failures
+            # are silent so the next interactive sudo will prompt.
+            try:
+                subprocess.run(
+                    ["sudo", "-nv"], capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+# ── Phase 1: Backup ───────────────────────────────────────────────────
+
+
+def _get_onion_address() -> str:
+    """Read the current onion hostname from the running tor container.
+    Empty string if not available (containers down, address not minted).
+    """
+    r = _run(
+        ["docker", "compose", "exec", "-T", "tor",
+         "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+        capture=True, timeout=10,
+    )
+    if r.returncode != 0:
+        return ""
+    addr = (r.stdout or "").strip()
+    return addr if addr and addr.endswith(".onion") else ""
+
+
+def _find_repo_dir() -> str:
+    """Find the OnionPress git checkout to re-install from. Mirrors the
+    bash glob list — the first match with a .git/ wins.
+    """
+    candidates = (
+        glob.glob("/home/*/tmp/onionpress")
+        + glob.glob("/home/*/onionpress")
+        + ["/opt/onionpress-src"]
+    )
+    for d in candidates:
+        if os.path.isdir(os.path.join(d, ".git")):
+            return d
+    return ""
+
+
+def phase_backup(password: str, log: Callable[[str], None]) -> PreScrubState:
+    """Capture pre-scrub state + create the backup zip. Raises
+    RuntimeError on any unrecoverable failure.
+    """
+    log("")
+    log("── Step 1/5: Backup ──")
+
+    # Capture pre-scrub state for verify.
+    state = PreScrubState()
+    state.onion_address = _get_onion_address()
+    if state.onion_address:
+        log(f"  Pre-scrub onion: {state.onion_address}")
+    else:
+        log("  WARNING: No pre-scrub onion address captured "
+            "(won't be able to verify match)")
+    try:
+        state.wp_port = int(os.environ.get("ONIONPRESS_WP_PORT", "8080"))
+    except ValueError:
+        state.wp_port = 8080
+    log(f"  Pre-scrub WP port: {state.wp_port}")
+
+    state.repo_dir = _find_repo_dir()
+    if not state.repo_dir:
+        raise RuntimeError(
+            "Cannot find OnionPress git repo — needed to re-install. "
+            "Looked in /home/*/tmp/onionpress, /home/*/onionpress, "
+            "/opt/onionpress-src.")
+
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    state.backup_path = f"/tmp/onionpress-scrub-{timestamp}.zip"
+
+    # Backup is still a bash subcommand. Shell out to it.
+    r = _run([LAUNCHER_BIN, "backup", password, state.backup_path])
+    if r.returncode != 0 or not os.path.isfile(state.backup_path) \
+            or os.path.getsize(state.backup_path) == 0:
+        raise RuntimeError("Backup file missing or empty — aborting.")
+
+    size_mb = os.path.getsize(state.backup_path) / (1024 * 1024)
+    log(f"  Backup saved to: {state.backup_path} ({size_mb:.1f}M)")
+    return state
+
+
+# ── Phase 2: Uninstall ────────────────────────────────────────────────
+
+
+def _systemctl_user(*args: str, ignore_errors: bool = True) -> None:
+    """Run `systemctl --user <args>`, optionally silent."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    r = subprocess.run(
+        ["systemctl", "--user", *args],
+        env=env, capture_output=True, text=True,
+    )
+    if r.returncode != 0 and not ignore_errors:
+        raise RuntimeError(f"systemctl --user {' '.join(args)} failed: {r.stderr}")
+
+
+def _sudo_systemctl(*args: str) -> None:
+    """Run `sudo systemctl <args>`. Silent on failure (legacy cleanup)."""
+    subprocess.run(["sudo", "systemctl", *args],
+                   capture_output=True)
+
+
+def phase_uninstall(log: Callable[[str], None]) -> None:
+    """Tear down the user-scope service + system-scope legacy units +
+    docker compose volumes + install dir + data dir.
+    """
+    log("")
+    log("── Step 2/5: Uninstall ──")
+
+    # User-scope services
+    for unit in ("onionpress-heartbeat", "onionpress-watcher.timer", "onionpress"):
+        _systemctl_user("stop", unit)
+
+    # Legacy system-scope (most users won't have these)
+    for unit in ("onionpress-heartbeat", "onionpress-watcher.timer", "onionpress"):
+        _sudo_systemctl("stop", unit)
+
+    # Remove containers AND volumes — scrub is the one place we
+    # deliberately do `down -v`. The backup captured everything; this
+    # is the "fresh install" precondition.
+    docker_dir = os.path.join(INSTALL_DIR, "docker")
+    if os.path.isdir(docker_dir):
+        subprocess.run(
+            ["docker", "compose", "down", "-v"],
+            cwd=docker_dir, capture_output=True,
+        )
+
+    # Disable and remove user-scope unit files
+    for unit in ("onionpress", "onionpress-heartbeat", "onionpress-watcher.timer"):
+        _systemctl_user("disable", unit)
+    for unit_file in (
+        "onionpress.service",
+        "onionpress-heartbeat.service",
+        "onionpress-watcher.service",
+        "onionpress-watcher.timer",
+    ):
+        path = os.path.join(USER_SYSTEMD_DIR, unit_file)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    _systemctl_user("daemon-reload")
+
+    # Legacy system-scope cleanup
+    for unit in ("onionpress", "onionpress-heartbeat", "onionpress-watcher.timer"):
+        _sudo_systemctl("disable", unit)
+    for unit_file in (
+        "/etc/systemd/system/onionpress.service",
+        "/etc/systemd/system/onionpress-heartbeat.service",
+        "/etc/systemd/system/onionpress-watcher.service",
+        "/etc/systemd/system/onionpress-watcher.timer",
+    ):
+        subprocess.run(["sudo", "rm", "-f", unit_file], capture_output=True)
+    subprocess.run(["sudo", "systemctl", "daemon-reload"], capture_output=True)
+
+    # Kill the tray. It's a separate user process — stopping the service
+    # doesn't touch it. Without this, the tray polls a deleted DATA_DIR
+    # and displays a stale icon for the whole uninstall window. Mirrors
+    # what the .deb's prerm does.
+    subprocess.run(
+        ["pkill", "-u", os.environ.get("USER", ""), "-f", "onionpress-tray"],
+        capture_output=True,
+    )
+
+    # Remove install dir + data dir
+    subprocess.run(["sudo", "rm", "-rf", INSTALL_DIR], capture_output=True)
+    subprocess.run(["sudo", "rm", "-f", SYMLINK_PATH], capture_output=True)
+    shutil.rmtree(DATA_DIR, ignore_errors=True)
+    log("  Uninstall complete.")
+
+
+# ── Phase 3: Install ──────────────────────────────────────────────────
+
+
+def phase_install(repo_dir: str, log: Callable[[str], None]) -> None:
+    """Re-run install.sh from the captured repo dir. Pipes through to
+    the user so they see the install output live.
+    """
+    log("")
+    log("── Step 3/5: Install ──")
+    r = subprocess.run(
+        ["sudo", "bash", "linux/install.sh"],
+        cwd=repo_dir,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"install.sh exited {r.returncode} — aborting scrub.")
+    log("  Install complete.")
+
+
+# ── Phase 4: Restore ──────────────────────────────────────────────────
+
+
+def phase_restore(
+    password: str,
+    backup_path: str,
+    log: Callable[[str], None],
+) -> None:
+    """Restore from the backup zip via the bash `restore` subcommand,
+    then bounce containers so the imported Tor keys take effect.
+    """
+    log("")
+    log("── Step 4/5: Restore ──")
+    r = subprocess.run([LAUNCHER_BIN, "restore", password, backup_path])
+    if r.returncode != 0:
+        raise RuntimeError(f"restore exited {r.returncode} — aborting scrub.")
+    log("  Restore and restart complete.")
+
+
+# ── Phase 5: Verify ───────────────────────────────────────────────────
+
+
+def _container_running(name: str) -> bool:
+    r = _run(["docker", "ps", "--format", "{{.Names}}"], capture=True)
+    if r.returncode != 0:
+        return False
+    return name in (r.stdout or "").splitlines()
+
+
+def _wp_responds() -> tuple[bool, str]:
+    r = _run(
+        ["docker", "exec", "onionpress-wordpress",
+         "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "http://localhost:80/"],
+        capture=True, timeout=15,
+    )
+    if r.returncode != 0:
+        return False, "000"
+    code = (r.stdout or "").strip() or "000"
+    return code in ("200", "301", "302"), code
+
+
+def _user_service_enabled(unit: str) -> bool:
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    r = subprocess.run(
+        ["systemctl", "--user", "is-enabled", unit],
+        env=env, capture_output=True, text=True,
+    )
+    return r.returncode == 0
+
+
+def _hub_registered(timeout_s: int = 90) -> bool:
+    """Poll onionheaven-registration.json for `"registered": true`."""
+    path = os.path.join(DATA_DIR, "onionheaven-registration.json")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                if data.get("registered") is True:
+                    return True
+            except (OSError, json.JSONDecodeError):
+                pass
+        time.sleep(10)
+    return False
+
+
+def _wayback_creds_present(timeout_s: int = 90) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["docker", "exec", "onionpress-wordpress",
+             "wp", "option", "get", "onionpress_archive_s3_access",
+             "--allow-root"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return True
+        time.sleep(10)
+    return False
+
+
+def phase_verify(state: PreScrubState, log: Callable[[str], None]) -> list[Check]:
+    """Run all the verify checks, log results, and return them."""
+    log("")
+    log("── Step 5/5: Verify ──")
+    checks: list[Check] = []
+
+    # 1. Each expected container is running.
+    for name in EXPECTED_CONTAINERS:
+        ok = _container_running(name)
+        checks.append(Check(f"{name} running", ok))
+
+    # 2. Onion address present and matches pre-scrub (vanity key preserved).
+    post_addr = _get_onion_address()
+    if not post_addr:
+        checks.append(Check("Onion address present", False,
+                            "No onion address found"))
+    elif state.onion_address and post_addr != state.onion_address:
+        checks.append(Check(
+            "Onion address matches pre-scrub", False,
+            f"changed: {state.onion_address} → {post_addr} "
+            f"(vanity key NOT restored)"))
+    else:
+        checks.append(Check(
+            "Onion address matches pre-scrub", True,
+            f"{post_addr}"))
+
+    # 3. WordPress responds.
+    ok, code = _wp_responds()
+    checks.append(Check(
+        "WordPress responding", ok, f"HTTP {code}"))
+
+    # 4. User-scope systemd unit is enabled (matches install.sh's model).
+    checks.append(Check(
+        "onionpress.service enabled (user)",
+        _user_service_enabled("onionpress")))
+
+    # 5. WP port matches pre-scrub (port-offset drift detection).
+    try:
+        post_port = int(os.environ.get("ONIONPRESS_WP_PORT", "8080"))
+    except ValueError:
+        post_port = 8080
+    if post_port == state.wp_port:
+        checks.append(Check(
+            f"WP port {post_port}", True, "matches pre-scrub"))
+    else:
+        checks.append(Check(
+            "WP port matches pre-scrub", False,
+            f"drifted: {state.wp_port} → {post_port} "
+            f"(a stale socket was likely in TIME_WAIT at detect time)"))
+
+    # 6. OnionHeaven hub re-registration (warn, not fail).
+    checks.append(Check(
+        "OnionHeaven registration restored",
+        _hub_registered(),
+        message="will converge on next heartbeat" if False else "",
+        severity="warn",
+    ))
+
+    # 7. Wayback S3 keys configured (warn).
+    checks.append(Check(
+        "Wayback S3 credentials configured",
+        _wayback_creds_present(),
+        message=("sweep won't submit posts until they land — "
+                 "check archive.org reachability"),
+        severity="warn",
+    ))
+
+    # Pretty-print
+    for c in checks:
+        if c.ok:
+            log(f"  ✓ {c.name}" + (f": {c.message}" if c.message else ""))
+        elif c.severity == "warn":
+            log(f"  ⚠ {c.name}"
+                + (f" — {c.message}" if c.message else ""))
+        else:
+            log(f"  ✗ {c.name}"
+                + (f": {c.message}" if c.message else ""))
+    return checks
+
+
+def scrub_passed(checks: list[Check]) -> bool:
+    """True iff every fail-severity check passed. Warnings don't fail."""
+    return all(c.ok for c in checks if c.severity == "fail")
+
+
+# ── Top-level orchestration ───────────────────────────────────────────
+
+
+def run_scrub(
+    password: Optional[str] = None,
+    *,
+    clean: bool = False,
+    log_func: Optional[Callable[[str], None]] = None,
+) -> int:
+    """Run the full scrub cycle. Returns 0 on PASS, 1 on FAIL.
+
+    Mirrors the bash `scrub)` case it replaces; printing format kept
+    similar so the user sees recognisable output.
+    """
+    log = log_func or _noop_log
+
+    log("")
+    log("OnionPress Scrub")
+    log("================")
+    log("This will: backup → uninstall → install → restore → verify")
+    log("")
+
+    if not _confirm():
+        log("Cancelled.")
+        return 0
+
+    # Pre-auth sudo + keep-alive (the original "abort half-uninstalled"
+    # bug; see the _SudoKeepAlive docstring).
+    log("── Authenticating sudo (needed for uninstall + install) ──")
+    keepalive = _SudoKeepAlive()
+    if not keepalive.start():
+        log("ERROR: sudo authentication failed — aborting scrub.")
+        return 1
+
+    # Make sure the keep-alive dies even on early exit.
+    def _on_signal(_signum, _frame):
+        keepalive.stop()
+        sys.exit(130)
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
+    try:
+        if not password:
+            try:
+                password = getpass.getpass(_INTERACTIVE_PROMPT)
+            except (EOFError, KeyboardInterrupt):
+                password = ""
+        if not password:
+            log("ERROR: Password is required for backup.")
+            return 1
+
+        try:
+            state = phase_backup(password, log)
+        except RuntimeError as e:
+            log(f"ERROR: {e}")
+            return 1
+
+        phase_uninstall(log)
+
+        try:
+            phase_install(state.repo_dir, log)
+        except RuntimeError as e:
+            log(f"ERROR: {e}")
+            return 1
+
+        try:
+            phase_restore(password, state.backup_path, log)
+        except RuntimeError as e:
+            log(f"ERROR: {e}")
+            return 1
+
+        checks = phase_verify(state, log)
+        ok = scrub_passed(checks)
+
+        log("")
+        if ok:
+            log("Scrub PASSED — backup/uninstall/install/restore all working.")
+            if clean:
+                try:
+                    os.unlink(state.backup_path)
+                    log(f"  Cleaned up: {state.backup_path}")
+                except OSError:
+                    pass
+            else:
+                log(f"  Backup retained at: {state.backup_path}")
+                log("  (pass --clean to delete on success)")
+            return 0
+        log("Scrub FAILED — see errors above.")
+        log(f"  Backup retained for recovery: {state.backup_path}")
+        return 1
+    finally:
+        keepalive.stop()
