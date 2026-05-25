@@ -1333,7 +1333,7 @@ class OnionPressTray:
                 os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
         except Exception:
             name = ""
-        url = f"http://{addr}/{name}/" if name else f"http://{addr}/"
+        url = f"http://{addr}/{name}" if name else f"http://{addr}/"
 
         # Gtk.Clipboard.set_text() from a window-less tray callback is
         # a silent no-op on Wayland (no window to own the clipboard;
@@ -1444,7 +1444,12 @@ class OnionPressTray:
                 os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
         except Exception:
             name = ""
-        base = (f"http://localhost:{self.status.wp_port}/{name}/"
+        # No trailing slash on the subsite path — sunrise.php's subsite
+        # router (preg_match '#^/([^/]+)/#') only matches with BOTH
+        # leading and trailing slashes, so /<name> (no trailing slash)
+        # routes to blog_id=1 on first hit, where the op_login plugin
+        # can find the transient. Matches Mac's URL shape exactly.
+        base = (f"http://localhost:{self.status.wp_port}/{name}"
                 if name else f"http://localhost:{self.status.wp_port}/")
         url = self._build_login_url(base)
         if launcher_ops is not None:
@@ -1469,7 +1474,8 @@ class OnionPressTray:
                 os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
         except Exception:
             name = ""
-        base = f"http://{addr}/{name}/" if name else f"http://{addr}/"
+        # See _on_open_local for the no-trailing-slash rationale.
+        base = f"http://{addr}/{name}" if name else f"http://{addr}/"
         url = self._build_login_url(base)
 
         if launcher_ops is None:
