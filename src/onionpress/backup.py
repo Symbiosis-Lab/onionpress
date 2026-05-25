@@ -716,6 +716,42 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
                 capture_output=True, timeout=10
             )
 
+            # Reconcile the wordpress mysql user's password with the
+            # CURRENT install's secrets. The mariadb-dump only dumps
+            # the wordpress database (not mysql.user), so the imported
+            # SQL shouldn't touch grants — but if the user is restoring
+            # into a DB volume that survived from a previous install
+            # (docker compose down without -v, an interrupted scrub,
+            # or any flow that left the data volume present), then
+            # mysql.user still holds the OLD install's password hash
+            # and the WP container can't connect.
+            #
+            # The fix is unconditional: always re-assert the wordpress
+            # user's password to match what the current containers are
+            # using (from env / wp-config / secrets). Idempotent — if
+            # they already match, ALTER USER is effectively a no-op.
+            log_func("Restore: reconciling DB user password with current secrets...")
+            alter_sql = (
+                f"ALTER USER 'wordpress'@'%' "
+                f"IDENTIFIED BY '{db_creds['password']}'; "
+                f"FLUSH PRIVILEGES;"
+            )
+            alter = subprocess.run(
+                ['docker', 'exec', 'onionpress-db', 'sh', '-c',
+                 'mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" -e "' + alter_sql + '"'],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=15,
+            )
+            if alter.returncode == 0:
+                log_func("Restore: DB user password reconciled")
+            else:
+                # Don't fail the restore — the existing grant may already
+                # be correct (the common case). Log so we have a breadcrumb
+                # if WP can't connect after restore.
+                log_func(f"Restore: WARNING — DB user password reconcile "
+                         f"failed (rc={alter.returncode}): "
+                         f"{alter.stderr.strip()[:200]}")
+
         # Post-import workload snapshot — row counts now reflect the
         # restored DB, so we can correlate ingest time with content size.
         _log_workload_stats(log_func, 'RESTORE_STATS_POST', db_creds)

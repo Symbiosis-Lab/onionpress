@@ -951,6 +951,98 @@ class TestOnionpressOnboardedUsesSiteOption(unittest.TestCase):
             )
 
 
+class TestTrayIconSize(unittest.TestCase):
+    """The flat tray-*.png files in linux/assets/ are what GNOME's
+    AppIndicator resolves via the bare icon name ("tray-running",
+    etc.). They must be 22×22 — the standard status-icon size most
+    shells slot directly without scaling. Shipping 32×32 here led to
+    the icon being clipped (shell crops oversized icons rather than
+    scaling them on some setups).
+    """
+
+    def test_flat_tray_icons_are_22x22(self):
+        import struct
+        for state in ("running", "starting", "stopped"):
+            path = os.path.join(PROJECT_ROOT, "linux", "assets",
+                                f"tray-{state}.png")
+            self.assertTrue(os.path.isfile(path),
+                            f"{path} must exist")
+            with open(path, "rb") as f:
+                head = f.read(24)
+            # PNG: 8-byte signature, IHDR chunk starts at offset 8:
+            # 4 length, 4 "IHDR", 4 width, 4 height (big-endian).
+            self.assertEqual(head[:8], b'\x89PNG\r\n\x1a\n',
+                             f"{path} must be a PNG")
+            width = struct.unpack(">I", head[16:20])[0]
+            height = struct.unpack(">I", head[20:24])[0]
+            self.assertEqual(
+                (width, height), (22, 22),
+                f"{path} must be 22x22 (got {width}x{height}). "
+                "Anything larger gets clipped by GNOME shell status-icon "
+                "slots on some setups.",
+            )
+
+
+class TestRestoreReconcilesDbPassword(unittest.TestCase):
+    """When restoring a backup into a fresh install, the WP container
+    comes up with a NEW auto-generated DB password (in ~/.onionpress/
+    secrets), but the backup's mariadb-dump only dumped the wordpress
+    database — mysql.user is whatever the current containers initialized
+    with. If the DB volume happens to be reused from a prior install
+    (interrupted scrub, docker compose down without -v, etc.), mysql.user
+    still has the OLD password hash and WP can't connect. Force a
+    re-grant after import so the password reliably matches.
+    """
+
+    def test_restore_reasserts_wordpress_user_password(self):
+        src = _read("src/onionpress/backup.py")
+        # Allow the f-string to span a line break (DOTALL).
+        self.assertRegex(
+            src,
+            r"ALTER USER 'wordpress'@'%'[\s\S]{0,40}IDENTIFIED BY",
+            "restore_from_backup must `ALTER USER 'wordpress'@'%' "
+            "IDENTIFIED BY '<current-secrets-password>'` after the SQL "
+            "import. Without it, restoring into a stale DB volume leaves "
+            "WP unable to connect (Database Error on every page).",
+        )
+
+
+class TestPortOffsetSticky(unittest.TestCase):
+    """When a quit/start happens within ~60s, the previous offset's
+    ports are still in TIME_WAIT. Naive port-detection sees them as
+    "taken" and bumps the offset, changing the user's wp_port for the
+    rest of the session. The Mac menubar fixes this with a .previous-
+    port-offset sentinel (src/menubar.py:258). Linux launcher must do
+    the same — write sentinel on stop, read+wait on start.
+    """
+
+    def test_linux_writes_previous_offset_on_stop(self):
+        src = _read("linux/onionpress")
+        # Carve out the stop_containers function body (anchor on the
+        # function definition, end at the next column-0 closing brace).
+        m = re.search(
+            r'^stop_containers\(\)\s*\{(.*?)^\}', src,
+            re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m, "stop_containers() must exist")
+        self.assertRegex(
+            m.group(1), r'\.previous-port-offset',
+            "linux/onionpress stop_containers must write "
+            "$DATA_DIR/.previous-port-offset before docker compose down "
+            "so the next start can wait for the prior ports to free.",
+        )
+
+    def test_linux_reads_previous_offset_on_start(self):
+        src = _read("linux/onionpress")
+        # Detection block must read the sentinel and wait for the
+        # desired port to come back.
+        self.assertRegex(
+            src, r'_prev_sentinel.*\.previous-port-offset',
+            "linux/onionpress port-offset detection must read "
+            "$DATA_DIR/.previous-port-offset at startup so a quick "
+            "restart reuses the same offset instead of bumping.",
+        )
+
+
 class TestScrubBashDelegatesToPython(unittest.TestCase):
     """The scrub flow used to be 300 lines of bash inline in linux/
     onionpress. It's now in src/onionpress/scrub.py; the bash case is

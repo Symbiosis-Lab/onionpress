@@ -164,6 +164,40 @@ for p in sys.argv[1:]:
 }
 
 if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
+    # Sticky-offset recovery (mirrors src/menubar.py:258). If we just
+    # quit/restarted, our previous offset's ports are likely in
+    # TIME_WAIT for ~30-60s. Naive detection sees them as "taken" and
+    # bumps to the next offset, giving the user a different port number
+    # for the rest of the session even after the old socket frees.
+    # Avoid this by reading a sentinel written on stop and waiting up
+    # to 15s for the prior offset's ports to come back. Stale sentinels
+    # (>60s) are ignored — likely from a crash where we never got to
+    # write a fresh one.
+    _prev_sentinel="$DATA_DIR/.previous-port-offset"
+    if [ -f "$_prev_sentinel" ]; then
+        _age=$(( $(date +%s) - $(stat -c %Y "$_prev_sentinel" 2>/dev/null || echo 0) ))
+        if [ "$_age" -lt 60 ]; then
+            _prev=$(cat "$_prev_sentinel" 2>/dev/null | tr -dc '0-9')
+            if [ -n "$_prev" ]; then
+                _desired=$((8080 + _prev))
+                for _i in $(seq 1 30); do  # up to 15s, 0.5s each
+                    if python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+    s.close()
+except OSError:
+    s.close(); sys.exit(1)
+' "$_desired" 2>/dev/null; then
+                        break
+                    fi
+                    sleep 0.5
+                done
+            fi
+        fi
+        rm -f "$_prev_sentinel"
+    fi
     ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
 fi
 export ONIONPRESS_PORT_OFFSET
@@ -1207,6 +1241,12 @@ stop_containers() {
     stop_container_log_capture
     stop_onionheaven_activation_watcher
     stop_onionheaven_farm
+    # Capture the offset BEFORE compose-down so the next start can wait
+    # for the TIME_WAIT sockets to clear and reuse the same offset.
+    # Without this the next start sees the post-down TIME_WAIT sockets
+    # as "taken" and bumps to a higher offset, leaving the user on a
+    # different port number across restarts. Best-effort.
+    echo "${ONIONPRESS_PORT_OFFSET:-0}" > "$DATA_DIR/.previous-port-offset" 2>/dev/null || true
     cd "$DOCKER_DIR"
     docker compose down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
