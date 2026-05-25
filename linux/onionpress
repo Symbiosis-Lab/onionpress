@@ -164,6 +164,31 @@ for p in sys.argv[1:]:
 }
 
 if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
+    # If the service is already running, read its offset from status.json
+    # rather than re-detecting via socket bind. The bind test returns 0
+    # when nothing currently holds port 8080 (e.g. between restarts or
+    # when another user's containers hold it but the bind test runs as a
+    # different uid), causing standalone commands like `onionpress setup`
+    # to target the wrong port.
+    _status_json="$DATA_DIR/status.json"
+    if [ -f "$_status_json" ] && command -v python3 >/dev/null 2>&1; then
+        _running_wp_port=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    p = int(d.get('wp_port', 0))
+    if p > 0:
+        print(p - 8080)
+except Exception:
+    pass
+" "$_status_json" 2>/dev/null)
+        if [ -n "$_running_wp_port" ] && [ "$_running_wp_port" -ge 0 ] 2>/dev/null; then
+            ONIONPRESS_PORT_OFFSET="$_running_wp_port"
+        fi
+    fi
+fi
+
+if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
     # Sticky-offset recovery (mirrors src/menubar.py:258). If we just
     # quit/restarted, our previous offset's ports are likely in
     # TIME_WAIT for ~30-60s. Naive detection sees them as "taken" and
@@ -843,22 +868,6 @@ setup_wordpress_interactive() {
             wp_title="$wp_title_input"
         fi
 
-        # Archive.org credentials for Wayback Machine archiving
-        echo ""
-        echo "  Archive.org credentials (for Wayback Machine archiving)."
-        echo "  Press Enter to skip (can be set later in Settings)."
-        echo ""
-        if [ -z "$ia_access" ]; then
-            printf "  Archive.org account (username or email): "
-            read ia_access
-        fi
-        if [ -n "$ia_access" ] && [ -z "$ia_secret" ]; then
-            printf "  Archive.org password: "
-            stty -echo 2>/dev/null
-            read ia_secret
-            stty echo 2>/dev/null
-            echo ""
-        fi
     fi
 
     if [ -z "$wp_email" ]; then
@@ -869,6 +878,15 @@ setup_wordpress_interactive() {
     echo "  Installing WordPress..."
     log "Running WP-CLI core multisite-install for first-time setup"
 
+    # sunrise.php is installed by provision-post-install before WordPress exists.
+    # It queries wp_site on load, which fails during a fresh install because the
+    # multisite tables don't exist yet. Move it aside for the duration of the
+    # install, then restore it.
+    docker exec onionpress-wordpress bash -c \
+        '[ -f wp-content/sunrise.php ] && mv wp-content/sunrise.php wp-content/sunrise.php.bak || true' \
+        >> "$LOG_FILE" 2>&1
+
+    local _wp_install_ok=false
     if docker exec onionpress-wordpress wp core multisite-install \
         --url="http://localhost" \
         --title="$wp_title" \
@@ -877,6 +895,14 @@ setup_wordpress_interactive() {
         --admin_email="$wp_email" \
         --skip-email \
         --allow-root >> "$LOG_FILE" 2>&1; then
+        _wp_install_ok=true
+    fi
+
+    docker exec onionpress-wordpress bash -c \
+        '[ -f wp-content/sunrise.php.bak ] && mv wp-content/sunrise.php.bak wp-content/sunrise.php || true' \
+        >> "$LOG_FILE" 2>&1
+
+    if $_wp_install_ok; then
         log "WordPress installed successfully via WP-CLI"
         echo "  WordPress installed successfully!"
     else
@@ -2314,6 +2340,13 @@ main() {
                     echo "  Starting Tor..."
                     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1
                 fi
+                # Run post-install provisioning: theme, multisite, plugins.
+                # provision-post-install ran at startup before WordPress existed
+                # and short-circuited the theme/multisite steps. Now that WP is
+                # installed, run it again to complete those steps.
+                op_py provision-post-install \
+                    --themes-dir "$THEMES_DIR" \
+                    --plugins-dir "$PLUGINS_DIR" >> "$LOG_FILE" 2>&1 || true
             fi
             write_status
             echo ""

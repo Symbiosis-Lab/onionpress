@@ -62,13 +62,10 @@ STATUS_FILE = os.path.join(DATA_DIR, "status.json")
 PIDFILE = os.path.join(DATA_DIR, "tray.pid")
 TRAY_LOG = os.path.join(DATA_DIR, "tray.log")
 ASSETS_DIR = os.path.join(INSTALL_DIR, "assets")
-# Icons live flat under assets/tray-<state>.png. We previously tried a
-# proper hicolor/<size>x<size>/apps/ tree, but on GNOME Wayland the
-# indicator extension didn't pick up the sub-sized icons via the new
-# IconThemePath — the shell rendered a "broken icon" placeholder (the
-# three-dots glyph). A flat directory works because gtk-icon-theme
-# resolves the bare name there directly. We also ship the hicolor tree
-# so /usr/share/icons consumers (e.g. GNOME Software) find icons too.
+# Flat PNGs under assets/ — AppIndicator resolves the bare name directly.
+# No hicolor/ subdir here: AppIndicator would prefer the larger sizes from
+# that tree and clip them in the panel. Desktop icons live separately in
+# ~/.local/share/icons/hicolor/ (populated by install.sh from app-icon.png).
 ICON_THEME_PATH = ASSETS_DIR
 # Point at the binary directly, not /usr/local/bin/onionpress. The
 # install.sh symlink to /usr/local/bin is for human CLI use; if it
@@ -1131,15 +1128,6 @@ class OnionPressTray:
         self.menu = Gtk.Menu()
         self._build_menu()
         self.indicator.set_menu(self.menu)
-
-        # Wire middle-click (and on some shells, left-click) to "Open
-        # Local Site" — the single most-likely action on a routine click.
-        # Right-click on the icon still shows the full menu. (On GNOME's
-        # ubuntu-appindicators extension, the default is right-click =
-        # menu; left-click does nothing by default. set_secondary_activate
-        # _target() promotes one menu item to the click action.)
-        if hasattr(self, "menu_open_local"):
-            self.indicator.set_secondary_activate_target(self.menu_open_local)
 
         self.status = Status(on_change=self._on_status_change)
 

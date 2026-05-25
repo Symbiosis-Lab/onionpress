@@ -832,6 +832,16 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             denv = self.server.docker_env
             wp_exec = [docker, "exec", "onionpress-wordpress"]
 
+            # sunrise.php is installed by provision-post-install before WordPress
+            # exists. It queries wp_site on load, which fails during a fresh install
+            # because multisite tables don't exist yet. Move it aside for the install.
+            subprocess.run(
+                wp_exec + ["bash", "-c",
+                    "[ -f wp-content/sunrise.php ] && "
+                    "mv wp-content/sunrise.php wp-content/sunrise.php.bak || true"],
+                env=denv, capture_output=True, timeout=10
+            )
+
             cmd = wp_exec + [
                 "wp", "core", "multisite-install",
                 "--url=http://localhost",
@@ -845,6 +855,13 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             result = subprocess.run(
                 cmd, env=denv,
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
+            )
+
+            subprocess.run(
+                wp_exec + ["bash", "-c",
+                    "[ -f wp-content/sunrise.php.bak ] && "
+                    "mv wp-content/sunrise.php.bak wp-content/sunrise.php || true"],
+                env=denv, capture_output=True, timeout=10
             )
 
             if result.returncode == 0:
