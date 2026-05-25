@@ -504,6 +504,10 @@ def main(argv: list[str] = None) -> int:
     # Individual post-start provisioning steps. These are the helpers
     # start_containers used to inline as bash function calls; the bash
     # launchers now delegate each one through here.
+    sub.add_parser(
+        "verify-admin-password",
+        help="Validate a WP admin password (reads from stdin). Exit 0 = match.",
+    )
     sub.add_parser("configure-ia-plugin",
                    help="Configure the IA Wayback Machine Link Fixer plugin")
     sub.add_parser("deactivate-wp-statistics",
@@ -576,6 +580,13 @@ def main(argv: list[str] = None) -> int:
             password=args.password,
             clean=args.clean,
         )
+    elif args.command == "verify-admin-password":
+        from .backup import verify_wp_admin_password_any
+        pw = sys.stdin.read().rstrip("\n")
+        if not pw:
+            return 1
+        ok, _ = verify_wp_admin_password_any(pw)
+        return 0 if ok else 1
     else:
         parser.print_help()
         return 1

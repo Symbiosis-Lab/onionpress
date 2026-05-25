@@ -104,6 +104,44 @@ def _confirm(prompt: str = "Continue? [y/N] ") -> bool:
 # ── sudo handling ────────────────────────────────────────────────────
 
 
+def _prompt_and_validate_wp_password(
+    initial: Optional[str],
+    *,
+    max_attempts: int = 3,
+    log: Callable[[str], None] = _noop_log,
+) -> Optional[str]:
+    """Validate a WP admin password against the running container.
+    `initial` may be set if the caller passed `--pass`; that's still
+    validated (a typo in the CLI is just as bad as one at the prompt).
+    Re-prompts up to `max_attempts` times.
+
+    Returns the validated password, or None if the user gave up / no
+    password came in / max retries hit.
+    """
+    from .backup import verify_wp_admin_password_any
+
+    pw = initial
+    for attempt in range(1, max_attempts + 1):
+        if not pw:
+            try:
+                pw = getpass.getpass(_INTERACTIVE_PROMPT)
+            except (EOFError, KeyboardInterrupt):
+                return None
+        if not pw:
+            log("  (empty password — aborting)")
+            return None
+        ok, _info = verify_wp_admin_password_any(pw)
+        if ok:
+            return pw
+        log("  Password does not match any WordPress admin account.")
+        remaining = max_attempts - attempt
+        if remaining > 0:
+            log(f"  ({remaining} more attempt{'s' if remaining > 1 else ''} remaining)")
+        pw = None  # force re-prompt
+    log("  Too many bad attempts — aborting.")
+    return None
+
+
 class _SudoKeepAlive:
     """Pre-authenticates sudo at the start of scrub and refreshes the
     timestamp every 60s so the later destructive sudo calls (which run
@@ -538,13 +576,15 @@ def run_scrub(
     signal.signal(signal.SIGTERM, _on_signal)
 
     try:
+        # Prompt for + validate the WP admin password BEFORE any
+        # destructive work. Without this validation, a typo would let us
+        # tear down half the install before phase_backup's internal
+        # verify catches the bad password and exits — leaving the user
+        # in a broken state. Three tries; clean abort on failure.
+        password = _prompt_and_validate_wp_password(
+            password, log=log)
         if not password:
-            try:
-                password = getpass.getpass(_INTERACTIVE_PROMPT)
-            except (EOFError, KeyboardInterrupt):
-                password = ""
-        if not password:
-            log("ERROR: Password is required for backup.")
+            log("ERROR: Could not validate WordPress admin password — aborting.")
             return 1
 
         try:

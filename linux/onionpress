@@ -263,6 +263,43 @@ wp_is_installed() {
     docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1
 }
 
+# Verify a WP admin password without making a backup. Used by scrub/
+# uninstall to pre-validate the password BEFORE any destructive work —
+# otherwise create_backup verifies mid-script and the user can end up
+# in a half-uninstalled state on a bad password.
+#
+# Stdin: the password.  Returns 0 if valid, non-zero otherwise.
+verify_wp_admin_password() {
+    op_py verify-admin-password
+}
+
+# Prompt for + validate a WP admin password. Sets PROMPTED_WP_PASS on
+# success. Retries up to 3 times; returns 1 if user gives up.
+prompt_and_validate_wp_password() {
+    local prompt="${1:-WordPress admin password: }"
+    local attempt
+    PROMPTED_WP_PASS=""
+    for attempt in 1 2 3; do
+        local pw
+        read -r -s -p "$prompt" pw
+        echo ""
+        if [ -z "$pw" ]; then
+            echo "  (empty — aborting)"
+            return 1
+        fi
+        if printf '%s' "$pw" | verify_wp_admin_password; then
+            PROMPTED_WP_PASS="$pw"
+            return 0
+        fi
+        echo "  Password does not match any WordPress admin account."
+        if [ "$attempt" -lt 3 ]; then
+            echo "  ($((3 - attempt)) more attempt$([ $attempt -lt 2 ] && echo s) remaining)"
+        fi
+    done
+    echo "  Too many bad attempts — aborting."
+    return 1
+}
+
 # ─── Secrets management ─────────────────────────────────────────────
 
 setup_db_passwords() {
@@ -2833,18 +2870,31 @@ sys.exit(0 if provision_interactive() else 1)
                 read -r -p "Create a backup before uninstalling? [Y/n] " backup_choice
                 if [ "$backup_choice" != "n" ] && [ "$backup_choice" != "N" ]; then
                     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
-                        read -r -s -p "WordPress admin password (for backup): " bp_pass
-                        echo ""
+                        # Pre-validate the WP admin password BEFORE any
+                        # destructive work. Without this, a typo'd password
+                        # makes create_backup error out mid-script, leaving
+                        # the user in a "Fix it or Ctrl-C" limbo. Three
+                        # tries; abort cleanly on failure — install stays
+                        # intact.
+                        if ! prompt_and_validate_wp_password \
+                                "WordPress admin password (for backup): "; then
+                            echo "Cancelled — install untouched."
+                            exit 1
+                        fi
                         bp_path="/tmp/OnionPress-backup-$(date +%Y-%m-%d-%H-%M).zip"
-                        if create_backup "$bp_pass" "$bp_path"; then
+                        if create_backup "$PROMPTED_WP_PASS" "$bp_path"; then
                             echo "Backup saved to: $bp_path"
                             echo ""
                             echo "IMPORTANT: Copy this file somewhere safe before continuing!"
                             echo "  e.g.: scp $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}'):$bp_path ."
                             echo ""
                         else
-                            echo "Backup failed. Fix the issue or press Ctrl-C to abort."
-                            echo ""
+                            # Password was already validated, so this is
+                            # a different kind of failure (disk full,
+                            # docker hiccup). Bail rather than risk an
+                            # uninstall without a backup.
+                            echo "Backup failed. Aborting uninstall — install untouched."
+                            exit 1
                         fi
                     else
                         echo "Containers are not running — cannot create backup."
@@ -2857,13 +2907,10 @@ sys.exit(0 if provision_interactive() else 1)
                         fi
                     fi
                 fi
-
-                # No separate "type DELETE" gate — the uninstall needs
-                # sudo to remove /opt/onionpress + system unit files,
-                # and that sudo password prompt is the actual "are you
-                # sure" moment. Two confirmations (backup y/N + sudo
-                # password) is friction without added safety. Mac's
-                # uninstall doesn't have a DELETE prompt either.
+                # No separate "type DELETE" gate — the sudo password
+                # prompt that comes next is the actual "are you sure"
+                # moment. Mac's uninstall doesn't have a DELETE prompt
+                # either.
             fi
 
             echo ""

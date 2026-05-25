@@ -186,6 +186,7 @@ class TestRunScrubBranches(unittest.TestCase):
                 start=mock.MagicMock(return_value=True),
                 stop=mock.MagicMock(),
             )),
+            "_prompt_and_validate_wp_password": "pw",
             "phase_backup": scrub.PreScrubState(
                 onion_address="op2happy.onion",
                 wp_port=18080,
@@ -202,6 +203,8 @@ class TestRunScrubBranches(unittest.TestCase):
             mock.patch.object(scrub, "_confirm", return_value=defaults["_confirm"]),
             mock.patch.object(scrub, "_SudoKeepAlive",
                               defaults["_SudoKeepAlive"]),
+            mock.patch.object(scrub, "_prompt_and_validate_wp_password",
+                              return_value=defaults["_prompt_and_validate_wp_password"]),
             mock.patch.object(scrub, "phase_backup",
                               return_value=defaults["phase_backup"]),
             mock.patch.object(scrub, "phase_uninstall",
@@ -214,6 +217,29 @@ class TestRunScrubBranches(unittest.TestCase):
                               return_value=defaults["phase_verify"]),
         ]
         return patches
+
+    def test_bad_password_aborts_before_any_destructive_action(self):
+        """If the WP admin password validation fails 3 times in a row,
+        scrub must abort with rc=1 WITHOUT calling phase_backup or any
+        subsequent destructive phase. This is the fix for today's bug
+        where bad passwords left the install half-uninstalled.
+        """
+        with mock.patch.object(scrub, "_confirm", return_value=True), \
+             mock.patch.object(scrub, "_SudoKeepAlive",
+                               return_value=mock.MagicMock(
+                                   start=mock.MagicMock(return_value=True),
+                                   stop=mock.MagicMock())), \
+             mock.patch.object(scrub, "_prompt_and_validate_wp_password",
+                               return_value=None) as pv, \
+             mock.patch.object(scrub, "phase_backup") as backup, \
+             mock.patch.object(scrub, "phase_uninstall") as uninstall, \
+             mock.patch.object(scrub, "phase_install") as install:
+            rc = scrub.run_scrub(password="wrong", log_func=lambda _: None)
+        self.assertEqual(rc, 1)
+        pv.assert_called_once_with("wrong", log=mock.ANY)
+        backup.assert_not_called()
+        uninstall.assert_not_called()
+        install.assert_not_called()
 
     def test_user_cancels(self):
         with mock.patch.object(scrub, "_confirm", return_value=False):
