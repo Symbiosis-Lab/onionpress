@@ -323,6 +323,26 @@ def install_fresh_wordpress(
     _write_config(data_dir, "ONIONNAME", onionname)
     log(f"Onionname saved to config: {onionname}")
 
+    # 8. Fetch archive.org S3 keys in the background.
+    # Tor-routed login can take 10-30s, so we don't block setup
+    # completion on it. The wp_option onionpress_archive_s3_access will
+    # appear once it lands — the Wayback sweep plugin polls for it.
+    # Without this, Mac SetupWindow and Linux tray SetupDialog never
+    # fetched the keys (only the bash `onionpress setup` subcommand
+    # did, via its explicit `op_py ensure-archive-s3-keys` call at
+    # linux/onionpress:2351). The scrub verify's Wayback warning was
+    # the symptom.
+    if launcher_bin is not None:
+        try:
+            subprocess.Popen(
+                [launcher_bin, "ensure-archive-s3-keys"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+            log("Archive.org S3 key fetch started in background")
+        except (OSError, FileNotFoundError) as e:
+            log(f"WARNING: could not start S3 key fetch: {e}")
+
     return True
 
 
