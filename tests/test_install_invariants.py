@@ -923,5 +923,64 @@ class TestOnionpressOnboardedUsesSiteOption(unittest.TestCase):
             )
 
 
+class TestScrubVerifyChecks(unittest.TestCase):
+    """The scrub Step 5 (verify) must check the three things that have
+    historically drifted across a backup→uninstall→install→restore cycle
+    without anyone noticing:
+
+      1. Port match — port detection is non-deterministic when a previous
+         socket is in TIME_WAIT, so the offset can bump from +10000 to
+         +20000 across a restart, leaving all the URLs pointing at a
+         different number than what the user/tray knows about.
+      2. OnionHeaven re-registration — the local heartbeat state survives
+         restore (it's in the backup), but the HUB needs to see our /online
+         within a heartbeat interval, otherwise visitors get fronted by
+         wayback fallback for minutes.
+      3. Wayback creds — `ensure_archive_s3_keys` runs in background after
+         start_containers; if the Tor-routed archive.org login fails, the
+         sweep silently can't submit. The install is otherwise functional
+         so this is a warning, not a hard fail.
+    """
+
+    def setUp(self):
+        script = _read("linux/onionpress")
+        m = re.search(
+            r'^ {8}scrub\)(.*?)^ {8}[a-z_-]+\)', script,
+            re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m, "scrub) case must exist")
+        self.body = m.group(1)
+
+    def test_pre_scrub_port_captured(self):
+        self.assertRegex(
+            self.body, r'pre_scrub_port\s*=',
+            "scrub must capture the pre-scrub WP port so the verify step "
+            "can detect port-offset drift across the cycle.",
+        )
+
+    def test_post_scrub_port_matches(self):
+        self.assertRegex(
+            self.body, r'post_scrub_port[\s\S]{0,200}pre_scrub_port',
+            "scrub verify must assert post_scrub_port == pre_scrub_port — "
+            "otherwise port-offset drift across the restart silently leaves "
+            "all the URLs pointing at the wrong number.",
+        )
+
+    def test_hub_registration_check(self):
+        self.assertRegex(
+            self.body, r'onionheaven-registration\.json',
+            "scrub verify must poll onionheaven-registration.json to "
+            "confirm the hub knows we're back — without it visitors get "
+            "wayback fallback for up to a heartbeat-interval after restore.",
+        )
+
+    def test_wayback_creds_check(self):
+        self.assertRegex(
+            self.body, r'onionpress_archive_s3_access',
+            "scrub verify must check that ensure_archive_s3_keys landed "
+            "Archive.org credentials. Without them the wayback sweep "
+            "silently can't submit anything for the lifetime of the install.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

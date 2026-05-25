@@ -3249,7 +3249,13 @@ sys.exit(0 if provision_interactive() else 1)
                 exit 1
             fi
 
-            # Capture pre-scrub onion address so we can verify it survives the cycle
+            # Capture pre-scrub state so Step 5 can verify the cycle didn't
+            # silently drift. The address is the canonical thing (vanity
+            # key restoration), but the port matters too — historically a
+            # restart in flux has bumped the offset (e.g. +10000 → +20000)
+            # because some prior socket was in TIME_WAIT at detect time.
+            # Different post-scrub port = same data but tray/install.sh-
+            # printed URLs all point at the wrong number.
             local pre_scrub_addr
             pre_scrub_addr=$(get_onion_address 2>/dev/null || echo "")
             if [ -n "$pre_scrub_addr" ] && [ "$pre_scrub_addr" != "Generating..." ]; then
@@ -3258,6 +3264,8 @@ sys.exit(0 if provision_interactive() else 1)
                 pre_scrub_addr=""
                 echo "  WARNING: No pre-scrub onion address captured (won't be able to verify match)"
             fi
+            local pre_scrub_port="${ONIONPRESS_WP_PORT:-8080}"
+            echo "  Pre-scrub WP port: $pre_scrub_port"
 
             local scrub_backup="/tmp/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
             create_backup "$scrub_pass" "$scrub_backup"
@@ -3400,6 +3408,58 @@ sys.exit(0 if provision_interactive() else 1)
             else
                 echo "  ✗ onionpress.service not enabled (user)"
                 scrub_ok=false
+            fi
+
+            # Check the post-scrub WP port matches pre-scrub. Different ports
+            # = different installs from the user's perspective (the tray /
+            # install.sh-printed URLs all point at the wrong number). Happens
+            # when detect_port_offset runs while some prior socket is in
+            # TIME_WAIT — non-deterministic bump from +10000 to +20000.
+            local post_scrub_port="${ONIONPRESS_WP_PORT:-8080}"
+            if [ "$post_scrub_port" = "$pre_scrub_port" ]; then
+                echo "  ✓ WP port: $post_scrub_port (matches pre-scrub)"
+            else
+                echo "  ✗ WP port drifted: $pre_scrub_port → $post_scrub_port"
+                echo "    (a stale socket was likely in TIME_WAIT at detect time)"
+                scrub_ok=false
+            fi
+
+            # Check OnionHeaven re-registration. Without this, the hub may
+            # not yet know we're back — visitors get the wayback fallback
+            # for up to a heartbeat-interval after restore. We poll for up
+            # to 90s; warn (don't fail) if still pending — the heartbeat
+            # client will eventually converge on its own.
+            local oh_registered="false"
+            for i in 1 2 3 4 5 6 7 8 9; do
+                if [ -f "$DATA_DIR/onionheaven-registration.json" ] && \
+                   grep -q '"registered"\s*:\s*true' "$DATA_DIR/onionheaven-registration.json" 2>/dev/null; then
+                    oh_registered="true"
+                    break
+                fi
+                sleep 10
+            done
+            if [ "$oh_registered" = "true" ]; then
+                echo "  ✓ OnionHeaven registration restored"
+            else
+                echo "  ⚠ OnionHeaven registration not visible after 90s — will converge on next heartbeat"
+            fi
+
+            # Check the baked-in Archive.org S3 keys landed so the wayback
+            # sweep can submit. ensure_archive_s3_keys runs in background
+            # during start_containers; the login goes through Tor and can
+            # take 10-30s. Warn (don't fail) — the install IS functional
+            # without wayback, just no Wayback Machine backups.
+            local wb_creds=""
+            for i in 1 2 3 4 5 6 7 8 9; do
+                wb_creds=$(docker exec onionpress-wordpress wp option get onionpress_archive_s3_access --allow-root 2>/dev/null | tr -d '\r\n ')
+                [ -n "$wb_creds" ] && break
+                sleep 10
+            done
+            if [ -n "$wb_creds" ]; then
+                echo "  ✓ Wayback S3 credentials configured"
+            else
+                echo "  ⚠ Wayback S3 credentials not yet present after 90s"
+                echo "    (sweep won't submit posts until they land — check archive.org reachability)"
             fi
 
             echo ""
