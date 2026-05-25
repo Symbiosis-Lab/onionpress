@@ -332,16 +332,17 @@ def install_fresh_wordpress(
     # did, via its explicit `op_py ensure-archive-s3-keys` call at
     # linux/onionpress:2351). The scrub verify's Wayback warning was
     # the symptom.
-    if launcher_bin is not None:
+    def _fetch_s3_keys():
         try:
-            subprocess.Popen(
-                [launcher_bin, "ensure-archive-s3-keys"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL, start_new_session=True,
-            )
-            log("Archive.org S3 key fetch started in background")
-        except (OSError, FileNotFoundError) as e:
-            log(f"WARNING: could not start S3 key fetch: {e}")
+            from . import multisite
+            multisite.ensure_archive_s3_keys(
+                docker_bin=docker_bin, log_func=log_func)
+        except Exception as e:
+            log(f"WARNING: archive.org S3 key fetch failed: {e}")
+
+    import threading
+    threading.Thread(target=_fetch_s3_keys, daemon=True).start()
+    log("Archive.org S3 key fetch started in background")
 
     return True
 
