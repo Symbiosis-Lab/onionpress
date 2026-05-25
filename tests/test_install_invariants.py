@@ -667,5 +667,261 @@ class TestLinuxReinstallBrowserOpen(unittest.TestCase):
         )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# "Cheap" static invariants added after a real uninstall→reinstall test
+# exposed several Linux-only regressions that Mac had silently solved
+# years ago. The pattern across them: a Mac function never got ported,
+# OR a path-specific helper (uninstall, stop, scrub) skipped a cleanup
+# step that the equivalent .deb prerm or Mac menubar already does.
+# These tests are the cheap text/AST kind — no docker, no containers,
+# just grep against the launcher scripts.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestMacLinuxFunctionParity(unittest.TestCase):
+    """Functions present in the Mac launcher must also exist in the Linux
+    launcher (with a small allowlist for genuinely platform-specific code).
+    Catches the "ported on Mac, forgotten on Linux" class of bug.
+
+    Incident: `ensure_archive_s3_keys` lived on Mac for a long time and
+    was never ported to Linux. Wayback Machine archiving silently never
+    worked on Linux installs because the auth header stayed empty, so
+    the sweep loop found posts and submitted zero of them forever.
+    """
+
+    # Functions that should exist on BOTH platforms. Not exhaustive —
+    # additions welcome whenever a new shared launcher helper lands.
+    REQUIRED_ON_BOTH = {
+        "ensure_archive_s3_keys",
+        "ensure_multisite",
+        "install_multisite_domain_map",
+        "install_onionpress_theme",
+        "fix_onionpress_permissions",
+        "fix_wordpress_uploads_permissions",
+        "deactivate_wp_statistics",
+        "install_ia_plugin",
+        "configure_ia_plugin",
+        "detect_port_offset",
+    }
+    # `fetch_archive_s3_keys` exists only on Linux: it's a helper used by
+    # the SSH/CLI `onionpress setup` interactive path, which on Mac is
+    # handled by the AppKit setup window. Same shape of work, different
+    # call site — not a parity bug.
+
+    def _fns(self, path):
+        return set(re.findall(r"^([a-z_][a-z_0-9]*)\(\)", _read(path), re.MULTILINE))
+
+    def test_shared_functions_exist_on_both(self):
+        mac = self._fns("app/MacOS/onionpress")
+        linux = self._fns("linux/onionpress")
+        missing_mac = self.REQUIRED_ON_BOTH - mac
+        missing_linux = self.REQUIRED_ON_BOTH - linux
+        self.assertFalse(
+            missing_mac,
+            f"Required functions missing from app/MacOS/onionpress: {missing_mac}",
+        )
+        self.assertFalse(
+            missing_linux,
+            f"Required functions missing from linux/onionpress: {missing_linux} "
+            "— port from Mac before shipping. The wayback bug was caused by "
+            "exactly this: ensure_archive_s3_keys existed on Mac for a long "
+            "time and was never ported, so fresh Linux installs never got "
+            "Archive.org credentials.",
+        )
+
+
+class TestScrubPreAuthsSudo(unittest.TestCase):
+    """The scrub flow does sudo work AFTER a 1-2 minute backup step.
+    Sudo's password cache will have expired by then, so any sudo call
+    in the uninstall section will block on a prompt nobody is watching,
+    time out, and leave the install half-done (units removed, volumes
+    gone, but /opt/onionpress and ~/.onionpress untouched).
+
+    Incident: a real scrub run died with `sudo: timed out` immediately
+    after `docker compose down`, leaving the system unbootable.
+
+    Fix: `sudo -v` at the very start of scrub (before backup) caches
+    the credential. A background `sudo -nv` keep-alive every 60s
+    refreshes the timestamp through the long phases. Both must be
+    present and ordered correctly: pre-auth THEN keep-alive THEN the
+    rest of the scrub work.
+    """
+
+    def test_scrub_preauths_and_keeps_alive(self):
+        script = _read("linux/onionpress")
+        # Carve scrub's case body until the next top-level case label
+        # (8-space indent + label + `)`). Bash sub-cases inside the
+        # branch use deeper indent or different markers (--clean, etc.),
+        # so this is safe.
+        m = re.search(
+            r'^ {8}scrub\)(.*?)^ {8}[a-z_-]+\)', script,
+            re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m, "scrub) case must exist in linux/onionpress")
+        # Strip shell comments so phrases inside comments (e.g. the
+        # explanatory block before `sudo -v`) don't get matched as actual
+        # sudo invocations. Newlines preserved so offsets still order
+        # roughly the same as the source.
+        body = re.sub(r'(?m)#.*$', '', m.group(1))
+
+        # `sudo -v` must appear somewhere in the scrub branch.
+        pre_auth = re.search(r'\bsudo\s+-v\b', body)
+        self.assertIsNotNone(
+            pre_auth,
+            "scrub must call `sudo -v` to pre-authenticate sudo before any "
+            "destructive work. Without it, a sudo prompt will time out "
+            "after backup and leave the install half-done.",
+        )
+
+        # A background keep-alive (sudo -nv in a loop) must appear too.
+        self.assertRegex(
+            body, r'sudo\s+-nv',
+            "scrub must keep the sudo timestamp refreshed while the long "
+            "phases run — a `sudo -nv` in a background loop is the standard "
+            "pattern. Without it, the keep-alive expires and later sudo "
+            "calls block.",
+        )
+
+        # The pre-auth must come BEFORE the first destructive sudo command
+        # in the same branch.
+        first_destructive_sudo = re.search(
+            r'\bsudo\s+(systemctl|rm)\b', body)
+        self.assertIsNotNone(
+            first_destructive_sudo,
+            "Expected scrub to use sudo for systemctl/rm in uninstall step.",
+        )
+        self.assertLess(
+            pre_auth.start(), first_destructive_sudo.start(),
+            "`sudo -v` must come BEFORE the first sudo systemctl/rm call "
+            "in scrub. Otherwise it doesn't actually help — that first "
+            "destructive sudo will still block on a prompt.",
+        )
+
+
+class TestUninstallPathsKillTray(unittest.TestCase):
+    """Every uninstall code path must `pkill onionpress-tray` so the
+    tray icon doesn't sit there showing a stale "running" state while
+    the launcher and containers are gone. The tray is a separate user
+    process (launched by the autostart .desktop, not by the systemd
+    onionpress.service unit), so stopping the service does NOT touch it.
+
+    Incident: after scrub's uninstall step, the tray icon stayed purple
+    for 2+ hours showing "running" while the service was actually dead.
+    The user thought everything was fine.
+
+    The .deb's prerm has had this fix for a while (`pkill onionpress-tray`);
+    scrub now does too.
+    """
+
+    def test_scrub_uninstall_kills_tray(self):
+        script = _read("linux/onionpress")
+        # Carve scrub's case body until the next top-level case label
+        # (8-space indent + label + `)`). Bash sub-cases inside the
+        # branch use deeper indent or different markers (--clean, etc.),
+        # so this is safe.
+        m = re.search(
+            r'^ {8}scrub\)(.*?)^ {8}[a-z_-]+\)', script,
+            re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m)
+        self.assertRegex(
+            m.group(1), r'pkill\s+[^\n]*onionpress-tray',
+            "scrub must `pkill -u $USER -f onionpress-tray` during uninstall "
+            "so the tray icon disappears with the rest of the install. "
+            "Without this it polls a deleted DATA_DIR for hours.",
+        )
+
+    def test_deb_prerm_kills_tray(self):
+        script = _read("build/build-linux.sh")
+        # Carve out the prerm heredoc (PRERM is the marker we just used).
+        m = re.search(
+            r"<<'PRERM'(.*?)PRERM\s*$", script, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(
+            m, "build-linux.sh must define a DEBIAN/prerm via a heredoc")
+        self.assertRegex(
+            m.group(1), r'pkill\s+[^\n]*onionpress-tray',
+            "The .deb's prerm must pkill the tray on `apt remove` so the "
+            "icon goes with the package. Without this it stays around "
+            "showing a stale state until the user logs out.",
+        )
+
+
+class TestStopContainersWritesStoppedStatus(unittest.TestCase):
+    """When the launcher stops containers, it must write a final
+    status.json with state="stopped" so the tray (which polls the file
+    every 2s) flips its icon to gray within one cycle. Without this,
+    the tray holds the previous "running" snapshot indefinitely.
+
+    The launcher's write_status() already maps an empty `docker compose ps`
+    to state="stopped" — stop_containers just has to call it.
+    """
+
+    def test_stop_containers_writes_status(self):
+        script = _read("linux/onionpress")
+        m = re.search(
+            r'stop_containers\(\)\s*\{(.*?)^\}', script,
+            re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m, "stop_containers() must exist")
+        body = m.group(1)
+        # write_status must be called after the compose down — order matters:
+        # the call needs to see the post-down `docker compose ps` (empty).
+        down = re.search(r'docker\s+compose\s+down', body)
+        ws = re.search(r'\bwrite_status\b', body)
+        self.assertIsNotNone(down, "stop_containers must run `docker compose down`")
+        self.assertIsNotNone(
+            ws,
+            "stop_containers must call write_status so the tray flips its "
+            "icon to gray. Linux tray is a separate process from the "
+            "launcher (file-based IPC via status.json); without this, the "
+            "icon stays purple/yellow indefinitely after the service stops.",
+        )
+        self.assertLess(
+            down.start(), ws.start(),
+            "write_status must come AFTER `docker compose down` — write_status "
+            "calls `docker compose ps` to derive state; calling it before "
+            "down would still report the running containers.",
+        )
+
+
+class TestOnionpressOnboardedUsesSiteOption(unittest.TestCase):
+    """`onionpress_onboarded` is set network-wide by the onboarding mu-
+    plugin via update_site_option(), so every reader/writer in the
+    launcher and setup_logic must use the site_option API too. A plain
+    `wp option update onionpress_onboarded 1` writes wp_options (per-blog)
+    while the plugin reads from wp_sitemeta (multisite) → admin gets
+    redirected to ?page=onionpress-onboarding on every wp-admin visit.
+
+    Incident: fresh installs hit the wizard redirect loop even though
+    setup completed cleanly.
+    """
+
+    def test_no_plain_option_writes_to_onionpress_onboarded(self):
+        for path in ("src/onionpress/setup_logic.py",
+                     "linux/onionpress",
+                     "app/MacOS/onionpress"):
+            src = _read(path)
+            # The bad pattern: `wp option update onionpress_onboarded ...`
+            # (whether shell args or Python list literal).
+            self.assertNotRegex(
+                src,
+                r'\bwp\b[^\n]*\boption\b\s+update[^\n]*onionpress_onboarded',
+                f"{path}: do not write onionpress_onboarded via plain "
+                "`wp option update` — that writes wp_options (per-blog) "
+                "while the onboarding mu-plugin reads via get_site_option "
+                "(wp_sitemeta, network-wide on multisite). Use "
+                "`wp eval 'update_site_option(...)'` instead.",
+            )
+
+    def test_no_plain_option_reads_for_onionpress_onboarded(self):
+        for path in ("linux/onionpress", "src/onionpress/setup_logic.py"):
+            src = _read(path)
+            self.assertNotRegex(
+                src,
+                r'\bwp\b[^\n]*\boption\b\s+get[^\n]*onionpress_onboarded',
+                f"{path}: do not read onionpress_onboarded via plain "
+                "`wp option get` — the value lives in wp_sitemeta on "
+                "multisite. Use `wp eval 'echo get_site_option(...)'` "
+                "instead, matching the mu-plugin's reader.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
