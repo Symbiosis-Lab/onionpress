@@ -261,6 +261,20 @@ class HubConnection:
         with self._lock:
             return self._sock is not None
 
+    def connect(self):
+        """Open the persistent socket eagerly so it's ready before the first
+        sleep can race us. Idempotent. Returns True on success."""
+        with self._lock:
+            if self._sock is not None:
+                return True
+            try:
+                self._open_locked()
+                return True
+            except Exception as e:
+                log.warning("HubConnection.connect failed: %s", e)
+                self._close_locked()
+                return False
+
     def close(self):
         with self._lock:
             self._close_locked()
@@ -948,9 +962,17 @@ def main():
     # through this socket, keeping it warm; the SleepInhibitor reuses
     # the same socket on PrepareForSleep so /offline lands in ~5ms
     # instead of the ~1.7s a fresh SOCKS5+Tor rendezvous takes.
+    #
+    # Open eagerly (rather than lazy on first /online) so a fast lid-close
+    # right after daemon restart still has a hot socket — without this,
+    # the first 60s of daemon uptime had the SleepInhibitor falling
+    # through to the slow path with no socket to use.
     if HAVE_PYSOCKS and _content_addr != _current_hub:
         _hub_conn = HubConnection(_current_hub)
-        log.info("hub-connection: persistent SOCKS5 socket prepared (lazy-open)")
+        if _hub_conn.connect():
+            log.info("hub-connection: persistent SOCKS5 socket open")
+        else:
+            log.warning("hub-connection: initial connect failed, will retry on first heartbeat")
 
     # Start the logind sleep-inhibitor now that we have keys + a hub.
     # The inhibitor sends /offline synchronously on PrepareForSleep(true)
