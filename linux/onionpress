@@ -2407,32 +2407,21 @@ sys.exit(0 if provision_interactive() else 1)
 
         sleep-pre|sleep-post)
             # Called by /usr/lib/systemd/system-sleep/onionpress around
-            # suspend. This hook fires AFTER NetworkManager has already
-            # torn down WiFi in response to the same logind sleep signal,
-            # so we cannot send a /offline POST from here — the heartbeat
-            # daemon takes care of that itself via a DBus delay inhibitor
-            # (see SleepInhibitor in onionpress-heartbeat.py).
+            # suspend. As of v2.4.99, all real work happens in the heartbeat
+            # daemon's DBus delay-inhibitor (see SleepInhibitor in
+            # onionpress-heartbeat.py): /offline POST on suspend and
+            # DEL_ONION / ADD_ONION watchdog signals on both sides, all
+            # while the inhibitor lock is still held — when docker is
+            # still responsive (not throttled by NM teardown).
             #
-            # What this hook still does: signal tor-watchdog inside each
-            # Tor container to DEL_ONION (sleep) or ADD_ONION (wake) the
-            # services via the local control port. That's all in-container
-            # work, no external network needed.
+            # This hook is kept as a no-op fallback so the system-sleep
+            # contract still has something to call, and so its presence
+            # in the journal proves the OnionPress install is wired in.
+            # If the heartbeat daemon isn't running for some reason,
+            # there's nothing useful we can do from here anyway —
+            # docker exec is too slow at this point in the suspend flow.
             phase="${1#sleep-}"
-            case "$phase" in
-                pre)  action="DEL_ONION"; td_sig="USR1" ;;
-                post) action="ADD_ONION"; td_sig="USR2" ;;
-            esac
-            log "system-sleep $phase: tor-watchdog $action"
-
-            for c in onionpress-tor onionheaven; do
-                if timeout 2 docker exec "$c" sh -c \
-                        "kill -${td_sig} \$(pgrep -f '[t]or-watchdog') 2>/dev/null" \
-                        >/dev/null 2>&1; then
-                    log "system-sleep $phase: SIG${td_sig} → $c tor-watchdog"
-                else
-                    log "system-sleep $phase: $c tor-watchdog signal failed or timed out"
-                fi
-            done
+            log "system-sleep $phase: hook called (no-op; daemon does the work)"
             ;;
 
         # ── Vanity + admin-password — thin wrappers around the Python CLI

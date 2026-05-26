@@ -782,22 +782,69 @@ class SleepInhibitor:
 
     def _on_prepare_for_sleep(self, going_to_sleep):
         if bool(going_to_sleep):
-            log.info("sleep-inhibitor: PrepareForSleep(true) — sending /offline")
+            log.info("sleep-inhibitor: PrepareForSleep(true) — sending /offline + DEL_ONION")
             try:
                 self._send_offline_now()
             except Exception as e:
                 log.warning("sleep-inhibitor: send_offline raised: %s", e)
+            # Signal tor-watchdog inside both Tor-carrying containers to
+            # DEL_ONION their services. Done here, not in the system-sleep
+            # hook, because we still hold the delay inhibitor — docker is
+            # still responsive. Once the hook fires it's after WiFi
+            # teardown and docker exec gets throttled to >2s.
+            self._signal_watchdogs("USR1")
             self._release()
             log.info("sleep-inhibitor: delay lock released, suspend can proceed")
         else:
-            log.info("sleep-inhibitor: PrepareForSleep(false) — woke up")
+            log.info("sleep-inhibitor: PrepareForSleep(false) — woke up, sending ADD_ONION")
             # Re-acquire the inhibitor for the next sleep cycle.
             self._acquire()
+            # Signal tor-watchdog to ADD_ONION services back. The watchdog
+            # waits for Tor circuits internally before doing the ADD, so
+            # there's no race with WiFi reconnecting.
+            self._signal_watchdogs("USR2")
             # Trigger an immediate /online via the existing pending-flag
             # machinery so the daemon's heartbeat loop posts it on the
             # next wake — same path USR2 uses, no duplicate plumbing.
             global _pending_online
             _pending_online = True
+
+    def _signal_watchdogs(self, sig):
+        """Send a Unix signal to tor-watchdog inside each Tor-carrying
+        container, in parallel threads so neither one's latency stacks
+        onto the other. Each call is best-effort: failure is logged but
+        doesn't block the rest of the suspend flow."""
+        threads = []
+        for c in ("onionpress-tor", "onionheaven"):
+            t = threading.Thread(
+                target=self._signal_watchdog_one, args=(c, sig),
+                daemon=True, name=f"signal-{c}",
+            )
+            t.start()
+            threads.append(t)
+        # Bounded join: don't block the inhibitor lock release for longer
+        # than necessary. 3s is plenty when docker is still responsive
+        # (typical call is ~100ms); a slow run still logs even after the
+        # join times out.
+        for t in threads:
+            t.join(timeout=3)
+
+    def _signal_watchdog_one(self, container, sig):
+        try:
+            result = subprocess.run(
+                ["docker", "exec", container, "sh", "-c",
+                 f"kill -{sig} $(pgrep -f '[t]or-watchdog')"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                log.info("sleep-inhibitor: SIG%s → %s tor-watchdog", sig, container)
+            else:
+                log.warning("sleep-inhibitor: %s tor-watchdog signal failed (rc=%d): %s",
+                            container, result.returncode, result.stderr.strip()[:120])
+        except subprocess.TimeoutExpired:
+            log.warning("sleep-inhibitor: %s tor-watchdog signal timed out", container)
+        except Exception as e:
+            log.warning("sleep-inhibitor: %s tor-watchdog signal errored: %s", container, e)
 
     def _send_offline_now(self):
         """Fast-path /offline through the persistent HubConnection — the
