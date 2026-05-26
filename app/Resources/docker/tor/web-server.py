@@ -10,7 +10,11 @@ Runs inside the tor container on port 8083, exposed through the onion service.
 
 Endpoints:
   POST /online       — Heartbeat / register (upserts registry entry, optionally stores arti key)
-  POST /unregister   — Release takeover and hard-delete from registry
+  POST /unregister   — Release takeover (DEL_ONION + decrement worker), mark
+                       row status='unregistered', delete arti key file.
+                       Row is NOT deleted — a subsequent /online from the same
+                       (content_address, healthcheck_address) transitions
+                       status back to 'online' (re-registration).
   POST /offline      — Notify OnionHeaven that instance is going offline
   POST /reset-onionheaven — Clean stress tests + refresh workers with current code (internal only)
   POST /logs/manifest — (OnionHome only) Accept log file manifests for analytics sharing
@@ -1079,15 +1083,27 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             ).fetchone()
 
             # Upsert: create if new, update if exists.
-            # Do NOT set status='online' here — release_function owns that transition.
-            # For new entries, status starts as 'online'. For existing entries, keep
-            # current status so release_function can detect taken-over and act on it.
+            # For new entries, status starts as 'online'. For existing entries:
+            #   - status='online'      → keep 'online'
+            #   - status='taken-over'  → keep 'taken-over'; release_function
+            #     (called below) owns the transition back to 'online' so it
+            #     can also DEL_ONION on the worker and decrement assigned_count.
+            #   - status='unregistered' → flip to 'online'. unregister_entry
+            #     already ran release_function before marking unregistered,
+            #     so no worker is holding the address; nothing to DEL_ONION.
+            #     Without this transition, a previously-unregistered address
+            #     could never be re-activated by a heartbeat — /online would
+            #     clear unregistered_at/reason but leave status='unregistered'
+            #     forever.
             wp_healthy_val = (1 if wordpress_healthy else 0) if wordpress_healthy is not None else None
             conn.execute("""INSERT INTO registry
                 (content_address, healthcheck_address, registered_at, version,
                  last_healthy, status, is_onionheaven, wordpress_healthy, wordpress_checked_at)
                 VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?)
                 ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
+                    status = CASE WHEN registry.status = 'unregistered'
+                                  THEN 'online'
+                                  ELSE registry.status END,
                     last_healthy = excluded.last_healthy,
                     version = CASE WHEN excluded.version != 'unknown' THEN excluded.version ELSE registry.version END,
                     is_onionheaven = excluded.is_onionheaven,
