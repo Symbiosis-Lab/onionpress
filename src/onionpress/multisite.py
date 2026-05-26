@@ -571,18 +571,23 @@ def ensure_archive_s3_keys(
         return True  # Already configured
 
     log("Fetching archive.org S3 keys for Wayback Machine archiving...")
-    # Route through onionheaven's bundled Tor SOCKS so we don't leak
-    # the instance's clearnet IP just for credential bootstrap.
+    # POST to archive.org's onion (NOT clearnet) — clearnet archive.org
+    # via Tor exit nodes is aggressively rate-limited / blocked by their
+    # Cloudflare layer (every exit we tried 2026-05-25 returned HTTP 000).
+    # The onion service (Onion-Location header advertised on archive.org
+    # itself) routes around that block entirely. -k accepts the onion's
+    # self-issued certificate.
     login = subprocess.run(
         [docker_bin, "exec", "onionheaven",
-         "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
-         "--max-time", "30", "-X", "POST",
+         "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
+         "--max-time", "60", "-X", "POST",
          "-d", f"email={_ARCHIVE_LOGIN_EMAIL}&password={_ARCHIVE_LOGIN_PASS}",
-         "https://archive.org/services/xauthn/?op=login"],
-        capture_output=True, text=True, timeout=45,
+         "https://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login"],
+        capture_output=True, text=True, timeout=75,
     )
     if login.returncode != 0 or not login.stdout:
-        log("WARNING: Could not reach archive.org to fetch S3 keys")
+        log("WARNING: Could not reach archive.org onion to fetch S3 keys — "
+            "set them manually in Settings if needed.")
         return False
 
     import json as _json
