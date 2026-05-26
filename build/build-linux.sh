@@ -3,10 +3,10 @@
 # Build OnionPress .deb for Linux
 # Usage: bash build/build-linux.sh
 #
-# Outputs:
-#   build/onionpress_VERSION_all.deb  (versioned, archived per release)
-#   build/onionpress.deb              (unversioned copy — what the homepage
-#                                      links to via releases/latest/download/)
+# Output:
+#   build/onionpress.deb  (version is inside the package via the Version:
+#                          control field — what the homepage links to via
+#                          releases/latest/download/)
 
 set -e
 
@@ -90,8 +90,12 @@ collect_files() {
 echo ""
 echo "Building .deb package..."
 
+# Staging dir name doesn't influence the output filename — `dpkg-deb --build`
+# writes wherever we point it, and the package's own version lives in the
+# control file's `Version:` field, not the filename.
 DEB_NAME="onionpress_${VERSION}_${DEB_ARCH}"
 DEB_ROOT="$STAGE_DIR/deb/$DEB_NAME"
+DEB_OUT="$BUILD_DIR/onionpress.deb"
 
 # Install files
 collect_files "$DEB_ROOT/opt/onionpress"
@@ -430,7 +434,7 @@ chmod 755 "$DEB_ROOT/DEBIAN/postrm"
 
 # Build the .deb
 if command -v dpkg-deb >/dev/null 2>&1; then
-    dpkg-deb --build "$DEB_ROOT" "$BUILD_DIR/${DEB_NAME}.deb"
+    dpkg-deb --build "$DEB_ROOT" "$DEB_OUT"
 else
     # dpkg-deb not available (e.g. building on macOS) — assemble manually.
     # A .deb is an ar archive containing: debian-binary, control.tar.gz, data.tar.gz
@@ -464,7 +468,7 @@ def ar_header(name, size):
     return f'{name}{mtime}{uid}{gid}{mode}{fsize}\x60\n'.encode()
 
 parts_dir = '$DEB_TMP'
-out_path = '$BUILD_DIR/${DEB_NAME}.deb'
+out_path = '$DEB_OUT'
 
 with open(out_path, 'wb') as out:
     out.write(b'!<arch>\n')
@@ -482,23 +486,14 @@ print(f'  .deb assembled: {out_path}')
 "
 fi
 
-DEB_SIZE=$(du -h "$BUILD_DIR/${DEB_NAME}.deb" | cut -f1)
-echo "  .deb created: build/${DEB_NAME}.deb ($DEB_SIZE)"
-
-# Unversioned copy. GitHub's releases/latest/download/<filename> endpoint
-# requires an exact filename match, so the homepage button needs a name
-# that doesn't change with each release — same trick as onionpress.dmg.
-# The versioned .deb stays as the per-release archive copy.
-cp "$BUILD_DIR/${DEB_NAME}.deb" "$BUILD_DIR/onionpress.deb"
-echo "  .deb copied:  build/onionpress.deb (unversioned, for releases/latest/download/)"
+DEB_SIZE=$(du -h "$DEB_OUT" | cut -f1)
+echo "  .deb created: $DEB_OUT ($DEB_SIZE, version $VERSION via control file)"
 
 # ─── Clean up ───────────────────────────────────────────────────────────
 
 rm -rf "$STAGE_DIR"
 
 echo ""
-echo "✅ Linux package built:"
-echo "   .deb (versioned):    build/${DEB_NAME}.deb"
-echo "   .deb (unversioned):  build/onionpress.deb"
+echo "✅ Linux package built: $DEB_OUT"
 echo ""
 echo "Install:     sudo apt install ./build/onionpress.deb"

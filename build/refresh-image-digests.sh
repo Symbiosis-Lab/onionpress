@@ -53,13 +53,34 @@ WP_PIN="${WP_IMG}@${WP_DIGEST}"
 #    The matcher tolerates "@sha256:..." being present or absent so the
 #    same script works on a fresh checkout or one already pinned to an
 #    older digest.
-sed -i -E \
-    -e "s|ghcr\\.io/brewsterkahle/onionpress-tor:latest(@sha256:[a-f0-9]+)?|${TOR_PIN}|g" \
-    -e "s|ghcr\\.io/brewsterkahle/onionpress-wordpress:latest(@sha256:[a-f0-9]+)?|${WP_PIN}|g" \
-    app/Resources/docker/docker-compose.yml \
-    linux/onionpress \
-    src/onionpress/containers.py \
-    src/onionpress/launcher_ops.py
+#
+# Use python to avoid BSD-vs-GNU sed `-i` incompatibility: BSD sed (macOS)
+# requires `-i ''` while GNU sed (Linux/CI) does not. Python is portable
+# and we already require a system python3 for the build.
+TOR_PIN="$TOR_PIN" WP_PIN="$WP_PIN" python3 - <<'PY'
+import os, re, pathlib
+tor_pin = os.environ["TOR_PIN"]
+wp_pin  = os.environ["WP_PIN"]
+# Lookahead `(?=["}\n])` ensures we only rewrite refs in a pin context
+# (a python/shell quoted string, a `${...:-...}` yaml default, or end of
+# line) — never an unquoted shell occurrence like
+#   `if docker image inspect ghcr.io/...:latest >/dev/null`
+# which is just a presence check and should stay unpinned.
+tor_re = re.compile(r"ghcr\.io/brewsterkahle/onionpress-tor:latest(@sha256:[a-f0-9]+)?(?=[\"}\n])")
+wp_re  = re.compile(r"ghcr\.io/brewsterkahle/onionpress-wordpress:latest(@sha256:[a-f0-9]+)?(?=[\"}\n])")
+for path in [
+    "app/Resources/docker/docker-compose.yml",
+    "linux/onionpress",
+    "src/onionpress/containers.py",
+    "src/onionpress/launcher_ops.py",
+]:
+    p = pathlib.Path(path)
+    s = p.read_text()
+    n = wp_re.sub(wp_pin, tor_re.sub(tor_pin, s))
+    if n != s:
+        p.write_text(n)
+        print(f"  updated: {path}")
+PY
 
 echo
 echo "Updated. Review with: git diff"

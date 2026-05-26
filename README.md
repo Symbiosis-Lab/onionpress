@@ -47,10 +47,11 @@ One command installs everything:
 curl -sSL https://raw.githubusercontent.com/brewsterkahle/onionpress/main/linux/install.sh | bash
 ```
 
-Or download the [`.deb` package](https://github.com/brewsterkahle/onionpress/releases/latest):
+Or download the [`.deb` package](https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.deb):
 
 ```bash
-sudo apt-get install ./onionpress_*.deb
+wget https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.deb
+sudo apt-get install ./onionpress.deb
 sudo systemctl start onionpress
 ```
 
