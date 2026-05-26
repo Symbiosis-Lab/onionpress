@@ -2408,35 +2408,73 @@ sys.exit(0 if provision_interactive() else 1)
         sleep-pre|sleep-post)
             # Called by /usr/lib/systemd/system-sleep/onionpress immediately
             # before suspend (sleep-pre) and after resume (sleep-post).
-            # Budget: ~4s total — the hook script wraps us in `timeout 4`,
+            # Budget: ~8s total — the hook script wraps us in `timeout 8`,
             # because systemd will kill the system-sleep handler eventually
             # and we mustn't block the suspend.
             #
-            # On the host side, the heartbeat client runs as a user systemd
-            # service. We poke it with USR1 (flush /offline) or USR2 (send
-            # immediate /online) so the hub state matches reality fast,
-            # rather than waiting up to a heartbeat interval to converge.
+            # sleep-pre MUST notify the hub BEFORE returning, because the
+            # hook returning is what frees systemd-logind to actually
+            # suspend. Any async signal-to-the-running-heartbeat path
+            # races the suspend — the daemon's flag may be set but its
+            # main loop may not finish the /offline POST before the box
+            # is frozen. So we run the POST in-process via the heartbeat
+            # script's --offline-once entry point.
             #
             # On the container side, the tor-watchdog inside each Tor-
             # carrying container responds to USR1 with DEL_ONION and USR2
             # with ADD_ONION — same primitive Mac uses (signal_watchdog).
+            #
+            # The running heartbeat is also signaled as a best-effort
+            # secondary — its handler updates the daemon's view of
+            # registration state, and a duplicate /offline POST is
+            # idempotent at the hub.
             phase="${1#sleep-}"
-            log "system-sleep $phase: notifying hub + ${phase/pre/DEL_ONION}${phase/post/ADD_ONION}"
             case "$phase" in
-                pre)  hb_sig="USR1"; td_sig="USR1" ;;
-                post) hb_sig="USR2"; td_sig="USR2" ;;
+                pre)  action="DEL_ONION"; hb_sig="USR1"; td_sig="USR1" ;;
+                post) action="ADD_ONION"; hb_sig="USR2"; td_sig="USR2" ;;
             esac
+            log "system-sleep $phase: notifying hub + $action"
+
+            # Synchronous /offline POST before suspend. Tight timeouts
+            # baked into the script so it can't overshoot the hook budget.
+            if [ "$phase" = "pre" ]; then
+                if [ -r /opt/onionpress/scripts/onionpress-heartbeat.py ]; then
+                    if python3 /opt/onionpress/scripts/onionpress-heartbeat.py \
+                            --offline-once >>"$LOG_FILE" 2>&1; then
+                        log "sleep-pre: synchronous /offline POST done"
+                    else
+                        log "sleep-pre: synchronous /offline POST exited non-zero"
+                    fi
+                else
+                    log "sleep-pre: heartbeat script missing — skipping sync /offline"
+                fi
+            fi
+
             # Heartbeat client (user-scope systemd unit). XDG_RUNTIME_DIR
             # must be set for `systemctl --user` to find the user bus.
+            # Log the result — silent failure here was the original symptom
+            # of the suspend-without-notifying-the-hub bug.
             if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-                systemctl --user kill -s "SIG${hb_sig}" onionpress-heartbeat \
-                    >/dev/null 2>&1 || true
+                if systemctl --user kill -s "SIG${hb_sig}" onionpress-heartbeat 2>>"$LOG_FILE"; then
+                    log "system-sleep $phase: SIG${hb_sig} → onionpress-heartbeat (via systemctl --user)"
+                else
+                    log "system-sleep $phase: systemctl --user kill failed; falling back to pkill"
+                    if pkill -"${hb_sig}" -f '[o]nionpress-heartbeat\.py' 2>/dev/null; then
+                        log "system-sleep $phase: SIG${hb_sig} → onionpress-heartbeat (via pkill)"
+                    else
+                        log "system-sleep $phase: pkill found no onionpress-heartbeat process"
+                    fi
+                fi
+            else
+                log "system-sleep $phase: XDG_RUNTIME_DIR unset — cannot signal heartbeat"
             fi
             # Watchdog inside each Tor container.
             for c in onionpress-tor onionheaven; do
-                docker exec "$c" sh -c \
-                    "kill -${td_sig} \$(pgrep -f '[t]or-watchdog') 2>/dev/null" \
-                    >/dev/null 2>&1 || true
+                if docker exec "$c" sh -c \
+                        "kill -${td_sig} \$(pgrep -f '[t]or-watchdog') 2>/dev/null" \
+                        >/dev/null 2>&1; then
+                    log "system-sleep $phase: SIG${td_sig} → $c tor-watchdog"
+                fi
             done
             ;;
 

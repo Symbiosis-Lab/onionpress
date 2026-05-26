@@ -47,10 +47,12 @@ while IFS=: read -r user _ uid _ _ home _; do
     [ "$uid" -ge 1000 ] || continue
     [ "$uid" -lt 60000 ] || continue
     [ -d "$home/.onionpress" ] || continue
-    # 4-second per-user budget. Docker / Tor / heartbeat are all best-
-    # effort here; failure to notify just means the hub takes its
-    # normal heartbeat-timeout path to figure things out.
-    timeout 4 runuser -u "$user" -- env \
+    # 8-second per-user budget. The sleep-pre path now does a synchronous
+    # /offline POST through Tor (~1-3s) before signaling tor-watchdog
+    # containers (~1s), so 4s was too tight. systemd-logind allows hooks
+    # ample time overall; this cap just prevents a wedged Docker from
+    # stalling the suspend indefinitely.
+    timeout 8 runuser -u "$user" -- env \
         XDG_RUNTIME_DIR="/run/user/$uid" \
         "$LAUNCHER" "sleep-$ACTION" >/dev/null 2>&1 || true
 done < /etc/passwd

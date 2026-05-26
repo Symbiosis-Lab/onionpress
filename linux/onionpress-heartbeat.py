@@ -158,9 +158,14 @@ def wait_for_ready():
 # Signing + POST via tor-client
 # ---------------------------------------------------------------------------
 
-def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key, extra=None):
+def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
+                  extra=None, max_time=60, docker_timeout=75):
     """Sign payload and POST to hub via docker exec curl through tor-client.
     Returns (success, response_dict_or_None).
+
+    max_time / docker_timeout default to the daemon's generous values. The
+    --offline-once caller passes tight values so the suspend hook never
+    overshoots its system-sleep budget.
     """
     timestamp = onion_auth.make_timestamp()
     signature = onion_auth.sign_payload(
@@ -186,10 +191,10 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key, 
             "--socks5-hostname", "127.0.0.1:9050",
             "-H", "Content-Type: application/json",
             "-d", payload_json,
-            "--max-time", "60",
+            "--max-time", str(max_time),
             f"http://{hub_addr}:{API_PORT}/{endpoint}",
         ],
-        timeout=75,
+        timeout=docker_timeout,
     )
 
     if ok and output:
@@ -545,5 +550,69 @@ def main():
     log.info("heartbeat client stopped")
 
 
+def offline_once():
+    """One-shot synchronous /offline POST for the system-sleep hook.
+
+    The long-running daemon receives SIGUSR1 from the hook and sets a
+    flag, but the actual POST happens later in the main loop — by which
+    time systemd-logind has often already proceeded with the suspend
+    (it only waits for the hook to return, not for the heartbeat process
+    to finish its async work). This entry point runs in the hook's own
+    process so the hook can't return until the /offline POST has been
+    attempted.
+
+    Reads keys + addresses directly from the running tor container, with
+    tight timeouts so a wedged docker or tor can't stall the suspend
+    past the hook's ~8-second budget. Returns 0 on success, 1 on any
+    failure (logged so it shows up alongside the launcher's
+    "system-sleep pre" line in onionpress.log).
+    """
+    config = read_config()
+    if config.get("REGISTER_WITH_ONIONHEAVEN", "yes").lower() == "no":
+        return 0
+    hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
+
+    ok, content = docker_exec(
+        "onionpress-tor",
+        ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+        timeout=2,
+    )
+    if not ok or not content.endswith(".onion"):
+        log.warning("offline-once: content address unavailable, skipping /offline")
+        return 1
+    content = content.strip()
+    if content == hub:
+        return 0  # We ARE the hub — nothing to notify.
+
+    ok, hc = docker_exec(
+        "onionpress-tor",
+        ["cat", "/var/lib/tor/hidden_service/healthcheck/hostname"],
+        timeout=2,
+    )
+    if not ok or not hc.endswith(".onion"):
+        log.warning("offline-once: healthcheck address unavailable, skipping /offline")
+        return 1
+    hc = hc.strip()
+
+    try:
+        priv_key, pub_key = key_manager.extract_keys()
+    except Exception as e:
+        log.warning("offline-once: keys unavailable: %s", e)
+        return 1
+
+    log.info("offline-once: posting /offline to %s", hub)
+    ok, resp = sign_and_post(
+        "offline", hub, content, hc, priv_key, pub_key,
+        max_time=3, docker_timeout=5,
+    )
+    if ok and resp and resp.get("offline"):
+        log.info("offline-once: /offline acknowledged by hub")
+        return 0
+    log.warning("offline-once: /offline POST failed (ok=%s resp=%s)", ok, resp)
+    return 1
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--offline-once":
+        sys.exit(offline_once())
     main()

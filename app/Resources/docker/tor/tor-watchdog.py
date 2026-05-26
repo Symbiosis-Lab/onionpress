@@ -300,11 +300,18 @@ _signal_wake = False
 def _handle_usr1(signum, frame):
     global _signal_sleep
     _signal_sleep = True
+    # Immediate signal-receipt evidence — separate from the
+    # "Received USR1 (sleep) — removing onion services" line in the
+    # main loop, which only prints after the DEL_ONION work runs.
+    # Without this, a system-sleep race where suspend lands before
+    # the main loop wakes leaves no record that USR1 arrived at all.
+    log("SIGUSR1 received (sleep)")
 
 
 def _handle_usr2(signum, frame):
     global _signal_wake
     _signal_wake = True
+    log("SIGUSR2 received (wake)")
 
 
 # ---------------------------------------------------------------------------
