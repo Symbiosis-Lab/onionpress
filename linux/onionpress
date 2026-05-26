@@ -663,7 +663,14 @@ update_images() {
 
     cd "$DOCKER_DIR"
 
-    local images=("ghcr.io/brewsterkahle/onionpress-tor:latest" "ghcr.io/brewsterkahle/onionpress-wordpress:latest" "mariadb:latest")
+    # GHCR images pinned to digest — must match docker-compose.yml. Refresh
+    # with build/refresh-image-digests.sh at each release. mariadb stays
+    # on :latest to receive upstream security patches automatically.
+    local images=(
+        "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:580f92ed80eee67ff4b761fd09fb5bd4272cfb61426186f05db10395d784371a"
+        "ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:e234e3ddabb8577fb7328fe301492c810b7d05c6f4bb9123cd1db23bbdf0baa2"
+        "mariadb:latest"
+    )
     local pulled=0
 
     for image in "${images[@]}"; do
