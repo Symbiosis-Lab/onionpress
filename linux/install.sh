@@ -156,6 +156,17 @@ if ! command -v python3 >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq python3
 fi
 
+# Heartbeat daemon takes a systemd-logind delay inhibitor so /offline lands
+# before suspend (NetworkManager tears down WiFi before any system-sleep
+# hook can fire — only the DBus PrepareForSleep path beats it). Requires
+# python3-dbus + python3-gi (GLib). Both are usually pre-installed on
+# desktop images; ensure them here for headless boxes too.
+if ! python3 -c "import dbus; from gi.repository import GLib" >/dev/null 2>&1; then
+    echo "  Installing python3-dbus + python3-gi (for sleep-inhibitor)..."
+    $SUDO apt-get install -y -qq python3-dbus python3-gi \
+        || echo "  (python3-dbus/gi install failed — sleep-inhibitor will be skipped, heartbeat-timeout fallback still works)"
+fi
+
 # Ensure unzip and zip are available (needed for plugin installs and backups)
 if ! command -v unzip >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1; then
     echo "  Installing zip/unzip..."

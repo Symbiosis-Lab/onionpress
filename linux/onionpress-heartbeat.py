@@ -19,8 +19,21 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
+
+# D-Bus + GLib are needed for the systemd-logind delay-inhibitor pattern
+# (the proper Linux equivalent of macOS's NSWorkspaceWillSleepNotification).
+# Both are usually pre-installed on Debian/Ubuntu desktop images; if missing
+# the daemon still runs, just without synchronous /offline-on-sleep.
+try:
+    import dbus
+    import dbus.mainloop.glib
+    from gi.repository import GLib
+    HAVE_DBUS = True
+except ImportError:
+    HAVE_DBUS = False
 
 # Add scripts directory to path for onion_auth and key_manager imports
 SCRIPTS_DIR = "/opt/onionpress/scripts"
@@ -59,6 +72,7 @@ _hc_addr = None
 _priv_key = None
 _pub_key = None
 _running = True
+_registered = False  # Set True after first successful registration; read by SleepInhibitor.
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +436,137 @@ def _usr2_handler(signum, frame):
 # Main
 # ---------------------------------------------------------------------------
 
+class SleepInhibitor:
+    """Hold a systemd-logind sleep delay inhibitor and use the
+    PrepareForSleep signal to do a synchronous /offline POST before
+    the kernel actually suspends.
+
+    The Linux equivalent of macOS's NSWorkspaceWillSleepNotification:
+    PrepareForSleep(true) is broadcast by logind before the kernel
+    freezes processes, and the delay-type inhibitor keeps the suspend
+    operation from completing until we release it (up to
+    InhibitDelayMaxSec, default 5s, often configured higher).
+
+    NetworkManager handles the same signal independently and starts
+    tearing down the WiFi immediately; that race is inherent to the
+    Linux desktop sleep flow. The inhibitor gives us a real window
+    (vs. the system-sleep hook, which fires *after* NM teardown
+    completes), and the existing Tor circuits to the hub often
+    survive long enough for the POST to land.
+
+    Falls back gracefully — if logind isn't reachable or the import
+    failed, the daemon still runs, just without sync-on-sleep
+    (heartbeat-timeout fallback path picks up after a few minutes).
+    """
+
+    def __init__(self):
+        self._inhibitor_fd = None
+        self._bus = None
+        self._login_obj = None
+        self._loop = None
+        self._thread = None
+
+    def start(self):
+        if not HAVE_DBUS:
+            log.warning("sleep-inhibitor: dbus/glib not importable, skipping")
+            return False
+        try:
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            self._bus = dbus.SystemBus()
+            self._login_obj = self._bus.get_object(
+                "org.freedesktop.login1", "/org/freedesktop/login1"
+            )
+            if not self._acquire():
+                return False
+            self._bus.add_signal_receiver(
+                self._on_prepare_for_sleep,
+                signal_name="PrepareForSleep",
+                dbus_interface="org.freedesktop.login1.Manager",
+                bus_name="org.freedesktop.login1",
+                path="/org/freedesktop/login1",
+            )
+            self._loop = GLib.MainLoop()
+            self._thread = threading.Thread(
+                target=self._loop.run, daemon=True, name="sleep-inhibitor"
+            )
+            self._thread.start()
+            log.info("sleep-inhibitor: watching logind PrepareForSleep")
+            return True
+        except Exception as e:
+            log.warning("sleep-inhibitor: start failed: %s", e)
+            return False
+
+    def _acquire(self):
+        if self._inhibitor_fd is not None:
+            return True
+        try:
+            manager = dbus.Interface(
+                self._login_obj, "org.freedesktop.login1.Manager"
+            )
+            fd_obj = manager.Inhibit(
+                "sleep",
+                "OnionPress",
+                "Notify OnionHeaven hub before suspend",
+                "delay",
+            )
+            self._inhibitor_fd = fd_obj.take()
+            return True
+        except Exception as e:
+            log.warning("sleep-inhibitor: Inhibit() failed: %s", e)
+            self._inhibitor_fd = None
+            return False
+
+    def _release(self):
+        if self._inhibitor_fd is None:
+            return
+        try:
+            os.close(self._inhibitor_fd)
+        except OSError:
+            pass
+        self._inhibitor_fd = None
+
+    def _on_prepare_for_sleep(self, going_to_sleep):
+        if bool(going_to_sleep):
+            log.info("sleep-inhibitor: PrepareForSleep(true) — sending /offline")
+            try:
+                self._send_offline_now()
+            except Exception as e:
+                log.warning("sleep-inhibitor: send_offline raised: %s", e)
+            self._release()
+            log.info("sleep-inhibitor: delay lock released, suspend can proceed")
+        else:
+            log.info("sleep-inhibitor: PrepareForSleep(false) — woke up")
+            # Re-acquire the inhibitor for the next sleep cycle.
+            self._acquire()
+            # Trigger an immediate /online via the existing pending-flag
+            # machinery so the daemon's heartbeat loop posts it on the
+            # next wake — same path USR2 uses, no duplicate plumbing.
+            global _pending_online
+            _pending_online = True
+
+    def _send_offline_now(self):
+        """Best-effort synchronous /offline using whatever state the daemon
+        has gathered. Uses tight timeouts so we don't burn through the
+        whole InhibitDelayMaxSec budget if Tor is wedged."""
+        if not _registered:
+            log.info("sleep-inhibitor: not registered yet, skipping /offline")
+            return
+        if _content_addr is None or _content_addr == _current_hub:
+            return
+        if _hc_addr is None or _priv_key is None or _pub_key is None:
+            log.info("sleep-inhibitor: state incomplete, skipping /offline")
+            return
+        ok, resp = sign_and_post(
+            "offline", _current_hub, _content_addr, _hc_addr,
+            _priv_key, _pub_key,
+            max_time=4, docker_timeout=6,
+        )
+        if ok and resp and resp.get("offline"):
+            log.info("sleep-inhibitor: /offline acknowledged by hub")
+        else:
+            log.warning("sleep-inhibitor: /offline POST failed (ok=%s)", ok)
+
+
 def main():
     global _current_hub, _content_addr, _hc_addr, _priv_key, _pub_key, _running
     global _pending_offline, _pending_online
@@ -458,14 +603,24 @@ def main():
             time.sleep(60)
         return
 
-    registered = False
+    global _registered
+    _registered = False
 
     if enabled:
-        registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+        _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
     else:
         log.info("Registration disabled (REGISTER_WITH_ONIONHEAVEN=no)")
 
-    # Heartbeat loop
+    # Start the logind sleep-inhibitor now that we have keys + a hub.
+    # The inhibitor sends /offline synchronously on PrepareForSleep(true)
+    # — the only Linux mechanism that beats NetworkManager's sleep
+    # teardown reliably. See SleepInhibitor docstring above.
+    sleep_inhibitor = SleepInhibitor()
+    sleep_inhibitor.start()
+
+    # Heartbeat loop. Uses the _registered global so the sleep-inhibitor
+    # thread sees the current registration state without needing locks
+    # (single-writer/single-reader, value semantics on a bool).
     while _running:
         time.sleep(HEARTBEAT_INTERVAL)
         if not _running:
@@ -476,7 +631,7 @@ def main():
         # without waiting for missed heartbeats to time out. USR2 means we
         # just woke — send /online right now instead of waiting up to a
         # full HEARTBEAT_INTERVAL for the regular cycle to fire.
-        if _pending_offline and registered and _content_addr != _current_hub:
+        if _pending_offline and _registered and _content_addr != _current_hub:
             _pending_offline = False
             log.info("USR1: sending /offline before suspend...")
             send_offline(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
@@ -484,7 +639,7 @@ def main():
             _pending_offline = False  # nothing to do, swallow the flag
         if _pending_online:
             _pending_online = False
-            if registered and _content_addr != _current_hub:
+            if _registered and _content_addr != _current_hub:
                 log.info("USR2: sending immediate /online after wake")
                 heartbeat(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
 
@@ -494,11 +649,11 @@ def main():
         new_hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
 
         # Handle hub address change
-        if new_hub != _current_hub and registered:
+        if new_hub != _current_hub and _registered:
             log.info("Hub address changed from %s to %s", _current_hub, new_hub)
             # Unregister from old hub to prevent false takeover
             unregister(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
-            registered = False
+            _registered = False
             _current_hub = new_hub
             if new_enabled:
                 # Self-check for new hub
@@ -507,43 +662,43 @@ def main():
                     while _running:
                         time.sleep(60)
                     break
-                registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+                _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
             continue
         _current_hub = new_hub
 
         # Handle enable/disable toggle
-        if not new_enabled and registered:
+        if not new_enabled and _registered:
             log.info("Registration disabled — sending /offline")
             send_offline(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
-            registered = False
+            _registered = False
             enabled = False
             continue
 
-        if new_enabled and not enabled and not registered:
+        if new_enabled and not enabled and not _registered:
             log.info("Registration re-enabled — registering")
             if _content_addr == _current_hub:
                 log.info("This node IS the hub — skipping")
                 enabled = True
                 continue
-            registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+            _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
             enabled = True
             continue
 
         enabled = new_enabled
 
         # Retry registration if not yet registered
-        if enabled and not registered:
+        if enabled and not _registered:
             if _content_addr != _current_hub:
                 log.info("Retrying registration with %s...", _current_hub)
-                registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+                _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
             continue
 
         # Send heartbeat if registered
-        if registered:
+        if _registered:
             heartbeat(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
 
     # Graceful shutdown: send /offline
-    if registered and _current_hub:
+    if _registered and _current_hub:
         log.info("Sending /offline before shutdown...")
         send_offline(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
 
