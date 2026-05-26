@@ -550,6 +550,24 @@ def main():
     log.info("heartbeat client stopped")
 
 
+def _cached_content_address():
+    """Read content address from the registration state file (instant)."""
+    try:
+        with open(STATE_PATH) as f:
+            return (json.load(f).get("content_address") or "").strip()
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def _cached_hc_address():
+    """Read healthcheck address from ~/.onionpress/healthcheck-address (instant)."""
+    try:
+        with open(os.path.join(DATA_DIR, "healthcheck-address")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def offline_once():
     """One-shot synchronous /offline POST for the system-sleep hook.
 
@@ -561,38 +579,55 @@ def offline_once():
     process so the hook can't return until the /offline POST has been
     attempted.
 
-    Reads keys + addresses directly from the running tor container, with
-    tight timeouts so a wedged docker or tor can't stall the suspend
-    past the hook's ~8-second budget. Returns 0 on success, 1 on any
-    failure (logged so it shows up alongside the launcher's
-    "system-sleep pre" line in onionpress.log).
+    Reads cached addresses from disk to avoid extra docker exec calls
+    on the hot path — the daemon writes the registration state file
+    and the healthcheck-address file during normal operation, so by
+    the time the user can suspend the box those files are populated.
+    Only the key extraction needs a docker exec, and the curl POST
+    itself.
     """
+    # Drop the StreamHandler the daemon installs — when invoked by the
+    # launcher's sleep-pre our stderr is already redirected into the
+    # same onionpress.log file the FileHandler writes to, so each line
+    # would land twice without this.
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if type(h) is logging.StreamHandler:
+            root.removeHandler(h)
+
     config = read_config()
     if config.get("REGISTER_WITH_ONIONHEAVEN", "yes").lower() == "no":
         return 0
     hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
 
-    ok, content = docker_exec(
-        "onionpress-tor",
-        ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
-        timeout=2,
-    )
-    if not ok or not content.endswith(".onion"):
-        log.warning("offline-once: content address unavailable, skipping /offline")
-        return 1
-    content = content.strip()
+    content = _cached_content_address()
+    if not content.endswith(".onion"):
+        # Fall back to container hostname file with a generous timeout —
+        # docker exec on rootless docker can take a few seconds when the
+        # box is preparing to suspend.
+        ok, content = docker_exec(
+            "onionpress-tor",
+            ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+            timeout=5,
+        )
+        content = content.strip() if ok else ""
+        if not content.endswith(".onion"):
+            log.warning("offline-once: content address unavailable, skipping /offline")
+            return 1
     if content == hub:
         return 0  # We ARE the hub — nothing to notify.
 
-    ok, hc = docker_exec(
-        "onionpress-tor",
-        ["cat", "/var/lib/tor/hidden_service/healthcheck/hostname"],
-        timeout=2,
-    )
-    if not ok or not hc.endswith(".onion"):
-        log.warning("offline-once: healthcheck address unavailable, skipping /offline")
-        return 1
-    hc = hc.strip()
+    hc = _cached_hc_address()
+    if not hc.endswith(".onion"):
+        ok, hc = docker_exec(
+            "onionpress-tor",
+            ["cat", "/var/lib/tor/hidden_service/healthcheck/hostname"],
+            timeout=5,
+        )
+        hc = hc.strip() if ok else ""
+        if not hc.endswith(".onion"):
+            log.warning("offline-once: healthcheck address unavailable, skipping /offline")
+            return 1
 
     try:
         priv_key, pub_key = key_manager.extract_keys()
@@ -603,7 +638,7 @@ def offline_once():
     log.info("offline-once: posting /offline to %s", hub)
     ok, resp = sign_and_post(
         "offline", hub, content, hc, priv_key, pub_key,
-        max_time=3, docker_timeout=5,
+        max_time=4, docker_timeout=6,
     )
     if ok and resp and resp.get("offline"):
         log.info("offline-once: /offline acknowledged by hub")

@@ -2450,30 +2450,27 @@ sys.exit(0 if provision_interactive() else 1)
                 fi
             fi
 
-            # Heartbeat client (user-scope systemd unit). XDG_RUNTIME_DIR
-            # must be set for `systemctl --user` to find the user bus.
-            # Log the result — silent failure here was the original symptom
-            # of the suspend-without-notifying-the-hub bug.
-            if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-                if systemctl --user kill -s "SIG${hb_sig}" onionpress-heartbeat 2>>"$LOG_FILE"; then
-                    log "system-sleep $phase: SIG${hb_sig} → onionpress-heartbeat (via systemctl --user)"
-                else
-                    log "system-sleep $phase: systemctl --user kill failed; falling back to pkill"
-                    if pkill -"${hb_sig}" -f '[o]nionpress-heartbeat\.py' 2>/dev/null; then
-                        log "system-sleep $phase: SIG${hb_sig} → onionpress-heartbeat (via pkill)"
-                    else
-                        log "system-sleep $phase: pkill found no onionpress-heartbeat process"
-                    fi
-                fi
+            # Signal the heartbeat daemon. Use pkill — not systemctl --user
+            # — because the system-sleep hook runs us under runuser from
+            # root context, and `systemctl --user` to the heartbeat unit
+            # has hung waiting on the user D-Bus in observed sleep paths,
+            # eating the entire hook budget before the rest of this block
+            # could log anything. pkill is a kernel-level process-table
+            # match; no D-Bus, no user manager involvement, sub-millisecond.
+            if pkill -"${hb_sig}" -f '[o]nionpress-heartbeat\.py' 2>/dev/null; then
+                log "system-sleep $phase: SIG${hb_sig} → onionpress-heartbeat (via pkill)"
             else
-                log "system-sleep $phase: XDG_RUNTIME_DIR unset — cannot signal heartbeat"
+                log "system-sleep $phase: pkill found no onionpress-heartbeat process"
             fi
-            # Watchdog inside each Tor container.
+            # Watchdog inside each Tor container. Wrap docker exec in
+            # `timeout` so a slow rootless docker can't burn the budget.
             for c in onionpress-tor onionheaven; do
-                if docker exec "$c" sh -c \
+                if timeout 2 docker exec "$c" sh -c \
                         "kill -${td_sig} \$(pgrep -f '[t]or-watchdog') 2>/dev/null" \
                         >/dev/null 2>&1; then
                     log "system-sleep $phase: SIG${td_sig} → $c tor-watchdog"
+                else
+                    log "system-sleep $phase: $c tor-watchdog signal failed or timed out"
                 fi
             done
             ;;
