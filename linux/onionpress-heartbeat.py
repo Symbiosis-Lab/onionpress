@@ -803,11 +803,19 @@ class SleepInhibitor:
             # waits for Tor circuits internally before doing the ADD, so
             # there's no race with WiFi reconnecting.
             self._signal_watchdogs("USR2")
-            # Trigger an immediate /online via the existing pending-flag
-            # machinery so the daemon's heartbeat loop posts it on the
-            # next wake — same path USR2 uses, no duplicate plumbing.
-            global _pending_online
-            _pending_online = True
+            # Kick the main heartbeat loop awake so it sends /online
+            # immediately instead of waiting out the remainder of its
+            # time.sleep(HEARTBEAT_INTERVAL). Sending SIGUSR2 to our own
+            # PID runs _usr2_handler (which sets _pending_online) AND
+            # interrupts time.sleep via EINTR.
+            try:
+                os.kill(os.getpid(), signal.SIGUSR2)
+            except OSError as e:
+                log.warning("sleep-inhibitor: self-SIGUSR2 failed: %s", e)
+                # Fallback: at least set the flag directly so the next
+                # natural loop iteration picks it up.
+                global _pending_online
+                _pending_online = True
 
     def _signal_watchdogs(self, sig):
         """Send a Unix signal to tor-watchdog inside each Tor-carrying
