@@ -443,27 +443,32 @@ echo "  Starting OnionPress (this may take a few minutes on first run)..."
 echo "  Docker will pull container images for WordPress, MariaDB, and Tor."
 echo ""
 
-# Use restart (not start) so a stale service from a previous install is replaced.
-# If the service isn't running, restart acts like start.
-run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-    systemctl --user restart onionpress
-
-# Start heartbeat client (will wait for containers to be ready)
-run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-    systemctl --user restart onionpress-heartbeat
-
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
-# Stream the service journal during the wait so the user sees Docker image-pull
-# progress instead of a silent 3-minute pause.
-echo ""
+# Start the journal tail BEFORE systemctl restart so it captures the early
+# "Pulling" lines. journalctl --since=now misses anything emitted before it
+# launches, and the launcher's tee'd pull output starts immediately.
 echo "  ───── live progress (image pulls take 2-3 min on first run) ─────"
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     journalctl --user -u onionpress -f --no-hostname --no-pager --since=now &
 JOURNAL_PID=$!
 trap "kill $JOURNAL_PID 2>/dev/null || true" EXIT INT TERM
 
-# Wait for WordPress container to respond.
+# Use restart (not start) so a stale service from a previous install is replaced.
+# --no-block: don't wait for Type=notify READY=1. Without --no-block, this
+# call would synchronously block for the full 2-3 min pull/bootstrap window
+# — starving the journal tail above of any audience until the work is done.
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user --no-block restart onionpress
+
+# Heartbeat client waits for containers anyway; --no-block keeps it from
+# stalling install.sh in lockstep with onionpress.service.
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user --no-block restart onionpress-heartbeat
+
+# Wait for WordPress container to respond. This is the real "are we up"
+# signal — `systemctl is-active` races against Type=notify when the
+# restart is non-blocking (returns "activating" until READY=1).
 # First run on a Pi can take 2-3 minutes (image pulls + DB bootstrap).
 wp_ready=false
 wp_wait=0
@@ -481,14 +486,7 @@ kill $JOURNAL_PID 2>/dev/null || true
 trap - EXIT INT TERM
 echo "  ─────────────────────────────────────────────────────────────────"
 
-if [ "$wp_ready" != "true" ]; then
-    echo "  WARNING: WordPress did not respond within 3 minutes."
-    echo "  It may still be starting. Check: journalctl --user -u onionpress -f"
-fi
-
-# Check if it started successfully
-if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-    systemctl --user is-active --quiet onionpress; then
+if [ "$wp_ready" = "true" ]; then
     # Try to get the onion address
     onion_addr=$("$INSTALL_DIR/onionpress" address 2>/dev/null) || true
 
@@ -526,10 +524,11 @@ if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     echo ""
 else
     echo ""
-    echo "  WARNING: OnionPress may still be starting."
-    echo "  Check status with: systemctl --user status onionpress"
-    echo "  Check logs with:   journalctl --user -u onionpress"
-    echo "  Or:                cat $DATA_DIR/onionpress.log"
+    echo "  WordPress did not respond within 3 minutes."
+    echo "  OnionPress may still be starting (slow connection or first"
+    echo "  install on low-end hardware). Check progress with:"
+    echo "    journalctl --user -u onionpress -f"
+    echo "    onionpress status"
     echo ""
 fi
 
