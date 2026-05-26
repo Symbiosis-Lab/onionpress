@@ -167,6 +167,16 @@ if ! python3 -c "import dbus; from gi.repository import GLib" >/dev/null 2>&1; t
         || echo "  (python3-dbus/gi install failed — sleep-inhibitor will be skipped, heartbeat-timeout fallback still works)"
 fi
 
+# python3-socks lets the inhibitor POST /offline direct from the host
+# through Tor's SOCKS5 port, skipping docker exec startup (~200ms).
+# That's the margin we need to win the race against NetworkManager's
+# WiFi teardown on suspend.
+if ! python3 -c "import socks" >/dev/null 2>&1; then
+    echo "  Installing python3-socks (for fast suspend /offline)..."
+    $SUDO apt-get install -y -qq python3-socks \
+        || echo "  (python3-socks install failed — sleep-inhibitor will fall back to docker exec)"
+fi
+
 # Ensure unzip and zip are available (needed for plugin installs and backups)
 if ! command -v unzip >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1; then
     echo "  Installing zip/unzip..."

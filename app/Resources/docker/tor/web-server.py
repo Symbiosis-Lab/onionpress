@@ -363,6 +363,17 @@ def _verify_signature(handler, data, endpoint):
 # ---------------------------------------------------------------------------
 
 class OnionHeavenHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 with keep-alive so clients can hold a persistent socket
+    # to the hub and send /offline within milliseconds during system
+    # suspend (NetworkManager's WiFi teardown only gives us ~30ms on
+    # Linux — no fresh SOCKS5/Tor circuit setup fits inside that). The
+    # client's regular /online heartbeats keep the connection warm.
+    protocol_version = "HTTP/1.1"
+
+    # Evict connections that have sat idle for too long. Heartbeats run
+    # every 60s, so 300s is a comfortable cushion that still bounds
+    # thread-per-connection memory under ThreadingHTTPServer.
+    timeout = 300
 
     def log_message(self, format, *args):
         """Override to add timestamp prefix (local time to match host logs)."""
@@ -371,10 +382,15 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         sys.stderr.flush()
 
     def _send_json(self, status_code, data):
+        # HTTP/1.1 keep-alive requires Content-Length on every response
+        # so the client knows where the body ends without waiting for
+        # the socket to close. Encode first, then send the header.
+        body = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+        self.wfile.write(body)
 
     def _read_json(self, max_size=None):
         if max_size is None:
@@ -828,10 +844,12 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
     def _passthrough(self, status, body):
         try:
+            payload = json.dumps(body).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(json.dumps(body).encode("utf-8"))
+            self.wfile.write(payload)
         except BrokenPipeError:
             pass
 
@@ -1612,6 +1630,15 @@ def main():
             onionnames.log(f"startup refresh failed: {e}")
         onionnames.start_refresh_thread()
         _start_analytics_cleanup_thread()
+
+    # Shrink per-thread stack from the 8MB default to 256KB before any
+    # request threads spawn. With HTTP/1.1 keep-alive each client now
+    # holds a thread for the connection's lifetime (not just a single
+    # request), so stack memory dominates at scale. 256KB × N clients
+    # gives us comfortable headroom into the low thousands; the request
+    # handlers are not stack-heavy (no deep recursion).
+    import threading
+    threading.stack_size(256 * 1024)
 
     # ThreadingHTTPServer: the register-local forward path can block up to
     # 30s waiting on Tor. Single-threaded serving would stall every other

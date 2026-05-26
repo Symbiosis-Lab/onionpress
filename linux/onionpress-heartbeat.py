@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -34,6 +35,18 @@ try:
     HAVE_DBUS = True
 except ImportError:
     HAVE_DBUS = False
+
+# PySocks lets us POST /offline directly from the host through Tor's
+# SOCKS port, skipping `docker exec → docker daemon → container exec
+# → curl` startup. That savings (~200ms) is the difference between
+# winning and losing the race against NetworkManager's WiFi teardown
+# on suspend. If missing, the daemon falls back to the docker-exec
+# path.
+try:
+    import socks
+    HAVE_PYSOCKS = True
+except ImportError:
+    HAVE_PYSOCKS = False
 
 # Add scripts directory to path for onion_auth and key_manager imports
 SCRIPTS_DIR = "/opt/onionpress/scripts"
@@ -73,6 +86,7 @@ _priv_key = None
 _pub_key = None
 _running = True
 _registered = False  # Set True after first successful registration; read by SleepInhibitor.
+_hub_conn = None     # Persistent HubConnection (set up after first /online).
 
 
 # ---------------------------------------------------------------------------
@@ -172,21 +186,239 @@ def wait_for_ready():
 # Signing + POST via tor-client
 # ---------------------------------------------------------------------------
 
-def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
-                  extra=None, max_time=60, docker_timeout=75):
-    """Sign payload and POST to hub via docker exec curl through tor-client.
-    Returns (success, response_dict_or_None).
+def _detect_host_socks_port():
+    """Find the host port that maps to onionpress-tor's 9050. The launcher
+    publishes Tor's SOCKS at 9050 + ONIONPRESS_PORT_OFFSET — we ask docker
+    rather than guessing so we work under both the default (9050) and
+    offset-by-10000 case (system tor squatting on 9050)."""
+    try:
+        result = subprocess.run(
+            ["docker", "port", "onionpress-tor", "9050/tcp"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if ":" in line:
+                    _, port = line.rsplit(":", 1)
+                    return int(port.strip())
+    except Exception as e:
+        log.debug("Could not detect host SOCKS port: %s", e)
+    return 9050
 
-    max_time / docker_timeout default to the daemon's generous values. The
-    --offline-once caller passes tight values so the suspend hook never
-    overshoots its system-sleep budget.
+
+class HubConnection:
+    """Persistent SOCKS5+HTTP/1.1 socket to the OnionHeaven hub.
+
+    A single socket reused across every /online + /offline POST.
+    Heartbeat traffic (~once per minute) doubles as the keep-alive
+    that holds the socket open — no separate keepalive logic. On
+    broken pipe / closed connection we reconnect once and retry,
+    so transient Tor circuit churn or hub restarts are transparent.
+
+    Why it exists: the suspend /offline POST must land within ~30ms
+    of PrepareForSleep, before NetworkManager finishes tearing down
+    WiFi. A fresh SOCKS5+CONNECT+Tor-rendezvous takes 1-2 seconds —
+    can't fit. A pre-established socket lets the inhibitor do nothing
+    more than sock.sendall(POST_bytes) at suspend time, which is
+    single-digit milliseconds.
+
+    Thread-safe: a single lock serialises all socket access. The
+    heartbeat main loop and the SleepInhibitor DBus thread both call
+    .post().
     """
+
+    def __init__(self, hub_addr, socks_port=None):
+        self._hub_addr = hub_addr
+        self._socks_port = socks_port
+        self._sock = None
+        self._lock = threading.Lock()
+
+    def _open_locked(self):
+        """Caller holds self._lock."""
+        if self._socks_port is None:
+            self._socks_port = _detect_host_socks_port()
+        s = socks.socksocket()
+        s.set_proxy(socks.SOCKS5, "127.0.0.1", self._socks_port, rdns=True)
+        s.settimeout(15)  # generous for cold Tor rendezvous setup
+        s.connect((self._hub_addr, API_PORT))
+        # OS-level keepalive on the underlying TCP: detects dead peers
+        # if the hub vanishes without sending FIN.
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
+        self._sock = s
+
+    def _close_locked(self):
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def is_open(self):
+        with self._lock:
+            return self._sock is not None
+
+    def close(self):
+        with self._lock:
+            self._close_locked()
+
+    def _send_request(self, endpoint, body):
+        """Caller holds self._lock and self._sock is not None."""
+        request = (
+            f"POST /{endpoint} HTTP/1.1\r\n"
+            f"Host: {self._hub_addr}:{API_PORT}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: keep-alive\r\n"
+            f"\r\n"
+        ).encode() + body
+        self._sock.sendall(request)
+
+    def _read_response(self):
+        """Caller holds self._lock and self._sock is not None.
+        Returns (status_code, body_dict_or_None, should_close).
+
+        `should_close` is True when the hub indicates the connection
+        won't be kept open (HTTP/1.0 reply, or `Connection: close`).
+        Caller must close the socket in that case; we drained the
+        body so the FIN/EOF arrives cleanly."""
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ConnectionResetError("hub closed before headers complete")
+            buf += chunk
+            if len(buf) > 65536:
+                raise OSError("response headers oversized")
+        head, _, rest = buf.partition(b"\r\n\r\n")
+        status_line, _, headers_blob = head.partition(b"\r\n")
+        parts = status_line.split(b" ", 2)
+        if len(parts) < 3 or not parts[0].startswith(b"HTTP/"):
+            raise OSError(f"bad status line: {status_line!r}")
+        status = int(parts[1])
+        http_version = parts[0]  # e.g. b"HTTP/1.0" or b"HTTP/1.1"
+
+        content_length = None
+        connection_close = False
+        for line in headers_blob.split(b"\r\n"):
+            if b":" not in line:
+                continue
+            k, _, v = line.partition(b":")
+            name = k.strip().lower()
+            val = v.strip()
+            if name == b"content-length":
+                try:
+                    content_length = int(val)
+                except ValueError:
+                    pass
+            elif name == b"connection":
+                if val.lower() == b"close":
+                    connection_close = True
+
+        # HTTP/1.0 defaults to close-after-response unless explicit
+        # keep-alive is set. The old hub uses 1.0 with no Content-Length
+        # — we have to read until the hub closes the socket and then
+        # not reuse it for further requests.
+        if http_version == b"HTTP/1.0" or connection_close:
+            should_close = True
+        else:
+            should_close = False
+
+        body = rest
+        if content_length is not None:
+            while len(body) < content_length:
+                chunk = self._sock.recv(content_length - len(body))
+                if not chunk:
+                    raise ConnectionResetError("hub closed during body read")
+                body += chunk
+        elif should_close:
+            # No Content-Length, connection will close — read until EOF.
+            while True:
+                try:
+                    chunk = self._sock.recv(4096)
+                except (socket.timeout, OSError):
+                    break
+                if not chunk:
+                    break
+                body += chunk
+
+        try:
+            parsed = json.loads(body) if body else None
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        return status, parsed, should_close
+
+    def post(self, endpoint, payload, timeout=15):
+        """Send POST, read response, return (ok, body_dict).
+        Reconnects once on broken socket; second failure returns (False, None).
+
+        If the hub indicates the connection won't be kept open
+        (HTTP/1.0 reply, or `Connection: close` header), we close
+        the socket cleanly so the next call opens a fresh one. Lets
+        the daemon talk to an old hub that hasn't been updated to
+        HTTP/1.1 yet — works, just slower."""
+        body = json.dumps(payload).encode("utf-8")
+        with self._lock:
+            for attempt in range(2):
+                try:
+                    if self._sock is None:
+                        self._open_locked()
+                    self._sock.settimeout(timeout)
+                    self._send_request(endpoint, body)
+                    status, resp, should_close = self._read_response()
+                    if should_close:
+                        self._close_locked()
+                    return status == 200, resp
+                except (BrokenPipeError, ConnectionResetError, OSError,
+                        socket.timeout, Exception) as e:
+                    if isinstance(e, KeyboardInterrupt):
+                        raise
+                    log.debug("HubConnection.post(%s): %s: %s — reconnecting",
+                              endpoint, type(e).__name__, e)
+                    self._close_locked()
+            return False, None
+
+    def post_fast_no_response(self, endpoint, payload):
+        """Send POST, do NOT wait for the response. For the suspend race:
+        we need the bytes on the wire before NetworkManager finishes
+        WiFi teardown, and waiting for the hub's response over a
+        going-down WiFi just burns the budget. Returns True if sendall
+        completed locally; the hub still processes the POST.
+
+        Closes the socket after the send because the response body is
+        now sitting in the receive buffer unread — leaving it would
+        corrupt the next request/response framing. Next /online from
+        the main loop reconnects."""
+        body = json.dumps(payload).encode("utf-8")
+        with self._lock:
+            if self._sock is None:
+                # Not pre-established — abandoning this path; caller
+                # should fall back to the slow path.
+                return False
+            try:
+                self._sock.settimeout(0.5)
+                self._send_request(endpoint, body)
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError,
+                    socket.timeout) as e:
+                log.warning("HubConnection.post_fast_no_response: %s: %s",
+                            type(e).__name__, e)
+                return False
+            finally:
+                # Always close — either we sent and the response is
+                # unread, or we failed and the socket may be half-dead.
+                self._close_locked()
+
+
+def _build_signed_payload(endpoint, content_addr, hc_addr, priv_key, pub_key, extra=None):
     timestamp = onion_auth.make_timestamp()
     signature = onion_auth.sign_payload(
         priv_key, pub_key,
         endpoint, content_addr, hc_addr, timestamp
     )
-
     payload = {
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
@@ -195,16 +427,39 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
     }
     if extra:
         payload.update(extra)
+    return payload
 
-    payload_json = json.dumps(payload)
 
+def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
+                  extra=None, max_time=60, docker_timeout=75):
+    """Sign + POST to the hub. Returns (success, response_dict_or_None).
+
+    Routes through the persistent HubConnection when one is available
+    (set up after first successful registration). Falls back to
+    docker exec curl on first-use, after broken-pipe retry exhaustion,
+    or when PySocks isn't importable on this box.
+
+    max_time / docker_timeout only apply to the docker-exec fallback —
+    the persistent path uses its own (tighter) socket timeout.
+    """
+    payload = _build_signed_payload(endpoint, content_addr, hc_addr,
+                                    priv_key, pub_key, extra)
+
+    if _hub_conn is not None:
+        ok, resp = _hub_conn.post(endpoint, payload)
+        if ok:
+            return True, resp
+        log.debug("POST /%s: persistent path failed, falling back to docker exec", endpoint)
+
+    # Fallback: docker exec curl. Used at first-use (no _hub_conn yet)
+    # and when the persistent connection refuses to recover.
     ok, output = docker_exec(
         "onionpress-tor",
         [
             "curl", "-s", "-X", "POST",
             "--socks5-hostname", "127.0.0.1:9050",
             "-H", "Content-Type: application/json",
-            "-d", payload_json,
+            "-d", json.dumps(payload),
             "--max-time", str(max_time),
             f"http://{hub_addr}:{API_PORT}/{endpoint}",
         ],
@@ -545,9 +800,11 @@ class SleepInhibitor:
             _pending_online = True
 
     def _send_offline_now(self):
-        """Best-effort synchronous /offline using whatever state the daemon
-        has gathered. Uses tight timeouts so we don't burn through the
-        whole InhibitDelayMaxSec budget if Tor is wedged."""
+        """Fast-path /offline through the persistent HubConnection — the
+        only path that wins the race against NetworkManager's WiFi
+        teardown on Linux suspend. Falls back to sign_and_post (which
+        will itself fall back to docker exec) only if the persistent
+        connection isn't established yet."""
         if not _registered:
             log.info("sleep-inhibitor: not registered yet, skipping /offline")
             return
@@ -556,13 +813,33 @@ class SleepInhibitor:
         if _hc_addr is None or _priv_key is None or _pub_key is None:
             log.info("sleep-inhibitor: state incomplete, skipping /offline")
             return
+
+        payload = _build_signed_payload(
+            "offline", _content_addr, _hc_addr, _priv_key, _pub_key,
+        )
+
+        if _hub_conn is not None and _hub_conn.is_open():
+            t0 = time.monotonic()
+            sent = _hub_conn.post_fast_no_response("offline", payload)
+            dt_ms = (time.monotonic() - t0) * 1000
+            if sent:
+                log.info(
+                    "sleep-inhibitor: /offline POSTed on persistent socket in %.1fms",
+                    dt_ms,
+                )
+                return
+            log.warning("sleep-inhibitor: persistent socket send failed — falling back")
+
+        # Persistent socket isn't open (first ever sleep, post-restart),
+        # OR send failed. Fall through to the slow path; it may or may
+        # not land before NM kills the network.
         ok, resp = sign_and_post(
             "offline", _current_hub, _content_addr, _hc_addr,
             _priv_key, _pub_key,
             max_time=4, docker_timeout=6,
         )
         if ok and resp and resp.get("offline"):
-            log.info("sleep-inhibitor: /offline acknowledged by hub")
+            log.info("sleep-inhibitor: /offline acknowledged by hub (slow path)")
         else:
             log.warning("sleep-inhibitor: /offline POST failed (ok=%s)", ok)
 
@@ -603,13 +880,22 @@ def main():
             time.sleep(60)
         return
 
-    global _registered
+    global _registered, _hub_conn
     _registered = False
 
     if enabled:
         _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
     else:
         log.info("Registration disabled (REGISTER_WITH_ONIONHEAVEN=no)")
+
+    # Establish the persistent HubConnection now that registration has
+    # primed Tor's circuit to the hub. Subsequent /online heartbeats go
+    # through this socket, keeping it warm; the SleepInhibitor reuses
+    # the same socket on PrepareForSleep so /offline lands in ~5ms
+    # instead of the ~1.7s a fresh SOCKS5+Tor rendezvous takes.
+    if HAVE_PYSOCKS and _content_addr != _current_hub:
+        _hub_conn = HubConnection(_current_hub)
+        log.info("hub-connection: persistent SOCKS5 socket prepared (lazy-open)")
 
     # Start the logind sleep-inhibitor now that we have keys + a hub.
     # The inhibitor sends /offline synchronously on PrepareForSleep(true)
@@ -654,6 +940,11 @@ def main():
             # Unregister from old hub to prevent false takeover
             unregister(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
             _registered = False
+            # Persistent socket points at the old hub — drop it so the
+            # next /online opens a fresh one to the new hub.
+            if _hub_conn is not None:
+                _hub_conn.close()
+                _hub_conn = None
             _current_hub = new_hub
             if new_enabled:
                 # Self-check for new hub
@@ -663,6 +954,8 @@ def main():
                         time.sleep(60)
                     break
                 _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+                if _registered and HAVE_PYSOCKS:
+                    _hub_conn = HubConnection(_current_hub)
             continue
         _current_hub = new_hub
 
@@ -701,6 +994,9 @@ def main():
     if _registered and _current_hub:
         log.info("Sending /offline before shutdown...")
         send_offline(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+
+    if _hub_conn is not None:
+        _hub_conn.close()
 
     log.info("heartbeat client stopped")
 
