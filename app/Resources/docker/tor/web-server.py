@@ -1218,6 +1218,15 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": err})
             return
 
+        # Telemetry: log every authenticated /offline. Paired with the
+        # existing /online addr_log line, this lets us measure the
+        # suspend-race miss rate (an /online without a preceding /offline
+        # from the same address ⇒ the client lost the suspend window
+        # before its /offline POST could complete).
+        from onionheaven_common import addr_log
+        version = data.get("version", "")
+        addr_log(content_address, f"/offline received from {content_address} (version={version})")
+
         conn = db_connect()
         db_ensure_schema(conn)
 
