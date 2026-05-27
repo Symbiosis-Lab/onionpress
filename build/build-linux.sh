@@ -167,7 +167,9 @@ Version: $VERSION
 Section: web
 Priority: optional
 Architecture: $DEB_ARCH
-Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose, jq, python3, zip, unzip,
+Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose,
+ uidmap, dbus-user-session, fuse-overlayfs, slirp4netns,
+ jq, python3, zip, unzip,
  python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
 Recommends: torbrowser-launcher
 Maintainer: Brewster Kahle <brewster@archive.org>
@@ -180,8 +182,9 @@ Description: Your Decentralized Social Blog Site
  Built on WordPress + Tor + Wayback Machine.
 EOF
 
-# Post-install: data dir + secrets (first install only), docker group,
-# linger, enable + start user units. Goal is "self-contained for casual
+# Post-install: data dir + secrets (first install only), Docker
+# bootstrap (rootless preferred, docker-group fallback), linger,
+# enable + start user units. Goal is "self-contained for casual
 # users": after `sudo apt install ./onionpress.deb` on a clean Ubuntu,
 # the site comes up and the user just needs a URL.
 #
@@ -270,39 +273,93 @@ fi
 systemctl --global enable onionpress.service onionpress-heartbeat.service onionpress-watcher.timer 2>/dev/null || true
 
 # Self-contained bootstrap. Only runs on first install (not upgrade) and
-# only when we have a real target user. apt has already installed
-# docker.io as a Depends, so the daemon is running and /var/run/docker.sock
-# exists; we just need to grant our user access via the docker group.
+# only when we have a real target user. Two-tier strategy:
+#   1. Preferred: rootless Docker (user-level daemon at
+#      /run/user/$UID/docker.sock). No docker group, no logout — same
+#      session can immediately use Docker. Requires
+#      dockerd-rootless-setuptool.sh (ships with docker.io on Debian 12 /
+#      Ubuntu 22.04+) and uidmap/dbus-user-session/fuse-overlayfs/
+#      slirp4netns (declared in Depends:). Refused if system Docker is
+#      already serving other containers.
+#   2. Fallback: docker group + daemon-reexec, the legacy flow. Still
+#      tries to avoid logout via daemon-reexec; if that fails the user
+#      gets the "Log out and back in" message.
 if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
     bootstrap_ok=1
+    rootless_ok=0
+    REAL_UID=$(id -u "$REAL_USER")
+    _rootless_sock="/run/user/$REAL_UID/docker.sock"
 
-    # 1. Docker group membership. apt's docker.io postinst creates the
-    #    group; we add the user to it. If usermod fails (NIS, LDAP, …),
-    #    we'll fall back to the manual-instructions path below.
-    if ! id -nG "$REAL_USER" 2>/dev/null | grep -qw docker; then
-        if usermod -aG docker "$REAL_USER" 2>/dev/null; then
-            echo "  Added $REAL_USER to the docker group."
-        else
-            bootstrap_ok=0
-        fi
-    fi
-
-    # 2. Lingering so the user's services run at boot without a login.
+    # 1. Lingering so the user systemd manager runs at boot without a
+    #    login. Needed for both rootless and group paths — rootless
+    #    docker.service is a user unit, and our own onionpress.service
+    #    is also user-scoped.
     if ! loginctl show-user "$REAL_USER" 2>/dev/null | grep -q 'Linger=yes'; then
         loginctl enable-linger "$REAL_USER" 2>/dev/null || bootstrap_ok=0
     fi
 
-    # 3. Reload the user's systemd manager so it picks up the new
-    #    docker-group membership. Without this, services launched from
-    #    the existing user-manager instance inherit the old group set
-    #    and can't reach /var/run/docker.sock.
-    #    `systemctl --user --machine=USER@.host` requires systemd 248+
-    #    (Ubuntu 22.04, Debian 12, Raspberry Pi OS Bookworm — all fine).
-    if [ "$bootstrap_ok" = "1" ]; then
-        systemctl --user --machine="${REAL_USER}@.host" daemon-reexec 2>/dev/null || bootstrap_ok=0
+    # 2. Already-rootless detection (e.g. earlier install.sh run, or
+    #    .deb reinstall after dpkg -r). Probing `docker info` with
+    #    DOCKER_HOST pointing at the socket confirms the daemon is
+    #    actually responsive, not just that the file exists.
+    if [ -S "$_rootless_sock" ] && \
+       runuser -u "$REAL_USER" -- env DOCKER_HOST="unix://$_rootless_sock" \
+           docker info >/dev/null 2>&1; then
+        rootless_ok=1
     fi
 
-    # 4. Enable + start the services.
+    # 3. Try fresh rootless setup. Skip if the setup tool isn't on PATH
+    #    (older Docker releases) or if system Docker is actively serving
+    #    other containers (we'd be ripping the rug out from under another
+    #    user's workloads). `docker ps -q` is empty on a fresh install
+    #    where apt just brought docker.service up.
+    if [ "$rootless_ok" = "0" ] && \
+       [ "$bootstrap_ok" = "1" ] && \
+       command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
+
+        system_busy=0
+        if docker ps -q 2>/dev/null | grep -q .; then
+            system_busy=1
+        fi
+
+        if [ "$system_busy" = "0" ]; then
+            # The rootless setup tool refuses to proceed while
+            # /var/run/docker.sock exists, so stop + remove it.
+            systemctl disable --now docker.service docker.socket 2>/dev/null || true
+            rm -f /var/run/docker.sock
+
+            if runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+                   dockerd-rootless-setuptool.sh install --force >/dev/null 2>&1 && \
+               runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+                   systemctl --user enable --now docker.service >/dev/null 2>&1; then
+                rootless_ok=1
+            fi
+        fi
+    fi
+
+    # 4. Fallback: docker group flow if rootless didn't take. apt's
+    #    docker.io postinst already created the group; we add the user.
+    if [ "$rootless_ok" = "0" ]; then
+        if ! id -nG "$REAL_USER" 2>/dev/null | grep -qw docker; then
+            if usermod -aG docker "$REAL_USER" 2>/dev/null; then
+                echo "  Added $REAL_USER to the docker group."
+            else
+                bootstrap_ok=0
+            fi
+        fi
+
+        # Reload the user's systemd manager so it picks up the new
+        # docker-group membership. Without this, services launched from
+        # the existing user-manager instance inherit the old group set
+        # and can't reach /var/run/docker.sock.
+        # `systemctl --user --machine=USER@.host` requires systemd 248+
+        # (Ubuntu 22.04, Debian 12, Raspberry Pi OS Bookworm — all fine).
+        if [ "$bootstrap_ok" = "1" ]; then
+            systemctl --user --machine="${REAL_USER}@.host" daemon-reexec 2>/dev/null || bootstrap_ok=0
+        fi
+    fi
+
+    # 5. Enable + start the OnionPress services.
     if [ "$bootstrap_ok" = "1" ]; then
         systemctl --user --machine="${REAL_USER}@.host" daemon-reload 2>/dev/null || true
         systemctl --user --machine="${REAL_USER}@.host" enable --now \
@@ -314,9 +371,15 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
 
     VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
     if [ "$bootstrap_ok" = "1" ]; then
+        if [ "$rootless_ok" = "1" ]; then
+            DOCKER_MODE_LINE="Docker mode: rootless (no logout required)."
+        else
+            DOCKER_MODE_LINE="Docker mode: system daemon (docker group)."
+        fi
         cat <<EOF
 
 OnionPress v$VERSION_INSTALLED installed and starting in the background.
+$DOCKER_MODE_LINE
 First start pulls ~500 MB of container images (Tor, WordPress, MariaDB)
 and may take 1-3 minutes on a fast connection, longer on a Pi.
 
