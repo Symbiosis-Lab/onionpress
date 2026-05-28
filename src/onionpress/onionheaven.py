@@ -724,16 +724,22 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     return False
 
 
-def notify_onionheaven_offline(app):
+def notify_onionheaven_offline(app, max_time=10):
     """Notify OnionHeaven that this instance is going offline (sleep/quit).
 
     Runs synchronously with a single attempt and short timeout —
     must complete before the system sleeps or the app quits.
+
+    ``max_time`` is the curl --max-time bound (seconds). Callers driving
+    this from inside an IOKit sleep delay-inhibitor (see
+    :class:`onionpress.mac_power.MacPowerHandler`) should pass a tighter
+    value (~5s) to leave headroom inside the 30s system suspend ceiling;
+    the default (10s) is for non-time-critical callers like quit / stop.
     """
     if getattr(app, 'is_onionheaven', False):
         return False
     app.log("Notifying OnionHeaven: going offline")
-    return _send_onionheaven_notification(app, "offline", "offline", max_attempts=1, max_time=10)
+    return _send_onionheaven_notification(app, "offline", "offline", max_attempts=1, max_time=max_time)
 
 
 def notify_onionheaven_online(app):

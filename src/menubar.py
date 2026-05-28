@@ -2291,7 +2291,23 @@ class OnionPressApp(rumps.App):
             self.update_menu()
 
     def register_wake_notification(self):
-        """Register for macOS wake notification to immediately update icon"""
+        """Register for macOS sleep/wake notifications.
+
+        Sleep handling prefers IOKit's IORegisterForSystemPower delay-
+        inhibitor (the Mac equivalent of Linux's logind delay-inhibitor) —
+        it actually holds the suspend until handle_sleep returns, so
+        /offline and DEL_ONION can complete before the container freezes.
+        NSWorkspaceWillSleepNotification by contrast is informational; the
+        system sleeps whenever it decides to regardless of whether our
+        observer is still running. That race was empirically losing ~47%
+        of suspends on Mac (see #254).
+
+        Wake handling stays on NSWorkspaceDidWakeNotification — there's
+        no time-critical work on wake, so the simpler observer is fine.
+        Falling back to NSWorkspaceWillSleepNotification for sleep is the
+        contingency if IOKit registration fails for any reason (older
+        macOS, IOKit framework missing, etc.).
+        """
         ws = AppKit.NSWorkspace.sharedWorkspace()
         nc = ws.notificationCenter()
         def _safe_callback(handler_name, handler):
@@ -2307,11 +2323,45 @@ class OnionPressApp(rumps.App):
                         pass
             return wrapper
 
-        nc.addObserverForName_object_queue_usingBlock_(
-            AppKit.NSWorkspaceWillSleepNotification,
-            None,
-            AppKit.NSOperationQueue.mainQueue(),
-            _safe_callback("sleep", self.handle_sleep))
+        # Try IOKit for sleep first. On success, skip the NSWorkspace
+        # WillSleep observer — IOKit will dispatch handle_sleep itself
+        # inside the delay-inhibitor window, and we don't want a double
+        # handle_sleep from both paths.
+        iokit_ok = False
+        try:
+            from onionpress.mac_power import MacPowerHandler
+            self._mac_power = MacPowerHandler(
+                on_will_sleep=lambda: (
+                    None if getattr(self, '_quitting', False)
+                    else self.handle_sleep()
+                ),
+                on_has_powered_on=lambda: (
+                    None if getattr(self, '_quitting', False)
+                    else self.handle_wake()
+                ),
+                log=self.log,
+            )
+            iokit_ok = self._mac_power.register()
+        except Exception as e:
+            self.log(f"WARNING: MacPowerHandler init failed: {e}")
+            iokit_ok = False
+
+        if not iokit_ok:
+            # Fallback: NSWorkspaceWillSleepNotification. Won't actually
+            # delay sleep — handle_sleep runs on a best-effort basis.
+            nc.addObserverForName_object_queue_usingBlock_(
+                AppKit.NSWorkspaceWillSleepNotification,
+                None,
+                AppKit.NSOperationQueue.mainQueue(),
+                _safe_callback("sleep", self.handle_sleep))
+            self.log("Registered for sleep via NSWorkspaceWillSleepNotification (fallback — no delay-inhibitor)")
+        else:
+            self.log("Registered for sleep via IOKit IORegisterForSystemPower (delay-inhibitor active)")
+
+        # Wake handling: stays on NSWorkspace. IOKit also fires
+        # kIOMessageSystemHasPoweredOn (handled via on_has_powered_on
+        # above when IOKit is active) but having NSWorkspaceDidWake
+        # registered too is harmless — handle_wake is idempotent.
         nc.addObserverForName_object_queue_usingBlock_(
             AppKit.NSWorkspaceDidWakeNotification,
             None,
@@ -2365,10 +2415,12 @@ class OnionPressApp(rumps.App):
                     self.log(f"Sent USR1 (sleep) to {container} watchdog")
                 else:
                     self.log(f"Failed to send USR1 to {container} watchdog")
-            # Notify OnionHeaven hub so it can take over quickly
+            # Notify OnionHeaven hub so it can take over quickly. Bound the
+            # /offline POST to 5s so total handle_sleep stays well inside
+            # the IOKit suspend deadline (~30s). Default 10s elsewhere.
             if self.is_ready and self._onionheaven_registration_succeeded:
                 try:
-                    onionheaven.notify_onionheaven_offline(self)
+                    onionheaven.notify_onionheaven_offline(self, max_time=5)
                 except Exception:
                     pass
             self.caffeine.stop()
