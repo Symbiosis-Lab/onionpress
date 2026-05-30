@@ -2052,6 +2052,14 @@ class OnionPressApp(rumps.App):
         finally:
             self._last_snapshot_ts = now
 
+    @staticmethod
+    def _short_onion(addr):
+        """Truncate a 56-char .onion so the menu doesn't stretch.
+        Full address is one click away via Copy Onion Address."""
+        if addr and len(addr) > 16 and addr.endswith(".onion"):
+            return f"{addr[:8]}…{addr[-6:]}"
+        return addr
+
     def update_menu(self):
         """Update menu items based on current state - thread-safe"""
         # Dispatch UI updates to main thread to avoid AppKit threading violations
@@ -2096,10 +2104,11 @@ class OnionPressApp(rumps.App):
             if state == "available":
                 self.icon = self.icon_running
                 onionname = self.read_config_value("ONIONNAME", "").strip()
+                short = self._short_onion(self.onion_address)
                 if onionname:
-                    self.menu["Starting..."].title = f"{onionname}@{self.onion_address}"
+                    self.menu["Starting..."].title = f"{onionname}@{short}"
                 else:
-                    self.menu["Starting..."].title = f"Address: {self.onion_address}"
+                    self.menu["Starting..."].title = f"Address: {short}"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
@@ -2141,7 +2150,7 @@ class OnionPressApp(rumps.App):
                 # Stopped
                 self.icon = self.icon_stopped
                 if self.onion_address and self.onion_address.endswith('.onion'):
-                    self.menu["Starting..."].title = f"Stopped — {self.onion_address}"
+                    self.menu["Starting..."].title = f"Stopped — {self._short_onion(self.onion_address)}"
                 else:
                     self.menu["Starting..."].title = "Status: Stopped"
                 self.menu["Start"].set_callback(self.start_service)
