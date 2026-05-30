@@ -1524,6 +1524,33 @@ stop_containers() {
     log "Containers stopped"
 }
 
+# Reap lima's shared usernet daemon. It survives `colima stop` and leaks
+# across restarts, holding the user-v2 network sockets — the likely cause of
+# the next *cold* boot wedging (fresh VM's guest agent can't bring up
+# networking -> gray icon; the same "5x in 30 days" wedge the restart path
+# recovers via limactl stop -f). lima respawns it on the next start, so
+# reaping at quit is safe
+# and leaves a clean slate. Scoped by LIMA_HOME so multi-user installs don't
+# touch each other; kill is per-user anyway. Mirrors _reap_lima_usernet in
+# src/menubar.py for the path where the MenubarApp was SIGKILLed and never
+# ran its own cleanup.
+reap_lima_usernet() {
+    local pidfile pid cmd
+    for pidfile in "$LIMA_HOME"/_networks/*/usernet_*.pid; do
+        [ -f "$pidfile" ] || continue
+        pid=$(tr -d '[:space:]' < "$pidfile" 2>/dev/null)
+        [ -n "$pid" ] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+        cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+        case "$cmd" in
+            *limactl*usernet*"$LIMA_HOME"*)
+                log "quit: reaping leaked lima usernet daemon (pid $pid)"
+                kill -TERM "$pid" 2>/dev/null || true
+                ;;
+        esac
+    done
+}
+
 # Function to get container status
 get_status() {
     cd "$DOCKER_DIR"
@@ -2120,6 +2147,10 @@ main() {
                 log "quit: colima binary not found at $COLIMA_BIN — skipping"
                 FAILED_STEPS="$FAILED_STEPS colima-missing"
             fi
+
+            # Leave a clean slate: lima's usernet daemon outlives `colima
+            # stop` and leaking it tends to wedge the next cold boot.
+            reap_lima_usernet
 
             # Remove the PID file, but only if it still matches the PID
             # we saw at the top (mirrors _remove_pid_file safety in

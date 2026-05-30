@@ -2528,7 +2528,56 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Warning: Colima stop failed: {e}")
 
+        # Reap lima's shared usernet daemon. It survives `colima stop` and
+        # leaks across restarts, holding the user-v2 network sockets — the
+        # likely cause of the next *cold* boot wedging (fresh VM's guest agent
+        # can't bring up networking -> gray icon). Quit is the right place to
+        # force a clean slate; lima respawns usernet on the next start.
+        self._reap_lima_usernet()
+
         self._remove_pid_file()
+
+    def _reap_lima_usernet(self):
+        """Kill any leaked `limactl usernet` daemon for this install.
+
+        lima's shared usernet daemon is meant to be torn down when the last
+        instance stops, but in practice it survives `colima stop` (observed
+        2026-05-30: one persisted across several relaunches, still holding the
+        user-v2 network sockets — the likely cause of the next cold boot
+        wedging). On the next start lima respawns it fresh, so reaping it at
+        quit is safe and leaves a clean slate.
+
+        Scoped by this install's colima_home so concurrent multi-user installs
+        don't touch each other's daemons (and kill is per-user anyway).
+        """
+        import glob
+        import signal as _signal
+        net_dir = os.path.join(self.colima_home, "_lima", "_networks")
+        for pidfile in glob.glob(os.path.join(net_dir, "*", "usernet_*.pid")):
+            try:
+                with open(pidfile) as f:
+                    pid = int(f.read().strip())
+            except Exception:
+                continue
+            try:
+                os.kill(pid, 0)  # still alive?
+            except OSError:
+                continue  # already gone
+            # Confirm it's our limactl usernet before killing anything.
+            try:
+                cmd = subprocess.run(
+                    ["ps", "-o", "command=", "-p", str(pid)],
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=5,
+                ).stdout
+            except Exception:
+                cmd = ""
+            if "limactl" in cmd and "usernet" in cmd and self.colima_home in cmd:
+                try:
+                    os.kill(pid, _signal.SIGTERM)
+                    self.log(f"Reaped leaked lima usernet daemon (pid {pid})")
+                except OSError as e:
+                    self.log(f"Warning: could not reap usernet pid {pid}: {e}")
 
     def _handle_terminate(self):
         """Handle app termination (osascript quit, Apple Event, etc.).
