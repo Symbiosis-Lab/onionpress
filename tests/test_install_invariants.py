@@ -76,6 +76,65 @@ class TestMacOSBuildBundlesKeyManager(unittest.TestCase):
         )
 
 
+class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
+    """mkp224o must be bundled at Contents/Resources/bin/mkp224o. On first run
+    the macOS shell launcher's generate_vanity_address() (app/MacOS/onionpress)
+    execs $BIN_DIR/mkp224o to mint the vanity (op2…) address. If it's missing,
+    vanity generation fails and the install SILENTLY falls back to a random
+    .onion — shipped in 2.4.101 and hit by multiple users on fresh install.
+
+    The build builds mkp224o in an isolated subshell (so a flaky libsodium
+    cross-compile won't abort the DMG), which means the only thing standing
+    between a failed mkp224o build and a broken release is the copy step
+    below failing hard. These checks guard that it stays a hard failure.
+    """
+
+    def test_build_script_copies_mkp224o_into_bin_dir(self):
+        script = _read("build/build-dmg-simple.sh")
+        self.assertRegex(
+            script,
+            r'cp\s+"\$TEMP_BIN_DIR/mkp224o"\s+"\$BIN_DIR/mkp224o"',
+            "build-dmg-simple.sh must copy mkp224o into Contents/Resources/bin/ "
+            "— the macOS shell launcher execs it from there for vanity addresses.",
+        )
+
+    def test_missing_mkp224o_aborts_the_build(self):
+        """A missing mkp224o must `exit 1`, not just `WARNING`. The original
+        bug was an `else echo "WARNING: mkp224o not available"` that let the
+        DMG ship without the binary, so every fresh install got a random
+        .onion.
+        """
+        script = _read("build/build-dmg-simple.sh")
+        block = re.search(
+            r'if\s+\[\s*-f\s+"\$TEMP_BIN_DIR/mkp224o"\s*\];\s*then(.*?)fi',
+            script,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            block,
+            "Could not find the mkp224o install block in build-dmg-simple.sh "
+            "— has it been renamed? Update this test.",
+        )
+        self.assertIn(
+            "exit 1",
+            block.group(1),
+            "The mkp224o install block must `exit 1` when the binary is "
+            "missing — a warning lets a vanity-less DMG ship (the 2.4.101 bug).",
+        )
+
+    def test_validate_bundle_requires_mkp224o(self):
+        """validate-bundle.sh's required universal-binaries list must keep
+        mkp224o, so any bundle check (CI or manual) catches its absence.
+        """
+        script = _read("build/validate-bundle.sh")
+        self.assertRegex(
+            script,
+            r'UNIVERSAL_BINARIES=\([^)]*\bmkp224o\b[^)]*\)',
+            "validate-bundle.sh must list mkp224o among the required universal "
+            "binaries it verifies are present in the bundle.",
+        )
+
+
 class TestMakefilePrecheckUsesCorrectPath(unittest.TestCase):
     """The Makefile's `make test` target asserts required source files
     exist before a build. After the move to the `onionpress` package the

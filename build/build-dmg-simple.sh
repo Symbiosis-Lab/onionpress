@@ -323,12 +323,20 @@ for binary in colima limactl docker docker-compose; do
     echo "  $binary installed ($(lipo -archs "$BIN_DIR/$binary"))"
 done
 
-# Copy mkp224o if it was built (native to build machine only)
+# Copy mkp224o into the bundle. This binary is REQUIRED: on first run,
+# app/MacOS/onionpress -> generate_vanity_address() execs $BIN_DIR/mkp224o
+# to mint the vanity (op2…) address. If it's missing, generate_vanity_address
+# returns failure and the install SILENTLY falls back to a random .onion —
+# exactly the regression shipped in 2.4.101. A missing mkp224o must abort the
+# DMG, not warn, so a flaky cross-compile can never ship a vanity-less build.
 if [ -f "$TEMP_BIN_DIR/mkp224o" ]; then
     cp "$TEMP_BIN_DIR/mkp224o" "$BIN_DIR/mkp224o"
     echo "  mkp224o installed successfully"
 else
-    echo "  WARNING: mkp224o not available"
+    echo "ERROR: mkp224o not available — refusing to build a DMG without it." >&2
+    echo "  Every fresh install would silently get a RANDOM .onion instead of" >&2
+    echo "  a vanity address. Fix the mkp224o build step above and rebuild." >&2
+    exit 1
 fi
 
 chmod +x "$BIN_DIR"/*
