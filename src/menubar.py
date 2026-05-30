@@ -2033,18 +2033,29 @@ class OnionPressApp(rumps.App):
             self._last_check_complete_ts = time.time()
             self.checking = False
 
-    def _maybe_emit_snapshot(self, force: bool = False) -> None:
+    def _maybe_emit_snapshot(self, force: bool = False, fast: bool = False) -> None:
         """Emit a ~12h snapshot line if enough time has passed (or if forced).
 
         Force=True is used by handle_sleep / handle_wake to checkpoint
         unconditionally. Issue #238.
+
+        Fast=True skips the container_metrics() `docker stats` call, which
+        costs ~3s through Colima and measurably dominates the time. handle_sleep
+        passes it because that snapshot runs synchronously inside the IOKit
+        sleep delay-inhibitor (mac_power.MacPowerHandler) — every ms there
+        delays the Mac going to sleep. The reachability session numbers (the
+        whole point of the pre-sleep snapshot) and the cheap host metrics are
+        still captured; only the per-container RAM/CPU line is dropped.
+        Periodic and wake snapshots keep full metrics (wake doesn't hold the OS).
         """
         now = time.time()
         if not force and now - self._last_snapshot_ts < self._snapshot_interval_seconds:
             return
         try:
             host = host_metrics()
-            ctn = container_metrics(self._docker) if self._docker is not None else None
+            ctn = None
+            if not fast and self._docker is not None:
+                ctn = container_metrics(self._docker)
             line = self._reachability_stats.format_snapshot(host, ctn, now)
             self.log(line)
         except Exception as e:
@@ -2403,6 +2414,26 @@ class OnionPressApp(rumps.App):
         Thin delegate to launcher_ops.signal_watchdog() — shared with Linux."""
         return launcher_ops.signal_watchdog(self._docker, container, sig)
 
+    def _record_suspend_offline(self, ok, elapsed_ms):
+        """Log one suspend's /offline outcome as a greppable SUSPEND-RACE line.
+
+        ``notify_onionheaven_offline`` returns True only when the hub sends
+        back its {"offline": true} ack, so ``ok`` means the hub genuinely
+        received the notification before we let the machine sleep — a real
+        suspend-race win. False means curl failed/timed out or the hub
+        rejected: the hub never learned we went offline and falls back to
+        slow heartbeat-timeout takeover.
+
+        One self-contained line per suspend, written to the normal log; a
+        machine's miss rate is `grep SUSPEND-RACE ~/.onionpress/logs/*.log`.
+        This is the client's own view; the hub's addr_log of /offline
+        arrivals is the independent other half.
+        """
+        self.log(
+            f"SUSPEND-RACE: /offline {'landed' if ok else 'MISSED'} "
+            f"in {elapsed_ms}ms"
+        )
+
     def handle_sleep(self):
         """Handle system sleep — DEL_ONION via watchdog, notify hub, release caffeinate.
 
@@ -2412,9 +2443,11 @@ class OnionPressApp(rumps.App):
         """
         self.log("System going to sleep")
         # Issue #238: emit a final session snapshot before sleeping so the
-        # session's reachability + resource numbers are captured. Done before
-        # _sleeping flag flips so any in-progress yellow streak finalizes.
-        self._maybe_emit_snapshot(force=True)
+        # session's reachability numbers are captured. Done before _sleeping
+        # flips so any in-progress yellow streak finalizes. fast=True skips the
+        # ~3s `docker stats` call — this runs inside the IOKit sleep
+        # delay-inhibitor, so it directly delays the Mac going to sleep.
+        self._maybe_emit_snapshot(force=True, fast=True)
         self._sleeping = True
         self._onionheaven_heartbeat_succeeded = False
         if not self.is_onionheaven:
@@ -2428,10 +2461,13 @@ class OnionPressApp(rumps.App):
             # /offline POST to 5s so total handle_sleep stays well inside
             # the IOKit suspend deadline (~30s). Default 10s elsewhere.
             if self.is_ready and self._onionheaven_registration_succeeded:
+                t0 = time.monotonic()
+                ok = False
                 try:
-                    onionheaven.notify_onionheaven_offline(self, max_time=5)
+                    ok = bool(onionheaven.notify_onionheaven_offline(self, max_time=5))
                 except Exception:
-                    pass
+                    ok = False
+                self._record_suspend_offline(ok, int((time.monotonic() - t0) * 1000))
             self.caffeine.stop()
 
     def _perform_quit_cleanup(self):
