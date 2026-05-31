@@ -2378,33 +2378,12 @@ main() {
                     exit 1
                 fi
             fi
-            restore_backup "$restore_pass" "$restore_path"
-            echo "Restarting containers..."
-            # Flag key reimport so start_containers removes the old
-            # arti-state volume and installs the restored key
-            touch "$DATA_DIR/.import-key-pending"
-            stop_containers
-            start_containers
-            # Restore re-imports multisite data but the WordPress container
-            # generates a fresh wp-config.php without multisite constants.
-            # start_containers skips Tor because wp_is_installed fails without
-            # these constants. Add them now, then start Tor explicitly.
-            log "Restore: re-adding multisite constants to wp-config.php..."
-            for entry in "WP_ALLOW_MULTISITE:true" "MULTISITE:true" "SUBDOMAIN_INSTALL:false" \
-                         "DOMAIN_CURRENT_SITE:'localhost'" "PATH_CURRENT_SITE:'/'" \
-                         "SITE_ID_CURRENT_SITE:1" "BLOG_ID_CURRENT_SITE:1"; do
-                local name="${entry%%:*}"
-                local value="${entry#*:}"
-                docker exec onionpress-wordpress wp config set "$name" "$value" \
-                    --raw --type=constant --allow-root >> "$LOG_FILE" 2>&1 || true
-            done
-            # Start Tor now that multisite is configured
-            cd "$DOCKER_DIR"
-            log "Restore: starting Tor containers..."
-            setup_db_passwords 2>/dev/null || true
-            docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start Tor containers"
-            wait_for_services
-            echo "Done! OnionPress restarted with restored data."
+            # install-from-backup: the Python CLI tears the install down and
+            # rebuilds it from the backup (seeded key + imported DB/content),
+            # replacing the old in-place overwrite + arti-state key-swap churn
+            # (no .import-key-pending, no manual multisite/Tor dance).
+            bundled_python -m onionpress.cli restore "$restore_pass" "$restore_path"
+            echo "Done! OnionPress rebuilt from backup."
             ;;
 
         reset)
@@ -2507,17 +2486,12 @@ main() {
 
             # ── Step 3: Restore ─────────────────────────────────────────
             echo ""
-            echo "── Step 3/4: Restore ──"
+            echo "── Step 3/4: Restore (install-from-backup) ──"
             setup_db_passwords
-            start_containers
-            wait_for_services
-            restore_backup "$scrub_pass" "$scrub_backup"
-            echo "  Restore complete. Restarting..."
-            touch "$DATA_DIR/.import-key-pending"
-            stop_containers
-            start_containers
-            wait_for_services
-            # write_status removed — Linux-only helper mistakenly copied from linux/onionpress
+            # cli restore tears down (already reset above) and rebuilds the
+            # install directly from the backup — seeded key + imported DB/
+            # content, no in-place overwrite or arti-state key-swap churn.
+            bundled_python -m onionpress.cli restore "$scrub_pass" "$scrub_backup"
             echo "  Restore and restart complete."
 
             # ── Step 4: Verify ──────────────────────────────────────────

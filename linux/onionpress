@@ -2472,16 +2472,12 @@ sys.exit(0 if provision_interactive() else 1)
                 echo "Restores from an OnionPress backup. Containers must be running."
                 exit 1
             fi
-            restore_backup "$restore_pass" "$restore_path"
-            echo "Restore complete. Restarting OnionPress..."
-            # Flag key reimport so start_containers removes the old
-            # arti-state volume and installs the restored key
-            touch "$DATA_DIR/.import-key-pending"
-            stop_containers
-            start_containers
-            wait_for_services
-            write_status
-            echo "Done! OnionPress restarted with restored data."
+            # install-from-backup: the shared Python CLI tears the install down
+            # and rebuilds it from the backup (seeded key + imported DB/content),
+            # replacing the in-place overwrite + arti-state key-swap churn (no
+            # .import-key-pending, no manual stop/start).
+            op_py restore "$restore_pass" "$restore_path"
+            echo "Done! OnionPress rebuilt from backup."
             ;;
 
         update)
