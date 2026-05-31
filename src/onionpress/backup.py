@@ -525,6 +525,108 @@ def read_backup_metadata(zip_path, password):
         raise ValueError("Not a valid zip file.")
 
 
+def extract_backup(zip_path, password, log_func):
+    """Extract a backup zip into a fresh staging dir; return (staging, metadata).
+
+    Validates the password as a side effect — a wrong password raises here
+    (zipfile error) before any state is touched. The caller owns the staging
+    dir and must clean it up.
+    """
+    staging = tempfile.mkdtemp(prefix='onionpress-restore-')
+    with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
+        log_func("Restore: extracting backup archive...")
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(staging, pwd=password.encode())
+    metadata_path = os.path.join(staging, 'metadata.json')
+    if not os.path.exists(metadata_path):
+        metadata_path = os.path.join(staging, '.', 'metadata.json')
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+    return staging, metadata
+
+
+def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
+    """Seed the backup's onion identity into host-side state so a fresh install
+    adopts it WITHOUT generating a vanity key. Writes the key + hostname into
+    ~/.onionpress/shared/vanity-keys/<addr>/ (the launcher's pre-imported-key
+    path), updates the cached onion_address, and points ADDRESS_PREFIX/ONIONNAME
+    at the restored identity. Returns the derived .onion address.
+
+    Host-side only: does NOT touch a running container or the arti-state volume.
+    On the next launcher start the key is copied into arti-state and (for C Tor)
+    converted to the C-Tor keystore by the tor entrypoint.
+    """
+    _data_dir = data_dir if data_dir is not None else _default_data_dir()
+    tor_dir = _find_dir(staging, 'tor-keys')
+    key_path = os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private')
+    if not os.path.exists(key_path):
+        raise Exception("Backup is missing ks_hs_id.ed25519_expanded_private")
+
+    with open(key_path, 'rb') as f:
+        pem_data = f.read()
+    priv, pub = key_manager.parse_openssh_key(pem_data)
+
+    # Address is fully determined by the key; trust the derived value over
+    # metadata.onion_address (older clients sometimes left it stale).
+    onion_address = key_manager.derive_onion_address(pub)
+    metadata_address = metadata.get('onion_address', '')
+    if metadata_address and metadata_address != onion_address:
+        log_func(f"Restore: KEY-MISMATCH — backup metadata.onion_address="
+                 f"{metadata_address} != key_derives_to={onion_address}; "
+                 f"using DERIVED address for all persisted state.")
+    metadata['onion_address'] = onion_address
+
+    cached_path = os.path.join(_data_dir, 'onion_address')
+    try:
+        with open(cached_path, 'w') as cf:
+            cf.write(onion_address + '\n')
+        log_func(f"Restore: updated cached onion_address to {onion_address}")
+    except OSError as e:
+        log_func(f"Restore: warning — could not update {cached_path}: {e}")
+
+    with _phase_timer(log_func, 'RESTORE', 'vanity_sync'):
+        vanity_dir = os.path.join(_data_dir, 'shared', 'vanity-keys')
+        addr_dir = os.path.join(vanity_dir, onion_address)
+        if os.path.isdir(vanity_dir):
+            import datetime
+            ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+            shutil.move(vanity_dir, vanity_dir + f'.old{ts}')
+        os.makedirs(addr_dir, exist_ok=True)
+        shutil.copy2(key_path, os.path.join(addr_dir, 'ks_hs_id.ed25519_expanded_private'))
+        with open(os.path.join(addr_dir, 'hostname'), 'w') as hf:
+            hf.write(onion_address + '\n')
+        log_func(f"Restore: synced vanity-keys for {onion_address}")
+
+        addr_base = onion_address.replace('.onion', '')
+        restored_username = metadata.get('username', '').strip()
+        config_path = os.path.join(_data_dir, 'config')
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as cf:
+                clines = cf.readlines()
+            found_prefix = found_onionname = False
+            for i, line in enumerate(clines):
+                if line.strip().startswith('ADDRESS_PREFIX='):
+                    old_prefix = line.strip().split('=', 1)[1]
+                    if not addr_base.startswith(old_prefix):
+                        plen = min(max(len(old_prefix), 3), 6)
+                        clines[i] = f'ADDRESS_PREFIX={addr_base[:plen]}\n'
+                        log_func(f"Restore: updated ADDRESS_PREFIX to {addr_base[:plen]}")
+                    found_prefix = True
+                elif line.strip().startswith('ONIONNAME=') and restored_username:
+                    clines[i] = f'ONIONNAME={restored_username}\n'
+                    log_func(f"Restore: updated ONIONNAME to {restored_username}")
+                    found_onionname = True
+            if not found_prefix:
+                clines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
+            if not found_onionname and restored_username:
+                clines.append(f'ONIONNAME={restored_username}\n')
+                log_func(f"Restore: set ONIONNAME to {restored_username}")
+            with open(config_path, 'w', encoding='utf-8') as cf:
+                cf.writelines(clines)
+
+    return onion_address
+
+
 def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
     """Restore an OnionPress site from a backup zip.
 
@@ -684,173 +786,10 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
                     with open(config_path, 'w', encoding='utf-8') as cf:
                         cf.writelines(lines)
 
-        # 2. Restore database via mariadb CLI in the db container
-        with _phase_timer(log_func, 'RESTORE', 'db_import'):
-            log_func("Restore: importing database...")
-            sql_path = os.path.join(db_dir, 'wordpress.sql')
-            if not os.path.exists(sql_path):
-                raise Exception("Backup is missing wordpress.sql")
-
-            db_creds = _get_db_credentials()
-
-            # Copy SQL into db container then import
-            subprocess.run(
-                ['docker', 'cp', sql_path, 'onionpress-db:/tmp/wordpress.sql'],
-                capture_output=True, timeout=30, check=True
-            )
-            result = subprocess.run(
-                ['docker', 'exec', 'onionpress-db',
-                 'mariadb',
-                 '-u', db_creds['user'],
-                 '-p' + db_creds['password'],
-                 db_creds['name'],
-                 '-e', 'source /tmp/wordpress.sql'],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
-            )
-            if result.returncode != 0:
-                raise Exception(f"Database import failed: {result.stderr}")
-
-            # Clean up SQL file in container
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-db', 'rm', '-f', '/tmp/wordpress.sql'],
-                capture_output=True, timeout=10
-            )
-
-            # Reconcile the wordpress mysql user's password with the
-            # CURRENT install's secrets. The mariadb-dump only dumps
-            # the wordpress database (not mysql.user), so the imported
-            # SQL shouldn't touch grants — but if the user is restoring
-            # into a DB volume that survived from a previous install
-            # (docker compose down without -v, an interrupted scrub,
-            # or any flow that left the data volume present), then
-            # mysql.user still holds the OLD install's password hash
-            # and the WP container can't connect.
-            #
-            # The fix is unconditional: always re-assert the wordpress
-            # user's password to match what the current containers are
-            # using (from env / wp-config / secrets). Idempotent — if
-            # they already match, ALTER USER is effectively a no-op.
-            log_func("Restore: reconciling DB user password with current secrets...")
-            alter_sql = (
-                f"ALTER USER 'wordpress'@'%' "
-                f"IDENTIFIED BY '{db_creds['password']}'; "
-                f"FLUSH PRIVILEGES;"
-            )
-            alter = subprocess.run(
-                ['docker', 'exec', 'onionpress-db', 'sh', '-c',
-                 'mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" -e "' + alter_sql + '"'],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=15,
-            )
-            if alter.returncode == 0:
-                log_func("Restore: DB user password reconciled")
-            else:
-                # Don't fail the restore — the existing grant may already
-                # be correct (the common case). Log so we have a breadcrumb
-                # if WP can't connect after restore.
-                log_func(f"Restore: WARNING — DB user password reconcile "
-                         f"failed (rc={alter.returncode}): "
-                         f"{alter.stderr.strip()[:200]}")
-
-        # Post-import workload snapshot — row counts now reflect the
-        # restored DB, so we can correlate ingest time with content size.
-        _log_workload_stats(log_func, 'RESTORE_STATS_POST', db_creds)
-
-        # 3. Restore wp-content
-        if wpcontent_dir and os.path.isdir(wpcontent_dir):
-            with _phase_timer(log_func, 'RESTORE', 'wpcontent_extract'):
-                log_func("Restore: copying wp-content (themes, plugins, uploads)...")
-                subprocess.run(
-                    ['docker', 'cp',
-                     wpcontent_dir + '/.',
-                     'onionpress-wordpress:/var/www/html/wp-content/'],
-                    capture_output=True, timeout=300, check=True
-                )
-                subprocess.run(
-                    ['docker', 'exec', 'onionpress-wordpress',
-                     'chown', '-R', 'www-data:www-data', '/var/www/html/wp-content/'],
-                    capture_output=True, timeout=60
-                )
-
-        # Surface Creations-exclusion reminder. The backup intentionally
-        # skips wp-content/creations (it's the host-side bind mount of
-        # ~/OnionPress/Creations) — on this machine the bind
-        # mount re-materializes Creations at container start, but on a
-        # different machine the user has to bring their Documents folder
-        # along too, or My Creations will be empty.
-        if metadata.get('excludes_creations'):
-            log_func("Restore: NOTE — backup does not include 'My Creations' files. "
-                     "They live in ~/OnionPress/Creations/ — if restoring "
-                     "on a new machine, copy that folder across separately.")
-
-        # 4. Restore OnionHeaven data if present in backup
-        onionheaven_dir = _find_dir(staging, 'onionheaven')
-        if os.path.isdir(onionheaven_dir) and os.path.exists(os.path.join(onionheaven_dir, 'master-key.json')):
-            with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
-                log_func("Restore: restoring OnionHeaven data (encrypted keys, registry)...")
-                # Remove ephemeral unlock file if it somehow exists in the backup
-                unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
-                if os.path.exists(unlocked_file):
-                    os.unlink(unlocked_file)
-                # Ensure OnionHeaven directory exists in container
-                subprocess.run(
-                    ['docker', 'exec', 'onionpress-wordpress',
-                     'mkdir', '-p', '/var/lib/onionpress/onionheaven'],
-                    capture_output=True, timeout=10
-                )
-                subprocess.run(
-                    ['docker', 'cp',
-                     onionheaven_dir + '/.',
-                     'onionpress-wordpress:/var/lib/onionpress/onionheaven/'],
-                    capture_output=True, timeout=60, check=True
-                )
-                subprocess.run(
-                    ['docker', 'exec', 'onionpress-wordpress',
-                     'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/onionheaven/'],
-                    capture_output=True, timeout=30
-                )
-                log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
-
-        # 4b. Restore OnionHome name registry if present in backup.
-        #     Kept root-owned — the tor container reads/writes these files
-        #     as root, same as OnionHeaven's tor-container-root files
-        #     alongside the www-data restore target above.
-        onionhome_dir = _find_dir(staging, 'onionhome')
-        if os.path.isdir(onionhome_dir) and os.path.exists(os.path.join(onionhome_dir, 'onionnames.db')):
-            with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):
-                log_func("Restore: restoring OnionHome name registry...")
-                subprocess.run(
-                    ['docker', 'exec', 'onionpress-wordpress',
-                     'mkdir', '-p', '/var/lib/onionpress/onionhome'],
-                    capture_output=True, timeout=10
-                )
-                subprocess.run(
-                    ['docker', 'cp',
-                     onionhome_dir + '/.',
-                     'onionpress-wordpress:/var/lib/onionpress/onionhome/'],
-                    capture_output=True, timeout=60, check=True
-                )
-                log_func("Restore: OnionHome name registry restored")
-
-        # 5. Re-add multisite constants to wp-config.php
-        # WordPress Docker image generates a fresh wp-config.php without multisite
-        # constants when the container is recreated. Without these, wp core
-        # is-installed --network fails and ensure_multisite skips conversion.
-        with _phase_timer(log_func, 'RESTORE', 'multisite_constants'):
-            _ensure_multisite_constants(log_func)
-
-        # 6. Restore config overrides (non-default user preferences)
-        overrides_path = os.path.join(staging, 'config-overrides.json')
-        if not os.path.exists(overrides_path):
-            overrides_path = os.path.join(staging, '.', 'config-overrides.json')
-        if os.path.exists(overrides_path):
-            with _phase_timer(log_func, 'RESTORE', 'config_overrides'):
-                with open(overrides_path, 'r') as f:
-                    overrides = json.load(f)
-                config_path = os.path.join(_data_dir, 'config')
-                for key, value in overrides.items():
-                    write_value(config_path, key, value)
-                log_func(f"Restore: applied {len(overrides)} config override(s)")
+        # 2-6. Container-side artifacts + config overrides — shared with the
+        # install-from-backup path (restore_container_artifacts / apply_config_overrides).
+        restore_container_artifacts(staging, metadata, log_func)
+        apply_config_overrides(staging, log_func, data_dir=data_dir)
 
         log_func(f"RESTORE_PHASE: name=total elapsed_s={time.monotonic() - restore_start:.2f}")
         log_func("Restore: files restored successfully")
@@ -858,6 +797,189 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
 
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def restore_container_artifacts(staging, metadata, log_func):
+    """Import a backup's container-side state into the RUNNING db + wordpress
+    containers: WordPress DB, wp-content, OnionHeaven data, OnionHome registry,
+    and multisite constants. Shared by restore_from_backup (in-place) and the
+    install-from-backup path. Requires onionpress-db + onionpress-wordpress up.
+    """
+    db_dir = _find_dir(staging, 'database')
+    wpcontent_dir = _find_dir(staging, 'wp-content')
+
+    # 2. Restore database via mariadb CLI in the db container
+    with _phase_timer(log_func, 'RESTORE', 'db_import'):
+        log_func("Restore: importing database...")
+        sql_path = os.path.join(db_dir, 'wordpress.sql')
+        if not os.path.exists(sql_path):
+            raise Exception("Backup is missing wordpress.sql")
+
+        db_creds = _get_db_credentials()
+
+        # Copy SQL into db container then import
+        subprocess.run(
+            ['docker', 'cp', sql_path, 'onionpress-db:/tmp/wordpress.sql'],
+            capture_output=True, timeout=30, check=True
+        )
+        result = subprocess.run(
+            ['docker', 'exec', 'onionpress-db',
+             'mariadb',
+             '-u', db_creds['user'],
+             '-p' + db_creds['password'],
+             db_creds['name'],
+             '-e', 'source /tmp/wordpress.sql'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
+        )
+        if result.returncode != 0:
+            raise Exception(f"Database import failed: {result.stderr}")
+
+        # Clean up SQL file in container
+        subprocess.run(
+            ['docker', 'exec', 'onionpress-db', 'rm', '-f', '/tmp/wordpress.sql'],
+            capture_output=True, timeout=10
+        )
+
+        # Reconcile the wordpress mysql user's password with the
+        # CURRENT install's secrets. The mariadb-dump only dumps
+        # the wordpress database (not mysql.user), so the imported
+        # SQL shouldn't touch grants — but if the user is restoring
+        # into a DB volume that survived from a previous install
+        # (docker compose down without -v, an interrupted scrub,
+        # or any flow that left the data volume present), then
+        # mysql.user still holds the OLD install's password hash
+        # and the WP container can't connect.
+        #
+        # The fix is unconditional: always re-assert the wordpress
+        # user's password to match what the current containers are
+        # using (from env / wp-config / secrets). Idempotent — if
+        # they already match, ALTER USER is effectively a no-op.
+        log_func("Restore: reconciling DB user password with current secrets...")
+        alter_sql = (
+            f"ALTER USER 'wordpress'@'%' "
+            f"IDENTIFIED BY '{db_creds['password']}'; "
+            f"FLUSH PRIVILEGES;"
+        )
+        alter = subprocess.run(
+            ['docker', 'exec', 'onionpress-db', 'sh', '-c',
+             'mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" -e "' + alter_sql + '"'],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=15,
+        )
+        if alter.returncode == 0:
+            log_func("Restore: DB user password reconciled")
+        else:
+            # Don't fail the restore — the existing grant may already
+            # be correct (the common case). Log so we have a breadcrumb
+            # if WP can't connect after restore.
+            log_func(f"Restore: WARNING — DB user password reconcile "
+                     f"failed (rc={alter.returncode}): "
+                     f"{alter.stderr.strip()[:200]}")
+
+    # Post-import workload snapshot — row counts now reflect the
+    # restored DB, so we can correlate ingest time with content size.
+    _log_workload_stats(log_func, 'RESTORE_STATS_POST', db_creds)
+
+    # 3. Restore wp-content
+    if wpcontent_dir and os.path.isdir(wpcontent_dir):
+        with _phase_timer(log_func, 'RESTORE', 'wpcontent_extract'):
+            log_func("Restore: copying wp-content (themes, plugins, uploads)...")
+            subprocess.run(
+                ['docker', 'cp',
+                 wpcontent_dir + '/.',
+                 'onionpress-wordpress:/var/www/html/wp-content/'],
+                capture_output=True, timeout=300, check=True
+            )
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'chown', '-R', 'www-data:www-data', '/var/www/html/wp-content/'],
+                capture_output=True, timeout=60
+            )
+
+    # Surface Creations-exclusion reminder. The backup intentionally
+    # skips wp-content/creations (it's the host-side bind mount of
+    # ~/OnionPress/Creations) — on this machine the bind
+    # mount re-materializes Creations at container start, but on a
+    # different machine the user has to bring their Documents folder
+    # along too, or My Creations will be empty.
+    if metadata.get('excludes_creations'):
+        log_func("Restore: NOTE — backup does not include 'My Creations' files. "
+                 "They live in ~/OnionPress/Creations/ — if restoring "
+                 "on a new machine, copy that folder across separately.")
+
+    # 4. Restore OnionHeaven data if present in backup
+    onionheaven_dir = _find_dir(staging, 'onionheaven')
+    if os.path.isdir(onionheaven_dir) and os.path.exists(os.path.join(onionheaven_dir, 'master-key.json')):
+        with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
+            log_func("Restore: restoring OnionHeaven data (encrypted keys, registry)...")
+            # Remove ephemeral unlock file if it somehow exists in the backup
+            unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
+            if os.path.exists(unlocked_file):
+                os.unlink(unlocked_file)
+            # Ensure OnionHeaven directory exists in container
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'mkdir', '-p', '/var/lib/onionpress/onionheaven'],
+                capture_output=True, timeout=10
+            )
+            subprocess.run(
+                ['docker', 'cp',
+                 onionheaven_dir + '/.',
+                 'onionpress-wordpress:/var/lib/onionpress/onionheaven/'],
+                capture_output=True, timeout=60, check=True
+            )
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/onionheaven/'],
+                capture_output=True, timeout=30
+            )
+            log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
+
+    # 4b. Restore OnionHome name registry if present in backup.
+    #     Kept root-owned — the tor container reads/writes these files
+    #     as root, same as OnionHeaven's tor-container-root files
+    #     alongside the www-data restore target above.
+    onionhome_dir = _find_dir(staging, 'onionhome')
+    if os.path.isdir(onionhome_dir) and os.path.exists(os.path.join(onionhome_dir, 'onionnames.db')):
+        with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):
+            log_func("Restore: restoring OnionHome name registry...")
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'mkdir', '-p', '/var/lib/onionpress/onionhome'],
+                capture_output=True, timeout=10
+            )
+            subprocess.run(
+                ['docker', 'cp',
+                 onionhome_dir + '/.',
+                 'onionpress-wordpress:/var/lib/onionpress/onionhome/'],
+                capture_output=True, timeout=60, check=True
+            )
+            log_func("Restore: OnionHome name registry restored")
+
+    # 5. Re-add multisite constants to wp-config.php
+    # WordPress Docker image generates a fresh wp-config.php without multisite
+    # constants when the container is recreated. Without these, wp core
+    # is-installed --network fails and ensure_multisite skips conversion.
+    with _phase_timer(log_func, 'RESTORE', 'multisite_constants'):
+        _ensure_multisite_constants(log_func)
+
+
+def apply_config_overrides(staging, log_func, *, data_dir=None):
+    """Apply a backup's non-default config overrides to ~/.onionpress/config."""
+    _data_dir = data_dir if data_dir is not None else _default_data_dir()
+    # 6. Restore config overrides (non-default user preferences)
+    overrides_path = os.path.join(staging, 'config-overrides.json')
+    if not os.path.exists(overrides_path):
+        overrides_path = os.path.join(staging, '.', 'config-overrides.json')
+    if os.path.exists(overrides_path):
+        with _phase_timer(log_func, 'RESTORE', 'config_overrides'):
+            with open(overrides_path, 'r') as f:
+                overrides = json.load(f)
+            config_path = os.path.join(_data_dir, 'config')
+            for key, value in overrides.items():
+                write_value(config_path, key, value)
+            log_func(f"Restore: applied {len(overrides)} config override(s)")
+
 
 
 def _ensure_multisite_constants(log_func):

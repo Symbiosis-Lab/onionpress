@@ -358,7 +358,9 @@ class TestBuildEnv(unittest.TestCase):
         env = cm._build_env()
         self.assertEqual(env["ONIONPRESS_WP_PORT"], "8080")
         self.assertEqual(env["ONIONPRESS_SOCKS_PORT"], "9050")
-        self.assertEqual(env["TOR_IMPL"], "arti")
+        # Default with no config is C Tor (the TOR_IMPL=arti default was a bug,
+        # fixed so fresh installs / menubar-driven starts come up as C Tor).
+        self.assertEqual(env["TOR_IMPL"], "tor")
 
     def test_build_env_reads_config(self):
         with open(self.paths.config_file, "w") as f:

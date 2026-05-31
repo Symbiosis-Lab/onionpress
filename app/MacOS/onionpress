@@ -1449,11 +1449,40 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # install_multisite_domain_map, install_onionpress_theme, the perm
     # fixes, and the shared-onion-address write — in the right order).
     # See src/onionpress/multisite.py.
+    # install-from-backup: if a backup was staged for this install, import its
+    # DB + content into the now-running containers BEFORE the WP provisioning
+    # below, so configure-ia/provision-post-install operate on the restored site.
+    # provision-post-install then refreshes the OnionPress-managed theme/
+    # mu-plugins/sunrise.php to the CURRENT version, fixing any backup version skew.
+    _ifb_marker="$DATA_DIR/.install-from-backup"
+    _ifb_staging=""
+    if [ -f "$_ifb_marker" ]; then
+        _ifb_staging=$(head -1 "$_ifb_marker" 2>/dev/null)
+        if [ -n "$_ifb_staging" ] && [ -d "$_ifb_staging" ]; then
+            log "Install-from-backup: importing artifacts from $_ifb_staging"
+            if ! bundled_python -m onionpress.cli import-backup-artifacts --staging "$_ifb_staging"; then
+                log "ERROR: install-from-backup import failed — leaving marker for retry"
+                _ifb_staging=""
+            fi
+        else
+            log "Install-from-backup: marker present but staging missing ($_ifb_staging); ignoring"
+            _ifb_staging=""
+        fi
+    fi
+
     bundled_python -m onionpress.cli configure-ia-plugin
     bundled_python -m onionpress.cli deactivate-wp-statistics
     bundled_python -m onionpress.cli provision-post-install \
         --themes-dir "$RESOURCES_DIR/themes" \
         --plugins-dir "$RESOURCES_DIR/plugins"
+
+    # install-from-backup: clean up staging + marker only after a successful
+    # import + provisioning, so an interrupted run re-imports on the next start.
+    if [ -n "$_ifb_staging" ]; then
+        rm -rf "$_ifb_staging"
+        rm -f "$_ifb_marker"
+        log "Install-from-backup: complete (staging cleaned up)"
+    fi
 
     # Tor-routed archive.org login can take 30s — background it so the
     # rest of start_containers returns promptly. No-op if keys are set.

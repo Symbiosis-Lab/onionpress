@@ -215,6 +215,38 @@ class OnionPressCLI:
             self.log(f"Restore failed: {e}")
             return 1
 
+    def cmd_import_backup_artifacts(self, staging: str) -> int:
+        """Import a backup's container-side artifacts (DB, wp-content,
+        OnionHeaven/OnionHome data, multisite constants) into the already-running
+        containers, then migrate the DB schema. Used by the launcher's
+        install-from-backup marker hook. Operates on an already-extracted staging
+        dir, so no password is needed here.
+        """
+        try:
+            from .backup import restore_container_artifacts
+            meta_path = os.path.join(staging, "metadata.json")
+            if not os.path.exists(meta_path):
+                meta_path = os.path.join(staging, ".", "metadata.json")
+            metadata = {}
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    metadata = json.load(f)
+            restore_container_artifacts(staging, metadata, self.log)
+            # Migrate DB schema for cross-version backups (non-fatal).
+            res = self.docker.run(
+                ["exec", "onionpress-wordpress",
+                 "wp", "core", "update-db", "--allow-root"],
+                timeout=120,
+            )
+            if not res.ok:
+                self.log("Install-from-backup: wp core update-db reported a "
+                         "problem (continuing)")
+            self.log("Install-from-backup: artifacts imported")
+            return 0
+        except Exception as e:
+            self.log(f"Install-from-backup import failed: {e}")
+            return 1
+
     def cmd_smoke_test_wayback(self) -> int:
         """End-to-end smoke test of the Wayback archiving pipeline.
 
@@ -526,6 +558,14 @@ def main(argv: list[str] = None) -> int:
         "--clean", action="store_true",
         help="Delete the backup zip after a successful scrub")
 
+    p_iba = sub.add_parser(
+        "import-backup-artifacts",
+        help="Import a backup's container-side artifacts into the running "
+             "containers (install-from-backup; no password needed)")
+    p_iba.add_argument(
+        "--staging", required=True,
+        help="Path to the already-extracted backup staging directory")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -548,6 +588,8 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_backup(args.password, args.output, args.user)
     elif args.command == "restore":
         return cli.cmd_restore(args.password, args.backup_file)
+    elif args.command == "import-backup-artifacts":
+        return cli.cmd_import_backup_artifacts(args.staging)
     elif args.command == "reset":
         return cli.cmd_reset(yes=args.yes)
     elif args.command == "smoke-test-wayback":

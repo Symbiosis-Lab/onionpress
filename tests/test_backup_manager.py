@@ -521,6 +521,69 @@ class TestRestoreRoundTrip(unittest.TestCase):
         self.assertIn(stale_metadata_addr, mismatch_logs[0])
         self.assertIn(_FAKE_DERIVED_ADDR, mismatch_logs[0])
 
+    # ── decomposed-function tests (install-from-backup primitive) ──────────
+
+    def test_extract_backup_returns_staging_and_metadata(self):
+        zip_path = self._make_backup_zip()
+        staging, metadata = backup_manager.extract_backup(
+            zip_path, "testpw", self.logs.append)
+        try:
+            self.assertEqual(metadata["onion_address"], _FAKE_DERIVED_ADDR)
+            self.assertTrue(os.path.isfile(os.path.join(
+                staging, "tor-keys", "ks_hs_id.ed25519_expanded_private")))
+            self.assertTrue(os.path.isfile(os.path.join(
+                staging, "database", "wordpress.sql")))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_extract_backup_wrong_password_raises(self):
+        zip_path = self._make_backup_zip(password="rightpw")
+        with self.assertRaises(Exception):
+            backup_manager.extract_backup(zip_path, "wrongpw", self.logs.append)
+
+    def test_seed_onion_key_writes_vanity_keys_and_config(self):
+        # An existing config so ADDRESS_PREFIX/ONIONNAME get rewritten in place.
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write("ADDRESS_PREFIX=zzz\nONIONNAME=old\n")
+        zip_path = self._make_backup_zip()
+        staging, metadata = backup_manager.extract_backup(
+            zip_path, "testpw", self.logs.append)
+        try:
+            addr = backup_manager.seed_onion_key_for_install(
+                staging, metadata, self.logs.append, data_dir=self.data_dir)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+        self.assertEqual(addr, _FAKE_DERIVED_ADDR)
+        # Key + hostname land in the launcher's pre-imported-key location.
+        addr_dir = os.path.join(self.data_dir, "shared", "vanity-keys", addr)
+        self.assertTrue(os.path.isfile(os.path.join(
+            addr_dir, "ks_hs_id.ed25519_expanded_private")))
+        with open(os.path.join(addr_dir, "hostname")) as f:
+            self.assertEqual(f.read().strip(), addr)
+        # Cached onion_address updated.
+        with open(os.path.join(self.data_dir, "onion_address")) as f:
+            self.assertEqual(f.read().strip(), addr)
+        # Config: ONIONNAME from backup username; stale ADDRESS_PREFIX rewritten.
+        with open(os.path.join(self.data_dir, "config")) as f:
+            cfg = f.read()
+        self.assertIn("ONIONNAME=admin", cfg)
+        self.assertNotIn("ADDRESS_PREFIX=zzz", cfg)
+
+    def test_seed_onion_key_mismatch_guard(self):
+        stale = "stalemd1stalemd1stalemd1stalemd1stalemd1stalemd1stale12.onion"
+        zip_path = self._make_backup_zip(metadata_address=stale)
+        staging, metadata = backup_manager.extract_backup(
+            zip_path, "testpw", self.logs.append)
+        try:
+            addr = backup_manager.seed_onion_key_for_install(
+                staging, metadata, self.logs.append, data_dir=self.data_dir)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        self.assertEqual(addr, _FAKE_DERIVED_ADDR)
+        self.assertNotEqual(addr, stale)
+        self.assertTrue(any("KEY-MISMATCH" in m for m in self.logs))
+
     def test_restore_renames_old_vanity_keys(self):
         """Restore renames the entire vanity-keys dir to vanity-keys.old<ts>.
 
