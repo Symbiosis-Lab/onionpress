@@ -525,6 +525,39 @@ def read_backup_metadata(zip_path, password):
         raise ValueError("Not a valid zip file.")
 
 
+def _unzip_cli_extract(zip_path, password, dest, log_func):
+    """Fast-path extraction via the system `unzip` CLI — C code, ~30-50x faster
+    than zipfile's pure-Python ZipCrypto decryption (which runs ~2 MB/s on a
+    ~900 MB encrypted backup). Returns True on success, False if `unzip` is
+    absent or errors (caller falls back to zipfile).
+
+    Injection-safe: arguments are passed as a LIST to subprocess.run with NO
+    shell=True, so the password and paths are literal argv values that a shell
+    never parses — a password containing ; $() `` | spaces etc. cannot inject
+    commands. `-P` always consumes the next argv as the password value, so a
+    password starting with '-' is taken literally too. zip_path is passed as a
+    plain argv (callers use absolute paths, so it won't be mistaken for a flag).
+    """
+    import shutil as _shutil
+    if _shutil.which('unzip') is None:
+        return False
+    try:
+        result = subprocess.run(
+            ['unzip', '-o', '-qq', '-P', password, zip_path, '-d', dest],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=900,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log_func(f"Restore: unzip CLI unavailable/timed out ({e}); using zipfile")
+        return False
+    if result.returncode != 0:
+        # Wrong password, AES archive, or corrupt zip — let zipfile try (and
+        # raise a clean error for the wrong-password case).
+        log_func(f"Restore: unzip CLI rc={result.returncode}; using zipfile")
+        return False
+    return True
+
+
 def extract_backup(zip_path, password, log_func, staging=None):
     """Extract a backup zip into a staging dir; return (staging, metadata).
 
@@ -533,13 +566,19 @@ def extract_backup(zip_path, password, log_func, staging=None):
     when the extracted files must survive a container restart, as in
     install-from-backup. Validates the password as a side effect — a wrong
     password raises here (zipfile error) before any state is touched.
+
+    Uses the system `unzip` CLI when available (much faster for password-
+    protected archives), falling back to pure-Python zipfile otherwise.
     """
     if staging is None:
         staging = tempfile.mkdtemp(prefix='onionpress-restore-')
     with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
         log_func("Restore: extracting backup archive...")
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(staging, pwd=password.encode())
+        if not _unzip_cli_extract(zip_path, password, staging, log_func):
+            # Fallback: pure-Python zipfile — always available, but slow for
+            # ZipCrypto. Also the path that surfaces a wrong-password error.
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(staging, pwd=password.encode())
     metadata_path = os.path.join(staging, 'metadata.json')
     if not os.path.exists(metadata_path):
         metadata_path = os.path.join(staging, '.', 'metadata.json')

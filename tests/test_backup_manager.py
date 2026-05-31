@@ -541,6 +541,23 @@ class TestRestoreRoundTrip(unittest.TestCase):
         with self.assertRaises(Exception):
             backup_manager.extract_backup(zip_path, "wrongpw", self.logs.append)
 
+    def test_extract_backup_password_metachars_no_shell_injection(self):
+        # A password full of shell metacharacters must be treated as a literal
+        # value (list-args to subprocess, no shell): it must decrypt correctly
+        # AND must not execute the embedded command.
+        canary = os.path.join(self.tmpdir, "INJECTION_CANARY")
+        evil = f"pw; touch {canary} #`id`$(id)"
+        zip_path = self._make_backup_zip(password=evil)
+        staging, metadata = backup_manager.extract_backup(
+            zip_path, evil, self.logs.append)
+        try:
+            self.assertEqual(metadata["onion_address"], _FAKE_DERIVED_ADDR)
+            self.assertFalse(
+                os.path.exists(canary),
+                "shell metacharacters in the password executed — command injection!")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
     def test_seed_onion_key_writes_vanity_keys_and_config(self):
         # An existing config so ADDRESS_PREFIX/ONIONNAME get rewritten in place.
         with open(os.path.join(self.data_dir, "config"), "w") as f:
