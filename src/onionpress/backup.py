@@ -587,6 +587,23 @@ def extract_backup(zip_path, password, log_func, staging=None):
     return staging, metadata
 
 
+def peek_backup_metadata(zip_path, password):
+    """Validate the password and return a backup's metadata WITHOUT a full
+    extract. Used by the welcome-screen restore flow to confirm the password up
+    front (and show the address/username being restored) before committing.
+    Raises on a wrong password or an invalid backup.
+    """
+    with tempfile.TemporaryDirectory(prefix='onionpress-peek-') as tmp:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            names = [n for n in zf.namelist()
+                     if n.rstrip('/').endswith('metadata.json')]
+            if not names:
+                raise Exception("Not an OnionPress backup (no metadata.json)")
+            zf.extract(names[0], tmp, pwd=password.encode())
+            with open(os.path.join(tmp, names[0])) as f:
+                return json.load(f)
+
+
 def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
     """Seed the backup's onion identity into host-side state so a fresh install
     adopts it WITHOUT generating a vanity key. Writes the key + hostname into

@@ -3240,9 +3240,42 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=start, daemon=True).start()
 
     def _first_run_after_welcome(self):
-        """Called after user fills in credentials and clicks Set Up.
+        """Called after the user clicks Set Up (new site) or Restore from backup.
         Runs on a background thread (from setup_window callback)."""
         sw = setup_window.get_setup_window() if setup_window else None
+
+        # Restore-from-backup path: stage the backup host-side (extract + seed
+        # the onion key + apply config overrides + write the .install-from-backup
+        # marker), then start — the launcher's marker hook imports the DB/content
+        # into the fresh containers. No new site, no vanity generation, no
+        # key-swap churn; the original op2… address comes back from the backup.
+        if sw and getattr(sw, 'restore_mode', False):
+            def _rlog(m):
+                self.log(m)
+                try:
+                    if sw:
+                        sw.add_log(m)
+                except Exception:
+                    pass
+            try:
+                from onionpress import backup as _backup
+                _rlog("Restore from backup: preparing…")
+                _backup.prepare_install_from_backup(
+                    sw.restore_zip, sw.restore_password, _rlog,
+                    data_dir=self.app_support)
+                _rlog("Restore from backup: staged — starting install…")
+            except Exception as e:
+                self.log(f"Restore from backup: prepare failed: {e}")
+                try:
+                    if sw:
+                        sw.set_status("Restore failed — check the log for details")
+                except Exception:
+                    pass
+                return
+            self.start_service(None)
+            return
+
+        # New-site path
         if sw and hasattr(sw, 'share_analytics'):
             self.write_config_value("SHARE_ANALYTICS_WITH_ONIONHOME", sw.share_analytics)
             self.log(f"Analytics sharing set to {sw.share_analytics} from welcome screen")
@@ -3741,7 +3774,13 @@ class OnionPressApp(rumps.App):
                     # always a confirmed, OnionHome-blessed onionname — the
                     # registrar may mutate sw.admin_user if the user hit a
                     # collision and picked a new name.
-                    if sw and sw.admin_pass:
+                    if sw and getattr(sw, 'restore_mode', False):
+                        # Restore-from-backup: the launcher's install-from-backup
+                        # marker hook imports the backup's DB (admin user +
+                        # content come from the backup), so DON'T fresh-install
+                        # WordPress or register a new onionname over it.
+                        self.log("Restore from backup: skipping fresh WordPress install")
+                    elif sw and sw.admin_pass:
                         try:
                             self._register_onionname_during_setup(sw)
                         except Exception as e:
@@ -4173,35 +4212,26 @@ class OnionPressApp(rumps.App):
                     display = msg.replace("Restore: ", "") if msg.startswith("Restore: ") else msg
                     _main_thread(lambda: pw.update(display))
 
-                backup_manager.restore_from_backup(
-                    zip_path, password, log_and_update)
+                # install-from-backup: delegate to the launcher's `restore`,
+                # which now tears down + rebuilds the install directly from the
+                # backup (seeded key + imported DB/content) — no in-place
+                # overwrite and no .import-key-pending arti-state key-swap churn.
+                log_and_update("Rebuilding from backup (install-from-backup)…")
+                r = subprocess.run(
+                    [self.launcher_script, "restore", password, zip_path],
+                    capture_output=True, text=True, encoding='utf-8',
+                    errors='replace', timeout=1800)
+                if r.returncode != 0:
+                    self.log(f"Restore: launcher restore rc={r.returncode}: "
+                             f"{(r.stderr or r.stdout or '')[:300]}")
 
                 restored_addr = metadata.get('onion_address', addr)
-
-                # Immediately refresh the in-memory address so the heartbeat
-                # thread (which polls extract_keys() live from the container
-                # and is about to see the new key) sends the matching
-                # content_address. Without this, the next heartbeat would
-                # ship (content=OLD, key=NEW) and OnionHeaven would clobber
-                # the old address's stored key — unrecoverable. backup.py
-                # also writes the on-disk cache, but in-memory wins for the
-                # rest of this process's lifetime.
+                # Refresh the in-memory address so the heartbeat ships the
+                # matching content_address (the restore also writes the on-disk
+                # cache).
                 if restored_addr and restored_addr.endswith('.onion'):
                     self.onion_address = restored_addr
-
-                # Restart containers to pick up restored keys
-                log_and_update("Restarting with restored address...")
-                try:
-                    import_flag = os.path.join(self.app_support, ".import-key-pending")
-                    with open(import_flag, 'w') as f:
-                        f.write("1")
-                    subprocess.run(
-                        [self.launcher_script, "restart"],
-                        capture_output=True, text=True, encoding='utf-8',
-                        errors='replace', timeout=120)
-                    self.log(f"Restarted with restored address: {restored_addr}")
-                except Exception as e:
-                    self.log(f"Warning: could not auto-restart: {e}")
+                self.log(f"Restore complete (install-from-backup): {restored_addr}")
 
                 # Build summary of what was restored and what will happen
                 notes = [f"Onion address: {restored_addr}"]

@@ -405,6 +405,23 @@ class SetupProgressWindow(AppKit.NSObject):
         setup_btn.setAttributedTitle_(attr_title)
         self.welcome_view.addSubview_(setup_btn)
 
+        y -= 26
+
+        # -- Secondary action: restore from an existing backup --
+        # Builds this install directly from a backup (original op2\u2026 address +
+        # content) instead of creating a new site \u2014 see install-from-backup.
+        restore_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect((width - btn_w) / 2, y, btn_w, 20)
+        )
+        restore_btn.setTitle_("Restore from backup\u2026")
+        restore_btn.setBezelStyle_(AppKit.NSBezelStyleInline)
+        restore_btn.setBordered_(False)
+        restore_btn.setFont_(_sys(12))
+        restore_btn.setTarget_(self)
+        restore_btn.setAction_(
+            objc.selector(self.restoreFromBackupClicked_, signature=b'v@:@'))
+        self.welcome_view.addSubview_(restore_btn)
+
         y -= 20
 
         # -- Estimated time --
@@ -662,6 +679,73 @@ class SetupProgressWindow(AppKit.NSObject):
             self.progress_view.setHidden_(False)
 
         # Fire callback to start setup
+        if self._on_setup_callback:
+            threading.Thread(target=self._on_setup_callback, daemon=True).start()
+
+    def restoreFromBackupClicked_(self, sender):
+        """Secondary welcome action: build this install from an existing backup
+        instead of creating a new site. Pick a backup zip + password, validate
+        the password up front, then hand off the same setup callback in restore
+        mode (menubar._first_run_after_welcome branches on self.restore_mode)."""
+        import os
+        # 1. Pick the backup zip (default to ~/OnionPress/backups).
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setTitle_("Choose an OnionPress backup")
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+        backups_dir = os.path.expanduser("~/OnionPress/backups")
+        if os.path.isdir(backups_dir):
+            panel.setDirectoryURL_(AppKit.NSURL.fileURLWithPath_(backups_dir))
+        try:
+            panel.setAllowedContentTypes_(
+                [AppKit.UTType.typeWithFilenameExtension_("zip")])
+        except Exception:
+            pass
+        if panel.runModal() != 1:  # NSModalResponseOK
+            return
+        zip_path = panel.URL().path()
+
+        # 2. Prompt for the backup password (hidden).
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("Backup password")
+        alert.setInformativeText_(
+            "Enter the password for this backup (the WordPress admin password "
+            "from when it was made).")
+        pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 300, 24))
+        alert.setAccessoryView_(pass_field)
+        alert.addButtonWithTitle_("Restore")
+        alert.addButtonWithTitle_("Cancel")
+        alert.window().setInitialFirstResponder_(pass_field)
+        if alert.runModal() != AppKit.NSAlertFirstButtonReturn:
+            return
+        password = pass_field.stringValue() or ""
+
+        # 3. Validate the password up front — no half-restore on a bad password.
+        try:
+            from onionpress import backup as _backup
+            meta = _backup.peek_backup_metadata(zip_path, password)
+        except Exception:
+            warn = AppKit.NSAlert.alloc().init()
+            warn.setMessageText_("Couldn't open that backup")
+            warn.setInformativeText_(
+                "Wrong password, or not a valid OnionPress backup. "
+                "Please try again.")
+            warn.runModal()
+            return
+
+        # 4. Stash restore intent + hand off to the same setup callback.
+        self.restore_mode = True
+        self.restore_zip = zip_path
+        self.restore_password = password
+        self.restore_address = meta.get("onion_address", "")
+
+        self._showing_welcome = False
+        if self.welcome_view:
+            self.welcome_view.setHidden_(True)
+        if self.progress_view:
+            self.progress_view.setHidden_(False)
         if self._on_setup_callback:
             threading.Thread(target=self._on_setup_callback, daemon=True).start()
 

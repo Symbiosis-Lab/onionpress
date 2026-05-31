@@ -612,6 +612,17 @@ class TestRestoreRoundTrip(unittest.TestCase):
         with open(marker) as f:
             self.assertEqual(f.read().strip(), staging)
 
+    def test_peek_backup_metadata_validates_and_returns(self):
+        zip_path = self._make_backup_zip()
+        meta = backup_manager.peek_backup_metadata(zip_path, "testpw")
+        self.assertEqual(meta["onion_address"], _FAKE_DERIVED_ADDR)
+        self.assertEqual(meta["username"], "admin")
+
+    def test_peek_backup_metadata_wrong_password_raises(self):
+        zip_path = self._make_backup_zip(password="rightpw")
+        with self.assertRaises(Exception):
+            backup_manager.peek_backup_metadata(zip_path, "wrongpw")
+
     def test_seed_onion_key_mismatch_guard(self):
         stale = "stalemd1stalemd1stalemd1stalemd1stalemd1stalemd1stale12.onion"
         zip_path = self._make_backup_zip(metadata_address=stale)
