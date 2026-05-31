@@ -2465,6 +2465,14 @@ main() {
             local scrub_backup="/tmp/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
             bundled_python -m onionpress.cli backup "$scrub_pass" "$scrub_backup"
 
+            # Capture the live identity + a log mark BEFORE teardown so Step 4 can
+            # prove install-from-backup preserved the address and did not
+            # regenerate a vanity key during the restore.
+            local scrub_addr_before scrub_log_mark
+            scrub_addr_before=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+            scrub_log_mark=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+            echo "  Pre-scrub address: ${scrub_addr_before:-<none>}"
+
             # ── Step 2: Reset ───────────────────────────────────────────
             echo ""
             echo "── Step 2/4: Reset ──"
@@ -2518,6 +2526,25 @@ main() {
             else
                 echo "  ✗ No onion address found"
                 scrub_ok=false
+            fi
+
+            # install-from-backup criteria: the restored identity must MATCH the
+            # pre-scrub address (proves the backup key was reused, not a freshly
+            # generated vanity), and no vanity generation ran during the scrub.
+            if [ -n "$scrub_addr_before" ]; then
+                if [ "$scrub_addr" = "$scrub_addr_before" ]; then
+                    echo "  ✓ Address preserved (rebuilt from backup key, no regeneration)"
+                else
+                    echo "  ✗ Address CHANGED: was $scrub_addr_before, now $scrub_addr"
+                    scrub_ok=false
+                fi
+            fi
+            if tail -n +"$((scrub_log_mark + 1))" "$LOG_FILE" 2>/dev/null | \
+                 grep -qiE "Generating custom onion address|Generated custom address"; then
+                echo "  ✗ Vanity address regenerated during restore (should reuse backup key)"
+                scrub_ok=false
+            else
+                echo "  ✓ No vanity regeneration during restore"
             fi
 
             # Check WordPress responds
