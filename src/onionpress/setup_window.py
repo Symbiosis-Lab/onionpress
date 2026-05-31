@@ -166,7 +166,7 @@ class SetupProgressWindow(AppKit.NSObject):
     # -- window creation ----------------------------------------------------
 
     def create_window(self):
-        width, height = 480, 580
+        width, height = 480, 640
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, width, height),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
@@ -375,7 +375,28 @@ class SetupProgressWindow(AppKit.NSObject):
             self._language_popup.addItemWithTitle_(name)
         self.welcome_view.addSubview_(self._language_popup)
 
-        y -= 50  # spacing
+        y -= 30
+        # -- Address prefix (advanced): choose the .onion vanity prefix now so
+        # it's generated once at install (default op2; longer prefixes take
+        # exponentially longer to generate). Restore-from-backup ignores this —
+        # the address comes from the backup.
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(label_x, y, 130, 20),
+            "Address prefix",
+            font=_bold(13), color=NSColor.labelColor(),
+        ))
+        self._prefix_field = _input_field(
+            NSMakeRect(field_x, y - 2, field_w, 24), placeholder="op2")
+        self._prefix_field.setStringValue_("op2")
+        self.welcome_view.addSubview_(self._prefix_field)
+        y -= 18
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(field_x, y, field_w, 14),
+            "Your .onion starts with this. Longer prefixes take much longer to make.",
+            font=_sys(10), color=_TEXT_SECONDARY,
+        ))
+
+        y -= 40  # spacing
 
         # -- Setup button --
         btn_w = 220
@@ -624,6 +645,14 @@ class SetupProgressWindow(AppKit.NSObject):
             self.admin_pass = self._pass_field.stringValue() or ""
         else:
             self.admin_pass = self._pass_field_secure.stringValue() or ""
+
+        # Address prefix (advanced) — default op2. The launcher validates it
+        # (base32, <=5 chars) and falls back to op2 if it's invalid.
+        if getattr(self, "_prefix_field", None):
+            p = (self._prefix_field.stringValue() or "").strip().lower()
+            self.address_prefix = p or "op2"
+        else:
+            self.address_prefix = "op2"
 
         # Validate required fields
         missing = False

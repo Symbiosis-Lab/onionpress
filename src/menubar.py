@@ -3276,6 +3276,11 @@ class OnionPressApp(rumps.App):
             return
 
         # New-site path
+        if sw and getattr(sw, 'address_prefix', None):
+            # Vanity prefix chosen on the welcome screen — generated once at
+            # first-run start (no on-the-fly change needed later).
+            self.write_config_value("ADDRESS_PREFIX", sw.address_prefix)
+            self.log(f"Address prefix set to '{sw.address_prefix}' from welcome screen")
         if sw and hasattr(sw, 'share_analytics'):
             self.write_config_value("SHARE_ANALYTICS_WITH_ONIONHOME", sw.share_analytics)
             self.log(f"Analytics sharing set to {sw.share_analytics} from welcome screen")
