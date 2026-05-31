@@ -525,14 +525,17 @@ def read_backup_metadata(zip_path, password):
         raise ValueError("Not a valid zip file.")
 
 
-def extract_backup(zip_path, password, log_func):
-    """Extract a backup zip into a fresh staging dir; return (staging, metadata).
+def extract_backup(zip_path, password, log_func, staging=None):
+    """Extract a backup zip into a staging dir; return (staging, metadata).
 
-    Validates the password as a side effect — a wrong password raises here
-    (zipfile error) before any state is touched. The caller owns the staging
-    dir and must clean it up.
+    If *staging* is None a fresh temp dir is created (caller cleans it up).
+    Pass an explicit *staging* (e.g. a persistent ~/.onionpress/restore-staging)
+    when the extracted files must survive a container restart, as in
+    install-from-backup. Validates the password as a side effect — a wrong
+    password raises here (zipfile error) before any state is touched.
     """
-    staging = tempfile.mkdtemp(prefix='onionpress-restore-')
+    if staging is None:
+        staging = tempfile.mkdtemp(prefix='onionpress-restore-')
     with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
         log_func("Restore: extracting backup archive...")
         with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -625,6 +628,40 @@ def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
                 cf.writelines(clines)
 
     return onion_address
+
+
+INSTALL_FROM_BACKUP_MARKER = ".install-from-backup"
+
+
+def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
+    """Host-side prep for an install-from-backup. Extracts the backup into a
+    PERSISTENT staging dir (<data_dir>/restore-staging, survives a container
+    restart), seeds the onion key into vanity-keys/, applies config overrides,
+    and writes the .install-from-backup marker (whose first line is the staging
+    path) so a launcher start — or cmd_import_backup_artifacts — knows where to
+    import from. Returns (staging, metadata).
+
+    A wrong password raises during extraction, before any state is touched. The
+    container-side import (restore_container_artifacts) runs later, against the
+    freshly (re)started containers; the import step removes staging + marker on
+    success, so the caller should NOT clean staging up here.
+    """
+    _data_dir = data_dir if data_dir is not None else _default_data_dir()
+    staging = os.path.join(_data_dir, 'restore-staging')
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging, exist_ok=True)
+    try:
+        os.chmod(staging, 0o700)
+    except OSError:
+        pass
+    _, metadata = extract_backup(zip_path, password, log_func, staging=staging)
+    seed_onion_key_for_install(staging, metadata, log_func, data_dir=_data_dir)
+    apply_config_overrides(staging, log_func, data_dir=_data_dir)
+    marker = os.path.join(_data_dir, INSTALL_FROM_BACKUP_MARKER)
+    with open(marker, 'w') as f:
+        f.write(staging + '\n')
+    log_func(f"Install-from-backup: staged at {staging} (marker written)")
+    return staging, metadata
 
 
 def restore_from_backup(zip_path, password, log_func, *, data_dir=None):

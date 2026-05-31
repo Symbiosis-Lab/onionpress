@@ -570,6 +570,31 @@ class TestRestoreRoundTrip(unittest.TestCase):
         self.assertIn("ONIONNAME=admin", cfg)
         self.assertNotIn("ADDRESS_PREFIX=zzz", cfg)
 
+    def test_prepare_install_from_backup_stages_seeds_and_marks(self):
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write("ADDRESS_PREFIX=zzz\nONIONNAME=old\n")
+        zip_path = self._make_backup_zip()
+        staging, metadata = backup_manager.prepare_install_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+
+        # Persistent staging dir (not a temp dir), still present afterward —
+        # the import step removes it, not prepare.
+        self.assertEqual(staging, os.path.join(self.data_dir, "restore-staging"))
+        self.assertTrue(os.path.isdir(staging))
+        self.assertEqual(metadata["onion_address"], _FAKE_DERIVED_ADDR)
+
+        # Key seeded into the launcher's pre-imported-key location.
+        addr_dir = os.path.join(self.data_dir, "shared", "vanity-keys",
+                                _FAKE_DERIVED_ADDR)
+        self.assertTrue(os.path.isfile(os.path.join(
+            addr_dir, "ks_hs_id.ed25519_expanded_private")))
+
+        # Marker written, first line points at the staging dir.
+        marker = os.path.join(self.data_dir, ".install-from-backup")
+        self.assertTrue(os.path.isfile(marker))
+        with open(marker) as f:
+            self.assertEqual(f.read().strip(), staging)
+
     def test_seed_onion_key_mismatch_guard(self):
         stale = "stalemd1stalemd1stalemd1stalemd1stalemd1stalemd1stale12.onion"
         zip_path = self._make_backup_zip(metadata_address=stale)

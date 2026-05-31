@@ -191,25 +191,73 @@ class OnionPressCLI:
             return 1
 
     def cmd_restore(self, password: str, backup_path: str) -> int:
-        """Restore from backup."""
+        """Restore from a backup via install-from-backup: tear the install down
+        to a clean state and rebuild it directly from the backup (key + DB +
+        content), instead of overwriting a live install in place. No vanity
+        generation and no onion-service key-swap churn.
+        """
+        import shutil
         try:
-            from .backup import restore_from_backup
-            restore_from_backup(
-                zip_path=backup_path,
-                password=password,
-                log_func=self.log,
-            )
-            # Flag key reimport
-            import_flag = os.path.join(self.paths.data_dir, ".import-key-pending")
-            with open(import_flag, "w") as f:
-                f.write("")
-            # Restart
+            from .backup import prepare_install_from_backup
+            staging, meta = prepare_install_from_backup(
+                backup_path, password, self.log, data_dir=self.paths.data_dir)
+        except Exception as e:
+            self.log(f"Restore failed during extract/seed: {e}")
+            return 1
+        try:
+            # Teardown: stop + wipe data + keystore volumes so the rebuild adopts
+            # the seeded key and imported backup cleanly (no stale keystore
+            # overriding the restored identity, no in-place overwrite).
             self.containers.stop()
+            for vol in ("onionpress-arti-state", "onionpress-tor-state",
+                        "onionpress-db-data", "onionpress-wordpress-data",
+                        "onionpress-persistent-data"):
+                self.docker.run(["volume", "rm", vol], timeout=20)
+                self.log(f"Removed volume: {vol}")
+
+            # Seed the fresh arti-state keystore from the backup key so Tor serves
+            # the restored identity on first start (the C-Tor entrypoint converts
+            # arti->ctor when tor-state is empty). Mirrors the launcher's
+            # first-run key install. Bind-mount the host vanity-keys dir, which
+            # seed_onion_key_for_install wrote under shared/ (inside the Colima
+            # mount, so the bind works on macOS as well as Linux).
+            addr = meta.get("onion_address", "")
+            vanity_addr_dir = os.path.join(
+                self.paths.data_dir, "shared", "vanity-keys", addr)
+            seed = self.docker.run([
+                "run", "--rm",
+                "-v", "onionpress-arti-state:/dest",
+                "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
+                "alpine", "sh", "-c",
+                "mkdir -p /dest/state/keystore/hss/wordpress && "
+                "cp /src/ks_hs_id.ed25519_expanded_private "
+                "/dest/state/keystore/hss/wordpress/ && "
+                "chown -R 100:100 /dest/state && "
+                "chmod 700 /dest/state /dest/state/keystore "
+                "/dest/state/keystore/hss /dest/state/keystore/hss/wordpress && "
+                "chmod 600 /dest/state/keystore/hss/wordpress/*",
+            ], timeout=30)
+            if not seed.ok:
+                self.log("Restore: WARNING — arti-state key seed reported a "
+                         "problem; Tor may not adopt the restored identity")
+
+            # Rebuild: fresh containers adopt the seeded key; import the backup
+            # artifacts into them; then bring up Tor with the restored identity.
             self.containers.start_core()
             self.containers.wait_for_wordpress()
+            if self.cmd_import_backup_artifacts(staging) != 0:
+                self.log("Restore: artifact import failed — staging kept for retry")
+                return 1
             self.containers.start_tor()
             self.containers.wait_for_tor()
-            print("Restore complete. OnionPress restarted with restored data.")
+
+            # Clean up staging + marker only after a successful import.
+            shutil.rmtree(staging, ignore_errors=True)
+            marker = os.path.join(self.paths.data_dir,
+                                  ".install-from-backup")
+            if os.path.exists(marker):
+                os.remove(marker)
+            print("Restore complete. OnionPress rebuilt from backup.")
             return 0
         except Exception as e:
             self.log(f"Restore failed: {e}")
