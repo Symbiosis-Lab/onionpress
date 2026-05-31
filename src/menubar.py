@@ -4927,6 +4927,11 @@ License: AGPL v3"""
                 host_uptime = int(time.time() - self._host_boot_time)
 
             import datetime
+            # Allowlisted config, folded into status.json so a single file
+            # carries both machine stats and (safe) settings. redact_config
+            # withholds secrets such as CLOUDFLARE_TUNNEL_TOKEN.
+            safe_config = op_config.redact_config(
+                op_config.read_config(os.path.join(self.app_support, "config")))
             status = {
                 'state': state,
                 'version': self.version,
@@ -4941,7 +4946,12 @@ License: AGPL v3"""
                 'load_avg': load_avg,
                 'host_uptime_seconds': host_uptime,
                 'onionheaven': oh_stats,
+                'config': safe_config,
             }
+
+            # Stash for the analytics uploader — it gzips this and offers it
+            # to OnionHome alongside the logs (one file: stats + safe config).
+            self._last_status_payload = status
 
             status_json = json.dumps(status, indent=2)
 
@@ -4961,22 +4971,10 @@ License: AGPL v3"""
                 encoding='utf-8', errors='replace', timeout=5
             )
 
-            # Write config-current.json
-            config = {}
-            config_file = os.path.join(self.app_support, "config")
-            try:
-                with open(config_file, encoding='utf-8', errors='replace') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith('#'):
-                            continue
-                        if '=' in line:
-                            key, val = line.split('=', 1)
-                            config[key] = val
-            except (OSError, IOError):
-                pass
-
-            config_json = json.dumps(config, indent=2)
+            # Write config-current.json — redacted via the allowlist so no
+            # secret (e.g. CLOUDFLARE_TUNNEL_TOKEN) ever reaches the WordPress
+            # container's filesystem.
+            config_json = json.dumps(safe_config, indent=2)
             subprocess.run(
                 ["docker", "exec", "-i", "onionpress-wordpress",
                  "tee", "/var/lib/onionpress/config-current.json"],

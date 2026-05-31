@@ -135,6 +135,44 @@ class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
         )
 
 
+class TestTorImplDefaultsToCTor(unittest.TestCase):
+    """C Tor (TOR_IMPL=tor) has been the default since 2026-03-16. But the
+    CLI-rewrite foundation (commit c15d8dd9, 2026-03-20) introduced
+    read_value(..., "TOR_IMPL", "arti") in containers.py and cli.py — so on
+    a fresh install with no TOR_IMPL in config (the normal case, since the
+    value only gets written when it's non-default), those paths brought the
+    stack up as Arti and the menubar settings window showed "arti". Every
+    TOR_IMPL default must be "tor" to match config.py DEFAULTS, the bash
+    launcher, settings_ui, and menubar.py.
+    """
+
+    def test_no_tor_impl_default_is_arti_or_unknown(self):
+        import glob
+        offenders = []
+        pat = re.compile(r'TOR_IMPL"\s*,\s*"(arti|unknown)"')
+        py_files = glob.glob(os.path.join(PROJECT_ROOT, "src", "**", "*.py"),
+                             recursive=True)
+        for path in py_files:
+            with open(path, "r", encoding="utf-8") as f:
+                for lineno, line in enumerate(f, 1):
+                    if pat.search(line):
+                        rel = os.path.relpath(path, PROJECT_ROOT)
+                        offenders.append(f"{rel}:{lineno}: {line.strip()}")
+        self.assertEqual(
+            offenders, [],
+            "TOR_IMPL must default to \"tor\" (C Tor) everywhere. Found "
+            "non-tor defaults:\n" + "\n".join(offenders),
+        )
+
+    def test_config_defaults_tor_impl_is_tor(self):
+        cfg = _read("src/onionpress/config.py")
+        self.assertRegex(
+            cfg,
+            r'"TOR_IMPL":\s*"tor"',
+            "config.py DEFAULTS must keep TOR_IMPL = \"tor\".",
+        )
+
+
 class TestMakefilePrecheckUsesCorrectPath(unittest.TestCase):
     """The Makefile's `make test` target asserts required source files
     exist before a build. After the move to the `onionpress` package the

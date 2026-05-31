@@ -255,6 +255,24 @@ def _do_upload_cycle(app, include_active=False):
         except OSError:
             pass
 
+    # Machine-status snapshot — gzip the latest status payload (machine stats
+    # + allowlisted config, assembled by write_status_to_volume) and offer it
+    # alongside the logs. A dated filename means OnionHome sees a new file and
+    # requests it each day (the server stores any safe-named file as-is).
+    status_payload = getattr(app, "_last_status_payload", None)
+    if status_payload:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            status_name = f"status-{_dt.now(_tz.utc).strftime('%Y-%m-%d')}.json.gz"
+            status_path = os.path.join(logs_dir, status_name)
+            with gzip.open(status_path, "wb") as _gz:
+                _gz.write(json.dumps(status_payload, indent=2).encode("utf-8"))
+            ssize = os.path.getsize(status_path)
+            if ssize > 0 and not any(f["name"] == status_name for f in all_files):
+                all_files.append({"name": status_name, "size": ssize, "path": status_path})
+        except Exception as _e:
+            app.log(f"Analytics: status snapshot write failed: {_e}")
+
     if not all_files:
         return {"status": "no_files"}
 
@@ -325,7 +343,7 @@ def _do_upload_cycle(app, include_active=False):
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
         "version": getattr(app, "version", "unknown"),
-        "tor_impl": app.read_config_value("TOR_IMPL", "unknown"),
+        "tor_impl": app.read_config_value("TOR_IMPL", "tor"),
         "os_version": platform.mac_ver()[0] or "unknown",
         "files": [{"name": f["name"], "size": f["size"]} for f in all_files],
         "timestamp": timestamp,

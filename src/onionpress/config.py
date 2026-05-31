@@ -35,6 +35,31 @@ DEFAULTS = {
     "ONIONHOME_ADDRESS": "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
 }
 
+# Config keys safe to share off-machine — surfaced in the local WordPress
+# status page AND uploaded to OnionHome inside status.json. This is an
+# ALLOWLIST, not a denylist: any key not listed here is withheld, so a
+# future credential-bearing key can't leak by simply being added to config.
+# CLOUDFLARE_TUNNEL_TOKEN is the notable exclusion — it's a secret.
+SAFE_CONFIG_KEYS = frozenset({
+    "TOR_IMPL", "ADDRESS_PREFIX",
+    "VM_MEMORY", "VM_CPU", "VM_DISK",
+    "INSTALL_IA_PLUGIN", "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "PREVENT_SLEEP",
+    "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS", "ONIONHEAVEN_MAX_SERVICES",
+    "SHARE_ANALYTICS_WITH_ONIONHOME", "ONIONHOME_ADDRESS",
+    "ONIONNAME", "ONIONNAME_REGISTERED",
+})
+
+
+def redact_config(config: dict) -> dict:
+    """Return only the allowlisted, non-secret keys from a config dict.
+
+    Used wherever config leaves its trust boundary — the status.json written
+    into the WordPress container and the copy uploaded to OnionHome. Allowlist
+    semantics mean a newly-added key (which could be a token/secret) is
+    withheld until explicitly added to SAFE_CONFIG_KEYS.
+    """
+    return {k: v for k, v in config.items() if k in SAFE_CONFIG_KEYS}
+
 
 def read_config(path: str) -> dict:
     """Read all key=value pairs from a config file.

@@ -16,8 +16,45 @@ from onionpress.config import (
     Secrets, load_secrets, ensure_secrets,
     PortConfig, detect_port_offset,
     ensure_config,
+    SAFE_CONFIG_KEYS, redact_config,
 )
 from onionpress.platform import OnionPressPaths, resolve_paths
+
+
+class TestRedactConfig(unittest.TestCase):
+    """redact_config is the trust boundary for config leaving the machine
+    (status.json into the WordPress container + the OnionHome upload). It is
+    an allowlist, so secrets/new keys are withheld by default.
+    """
+
+    def test_secret_keys_are_withheld(self):
+        cfg = {
+            "TOR_IMPL": "tor",
+            "CLOUDFLARE_TUNNEL_TOKEN": "super-secret-token",
+            "ADDRESS_PREFIX": "op2",
+        }
+        out = redact_config(cfg)
+        self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", out)
+        self.assertEqual(out.get("TOR_IMPL"), "tor")
+        self.assertEqual(out.get("ADDRESS_PREFIX"), "op2")
+
+    def test_cloudflare_token_not_in_allowlist(self):
+        # The one secret that actually lives in config must never be allowed.
+        self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", SAFE_CONFIG_KEYS)
+
+    def test_unknown_key_is_withheld_by_default(self):
+        # Allowlist semantics: a brand-new key (which could be a future
+        # credential) is dropped unless explicitly added to SAFE_CONFIG_KEYS.
+        out = redact_config({"SOME_FUTURE_TOKEN": "x", "TOR_IMPL": "tor"})
+        self.assertEqual(out, {"TOR_IMPL": "tor"})
+
+    def test_allowlist_has_no_secret_named_keys(self):
+        for key in SAFE_CONFIG_KEYS:
+            for bad in ("TOKEN", "SECRET", "PASSWORD"):
+                self.assertNotIn(
+                    bad, key.upper(),
+                    f"SAFE_CONFIG_KEYS contains a credential-looking key: {key}",
+                )
 
 
 class TestReadConfig(unittest.TestCase):

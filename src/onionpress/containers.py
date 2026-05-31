@@ -79,7 +79,7 @@ class ContainerManager:
         env["ONIONPRESS_PORT_OFFSET"] = str(self.port_config.offset)
 
         # Read config-driven env vars
-        tor_impl = read_value(self.paths.config_file, "TOR_IMPL", "arti")
+        tor_impl = read_value(self.paths.config_file, "TOR_IMPL", "tor")
         env["TOR_IMPL"] = tor_impl
 
         cf_token = read_value(self.paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", "")
@@ -283,7 +283,7 @@ class ContainerManager:
         name = f"onionheaven-takeover-{idx}"
         self._log(f"Starting farm worker {name}...")
 
-        tor_impl = read_value(self.paths.config_file, "TOR_IMPL", "arti")
+        tor_impl = read_value(self.paths.config_file, "TOR_IMPL", "tor")
         max_services = read_value(
             self.paths.config_file, "ONIONHEAVEN_MAX_SERVICES",
             DEFAULTS["ONIONHEAVEN_MAX_SERVICES"],
