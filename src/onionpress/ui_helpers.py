@@ -122,8 +122,13 @@ class BackupProgressWindow:
         if self._status_field:
             self._status_field.setStringValue_(message)
 
-    def finish(self, message):
-        # Close the progress window and show a simple alert
+    def finish(self, message, on_done=None):
+        # Close the progress window and show a simple alert. If on_done is given,
+        # run it AFTER the user dismisses this alert — but re-dispatched onto the
+        # main queue (not synchronously), so the modal session fully unwinds
+        # before any follow-up modal opens (avoids the DELETE/confirm window
+        # appearing behind or without focus). Used by the uninstall "backup
+        # first" flow to proceed only once the backup's Done alert is dismissed.
         if self._window:
             self._window.orderOut_(None)
             self._window = None
@@ -141,6 +146,8 @@ class BackupProgressWindow:
                 if icon:
                     alert.setIcon_(icon)
         alert.runModal()
+        if on_done:
+            main_thread(on_done)
 
     def finish_with_restart(self, message):
         """Close progress window, show alert with Restart Now button."""

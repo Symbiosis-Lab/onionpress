@@ -2685,7 +2685,21 @@ class OnionPressApp(rumps.App):
         creations_dir = os.path.expanduser("~/OnionPress/Creations/My Creations")
         thumbs_dir = os.path.join(creations_dir, ".thumbs")
 
+        # Only attempt thumbnails for media types QuickLook renders usefully.
+        # Data files (blog-archives *.xml.gz, *.zip, *.json, ...) have no useful
+        # QuickLook preview — qlmanage hangs on them for the full timeout, and
+        # because the thumbnail is never produced the loop would retry forever.
+        THUMBNAILABLE_EXTS = {
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif",
+            ".heic", ".heif", ".webp", ".pdf",
+            ".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm",
+        }
+
         def generator():
+            # Files we've already tried and failed/timed out on this process,
+            # so a non-thumbnailable file that slips the extension filter (or a
+            # corrupt media file) isn't reattempted every pass.
+            failed = set()
             while True:
                 time.sleep(60)
                 if not os.path.isdir(creations_dir):
@@ -2700,7 +2714,11 @@ class OnionPressApp(rumps.App):
                         for fname in files:
                             if fname.startswith('.'):
                                 continue
+                            if os.path.splitext(fname)[1].lower() not in THUMBNAILABLE_EXTS:
+                                continue
                             src = os.path.join(root, fname)
+                            if src in failed:
+                                continue
                             rel = os.path.relpath(src, creations_dir)
                             thumb = os.path.join(thumbs_dir, rel + ".png")
                             # Skip if thumbnail exists and is newer than source
@@ -2708,16 +2726,23 @@ class OnionPressApp(rumps.App):
                                 continue
                             # Create subdirectory in .thumbs if needed
                             os.makedirs(os.path.dirname(thumb), exist_ok=True)
-                            subprocess.run(
-                                ["qlmanage", "-t", "-s", "400", "-o",
-                                 os.path.dirname(thumb), src],
-                                capture_output=True, timeout=30,
-                            )
+                            try:
+                                subprocess.run(
+                                    ["qlmanage", "-t", "-s", "400", "-o",
+                                     os.path.dirname(thumb), src],
+                                    capture_output=True, timeout=30,
+                                )
+                            except subprocess.TimeoutExpired:
+                                failed.add(src)
+                                continue
                             # qlmanage outputs filename.ext.png — rename if needed
                             ql_output = os.path.join(os.path.dirname(thumb),
                                                      fname + ".png")
                             if os.path.exists(ql_output) and ql_output != thumb:
                                 os.rename(ql_output, thumb)
+                            elif not os.path.exists(thumb):
+                                # qlmanage produced nothing — don't retry forever
+                                failed.add(src)
                 except Exception as e:
                     self.log(f"Thumbnail generation error: {e}")
 
@@ -3986,8 +4011,13 @@ class OnionPressApp(rumps.App):
         )
 
     @rumps.clicked("Backup...")
-    def backup(self, _):
-        """Create a full backup of OnionPress (Tor keys, database, wp-content)"""
+    def backup(self, _, on_complete=None):
+        """Create a full backup of OnionPress (Tor keys, database, wp-content).
+
+        on_complete, if given, is called with True after a successful backup
+        (once the user dismisses the "Done" alert) or False on any cancel /
+        failure. The uninstall "backup first" flow uses it to proceed only
+        after a successful backup; the menu item passes none (unchanged)."""
         # Show credentials dialog using AppKit accessory view
         alert = AppKit.NSAlert.alloc().init()
         alert.setMessageText_("Backup OnionPress")
@@ -4032,6 +4062,8 @@ class OnionPressApp(rumps.App):
 
         response = alert.runModal()
         if response != 1000:  # Not "Backup"
+            if on_complete:
+                on_complete(False)
             return
 
         username = user_field.stringValue().strip()
@@ -4040,6 +4072,8 @@ class OnionPressApp(rumps.App):
         if not username or not password:
             rumps.alert(title="Missing Credentials",
                         message="Both username and password are required.")
+            if on_complete:
+                on_complete(False)
             return
 
         # Verify credentials
@@ -4048,6 +4082,8 @@ class OnionPressApp(rumps.App):
         if not ok:
             self.log(f"Backup: credential verification failed: {err}")
             rumps.alert(title="Verification Failed", message=err)
+            if on_complete:
+                on_complete(False)
             return
 
         # Show NSSavePanel for output location
@@ -4079,6 +4115,8 @@ class OnionPressApp(rumps.App):
             AppKit.UTType.typeWithFilenameExtension_("zip")])
 
         if panel.runModal() != 1:  # NSModalResponseOK
+            if on_complete:
+                on_complete(False)
             return
 
         output_path = panel.URL().path()
@@ -4101,10 +4139,16 @@ class OnionPressApp(rumps.App):
 
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
-                _main_thread(lambda: pw.finish(msg))
+                # Route completion through finish's on_done so on_complete(True)
+                # fires on the main thread AFTER the user dismisses the Done
+                # alert (not from this daemon thread, and not before the alert).
+                _main_thread(lambda: pw.finish(
+                    msg, on_done=(lambda: on_complete(True)) if on_complete else None))
             except Exception as e:
                 self.log(f"Backup failed: {e}")
-                _main_thread(lambda: pw.finish(f"Backup failed: {e}"))
+                _main_thread(lambda: pw.finish(
+                    f"Backup failed: {e}",
+                    on_done=(lambda: on_complete(False)) if on_complete else None))
 
         threading.Thread(target=do_backup, daemon=True).start()
 
@@ -4733,28 +4777,28 @@ License: AGPL v3"""
 
         if button_index == 2:  # Yes, Backup First
             self.log("User chose to backup before uninstall")
-            if self.is_running:
-                self.backup(None)
-            else:
+            if not self.is_running:
                 rumps.alert(
                     title="Service Not Running",
                     message="Cannot create a backup while service is stopped.\n\nPlease start the service first, then try uninstall again."
                 )
                 return
+            # Back up FIRST, then proceed ONLY after it completes successfully.
+            # The teardown must never run concurrently with the backup — that
+            # would corrupt the backup mid-write and then delete everything (#258).
+            self.backup(None, on_complete=lambda ok: (
+                self._proceed_with_uninstall() if ok
+                else self.log("Uninstall aborted — backup did not complete")))
+            return
 
-            # After backup, ask again if they want to continue with uninstall
-            button_index = self.show_native_alert(
-                title="Confirm Uninstall",
-                message="Proceed with uninstall?\n\nThis will permanently delete all data.",
-                buttons=["Cancel", "Proceed with Uninstall"],
-                default_button=0,
-                cancel_button=0,
-                style="warning"
-            )
+        # button_index == 1: "No, Delete Everything" — go straight to the final
+        # DELETE confirmation (no backup; no running-service requirement).
+        self._proceed_with_uninstall()
 
-            if button_index != 1:  # User didn't click "Proceed"
-                return
-
+    def _proceed_with_uninstall(self):
+        """Final 'DELETE' confirmation + teardown. Invoked directly for
+        "Delete Everything", or as the backup on_complete callback (success
+        only) so the destructive work never races an in-progress backup (#258)."""
         # Step 2: Final confirmation with explicit acknowledgment
         # Use rumps.Window for text input (no osascript, no permissions needed)
         window = rumps.Window(
