@@ -835,8 +835,9 @@ function onionpress_settings_fields() {
     return array(
         'ADDRESS_PREFIX' => array(
             'label'       => 'Onion Address Prefix',
-            'description' => 'Customize the beginning of your .onion address (base32: a-z, 2-7, max 5 chars). Changing this generates a new address — your old address will stop working.',
+            'description' => 'The beginning of your .onion address, chosen when you first set up OnionPress. It can no longer be changed here — to use a different address, restore from a backup that has it.',
             'type'        => 'text',
+            'readonly'    => true,
             'placeholder' => 'op2',
         ),
         'UPDATE_ON_LAUNCH' => array(
@@ -1082,6 +1083,20 @@ function onionpress_settings_page() {
                             echo esc_html( $addr );
                         }
                     ?></code>
+                    <?php
+                        // "Open site" link — visit the followed site directly.
+                        // Onion URLs only resolve in a Tor-capable browser, the
+                        // same contract the Follow page states.
+                        if ( preg_match( '#^https?://#i', $addr ) ) {
+                            $open_url = $addr;                          // raw http(s) feed follow
+                        } else {
+                            $open_url = 'http://' . $addr . '/';        // bare .onion
+                            if ( ! empty( $following_names[ $addr ] ) ) {
+                                $open_url .= $following_names[ $addr ];  // http://<addr>/<onionname>
+                            }
+                        }
+                    ?>
+                    <a class="onionpress-following-open" href="<?php echo esc_url( $open_url ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none;"><span class="dashicons dashicons-external" style="vertical-align: middle;"></span></a>
                     <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $addr ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
                 </div>
                 <?php endforeach; ?>
@@ -1166,6 +1181,7 @@ function onionpress_settings_page() {
                             <input type="text" name="op_<?php echo esc_attr( $key ); ?>" id="op_<?php echo esc_attr( $key ); ?>"
                                    value="<?php echo esc_attr( $val ); ?>"
                                    placeholder="<?php echo esc_attr( $field['placeholder'] ?? '' ); ?>"
+                                   <?php echo ! empty( $field['readonly'] ) ? 'readonly' : ''; ?>
                                    class="regular-text">
                         <?php endif; ?>
                         <?php if ( $key === 'SHARE_ANALYTICS_WITH_ONIONHOME' ) : ?>
@@ -1361,28 +1377,10 @@ function onionpress_settings_page() {
             <?php submit_button( 'Restore from Backup', 'secondary', 'submit', false ); ?>
         </form>
 
-        <!-- Vanity Address Generation -->
-        <hr>
-        <h2>Vanity Address Generation</h2>
-        <?php
-        $vanity_file = '/var/lib/onionpress/vanity-result.json';
-        if ( file_exists( $vanity_file ) ) {
-            $vanity = json_decode( file_get_contents( $vanity_file ), true );
-            if ( is_array( $vanity ) ) {
-                if ( ! empty( $vanity['success'] ) ) {
-                    echo '<p><strong style="color:#16a34a">Generated:</strong> <code>' . esc_html( $vanity['address'] ?? '' ) . '</code></p>';
-                } elseif ( ! empty( $vanity['error'] ) ) {
-                    echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $vanity['error'] ) . '</p>';
-                }
-            }
-        }
-        ?>
-        <p class="description">Generate a new vanity .onion address matching your Address Prefix setting. This will <strong>replace</strong> your current address, forever. Not reversible. Generation can take seconds to minutes depending on prefix length.</p>
-        <form method="post" style="margin-top: 8px;">
-            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
-            <input type="hidden" name="onionpress_action" value="generate-vanity">
-            <?php submit_button( 'Generate Vanity Address', 'secondary', 'submit', false ); ?>
-        </form>
+        <!-- Vanity Address Generation removed (#256 phase 4b): the .onion address
+             is chosen once at install (welcome screen) and is no longer changed on
+             the fly — that path churned the onion service and risked clobbering the
+             address. To use a different address, restore from a backup that has it. -->
 
         <!-- Import Key -->
         <hr>
