@@ -2999,217 +2999,15 @@ class OnionPressApp(rumps.App):
         return op_config.validate_address_prefix(prefix)
 
     def check_address_prefix_change(self):
-        """Check if ADDRESS_PREFIX has changed and handle regeneration.
+        """No-op: the vanity prefix is chosen once at install (welcome
+        screen) and never changed on the fly. The old behaviour — detect a
+        config ADDRESS_PREFIX that no longer matched the live address and
+        regenerate the onion identity on startup — was removed (#256 phase
+        4b): it shared the churny stop -> delete arti-state -> regenerate
+        path and risked clobbering the address. Kept as a stub so the
+        startup/restart call sites are unchanged; always proceeds."""
+        return True
 
-        Called from a background thread before starting the launcher.
-        Returns True if startup should proceed, False to abort.
-        """
-        # Read configured prefix (fall back to old VANITY_PREFIX for migration)
-        prefix = self._read_config_value("ADDRESS_PREFIX", "").strip()
-        if not prefix:
-            prefix = self._read_config_value("VANITY_PREFIX", "op2").strip()
-        if not prefix:
-            prefix = "op2"
-
-        # Validate prefix
-        valid, error_msg, suggestion = self.validate_address_prefix(prefix)
-        if not valid:
-            self.log(f"Invalid ADDRESS_PREFIX: {prefix}")
-
-            # Try to determine the current working prefix from the onion address
-            current_prefix = "op2"  # fallback default
-            try:
-                docker_bin = os.path.join(self.bin_dir, "docker")
-                env = os.environ.copy()
-                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
-                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
-                result = subprocess.run(
-                    [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
-                     "alpine", "cat", "/keys/wordpress/hostname"],
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=15
-                )
-                hostname = result.stdout.strip().replace(".onion", "")
-                if hostname:
-                    # Extract the prefix from the current address
-                    current_prefix = hostname[:len(prefix)] if len(hostname) >= len(prefix) else hostname[:3]
-            except Exception:
-                pass
-
-            # Build button list: Use suggestion (if different), Revert, Edit Again
-            # NSAlert supports max 3 buttons well
-            buttons = []
-            if suggestion and suggestion != current_prefix:
-                buttons.append(f"Use \"{suggestion}\"")
-            buttons.append(f"Revert to \"{current_prefix}\"")
-            buttons.append("Edit Again")
-            revert_idx = len(buttons) - 2
-            edit_idx = len(buttons) - 1
-
-            button_index = self.show_native_alert(
-                "Invalid Address Prefix",
-                error_msg + (f"\n\nSuggested prefix: \"{suggestion}\"" if suggestion and suggestion != current_prefix else ""),
-                buttons=buttons,
-                default_button=0,
-                cancel_button=edit_idx,
-                style="warning"
-            )
-
-            if suggestion and suggestion != current_prefix and button_index == 0:
-                self.log(f"User accepted suggested prefix: {suggestion}")
-                self.write_config_value("ADDRESS_PREFIX", suggestion)
-                prefix = suggestion
-            elif button_index == revert_idx:
-                self.log(f"User reverted to prefix: {current_prefix}")
-                self.write_config_value("ADDRESS_PREFIX", current_prefix)
-                prefix = current_prefix
-            else:
-                # Open config for editing and bring TextEdit to front
-                self.log("User chose to edit config — opening TextEdit")
-                config_file = os.path.join(self.app_support, "config")
-                subprocess.Popen(["open", "-a", "TextEdit", config_file])
-                subprocess.Popen(["osascript", "-e", 'tell application "TextEdit" to activate'])
-                # Show follow-up dialog — when dismissed, retry start
-                self.show_native_alert(
-                    "Edit Settings",
-                    "Edit the config file in TextEdit, then save it (⌘S).\n\nClick OK when you're done to restart.",
-                    buttons=["OK"],
-                    style="informational"
-                )
-                self.log("User finished editing — retrying start")
-                # Re-read config and retry from the top
-                return self.check_address_prefix_change()
-
-        self.log(f"Prefix validation passed, checking current hostname (prefix={prefix})")
-
-        # Skip prefix check if a key import is pending — the launcher will handle it
-        pending_file = os.path.join(self.app_support, ".import-key-pending")
-        if os.path.exists(pending_file):
-            self.log("Key import pending — skipping prefix check (launcher will swap volume)")
-            return True
-
-        # Try to get current hostname from tor-keys volume
-        current_hostname = None
-        try:
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            env = os.environ.copy()
-            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
-            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
-            result = subprocess.run(
-                [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
-                 "alpine", "cat", "/keys/wordpress/hostname"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=15
-            )
-            current_hostname = result.stdout.strip()
-        except Exception as e:
-            self.log(f"Could not read hostname from volume: {e}")
-
-        # Fall back to cached onion address file (survives restarts)
-        if not current_hostname or not current_hostname.endswith(".onion"):
-            cached_addr_file = os.path.join(self.app_support, "onion_address")
-            try:
-                with open(cached_addr_file) as f:
-                    cached = f.read().strip()
-                if cached and cached.endswith('.onion'):
-                    current_hostname = cached
-                    self.log(f"Using cached onion address for prefix check: {current_hostname}")
-            except (OSError, IOError):
-                pass
-
-        if not current_hostname or not current_hostname.endswith(".onion"):
-            self.log("No existing onion address found, proceeding with first run")
-            return True
-
-        # Check if current hostname already matches the prefix
-        hostname_base = current_hostname.replace(".onion", "")
-        if hostname_base.startswith(prefix):
-            self.log(f"Address prefix '{prefix}' matches current address {current_hostname}")
-            return True
-
-        # Mismatch detected — determine old prefix for display
-        old_prefix = hostname_base[:len(prefix)] if len(hostname_base) >= len(prefix) else hostname_base[:3]
-        self.log(f"Address prefix changed: current address starts with '{old_prefix}', config says '{prefix}'")
-
-        # Show confirmation dialog with time estimates
-        time_estimates = (
-            "Estimated generation time:\n"
-            "  2 characters:  < 1 second\n"
-            "  3 characters:  < 1 second\n"
-            "  4 characters:  5-30 seconds\n"
-            "  5 characters:  10-30 minutes"
-        )
-
-        message = (
-            f"Your address prefix has changed from what was used to generate "
-            f"your current onion address.\n\n"
-            f"Current address:\n{current_hostname}\n\n"
-            f"New prefix: \"{prefix}\"\n\n"
-            f"Changing will generate a NEW onion address.\n"
-            f"Your current address will stop working permanently.\n\n"
-            f"{time_estimates}"
-        )
-
-        button_index = self.show_native_alert(
-            "Change Onion Address?",
-            message,
-            buttons=["Change Address", "Keep Current Address"],
-            default_button=1,
-            cancel_button=1,
-            style="warning"
-        )
-
-        if button_index == 0:
-            # User confirmed — delete old keys so launcher regenerates
-            self.log("User confirmed address prefix change — deleting old keys")
-
-            # Unregister old address from OnionHeaven (it will never come back)
-            try:
-                onionheaven.unregister_from_onionheaven(self, content_address=current_hostname)
-            except Exception as e:
-                self.log(f"OnionHeaven unregister failed (continuing): {e}")
-
-            try:
-                docker_bin = os.path.join(self.bin_dir, "docker")
-                env = os.environ.copy()
-                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
-                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
-
-                # Delete vanity-keys directory
-                vanity_dir = os.path.join(self.app_support, "shared", "vanity-keys")
-                if os.path.exists(vanity_dir):
-                    import shutil
-                    shutil.rmtree(vanity_dir)
-                    self.log(f"Deleted vanity-keys directory: {vanity_dir}")
-
-                # Delete docker volume
-                subprocess.run(
-                    [docker_bin, "volume", "rm", "onionpress-tor-keys"],
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=15
-                )
-                self.log("Deleted onionpress-tor-keys volume")
-
-                # Clear cached onion address
-                cached_addr_file = os.path.join(self.app_support, "onion_address")
-                if os.path.exists(cached_addr_file):
-                    os.remove(cached_addr_file)
-                    self.log("Cleared cached onion address")
-
-            except Exception as e:
-                self.log(f"Error cleaning up old keys: {e}")
-                self.show_native_alert(
-                    "Error",
-                    f"Failed to remove old onion keys:\n\n{e}\n\nPlease try again or manually delete ~/.onionpress/shared/vanity-keys/ and run: docker volume rm onionpress-tor-keys",
-                    buttons=["OK"],
-                    style="critical"
-                )
-                return False
-
-            return True
-        else:
-            # User cancelled — don't start
-            self.log("User chose to keep current address — aborting start")
-            return False
-
-    @rumps.clicked("Start")
     def start_service(self, _):
         """Start the WordPress + Tor service"""
         self._stopping = False  # Clear in case Stop was hit previously
@@ -5314,38 +5112,20 @@ License: AGPL v3"""
                     self.log(f"Settings page: reachability test -> HTTP {http_code} (reachable={reachable})")
 
             elif action == "generate-vanity":
-                self.log("Settings page: generating vanity address...")
-                prefix = self._read_config_value("ADDRESS_PREFIX", "op2")
-                try:
-                    # Use the onionpress script's prefix change mechanism:
-                    # stop → delete arti state volume → start (triggers key regen)
-                    self.run_command("stop")
-                    import time
-                    time.sleep(2)
-                    # Delete the arti state volume so a new key is generated on next start
-                    subprocess.run(
-                        ["docker", "volume", "rm", "onionpress-arti-state"],
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=15
-                    )
-                    self.run_command("start")
-                    for _ in range(60):
-                        time.sleep(2)
-                        if self.is_running and self.onion_address and ".onion" in str(self.onion_address):
-                            break
-                    self.write_status_to_volume()
-                    new_addr = self.onion_address or ""
-                    _write_result("vanity-result.json", {
-                        "success": True, "address": new_addr,
-                        "generated_at": now_iso
-                    })
-                    self.log(f"Settings page: vanity address generated: {new_addr}")
-                except Exception as e:
-                    _write_result("vanity-result.json", {
-                        "success": False, "error": str(e),
-                        "generated_at": now_iso
-                    })
-                    self.log(f"Settings page: vanity generation failed: {e}")
+                # On-the-fly vanity regeneration was removed (#256 phase 4b):
+                # the address is fixed at install (chosen on the welcome screen)
+                # and only changes via restore-from-backup. This used the churny
+                # stop -> delete arti-state -> regen path that risked clobbering
+                # the address; it is now a no-op that reports back to the page.
+                self.log("Settings page: generate-vanity requested but disabled "
+                         "(prefix is fixed at install) — ignoring")
+                _write_result("vanity-result.json", {
+                    "success": False,
+                    "error": "Changing the address prefix is no longer supported. "
+                             "The address is chosen at install; to use a different "
+                             "one, restore from a backup that has it.",
+                    "generated_at": now_iso
+                })
 
             elif action == "import-key-file":
                 self.log("Settings page: importing key...")

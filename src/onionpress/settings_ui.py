@@ -348,7 +348,10 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
             return popup
 
         y = container_h - row_h
-        prefix_field = add_text_row(y, "Address Prefix:", "ADDRESS_PREFIX", form_values["ADDRESS_PREFIX"])
+        # The vanity prefix is chosen once at install (welcome screen) and can't
+        # be changed on the fly (#256 phase 4b) — show it read-only.
+        prefix_field = add_text_row(y, "Address prefix (fixed):", "ADDRESS_PREFIX", form_values["ADDRESS_PREFIX"])
+        prefix_field.setEditable_(False)
         y -= row_h
         add_text_row(y, "VM Memory (GB):", "VM_MEMORY", form_values["VM_MEMORY"])
         y -= row_h
