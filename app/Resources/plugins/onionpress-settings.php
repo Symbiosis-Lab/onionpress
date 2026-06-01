@@ -150,6 +150,16 @@ add_action( 'network_admin_menu', function () {
         $icon,
         80
     );
+    // Constrain the icon to match other sidebar icons (same as site admin)
+    add_action( 'admin_head', function () {
+        echo '<style>
+#adminmenu .toplevel_page_onionpress-settings .wp-menu-image img {
+    width: 20px;
+    height: 20px;
+    padding: 7px 0;
+}
+</style>' . "\n";
+    } );
 } );
 
 // REST endpoint: trigger analytics upload by touching the trigger file
@@ -1058,13 +1068,22 @@ function onionpress_settings_page() {
                         $well_formed  = preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) || preg_match( '#^https?://#i', $addr );
                         if ( $last_success && ! $fail_count ) {
                             $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
-                        } elseif ( $fail_count || ! $well_formed ) {
+                            $status_label = 'Feed fetched successfully — last update '
+                                . human_time_diff( $last_success ) . ' ago.';
+                        } elseif ( ! $well_formed ) {
+                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: malformed
+                            $status_label = 'Malformed address — this entry is not a valid .onion address or feed URL, so no feed can be fetched.';
+                        } elseif ( $fail_count ) {
                             $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: failing
+                            $status_label = 'Feed not reachable yet (' . $fail_count . ' failed '
+                                . _n( 'attempt', 'attempts', $fail_count )
+                                . '). Onion feeds are fetched over Tor and can take a few minutes after you follow — it keeps retrying.';
                         } else {
                             $glyph = '';         $color = '';        // blank: untested
+                            $status_label = 'Not checked yet — waiting for the first feed fetch.';
                         }
                     ?>
-                    <span class="onionpress-following-status" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>; min-width: 14px; display: inline-block;"><?php echo $glyph; ?></span>
+                    <span class="onionpress-following-status" title="<?php echo esc_attr( $status_label ); ?>" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>; min-width: 14px; display: inline-block; cursor: help;"><?php echo $glyph; ?></span>
                     <code style="flex: 1; font-size: 12px;"><?php
                         $has_title = isset( $following_titles[ $addr ] ) && $following_titles[ $addr ];
                         $has_name  = isset( $following_names[ $addr ] );
@@ -1096,7 +1115,7 @@ function onionpress_settings_page() {
                             }
                         }
                     ?>
-                    <a class="onionpress-following-open" href="<?php echo esc_url( $open_url ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none;"><span class="dashicons dashicons-external" style="vertical-align: middle;"></span></a>
+                    <a class="onionpress-following-open" href="<?php echo esc_url( $open_url ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none; display: inline-flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a>
                     <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $addr ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
                 </div>
                 <?php endforeach; ?>
