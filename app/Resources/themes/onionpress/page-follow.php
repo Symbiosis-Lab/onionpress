@@ -18,7 +18,19 @@ if (!$onion_addr) {
 }
 
 $site_name = get_bloginfo('name');
-$onion_url = $onion_addr ? 'http://' . $onion_addr . '/' : '';
+// The complete followable identity: this .onion address plus the current
+// subsite's onionname. OnionPress is path-based multisite, so the blog path
+// IS the onionname (e.g. addr.onion/alice); the root blog has no path.
+// Following the complete addr/onionname is what distinguishes subsites that
+// share one .onion address.
+$follow_id = $onion_addr;
+if ($onion_addr) {
+    $sub_path = trim((string) parse_url(home_url('/'), PHP_URL_PATH), '/');
+    if ($sub_path !== '') {
+        $follow_id = $onion_addr . '/' . $sub_path;
+    }
+}
+$onion_url = $follow_id ? 'http://' . $follow_id . '/' : '';
 $tor_url = 'https://www.torproject.org/download/';
 
 get_header();
@@ -35,7 +47,7 @@ get_header();
            <a href="<?php echo esc_url($tor_url); ?>">Tor Browser</a> and this address:</p>
 
         <div class="follow-address-box">
-            <code class="follow-address"><?php echo esc_html($onion_addr); ?></code>
+            <code class="follow-address"><?php echo esc_html($follow_id); ?></code>
         </div>
 
         <div class="follow-qr-row">
@@ -73,7 +85,7 @@ get_header();
                 <div>
                     <strong>Add this address</strong>
                     <p>Paste the address below into the Follow field and click Follow:</p>
-                    <code class="follow-address-inline"><?php echo esc_html($onion_addr); ?></code>
+                    <code class="follow-address-inline"><?php echo esc_html($follow_id); ?></code>
                 </div>
             </div>
             <div class="follow-step">
@@ -87,7 +99,7 @@ get_header();
 
         <p class="follow-direct-link">
             Or click directly:
-            <a href="onionpress://follow/<?php echo esc_attr($onion_addr); ?>">
+            <a href="onionpress://follow/<?php echo esc_attr($follow_id); ?>">
                 + Follow <?php echo esc_html($site_name); ?>
             </a>
             <span class="follow-direct-note">(opens OnionPress if installed)</span>

@@ -4,33 +4,32 @@
     <?php endif; ?>
 
     <?php
-    // Follows — reads from the onionpress_following option (managed in OnionPress Settings)
+    // Follows — reads from the onionpress_following option (managed in OnionPress Settings).
+    // Keys are canonical follow keys: a URL, or <addr>.onion[/<onionname>].
     $following = get_option('onionpress_following', array());
-    $following_names = get_option('onionpress_following_names', array());
     $following_titles = get_option('onionpress_following_titles', array());
     if (!is_array($following)) { $following = array(); }
-    if (!is_array($following_names)) { $following_names = array(); }
     if (!is_array($following_titles)) { $following_titles = array(); }
-    // Well-known names
-    $following_names += array(
-        'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' => 'onionhome',
-        'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' => 'onionheaven',
-    );
     if (!empty($following)) : ?>
         <div class="sidebar-section">
             <h3>Follows</h3>
             <ul>
-                <?php foreach ($following as $addr) :
-                    if (isset($following_titles[$addr]) && $following_titles[$addr]) {
-                        $label = $following_titles[$addr];
-                    } elseif (isset($following_names[$addr])) {
-                        $label = '@' . $following_names[$addr];
-                    } elseif (strlen($addr) > 20) {
-                        $label = substr($addr, 0, 12) . '...';
+                <?php foreach ($following as $key) :
+                    $p = function_exists('onionpress_follow_parse')
+                        ? onionpress_follow_parse($key)
+                        : array('type' => preg_match('#^https?://#i', $key) ? 'url' : 'onion', 'addr' => $key, 'name' => '', 'url' => $key);
+                    if (isset($following_titles[$key]) && $following_titles[$key]) {
+                        $label = $following_titles[$key];
+                    } elseif ('' !== $p['name']) {
+                        $label = '@' . $p['name'];
+                    } elseif ('url' === $p['type']) {
+                        $label = $p['url'];
                     } else {
-                        $label = $addr;
+                        $label = substr($p['addr'], 0, 12) . '...';
                     }
-                    $href = preg_match('#^https?://#', $addr) ? $addr : 'http://' . $addr . '/';
+                    $href = function_exists('onionpress_follow_site_url')
+                        ? onionpress_follow_site_url($key)
+                        : (preg_match('#^https?://#i', $key) ? $key : 'http://' . $key . '/');
                 ?>
                     <li class="blogroll-item">
                         <a href="<?php echo esc_url($href); ?>">
@@ -52,10 +51,13 @@
             <h3>Feed</h3>
             <ul>
                 <?php foreach ($feed_items as $item) :
+                    $sp = function_exists('onionpress_follow_parse')
+                        ? onionpress_follow_parse($item['source_addr'])
+                        : array('name' => '');
                     if (isset($following_titles[$item['source_addr']]) && $following_titles[$item['source_addr']]) {
                         $source = $following_titles[$item['source_addr']];
-                    } elseif (isset($following_names[$item['source_addr']])) {
-                        $source = '@' . $following_names[$item['source_addr']];
+                    } elseif (!empty($sp['name'])) {
+                        $source = '@' . $sp['name'];
                     } else {
                         $source = $item['source'];
                     }

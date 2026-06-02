@@ -10,13 +10,6 @@ get_header();
 $items = function_exists( 'onionpress_get_aggregated_feed_items' )
     ? onionpress_get_aggregated_feed_items( 30 )
     : array();
-$names_map = get_option( 'onionpress_following_names', array() );
-if ( ! is_array( $names_map ) ) { $names_map = array(); }
-// Well-known names
-$names_map += array(
-    'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' => 'onionhome',
-    'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' => 'onionheaven',
-);
 $titles_map = get_option( 'onionpress_following_titles', array() );
 if ( ! is_array( $titles_map ) ) { $titles_map = array(); }
 ?>
@@ -31,10 +24,13 @@ if ( ! is_array( $titles_map ) ) { $titles_map = array(); }
     <?php else : ?>
         <div class="blogroll-feed">
             <?php foreach ( $items as $item ) :
+                $sp = function_exists( 'onionpress_follow_parse' )
+                    ? onionpress_follow_parse( $item['source_addr'] )
+                    : array( 'name' => '' );
                 if ( isset( $titles_map[ $item['source_addr'] ] ) && $titles_map[ $item['source_addr'] ] ) {
                     $source_label = $titles_map[ $item['source_addr'] ];
-                } elseif ( isset( $names_map[ $item['source_addr'] ] ) ) {
-                    $source_label = '@' . $names_map[ $item['source_addr'] ];
+                } elseif ( ! empty( $sp['name'] ) ) {
+                    $source_label = '@' . $sp['name'];
                 } else {
                     $source_label = $item['source'];
                 }

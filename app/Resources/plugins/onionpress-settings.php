@@ -382,7 +382,7 @@ add_action( 'admin_init', function () {
         return;
     }
 
-    $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion', 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' ) );
+    $following = get_option( 'onionpress_following', onionpress_default_follows() );
     if ( ! is_array( $following ) ) {
         $following = array();
     }
@@ -442,33 +442,34 @@ add_action( 'admin_init', function () {
             $addr = strtolower( $raw );
         }
         if ( $addr ) {
-            if ( ! in_array( $addr, $following, true ) ) {
-                $following[] = $addr;
+            // Canonical follow key: the URL itself for feed follows, otherwise
+            // <addr>.onion/<onionname> (or bare <addr> when there is no name).
+            // Keying by the full path is what lets two onionname subsites on
+            // the same .onion address be followed independently.
+            if ( preg_match( '#^https?://#i', $addr ) ) {
+                $key = $addr;
+            } else {
+                $key = onionpress_follow_key( $addr, $resolved_name );
+            }
+
+            if ( ! in_array( $key, $following, true ) ) {
+                $following[] = $key;
                 update_option( 'onionpress_following', $following );
             }
-            // Update name/feed mappings whether or not this is a new follow:
-            // resubmitting .../<name>/... upgrades a previously nameless
-            // follow with the user-path, and a fresh explicit feed URL
-            // supersedes a stale cached one.
+            // The onionname is embedded in the key, but record it in the side
+            // map too (keyed by the full key) for direct lookups.
             if ( $resolved_name ) {
                 $names = get_option( 'onionpress_following_names', array() );
                 if ( ! is_array( $names ) ) { $names = array(); }
-                if ( ! isset( $names[ $addr ] ) || $names[ $addr ] !== $resolved_name ) {
-                    $names[ $addr ] = $resolved_name;
+                if ( ! isset( $names[ $key ] ) || $names[ $key ] !== $resolved_name ) {
+                    $names[ $key ] = $resolved_name;
                     update_option( 'onionpress_following_names', $names );
-                    // Name changed → invalidate the cached feed URL so
-                    // discover_feed_url re-resolves against /<name>/feed/.
-                    $feeds = get_option( 'onionpress_following_feeds', array() );
-                    if ( is_array( $feeds ) && isset( $feeds[ $addr ] ) ) {
-                        unset( $feeds[ $addr ] );
-                        update_option( 'onionpress_following_feeds', $feeds );
-                    }
                 }
             }
             if ( $feed_url ) {
                 $feeds = get_option( 'onionpress_following_feeds', array() );
                 if ( ! is_array( $feeds ) ) { $feeds = array(); }
-                $feeds[ $addr ] = $feed_url;
+                $feeds[ $key ] = $feed_url;
                 update_option( 'onionpress_following_feeds', $feeds );
             }
 
@@ -499,7 +500,7 @@ add_action( 'admin_init', function () {
                         // Seed stats so the UI immediately shows a green check.
                         $stats = get_option( 'onionpress_following_stats', array() );
                         if ( ! is_array( $stats ) ) { $stats = array(); }
-                        $stats[ $addr ] = array(
+                        $stats[ $key ] = array(
                             'last_success' => time(),
                             'fail_count'   => 0,
                         );
@@ -507,7 +508,7 @@ add_action( 'admin_init', function () {
                         // Cache the verified feed URL too.
                         $feeds = get_option( 'onionpress_following_feeds', array() );
                         if ( ! is_array( $feeds ) ) { $feeds = array(); }
-                        $feeds[ $addr ] = $probe_url;
+                        $feeds[ $key ] = $probe_url;
                         update_option( 'onionpress_following_feeds', $feeds );
                     }
                 }
@@ -1028,21 +1029,13 @@ function onionpress_settings_page() {
 
         <!-- Following Section -->
         <?php
-        $following = get_option( 'onionpress_following', array( 'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion', 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' ) );
+        $following = get_option( 'onionpress_following', onionpress_default_follows() );
         if ( ! is_array( $following ) ) {
             $following = array();
         }
-        // Map .onion addresses to onionnames (stored in separate option)
-        $following_names = get_option( 'onionpress_following_names', array() );
-        if ( ! is_array( $following_names ) ) {
-            $following_names = array();
-        }
-        // Well-known onionnames for default follows
-        $following_names += array(
-            'op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion' => 'onionhome',
-            'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion' => 'onionheaven',
-        );
-        // Feed titles learned from RSS fetches
+        // Feed titles learned from RSS fetches (keyed by the full follow key).
+        // The onionname now lives in the key itself, so there's no separate
+        // names map to read here — it's derived via onionpress_follow_parse().
         $following_titles = get_option( 'onionpress_following_titles', array() );
         if ( ! is_array( $following_titles ) ) { $following_titles = array(); }
         // Per-follow stats — used to color-code the status indicator.
@@ -1055,17 +1048,21 @@ function onionpress_settings_page() {
                 <?php if ( empty( $following ) ) : ?>
                 <p class="description" id="onionpress-following-empty">No onion services followed yet. Add one below.</p>
                 <?php endif; ?>
-                <?php foreach ( $following as $addr ) : ?>
+                <?php foreach ( $following as $key ) :
+                    // $key is the canonical follow key: a URL, or <addr>.onion[/<name>].
+                    $p    = onionpress_follow_parse( $key );
+                    $name = $p['name'];
+                ?>
                 <div class="onionpress-following-entry" style="display: flex; align-items: center; margin-bottom: 4px;">
                     <?php
                         // Status glyph matches the menubar vocabulary:
                         //   purple ✓ = fetched successfully (like menubar "running")
                         //   yellow ⚠ = failing or malformed (like menubar "starting/stuck")
                         //   blank    = never attempted yet (new follow, before first fetch)
-                        $st           = isset( $following_stats[ $addr ] ) ? $following_stats[ $addr ] : array();
+                        $st           = isset( $following_stats[ $key ] ) ? $following_stats[ $key ] : array();
                         $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
                         $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
-                        $well_formed  = preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) || preg_match( '#^https?://#i', $addr );
+                        $well_formed  = ( 'url' === $p['type'] ) || preg_match( '/^[a-z2-7]{56}\.onion$/', $p['addr'] );
                         if ( $last_success && ! $fail_count ) {
                             $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
                             $status_label = 'Feed fetched successfully — last update '
@@ -1085,38 +1082,27 @@ function onionpress_settings_page() {
                     ?>
                     <span class="onionpress-following-status" title="<?php echo esc_attr( $status_label ); ?>" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>; min-width: 14px; display: inline-block; cursor: help;"><?php echo $glyph; ?></span>
                     <code style="flex: 1; font-size: 12px;"><?php
-                        $has_title = isset( $following_titles[ $addr ] ) && $following_titles[ $addr ];
-                        $has_name  = isset( $following_names[ $addr ] );
-                        if ( $has_title ) {
-                            // Title is primary, address/onionname in gray
-                            echo '<strong>' . esc_html( $following_titles[ $addr ] ) . '</strong>';
-                            if ( $has_name ) {
-                                echo ' <span style="color:#999;">' . esc_html( $addr ) . '/' . esc_html( $following_names[ $addr ] ) . '</span>';
-                            } else {
-                                echo ' <span style="color:#999;">' . esc_html( substr( $addr, 0, 12 ) ) . '&hellip;.onion</span>';
-                            }
-                        } elseif ( $has_name ) {
-                            echo '<strong>' . esc_html( $following_names[ $addr ] ) . '</strong>';
-                            echo ' <span style="color:#999;">' . esc_html( substr( $addr, 0, 12 ) ) . '&hellip;.onion</span>';
+                        $title    = isset( $following_titles[ $key ] ) ? $following_titles[ $key ] : '';
+                        $addr_disp = esc_html( substr( $p['addr'], 0, 12 ) ) . '&hellip;.onion'
+                                   . ( '' !== $name ? '/' . esc_html( $name ) : '' );
+                        if ( $title ) {
+                            // Title is primary; key (addr/name or URL) in gray.
+                            echo '<strong>' . esc_html( $title ) . '</strong>';
+                            echo ' <span style="color:#999;">'
+                                . ( 'url' === $p['type'] ? esc_html( $p['url'] ) : $addr_disp )
+                                . '</span>';
+                        } elseif ( 'url' === $p['type'] ) {
+                            echo esc_html( $p['url'] );
+                        } elseif ( '' !== $name ) {
+                            // Onionname is primary; truncated address in gray.
+                            echo '<strong>' . esc_html( $name ) . '</strong>';
+                            echo ' <span style="color:#999;">' . esc_html( substr( $p['addr'], 0, 12 ) ) . '&hellip;.onion</span>';
                         } else {
-                            echo esc_html( $addr );
+                            echo esc_html( $key );
                         }
                     ?></code>
-                    <?php
-                        // "Open site" link — visit the followed site directly.
-                        // Onion URLs only resolve in a Tor-capable browser, the
-                        // same contract the Follow page states.
-                        if ( preg_match( '#^https?://#i', $addr ) ) {
-                            $open_url = $addr;                          // raw http(s) feed follow
-                        } else {
-                            $open_url = 'http://' . $addr . '/';        // bare .onion
-                            if ( ! empty( $following_names[ $addr ] ) ) {
-                                $open_url .= $following_names[ $addr ];  // http://<addr>/<onionname>
-                            }
-                        }
-                    ?>
-                    <a class="onionpress-following-open" href="<?php echo esc_url( $open_url ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none; display: inline-flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a>
-                    <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $addr ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
+                    <a class="onionpress-following-open" href="<?php echo esc_url( onionpress_follow_site_url( $key ) ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none; display: inline-flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a>
+                    <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $key ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
                 </div>
                 <?php endforeach; ?>
             </div>
