@@ -336,7 +336,7 @@ class OnionPressCLI:
         if result is not None:
             release_data, latest = result
             update_available = True
-            release_url = f"https://github.com/brewsterkahle/onionpress/releases/tag/v{latest}"
+            release_url = f"https://github.com/Symbiosis-Lab/onionpress/releases/tag/v{latest}"
             release_notes = (release_data.get("body") or "").strip()
             published_at = release_data.get("published_at")
         else:
