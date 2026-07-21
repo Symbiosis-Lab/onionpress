@@ -2185,7 +2185,13 @@ main() {
             #   onionname check   <name>     -> {"available",…}
             #   onionname register <name>    -> {"ok",…}
             shift  # drop "onionname"; pass suggest/check/register (+name) through
-            bundled_python -m onionpress.cli onionname "$@"
+            # Point the local-suggestion fallback at the bundled wordlists.
+            # onionnames_client's auto-discovery doesn't know the bundle's
+            # docker/tor/wordlists layout, so `suggest` would return an empty
+            # name when the registry is unreachable. Only the fallback path
+            # uses this; the primary path is the server suggestion.
+            ONIONNAME_WORDLISTS_DIR="$DOCKER_DIR/tor/wordlists" \
+                bundled_python -m onionpress.cli onionname "$@"
             ;;
 
         start-tor)
