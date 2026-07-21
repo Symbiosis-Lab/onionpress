@@ -12,7 +12,10 @@ RUN a2enmod remoteip rewrite headers
 COPY onionpress-proxy-protocol.conf /etc/apache2/conf-available/
 COPY onionpress-xmlrpc-block.conf /etc/apache2/conf-available/
 COPY onionpress-log-format.conf /etc/apache2/conf-available/
-RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format
+# Static-first serving of moss generations (see onionpress-static-site.conf).
+# mod_rewrite is already enabled above (a2enmod rewrite).
+COPY onionpress-static-site.conf /etc/apache2/conf-available/
+RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format onionpress-static-site
 
 # Multisite init script — runs on every container start to ensure
 # multisite is configured (safe to re-run, checks if already done)
