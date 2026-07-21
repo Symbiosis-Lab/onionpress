@@ -1263,7 +1263,8 @@ start_containers() {
     # /var/lib/onionpress and wp-content/uploads.
     op_py provision-post-install \
         --themes-dir "$THEMES_DIR" \
-        --plugins-dir "$PLUGINS_DIR"
+        --plugins-dir "$PLUGINS_DIR" \
+        --apache-conf-dir "$DOCKER_DIR/wordpress"
 
 }
 

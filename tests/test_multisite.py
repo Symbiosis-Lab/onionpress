@@ -196,6 +196,107 @@ class TestInstallOnionpressTheme(unittest.TestCase):
         )
 
 
+class TestInstallStaticSiteConf(unittest.TestCase):
+    """The Apache static-first conf is injected at runtime (docker cp +
+    a2enconf), NOT baked into the pulled WordPress image. See
+    install_static_site_conf's docstring for why.
+    """
+
+    def test_copies_conf_and_enables_it(self):
+        cp_calls = []
+        exec_calls = []
+
+        def fake_cp(src, dest, **kwargs):
+            cp_calls.append((src, dest))
+            return _ok()
+
+        def fake_exec(command, **kwargs):
+            exec_calls.append(command)
+            return _ok()
+
+        with mock.patch.object(multisite, "_docker_cp", side_effect=fake_cp), \
+             mock.patch.object(multisite, "_exec_sh", side_effect=fake_exec), \
+             mock.patch("os.path.isfile", return_value=True):
+            ok = multisite.install_static_site_conf(
+                conf_dir="/x/docker/wordpress", log_func=lambda _: None)
+
+        self.assertTrue(ok)
+        # Copied the conf into Apache's conf-available.
+        self.assertEqual(len(cp_calls), 1)
+        src, dest = cp_calls[0]
+        self.assertTrue(src.endswith("onionpress-static-site.conf"))
+        self.assertIn("/etc/apache2/conf-available/", dest)
+        # Enabled the module + conf and reloaded Apache in one exec.
+        self.assertEqual(len(exec_calls), 1)
+        cmd = exec_calls[0]
+        self.assertIn("a2enmod rewrite", cmd)
+        self.assertIn("a2enconf onionpress-static-site", cmd)
+        self.assertIn("apache2ctl graceful", cmd)
+
+    def test_skips_when_conf_file_missing(self):
+        logs = []
+        with mock.patch.object(multisite, "_docker_cp") as cp, \
+             mock.patch.object(multisite, "_exec_sh") as ex, \
+             mock.patch("os.path.isfile", return_value=False):
+            ok = multisite.install_static_site_conf(
+                conf_dir="/nope", log_func=logs.append)
+
+        self.assertFalse(ok)
+        cp.assert_not_called()
+        ex.assert_not_called()
+        self.assertTrue(any("not found" in s for s in logs))
+
+    def test_returns_false_when_cp_fails(self):
+        with mock.patch.object(multisite, "_docker_cp", return_value=_err()), \
+             mock.patch.object(multisite, "_exec_sh") as ex, \
+             mock.patch("os.path.isfile", return_value=True):
+            ok = multisite.install_static_site_conf(
+                conf_dir="/x", log_func=lambda _: None)
+        self.assertFalse(ok)
+        # Never tries to enable a conf it failed to copy.
+        ex.assert_not_called()
+
+
+class TestProvisionInjectsStaticConf(unittest.TestCase):
+    """provision_post_install only injects the static conf when a conf_dir
+    is supplied — pre-moss callers that omit it keep the old behavior.
+    """
+
+    def _patch_all_but_conf(self):
+        def fake(**kwargs):
+            return True
+        return [
+            mock.patch.object(multisite, "ensure_multisite", fake),
+            mock.patch.object(multisite, "install_multisite_domain_map", fake),
+            mock.patch.object(multisite, "install_onionpress_theme", fake),
+            mock.patch.object(multisite, "fix_onionpress_permissions", fake),
+            mock.patch.object(multisite, "fix_wordpress_uploads_permissions", fake),
+            mock.patch.object(multisite, "write_shared_onion_address", fake),
+        ]
+
+    def test_injects_when_conf_dir_given(self):
+        patches = self._patch_all_but_conf()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with mock.patch.object(multisite, "install_static_site_conf") as inj:
+            multisite.provision_post_install(
+                themes_dir="/t", plugins_dir="/p",
+                conf_dir="/d/docker/wordpress")
+        inj.assert_called_once()
+        self.assertEqual(inj.call_args.kwargs.get("conf_dir"),
+                         "/d/docker/wordpress")
+
+    def test_skips_when_no_conf_dir(self):
+        patches = self._patch_all_but_conf()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with mock.patch.object(multisite, "install_static_site_conf") as inj:
+            multisite.provision_post_install(themes_dir="/t", plugins_dir="/p")
+        inj.assert_not_called()
+
+
 class TestMuPluginsList(unittest.TestCase):
     """The list of bundled mu-plugins lives in MU_PLUGINS at module scope
     so Mac and Linux see the same set. Catch the easy "added a plugin

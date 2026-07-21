@@ -580,6 +580,11 @@ def main(argv: list[str] = None) -> int:
     p_ppi.add_argument(
         "--plugins-dir", required=True,
         help="Source directory containing mu-plugins, sunrise.php, icons")
+    p_ppi.add_argument(
+        "--apache-conf-dir",
+        help="Source directory containing onionpress-static-site.conf, "
+             "injected at runtime for moss static-first serving "
+             "(optional; skipped when omitted)")
 
     # Individual post-start provisioning steps. These are the helpers
     # start_containers used to inline as bash function calls; the bash
@@ -653,6 +658,7 @@ def main(argv: list[str] = None) -> int:
         return multisite.provision_post_install(
             themes_dir=args.themes_dir,
             plugins_dir=args.plugins_dir,
+            conf_dir=args.apache_conf_dir,
             log_func=print,
         )
     elif args.command == "configure-ia-plugin":

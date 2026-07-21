@@ -300,6 +300,67 @@ def install_multisite_domain_map(
     return True
 
 
+def install_static_site_conf(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Inject the Apache static-first conf into the running WordPress
+    container at provision time (the runtime equivalent of the Dockerfile
+    COPY + a2enconf we removed).
+
+    Why runtime, not baked-in: docker-compose.yml pulls the WordPress image
+    by digest (`ghcr.io/brewsterkahle/onionpress-wordpress@sha256:…`) — it
+    is never built from our Dockerfile locally. Baking onionpress-static-
+    site.conf into that image would force us to rebuild + host a fork image.
+    Copying it in the same way the mu-plugins are (docker cp into the live
+    container) reuses Brewster's published image unchanged. The conf lands
+    in the container's ephemeral rootfs, so it is re-injected on every
+    start — a container recreate can never silently drop it.
+
+    `conf_dir` is the on-disk directory holding onionpress-static-site.conf
+    (Mac: `$RESOURCES_DIR/docker/wordpress`; Linux: `$INSTALL_DIR/docker/
+    wordpress`). Best-effort: a missing file or a not-yet-running container
+    logs a warning and returns False without aborting the provision run.
+    """
+    log = log_func or _noop_log
+    src = os.path.join(conf_dir, "onionpress-static-site.conf")
+    if not os.path.isfile(src):
+        log(f"WARNING: static-site Apache conf not found at {src} — "
+            "moss static serving not enabled")
+        return False
+
+    cp = _docker_cp(
+        src,
+        "onionpress-wordpress:/etc/apache2/conf-available/"
+        "onionpress-static-site.conf",
+        docker_bin=docker_bin,
+    )
+    if cp.returncode != 0:
+        log(f"WARNING: Failed to copy static-site Apache conf: "
+            f"{cp.stderr.strip()[:200]}")
+        return False
+
+    # Enable mod_rewrite (the conf's InheritDownBefore rules need it),
+    # enable the conf, then gracefully reload Apache so it takes effect
+    # without dropping in-flight requests. a2enmod/a2enconf are idempotent
+    # (no-op + exit 0 when already enabled), so this is safe every start.
+    r = _exec_sh(
+        "a2enmod rewrite && a2enconf onionpress-static-site && "
+        "apache2ctl graceful",
+        docker_bin=docker_bin,
+    )
+    if r.returncode != 0:
+        log(f"WARNING: Failed to enable static-site Apache conf: "
+            f"{r.stderr.strip()[:200]}")
+        return False
+
+    log("Static-first Apache conf installed "
+        "(moss generations served ahead of WordPress)")
+    return True
+
+
 def install_onionpress_theme(
     *,
     themes_dir: str,
@@ -617,6 +678,7 @@ def provision_post_install(
     *,
     themes_dir: str,
     plugins_dir: str,
+    conf_dir: Optional[str] = None,
     docker_bin: str = "docker",
     log_func: Optional[Callable[[str], None]] = None,
 ) -> int:
@@ -638,6 +700,12 @@ def provision_post_install(
     ensure_multisite(docker_bin=docker_bin, log_func=log)
     install_multisite_domain_map(
         plugins_dir=plugins_dir, docker_bin=docker_bin, log_func=log)
+    # Runtime-inject the Apache static-first conf so moss generations shadow
+    # WordPress. Only when a conf dir is supplied — callers that predate the
+    # moss integration (and don't pass one) keep the pre-moss behavior.
+    if conf_dir:
+        install_static_site_conf(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log)
     install_onionpress_theme(
         themes_dir=themes_dir, plugins_dir=plugins_dir,
         docker_bin=docker_bin, log_func=log)
