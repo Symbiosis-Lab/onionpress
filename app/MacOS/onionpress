@@ -2175,6 +2175,19 @@ main() {
             get_onion_address
             ;;
 
+        onionname)
+            # Headless onionname registry, driven by moss via execute_binary.
+            # Delegates to the Python CLI, which wraps the already-built
+            # Registrar client and prints exactly ONE JSON line to stdout
+            # (moss parses it). All launcher/CLI diagnostics go to the log
+            # file / stderr, so stdout stays clean for the JSON.
+            #   onionname suggest            -> {"name":"…"}
+            #   onionname check   <name>     -> {"available",…}
+            #   onionname register <name>    -> {"ok",…}
+            shift  # drop "onionname"; pass suggest/check/register (+name) through
+            bundled_python -m onionpress.cli onionname "$@"
+            ;;
+
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
@@ -2620,6 +2633,8 @@ User commands:
 Advanced / internal (used by the menubar app or scripts):
   start-tor, launch, upload-analytics, validate-oh-address,
   reset, scrub
+  onionname {suggest|check <name>|register <name>}
+                (onionname registry ops; one JSON line on stdout, for moss)
 
 Examples:
   $0 status
