@@ -42,6 +42,7 @@ MU_PLUGINS = (
     "onionpress-social-archive-twitter.php",
     "onionpress-social-archive-mastodon.php",
     "onionpress-social-archive-bluesky.php",
+    "onionpress-moss-receiver.php",
 )
 
 # Icon assets co-located with the mu-plugins.
@@ -296,6 +297,67 @@ def install_multisite_domain_map(
         else:
             log(f"WARNING: Failed to copy {asset}")
 
+    return True
+
+
+def install_static_site_conf(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Inject the Apache static-first conf into the running WordPress
+    container at provision time (the runtime equivalent of the Dockerfile
+    COPY + a2enconf we removed).
+
+    Why runtime, not baked-in: docker-compose.yml pulls the WordPress image
+    by digest (`ghcr.io/brewsterkahle/onionpress-wordpress@sha256:…`) — it
+    is never built from our Dockerfile locally. Baking onionpress-static-
+    site.conf into that image would force us to rebuild + host a fork image.
+    Copying it in the same way the mu-plugins are (docker cp into the live
+    container) reuses Brewster's published image unchanged. The conf lands
+    in the container's ephemeral rootfs, so it is re-injected on every
+    start — a container recreate can never silently drop it.
+
+    `conf_dir` is the on-disk directory holding onionpress-static-site.conf
+    (Mac: `$RESOURCES_DIR/docker/wordpress`; Linux: `$INSTALL_DIR/docker/
+    wordpress`). Best-effort: a missing file or a not-yet-running container
+    logs a warning and returns False without aborting the provision run.
+    """
+    log = log_func or _noop_log
+    src = os.path.join(conf_dir, "onionpress-static-site.conf")
+    if not os.path.isfile(src):
+        log(f"WARNING: static-site Apache conf not found at {src} — "
+            "moss static serving not enabled")
+        return False
+
+    cp = _docker_cp(
+        src,
+        "onionpress-wordpress:/etc/apache2/conf-available/"
+        "onionpress-static-site.conf",
+        docker_bin=docker_bin,
+    )
+    if cp.returncode != 0:
+        log(f"WARNING: Failed to copy static-site Apache conf: "
+            f"{cp.stderr.strip()[:200]}")
+        return False
+
+    # Enable mod_rewrite (the conf's InheritDownBefore rules need it),
+    # enable the conf, then gracefully reload Apache so it takes effect
+    # without dropping in-flight requests. a2enmod/a2enconf are idempotent
+    # (no-op + exit 0 when already enabled), so this is safe every start.
+    r = _exec_sh(
+        "a2enmod rewrite && a2enconf onionpress-static-site && "
+        "apache2ctl graceful",
+        docker_bin=docker_bin,
+    )
+    if r.returncode != 0:
+        log(f"WARNING: Failed to enable static-site Apache conf: "
+            f"{r.stderr.strip()[:200]}")
+        return False
+
+    log("Static-first Apache conf installed "
+        "(moss generations served ahead of WordPress)")
     return True
 
 
@@ -612,10 +674,51 @@ def ensure_archive_s3_keys(
     return True
 
 
+def apply_managed_defaults(
+    *,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Settings that only make sense when an external app (moss) owns setup.
+
+    Opt-in, so a standalone OnionPress install keeps its current behaviour.
+
+    1. Close the onboarding gate. onionpress-onboarding redirects EVERY admin
+       page to its wizard until `onionpress_onboarded` is set. When moss has
+       already installed and configured WordPress, that wizard is a dead end
+       the user never asked for — and it blocks the settings page outright,
+       so they cannot even reach the Archive.org fields.
+
+    2. Stop WordPress phoning home. wp-admin calls api.wordpress.org for core,
+       plugin and theme update checks on page load. Measured from inside the
+       container on a censored network, one such call took 11.5s to connect,
+       making the admin close to unusable — on exactly the networks this
+       product exists to serve. Blocking WP_Http does NOT affect archiving or
+       takeover: the Wayback plugin and OnionHeaven use raw curl.
+    """
+    log = log_func or _noop_log
+
+    res = _wp("eval", "update_site_option('onionpress_onboarded', time());",
+              docker_bin=docker_bin)
+    if res.returncode == 0:
+        log("Managed install: onboarding wizard marked complete")
+    else:
+        log("WARNING: could not mark onboarding complete")
+
+    res = _wp("config", "set", "WP_HTTP_BLOCK_EXTERNAL", "true", "--raw",
+              docker_bin=docker_bin)
+    if res.returncode == 0:
+        log("Managed install: WordPress external HTTP blocked (no update-check stalls)")
+    else:
+        log("WARNING: could not set WP_HTTP_BLOCK_EXTERNAL")
+
+
 def provision_post_install(
     *,
     themes_dir: str,
     plugins_dir: str,
+    conf_dir: Optional[str] = None,
+    managed: bool = False,
     docker_bin: str = "docker",
     log_func: Optional[Callable[[str], None]] = None,
 ) -> int:
@@ -634,9 +737,17 @@ def provision_post_install(
     without aborting the run.
     """
     log = log_func or _noop_log
+    if managed:
+        apply_managed_defaults(docker_bin=docker_bin, log_func=log)
     ensure_multisite(docker_bin=docker_bin, log_func=log)
     install_multisite_domain_map(
         plugins_dir=plugins_dir, docker_bin=docker_bin, log_func=log)
+    # Runtime-inject the Apache static-first conf so moss generations shadow
+    # WordPress. Only when a conf dir is supplied — callers that predate the
+    # moss integration (and don't pass one) keep the pre-moss behavior.
+    if conf_dir:
+        install_static_site_conf(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log)
     install_onionpress_theme(
         themes_dir=themes_dir, plugins_dir=plugins_dir,
         docker_bin=docker_bin, log_func=log)
