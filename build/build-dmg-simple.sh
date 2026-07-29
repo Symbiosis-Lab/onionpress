@@ -553,7 +553,10 @@ while IFS= read -r macho; do
             ;;
     esac
 done < <(find "$APP_PATH" -type f -print0 | xargs -0 file 2>/dev/null \
-         | grep 'Mach-O' | cut -d: -f1 | sort -u)
+         | grep 'Mach-O' | grep -v ' (for architecture ' | cut -d: -f1 | sort -u)
+# ^ `file` emits extra per-slice lines for universal binaries
+#   ("path (for architecture x86_64): Mach-O ..."); those are not paths —
+#   filtering them out keeps the path extraction honest.
 
 if [ "$MACHO_CHECKED" -eq 0 ]; then
     echo "ERROR: arch gate found no Mach-O files at all — the gate itself" >&2
