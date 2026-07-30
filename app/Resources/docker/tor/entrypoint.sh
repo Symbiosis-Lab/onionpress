@@ -7,6 +7,37 @@
 # Which Tor implementation to use: "tor" (C Tor, default) or "arti"
 TOR_IMPL="${TOR_IMPL:-tor}"
 
+# Bridge / pluggable-transport support (censored networks). Config-driven via
+# TOR_BRIDGE_LINES (one "Bridge ..." line per entry, joined with ';' since
+# ~/.onionpress/config has no multi-line values) and TOR_CLIENT_TRANSPORT_PLUGIN
+# ("snowflake" or "obfs4"). Applied to every C-Tor torrc this entrypoint
+# generates — main, onionheaven, takeover-worker, and SOCKS-only modes all run
+# their own Tor process that needs to reach the network. Must be baked in at
+# generation time: /etc/tor/torrc is rewritten from scratch on every start, so
+# a runtime edit is silently discarded on restart, and Tor can't pick up a new
+# ClientTransportPlugin via SIGHUP — only a real restart applies it.
+apply_bridge_config() {
+    [ -n "$TOR_BRIDGE_LINES" ] || return 0
+    echo "UseBridges 1" >> /etc/tor/torrc
+    case "$TOR_CLIENT_TRANSPORT_PLUGIN" in
+        snowflake)
+            echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client" >> /etc/tor/torrc
+            ;;
+        obfs4)
+            echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy" >> /etc/tor/torrc
+            ;;
+    esac
+    echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
+        # Trim leading/trailing whitespace (e.g. a space after a ';'
+        # separator) before checking for a redundant "Bridge " prefix —
+        # otherwise a leading space defeats the prefix-strip below.
+        bridge_line=$(echo "$bridge_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        bridge_line="${bridge_line#Bridge }"
+        [ -n "$bridge_line" ] && echo "Bridge $bridge_line" >> /etc/tor/torrc
+    done
+    echo "Bridge/pluggable-transport support enabled (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
+}
+
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
 
@@ -65,6 +96,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+        apply_bridge_config
         chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
         su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
         TOR_PID=$!
@@ -135,6 +167,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+            apply_bridge_config
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
         su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
             TOR_PID=$!
@@ -237,6 +270,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+            apply_bridge_config
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
             # Start watchdog in background (will connect once control port is ready)
             python3 /tor-watchdog.py &
@@ -313,29 +347,7 @@ if [ "$TOR_IMPL" = "tor" ]; then
     cp /etc/tor/torrc.template /etc/tor/torrc
     sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d; /^# __WORDPRESS_API_PORT__/d' /etc/tor/torrc
 
-    # Bridge / pluggable-transport support (censored networks). Config-driven via
-    # TOR_BRIDGE_LINES (one "Bridge ..." line per entry, joined with ';' since
-    # ~/.onionpress/config has no multi-line values) and TOR_CLIENT_TRANSPORT_PLUGIN
-    # ("snowflake" or "obfs4"). This must be baked into the generated torrc here —
-    # /etc/tor/torrc is regenerated from the template on every start, so editing a
-    # running container's torrc is silently discarded on restart. It also can't be
-    # applied via SIGHUP: Tor exits rather than reloading a new ClientTransportPlugin.
-    if [ -n "$TOR_BRIDGE_LINES" ]; then
-        echo "UseBridges 1" >> /etc/tor/torrc
-        case "$TOR_CLIENT_TRANSPORT_PLUGIN" in
-            snowflake)
-                echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client" >> /etc/tor/torrc
-                ;;
-            obfs4)
-                echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy" >> /etc/tor/torrc
-                ;;
-        esac
-        echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
-            bridge_line="${bridge_line#Bridge }"
-            [ -n "$bridge_line" ] && echo "Bridge $bridge_line" >> /etc/tor/torrc
-        done
-        echo "Bridge/pluggable-transport support enabled (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
-    fi
+    apply_bridge_config
 
     # Write onion service definitions for the watchdog to ADD_ONION.
     # Keys live on disk at /var/lib/tor/hidden_service/<name>/.

@@ -280,6 +280,20 @@ class TestFarmWorkers(unittest.TestCase):
         call_args = docker.run.call_args[0][0]
         self.assertIn("onionheaven-takeover-0", call_args)
 
+    def test_start_farm_worker_passes_bridge_config(self):
+        with open(self.paths.config_file, "w") as f:
+            f.write(
+                "TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 FPRINT\n"
+                "TOR_CLIENT_TRANSPORT_PLUGIN=snowflake\n"
+            )
+        docker = mock.Mock(spec=Docker)
+        docker.run.return_value = _ok("container-id")
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        cm.start_farm_worker(0)
+        call_args = docker.run.call_args[0][0]
+        self.assertIn("TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 FPRINT", call_args)
+        self.assertIn("TOR_CLIENT_TRANSPORT_PLUGIN=snowflake", call_args)
+
     def test_stop_farm_no_workers(self):
         docker = mock.Mock(spec=Docker)
         docker.run.return_value = _ok("")  # no containers

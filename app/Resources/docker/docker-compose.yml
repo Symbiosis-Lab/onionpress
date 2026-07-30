@@ -145,6 +145,8 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - TOR_IMPL=${TOR_IMPL:-tor}
+      - TOR_BRIDGE_LINES=${TOR_BRIDGE_LINES:-}
+      - TOR_CLIENT_TRANSPORT_PLUGIN=${TOR_CLIENT_TRANSPORT_PLUGIN:-}
       - NO_ONION_SERVICE=1
       - ONIONHEAVEN=1
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
