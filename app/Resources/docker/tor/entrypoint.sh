@@ -313,6 +313,30 @@ if [ "$TOR_IMPL" = "tor" ]; then
     cp /etc/tor/torrc.template /etc/tor/torrc
     sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d; /^# __WORDPRESS_API_PORT__/d' /etc/tor/torrc
 
+    # Bridge / pluggable-transport support (censored networks). Config-driven via
+    # TOR_BRIDGE_LINES (one "Bridge ..." line per entry, joined with ';' since
+    # ~/.onionpress/config has no multi-line values) and TOR_CLIENT_TRANSPORT_PLUGIN
+    # ("snowflake" or "obfs4"). This must be baked into the generated torrc here —
+    # /etc/tor/torrc is regenerated from the template on every start, so editing a
+    # running container's torrc is silently discarded on restart. It also can't be
+    # applied via SIGHUP: Tor exits rather than reloading a new ClientTransportPlugin.
+    if [ -n "$TOR_BRIDGE_LINES" ]; then
+        echo "UseBridges 1" >> /etc/tor/torrc
+        case "$TOR_CLIENT_TRANSPORT_PLUGIN" in
+            snowflake)
+                echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client" >> /etc/tor/torrc
+                ;;
+            obfs4)
+                echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy" >> /etc/tor/torrc
+                ;;
+        esac
+        echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
+            bridge_line="${bridge_line#Bridge }"
+            [ -n "$bridge_line" ] && echo "Bridge $bridge_line" >> /etc/tor/torrc
+        done
+        echo "Bridge/pluggable-transport support enabled (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
+    fi
+
     # Write onion service definitions for the watchdog to ADD_ONION.
     # Keys live on disk at /var/lib/tor/hidden_service/<name>/.
     cat > /etc/tor/onion-services.json << 'SERVICES_EOF'
@@ -328,6 +352,14 @@ SERVICES_EOF
 
     # Start C Tor as debian-tor user (log to persistent file + docker logs)
     TOR_LOG="/var/lib/tor/tor.log"
+    # Pre-create the log file owned by debian-tor. Otherwise, on a fresh
+    # volume, `tee -a` below creates it as root before Tor starts, and Tor's
+    # own "Log notice file" directive (torrc.template) then fails with
+    # "Permission denied" since debian-tor can't write a root-owned file.
+    # It self-heals on the next restart (root:root vs debian-tor ownership
+    # only happens once), but costs a restart cycle and logs ERROR/[err].
+    touch "$TOR_LOG"
+    chown debian-tor:debian-tor "$TOR_LOG" 2>/dev/null || true
     su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" 2>&1 | tee -a "$TOR_LOG" &
     TOR_PID=$!
     sleep 2

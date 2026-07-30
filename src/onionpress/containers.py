@@ -86,6 +86,15 @@ class ContainerManager:
         if cf_token:
             env["CLOUDFLARE_TUNNEL_TOKEN"] = cf_token
 
+        # Bridge / pluggable-transport support for censored networks — see
+        # entrypoint.sh for how these drive the generated torrc.
+        bridge_lines = read_value(self.paths.config_file, "TOR_BRIDGE_LINES", "")
+        if bridge_lines:
+            env["TOR_BRIDGE_LINES"] = bridge_lines
+            env["TOR_CLIENT_TRANSPORT_PLUGIN"] = read_value(
+                self.paths.config_file, "TOR_CLIENT_TRANSPORT_PLUGIN", ""
+            )
+
         return env
 
     # -- Core lifecycle --
