@@ -15,9 +15,9 @@ Both sides implement EXACTLY this. Prototype defaults chosen to unblock a real e
 ### GET /status  (no body)
 200 →
 ```json
-{ "onion_address": "<addr>.onion", "current_generation": "moss-1699999999" | null, "receiver_version": "1" }
+{ "onion_address": "<addr>.onion", "current_generation": "moss-1699999999" | null, "receiver_version": "1", "bootstrap_pct": 100 | null }
 ```
-`onion_address` read from `/var/lib/onionpress/onion_address` (fallback: `status.json`.onion_address). `current_generation` = `basename(readlink(/var/www/html/site/current))` or null.
+`onion_address` read from `/var/lib/onionpress/onion_address` (fallback: `status.json`.onion_address). `current_generation` = `basename(readlink(/var/www/html/site/current))` or null. `bootstrap_pct` (added moss#910) is `status.json`'s `bootstrap_pct` (0-100, Tor's live bootstrap percentage; menubar.py forces it to 100 once the stack is ready), or `null` if `status.json` is unreadable/missing the field — moss's name step uses it to tell "Tor still bootstrapping" apart from "registry unreachable but Tor is fine".
 
 ### POST /generation?id=<genid>   Content-Type: application/x-tar
 - Body = raw tar (plain, not gzipped) of the generation dir CONTENTS at tar root (files like `index.html`, `assets/…` at top level — created with `tar -cf x.tar -C <gendir> .`).

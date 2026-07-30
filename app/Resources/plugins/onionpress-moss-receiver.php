@@ -96,6 +96,25 @@ function onionpress_moss_onion_address() {
 }
 
 /**
+ * Tor's current bootstrap percentage (0-100), or null when unknown.
+ *
+ * menubar.py's write_status_to_volume() keeps status.json's `bootstrap_pct`
+ * current (100 once the stack is ready) — the moss name step distinguishes
+ * "Tor still bootstrapping" from "registry unreachable but Tor is fine" so it
+ * never invites a claim that cannot succeed yet (moss#910).
+ */
+function onionpress_moss_bootstrap_pct() {
+    $sf = '/var/lib/onionpress/status.json';
+    if ( is_readable( $sf ) ) {
+        $data = json_decode( (string) @file_get_contents( $sf ), true );
+        if ( is_array( $data ) && isset( $data['bootstrap_pct'] ) && is_numeric( $data['bootstrap_pct'] ) ) {
+            return (int) $data['bootstrap_pct'];
+        }
+    }
+    return null;
+}
+
+/**
  * The id of the live generation (basename of the `current` symlink target),
  * or null when nothing has been committed yet.
  */
@@ -369,6 +388,7 @@ function onionpress_moss_route_status() {
         'onion_address'      => onionpress_moss_onion_address(),
         'current_generation' => onionpress_moss_current_generation(),
         'receiver_version'   => '1',
+        'bootstrap_pct'      => onionpress_moss_bootstrap_pct(),
     ), 200 );
 }
 
