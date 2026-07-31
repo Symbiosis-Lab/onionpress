@@ -448,6 +448,7 @@ class OnionPressApp(rumps.App):
         self._reachability_stats = ReachabilityStats()
         self._last_probe_code = ""
         self._last_probe_ms = 0
+        self._last_reachability = (None, None)  # moss#917: (reachable, http_code)
         self._last_snapshot_ts = time.time()
         self._snapshot_interval_seconds = 12 * 3600
 
@@ -1325,11 +1326,16 @@ class OnionPressApp(rumps.App):
         self._tor_internally_ready = False
         self._last_probe_code = ""
         self._last_probe_ms = 0
-        # moss#917: external reachability, tri-state. None until Check 5
-        # actually runs (mirrors the linux service's status.json gate) — a
-        # hostname/bootstrap/internal failure means we never asked the
-        # question, not that the answer was "no".
-        self._last_tor_externally_reachable = None
+        # moss#917: external reachability, tri-state, read by
+        # write_status_to_volume() from a DIFFERENT thread than this one.
+        # Stored as a single (reachable, http_code) tuple — one attribute,
+        # one store/load — rather than two separate attributes, so a
+        # concurrent reader can never observe a torn combination (e.g. a
+        # fresh http_code paired with a stale reachable from the previous
+        # cycle). None until Check 5 actually runs: a hostname/bootstrap/
+        # internal failure means we never asked the question, not that the
+        # answer was "no".
+        self._last_reachability = (None, None)
         if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
             self._last_probe_code = "no_address"
             return False
@@ -1373,7 +1379,7 @@ class OnionPressApp(rumps.App):
             reachable, http_code = self._health_checker.check_external_reachability(self.onion_address)
             self._last_probe_ms = int((time.monotonic() - _probe_start) * 1000)
             self._last_probe_code = http_code or ""
-            self._last_tor_externally_reachable = reachable
+            self._last_reachability = (reachable, http_code or None)
             if not reachable:
                 if log_result:
                     if http_code == "takeover":
@@ -1684,6 +1690,11 @@ class OnionPressApp(rumps.App):
                     if self.is_ready:
                         self.log("Going offline — no internet connection")
                     self.is_ready = False
+                    # moss#917: check_tor_reachability() isn't called on this
+                    # path, so the reachability tuple would otherwise keep
+                    # whatever it was before the internet dropped — reporting
+                    # a stale "reachable" verdict while genuinely offline.
+                    self._last_reachability = (None, None)
                     # Track yellow/starting state
                     if self._yellow_since is None:
                         self._yellow_since = time.time()
@@ -1994,6 +2005,11 @@ class OnionPressApp(rumps.App):
                 if not self.onion_address or self.onion_address in ["Starting...", "Generating address..."]:
                     self.onion_address = "Not running"
                 self.is_ready = False
+                # moss#917: containers aren't all up, so nothing will call
+                # check_tor_reachability() again until they are — clear the
+                # last verdict rather than let a stale "reachable: true"
+                # from before the stop keep being reported.
+                self._last_reachability = (None, None)
                 # Don't reset auto_opened_browser — browser is already open
                 self._wp_installed = None  # Reset for next start
                 self._wp_not_installed_count = 0
@@ -4752,9 +4768,10 @@ License: AGPL v3"""
                 bootstrap_pct = 100
 
             # moss#917: surface the same tri-state reachability the linux
-            # service writes — None until Check 5 has actually run.
-            onion_reachable = getattr(self, '_last_tor_externally_reachable', None)
-            onion_http_code = self._last_probe_code if getattr(self, '_last_probe_code', '') and onion_reachable is not None else None
+            # service writes — None until Check 5 has actually run. Read as
+            # one tuple (see check_tor_reachability) so a concurrent update
+            # from the status-loop thread can't be observed half-applied.
+            onion_reachable, onion_http_code = getattr(self, '_last_reachability', (None, None))
 
             # OnionHeaven stats
             oh_server_active = getattr(self, 'is_onionheaven', False)
