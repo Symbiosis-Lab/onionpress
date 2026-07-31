@@ -208,6 +208,17 @@ def write_status(
 
     bootstrap_pct = health_result.bootstrap_pct if health_result else 0
 
+    # External reachability (moss#917): None while we haven't run Check 5 yet
+    # (tor_internally_ready gates it in full_check) — distinct from a
+    # completed check that came back negative. A receiver whose caller is
+    # still bootstrapping must not be read as "confirmed unreachable".
+    if health_result is not None and health_result.tor_internally_ready:
+        onion_reachable = health_result.tor_externally_reachable
+        onion_http_code = health_result.external_http_code
+    else:
+        onion_reachable = None
+        onion_http_code = None
+
     # Map ServiceState → status.json "state"
     state_str = {
         ServiceState.AVAILABLE: "running",
@@ -271,6 +282,8 @@ def write_status(
         "onion_address": onion_address,
         "uptime_seconds": uptime,
         "bootstrap_pct": bootstrap_pct,
+        "onion_reachable": onion_reachable,
+        "onion_http_code": onion_http_code,
         "containers": containers,
         "wayback_queue_count": wayback_queue,
         "updated_at": now,

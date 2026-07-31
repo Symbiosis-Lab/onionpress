@@ -1325,6 +1325,11 @@ class OnionPressApp(rumps.App):
         self._tor_internally_ready = False
         self._last_probe_code = ""
         self._last_probe_ms = 0
+        # moss#917: external reachability, tri-state. None until Check 5
+        # actually runs (mirrors the linux service's status.json gate) — a
+        # hostname/bootstrap/internal failure means we never asked the
+        # question, not that the answer was "no".
+        self._last_tor_externally_reachable = None
         if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
             self._last_probe_code = "no_address"
             return False
@@ -1368,6 +1373,7 @@ class OnionPressApp(rumps.App):
             reachable, http_code = self._health_checker.check_external_reachability(self.onion_address)
             self._last_probe_ms = int((time.monotonic() - _probe_start) * 1000)
             self._last_probe_code = http_code or ""
+            self._last_tor_externally_reachable = reachable
             if not reachable:
                 if log_result:
                     if http_code == "takeover":
@@ -4745,6 +4751,11 @@ License: AGPL v3"""
             if self.is_ready:
                 bootstrap_pct = 100
 
+            # moss#917: surface the same tri-state reachability the linux
+            # service writes — None until Check 5 has actually run.
+            onion_reachable = getattr(self, '_last_tor_externally_reachable', None)
+            onion_http_code = self._last_probe_code if getattr(self, '_last_probe_code', '') and onion_reachable is not None else None
+
             # OnionHeaven stats
             oh_server_active = getattr(self, 'is_onionheaven', False)
             oh_stats = {'server_active': oh_server_active, 'client_registered': False,
@@ -4817,6 +4828,8 @@ License: AGPL v3"""
                 'tor_impl': self._read_config_value("TOR_IMPL", "tor"),
                 'uptime_seconds': uptime_seconds,
                 'bootstrap_pct': bootstrap_pct,
+                'onion_reachable': onion_reachable,
+                'onion_http_code': onion_http_code,
                 'containers': containers,
                 'updated_at': datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 'platform': 'macos',
