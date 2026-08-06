@@ -18,18 +18,52 @@ fi
 PLUGIN_URL="https://downloads.wordpress.org/plugin/${PLUGIN_SLUG}.zip"
 ZIP_PATH="${DEST_DIR}/${PLUGIN_SLUG}.zip"
 
-echo "Downloading ${PLUGIN_SLUG} from WordPress.org..."
+echo "Downloading ${PLUGIN_SLUG} from WordPress.org over Tor..."
 echo "URL: ${PLUGIN_URL}"
 
-# Clear any inherited SSL overrides (e.g. py2app's __boot__.py) so curl
-# uses the macOS system CA bundle from the keychain.
-unset SSL_CERT_FILE SSL_CERT_DIR
+# The download runs INSIDE the WordPress container, through Tor's SOCKS proxy.
+#
+# It used to be a plain `curl` here on the host, which handed the user's real
+# IP to wordpress.org — the one correlation this project exists to prevent.
+# It cannot simply be a host-side curl with --socks5-hostname either: the SOCKS
+# port does not survive Colima's port forwarding (connections are accepted and
+# then immediately closed), so anything Tor-routed has to run in a container on
+# the compose network. The WordPress container is the one with curl.
+CONTAINER="${ONIONPRESS_WP_CONTAINER:-onionpress-wordpress}"
+REMOTE_ZIP="/tmp/onionpress-plugin-$$.zip"
 
-# Download plugin zip
-if ! curl -L -f --max-time 60 -o "$ZIP_PATH" "$PLUGIN_URL" 2>&1; then
-    echo "Error downloading plugin"
+if ! docker exec "$CONTAINER" true 2>/dev/null; then
+    echo "Error: container ${CONTAINER} is not running — cannot download over Tor"
     exit 1
 fi
+
+# onionheaven first: onionpress-tor is also publishing the user's onion
+# service, so bulk fetches belong on the other daemon. Never fall back to a
+# direct connection — no Tor means no download.
+downloaded=0
+for proxy in onionheaven onionpress-tor; do
+    if docker exec "$CONTAINER" curl -sSL -f --max-time 300 \
+            --socks5-hostname "${proxy}:9050" \
+            -o "$REMOTE_ZIP" "$PLUGIN_URL" 2>&1; then
+        downloaded=1
+        echo "Fetched via ${proxy}"
+        break
+    fi
+    echo "Download via ${proxy} failed, trying next Tor proxy..."
+done
+
+if [ "$downloaded" -ne 1 ]; then
+    echo "Error downloading plugin over Tor"
+    docker exec "$CONTAINER" rm -f "$REMOTE_ZIP" 2>/dev/null
+    exit 1
+fi
+
+if ! docker cp "${CONTAINER}:${REMOTE_ZIP}" "$ZIP_PATH" 2>&1; then
+    echo "Error copying downloaded plugin out of ${CONTAINER}"
+    docker exec "$CONTAINER" rm -f "$REMOTE_ZIP" 2>/dev/null
+    exit 1
+fi
+docker exec "$CONTAINER" rm -f "$REMOTE_ZIP" 2>/dev/null
 
 # Get file size
 SIZE=$(stat -f%z "$ZIP_PATH" 2>/dev/null || stat -c%s "$ZIP_PATH" 2>/dev/null)
