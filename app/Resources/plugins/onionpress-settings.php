@@ -356,13 +356,20 @@ add_action( 'admin_notices', function () {
     }
     delete_transient( $key );
     $label = isset( $probe['label'] ) ? $probe['label'] : 'follow';
-    if ( ! empty( $probe['ok'] ) ) {
+    $verb  = isset( $probe['verb'] ) ? $probe['verb'] : 'Added';
+    if ( ! empty( $probe['error'] ) ) {
+        echo '<div class="notice notice-warning is-dismissible"><p>'
+            . 'Could not resolve <strong>' . esc_html( $label ) . '</strong> &mdash; '
+            . 'that onionname is not registered with OnionHome. '
+            . 'Check the spelling, or follow the full .onion address instead.'
+            . '</p></div>';
+    } elseif ( ! empty( $probe['ok'] ) ) {
         echo '<div class="notice notice-success is-dismissible"><p>'
-            . 'Added <strong>' . esc_html( $label ) . '</strong> &mdash; feed verified.'
+            . esc_html( $verb ) . ' <strong>' . esc_html( $label ) . '</strong> &mdash; feed verified.'
             . '</p></div>';
     } else {
         echo '<div class="notice notice-warning is-dismissible"><p>'
-            . 'Added <strong>' . esc_html( $label ) . '</strong>, but the feed could not be reached on this first try. '
+            . esc_html( $verb ) . ' <strong>' . esc_html( $label ) . '</strong>, but the feed could not be reached on this first try. '
             . 'It will be retried in the background with backoff.'
             . '</p></div>';
     }
@@ -404,6 +411,77 @@ add_action( 'admin_init', function () {
         update_option( 'onionpress_following_feeds', $feeds );
         update_option( 'onionpress_following_titles', $titles );
         update_option( 'onionpress_following_stats', $stats );
+        wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
+        exit;
+    }
+
+    // Re-lookup — retry the OnionHome directory lookup for a follow that
+    // was stored as a bare onionname (its add-time lookup failed, e.g.
+    // OnionHome was unreachable, or the name wasn't registered yet). On
+    // success the entry is re-keyed to the canonical <addr>.onion/<name>
+    // form, exactly as if the original add had resolved.
+    if ( ! empty( $_POST['onionpress_relookup_address'] ) ) {
+        $orig  = sanitize_text_field( wp_unslash( $_POST['onionpress_relookup_address'] ) );
+        $p     = onionpress_follow_parse( $orig );
+        $bare  = ( 'url' !== $p['type'] && ! preg_match( '/^[a-z2-7]{56}\.onion$/', $p['addr'] ) );
+        $probe = array( 'label' => '@' . $orig, 'ok' => false, 'url' => '', 'verb' => 'Resolved' );
+        $addr  = '';
+        if ( $bare && in_array( $orig, $following, true ) && function_exists( 'onionpress_directory_lookup' ) ) {
+            $name = strtolower( $orig );
+            $info = onionpress_directory_lookup( $name );
+            $addr = $info ? strtolower( (string) ( $info['onionaddress'] ?? '' ) ) : '';
+        }
+        if ( $addr && preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+            $key = onionpress_follow_key( $addr, $name );
+            $following = array_values( array_unique( array_map( function ( $k ) use ( $orig, $key ) {
+                return $k === $orig ? $key : $k;
+            }, $following ) ) );
+            update_option( 'onionpress_following', $following );
+            $names = get_option( 'onionpress_following_names', array() );
+            if ( ! is_array( $names ) ) { $names = array(); }
+            $names[ $key ] = $name;
+            unset( $names[ $orig ] );
+            update_option( 'onionpress_following_names', $names );
+            // Stats/feeds/titles under the bare key were placeholders — drop them.
+            foreach ( array( 'onionpress_following_stats', 'onionpress_following_feeds', 'onionpress_following_titles' ) as $opt ) {
+                $map = get_option( $opt, array() );
+                if ( is_array( $map ) && isset( $map[ $orig ] ) ) {
+                    unset( $map[ $orig ] );
+                    update_option( $opt, $map );
+                }
+            }
+            // Probe the feed so the row can go straight to a purple check.
+            if ( function_exists( 'onionpress_discover_feed_url' ) ) {
+                $probe_url = onionpress_discover_feed_url( $addr, $name, 8 );
+                if ( $probe_url ) {
+                    $resp = wp_remote_get( $probe_url, array(
+                        'timeout' => 8,
+                        'headers' => array( 'Accept' => 'application/rss+xml, application/atom+xml, application/xml, text/xml' ),
+                    ) );
+                    if ( ! is_wp_error( $resp ) ) {
+                        $code = wp_remote_retrieve_response_code( $resp );
+                        $body = wp_remote_retrieve_body( $resp );
+                        if ( $code >= 200 && $code < 400
+                             && preg_match( '#<(rss|feed|rdf:RDF)\b#i', substr( $body, 0, 2048 ) ) ) {
+                            $probe['ok']  = true;
+                            $probe['url'] = $probe_url;
+                            $stats = get_option( 'onionpress_following_stats', array() );
+                            if ( ! is_array( $stats ) ) { $stats = array(); }
+                            $stats[ $key ] = array( 'last_success' => time(), 'fail_count' => 0 );
+                            update_option( 'onionpress_following_stats', $stats );
+                            $feeds = get_option( 'onionpress_following_feeds', array() );
+                            if ( ! is_array( $feeds ) ) { $feeds = array(); }
+                            $feeds[ $key ] = $probe_url;
+                            update_option( 'onionpress_following_feeds', $feeds );
+                        }
+                    }
+                }
+            }
+            delete_transient( 'onionpress_blogroll_items' );
+        } else {
+            $probe['error'] = 'not-registered';
+        }
+        set_transient( 'onionpress_follow_probe_' . get_current_user_id(), $probe, 60 );
         wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
         exit;
     }
@@ -1063,10 +1141,17 @@ function onionpress_settings_page() {
                         $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
                         $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
                         $well_formed  = ( 'url' === $p['type'] ) || preg_match( '/^[a-z2-7]{56}\.onion$/', $p['addr'] );
+                        // A bare onionname: stored when the add-time OnionHome
+                        // lookup failed. Offered a re-lookup button below.
+                        $is_bare_name = ( ! $well_formed
+                            && preg_match( '/^[a-z0-9][a-z0-9._-]*$/i', $p['addr'] ) );
                         if ( $last_success && ! $fail_count ) {
                             $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
                             $status_label = 'Feed fetched successfully — last update '
                                 . human_time_diff( $last_success ) . ' ago.';
+                        } elseif ( $is_bare_name ) {
+                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: unresolved name
+                            $status_label = 'Unresolved onionname — the OnionHome lookup has not succeeded for this name. Use the retry button to look it up again.';
                         } elseif ( ! $well_formed ) {
                             $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: malformed
                             $status_label = 'Malformed address — this entry is not a valid .onion address or feed URL, so no feed can be fetched.';
@@ -1102,6 +1187,9 @@ function onionpress_settings_page() {
                         }
                     ?></code>
                     <a class="onionpress-following-open" href="<?php echo esc_url( onionpress_follow_site_url( $key ) ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none; display: inline-flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a>
+                    <?php if ( $is_bare_name ) : ?>
+                    <button type="button" class="button-link onionpress-relookup" data-address="<?php echo esc_attr( $key ); ?>" title="Look up this onionname on OnionHome again" aria-label="Look up this onionname again" style="color: #6b46a8; margin-left: 8px;">&#8635;</button>
+                    <?php endif; ?>
                     <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $key ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
                 </div>
                 <?php endforeach; ?>
@@ -1118,6 +1206,10 @@ function onionpress_settings_page() {
             <form method="post" id="onionpress-unfollow-form" style="display: none;">
                 <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
                 <input type="hidden" name="onionpress_unfollow_address" id="onionpress-unfollow-address" value="">
+            </form>
+            <form method="post" id="onionpress-relookup-form" style="display: none;">
+                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
+                <input type="hidden" name="onionpress_relookup_address" id="onionpress-relookup-address" value="">
             </form>
         </div>
         <script>
@@ -1145,6 +1237,14 @@ function onionpress_settings_page() {
                 btn.addEventListener('click', function() {
                     document.getElementById('onionpress-unfollow-address').value = btn.dataset.address;
                     document.getElementById('onionpress-unfollow-form').submit();
+                });
+            });
+            document.querySelectorAll('.onionpress-relookup').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    btn.disabled = true;
+                    btn.textContent = '…';
+                    document.getElementById('onionpress-relookup-address').value = btn.dataset.address;
+                    document.getElementById('onionpress-relookup-form').submit();
                 });
             });
         })();
