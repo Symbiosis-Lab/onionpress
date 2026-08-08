@@ -110,6 +110,28 @@ VM_MEMORY=1
 # the Docker-internal WordPress container.
 CLOUDFLARE_TUNNEL_TOKEN=
 
+# Bridge / pluggable-transport support
+# Default: empty (disabled — Tor connects directly)
+#
+# If your network blocks Tor outright, set these to bootstrap via a bridge
+# and a pluggable transport instead. Get bridge lines from
+# https://bridges.torproject.org/ or from Tor Browser's own
+# about:preferences#connection page (Tor Browser must already be able to
+# connect on this network for the lines it gives you to work here too).
+#
+# TOR_CLIENT_TRANSPORT_PLUGIN selects the pluggable transport binary: "snowflake"
+# or "obfs4" (both are bundled in the onionpress-tor image). Leave blank to use
+# a bridge with no pluggable transport.
+#
+# TOR_BRIDGE_LINES holds one or more "Bridge ..." lines (as given by Tor Browser
+# or bridges.torproject.org), joined with ';' since this file has no multi-line
+# values, e.g.:
+#   TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72
+# Multiple bridges:
+#   TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 FPRINT1;snowflake 192.0.2.2:80 FPRINT2
+TOR_CLIENT_TRANSPORT_PLUGIN=
+TOR_BRIDGE_LINES=
+
 # Register with OnionHeaven
 # Default: "yes" (register this site with the OnionHeaven)
 #

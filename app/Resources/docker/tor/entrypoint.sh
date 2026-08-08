@@ -7,6 +7,37 @@
 # Which Tor implementation to use: "tor" (C Tor, default) or "arti"
 TOR_IMPL="${TOR_IMPL:-tor}"
 
+# Bridge / pluggable-transport support (censored networks). Config-driven via
+# TOR_BRIDGE_LINES (one "Bridge ..." line per entry, joined with ';' since
+# ~/.onionpress/config has no multi-line values) and TOR_CLIENT_TRANSPORT_PLUGIN
+# ("snowflake" or "obfs4"). Applied to every C-Tor torrc this entrypoint
+# generates — main, onionheaven, takeover-worker, and SOCKS-only modes all run
+# their own Tor process that needs to reach the network. Must be baked in at
+# generation time: /etc/tor/torrc is rewritten from scratch on every start, so
+# a runtime edit is silently discarded on restart, and Tor can't pick up a new
+# ClientTransportPlugin via SIGHUP — only a real restart applies it.
+apply_bridge_config() {
+    [ -n "$TOR_BRIDGE_LINES" ] || return 0
+    echo "UseBridges 1" >> /etc/tor/torrc
+    case "$TOR_CLIENT_TRANSPORT_PLUGIN" in
+        snowflake)
+            echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client" >> /etc/tor/torrc
+            ;;
+        obfs4)
+            echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy" >> /etc/tor/torrc
+            ;;
+    esac
+    echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
+        # Trim leading/trailing whitespace (e.g. a space after a ';'
+        # separator) before checking for a redundant "Bridge " prefix —
+        # otherwise a leading space defeats the prefix-strip below.
+        bridge_line=$(echo "$bridge_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        bridge_line="${bridge_line#Bridge }"
+        [ -n "$bridge_line" ] && echo "Bridge $bridge_line" >> /etc/tor/torrc
+    done
+    echo "Bridge/pluggable-transport support enabled (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
+}
+
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
 
@@ -65,6 +96,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+        apply_bridge_config
         chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
         su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
         TOR_PID=$!
@@ -135,6 +167,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+            apply_bridge_config
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
         su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
             TOR_PID=$!
@@ -237,6 +270,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+            apply_bridge_config
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
             # Start watchdog in background (will connect once control port is ready)
             python3 /tor-watchdog.py &
@@ -313,6 +347,8 @@ if [ "$TOR_IMPL" = "tor" ]; then
     cp /etc/tor/torrc.template /etc/tor/torrc
     sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d; /^# __WORDPRESS_API_PORT__/d' /etc/tor/torrc
 
+    apply_bridge_config
+
     # Write onion service definitions for the watchdog to ADD_ONION.
     # Keys live on disk at /var/lib/tor/hidden_service/<name>/.
     cat > /etc/tor/onion-services.json << 'SERVICES_EOF'
@@ -328,6 +364,14 @@ SERVICES_EOF
 
     # Start C Tor as debian-tor user (log to persistent file + docker logs)
     TOR_LOG="/var/lib/tor/tor.log"
+    # Pre-create the log file owned by debian-tor. Otherwise, on a fresh
+    # volume, `tee -a` below creates it as root before Tor starts, and Tor's
+    # own "Log notice file" directive (torrc.template) then fails with
+    # "Permission denied" since debian-tor can't write a root-owned file.
+    # It self-heals on the next restart (root:root vs debian-tor ownership
+    # only happens once), but costs a restart cycle and logs ERROR/[err].
+    touch "$TOR_LOG"
+    chown debian-tor:debian-tor "$TOR_LOG" 2>/dev/null || true
     su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" 2>&1 | tee -a "$TOR_LOG" &
     TOR_PID=$!
     sleep 2

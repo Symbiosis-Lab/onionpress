@@ -96,6 +96,34 @@ function onionpress_moss_onion_address() {
 }
 
 /**
+ * External reachability, as last observed by the health checker (moss#917).
+ *
+ * Read straight from status.json — the same file onion_address falls back
+ * to — rather than re-probing here: the reachability check is a real
+ * Tor-routed curl (see health.py's check_external_reachability), too slow
+ * to run inline in a REST response. `reachable` is null (not false) until
+ * the checker has actually completed Check 5 at least once; a caller must
+ * not read null as "confirmed unreachable".
+ *
+ * @return array{reachable: bool|null, http_code: string|null}
+ */
+function onionpress_moss_reachability() {
+    $sf = '/var/lib/onionpress/status.json';
+    if ( is_readable( $sf ) ) {
+        $data = json_decode( (string) @file_get_contents( $sf ), true );
+        if ( is_array( $data ) ) {
+            $reachable = array_key_exists( 'onion_reachable', $data ) ? $data['onion_reachable'] : null;
+            $http_code = array_key_exists( 'onion_http_code', $data ) ? $data['onion_http_code'] : null;
+            return array(
+                'reachable' => is_bool( $reachable ) ? $reachable : null,
+                'http_code' => is_string( $http_code ) ? $http_code : null,
+            );
+        }
+    }
+    return array( 'reachable' => null, 'http_code' => null );
+}
+
+/**
  * The id of the live generation (basename of the `current` symlink target),
  * or null when nothing has been committed yet.
  */
@@ -365,10 +393,13 @@ function onionpress_moss_extract_tar( $tar_path, $dest_dir ) {
  * GET /status — advertise the receiver so moss can find the right port.
  */
 function onionpress_moss_route_status() {
+    $reachability = onionpress_moss_reachability();
     return new WP_REST_Response( array(
         'onion_address'      => onionpress_moss_onion_address(),
         'current_generation' => onionpress_moss_current_generation(),
-        'receiver_version'   => '1',
+        'receiver_version'   => '1.1',
+        'onion_reachable'    => $reachability['reachable'],
+        'onion_http_code'    => $reachability['http_code'],
     ), 200 );
 }
 

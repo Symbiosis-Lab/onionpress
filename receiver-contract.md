@@ -15,9 +15,17 @@ Both sides implement EXACTLY this. Prototype defaults chosen to unblock a real e
 ### GET /status  (no body)
 200 →
 ```json
-{ "onion_address": "<addr>.onion", "current_generation": "moss-1699999999" | null, "receiver_version": "1" }
+{
+  "onion_address": "<addr>.onion",
+  "current_generation": "moss-1699999999" | null,
+  "receiver_version": "1.1",
+  "onion_reachable": true | false | null,
+  "onion_http_code": "301" | "000:rc=28" | "takeover" | null
+}
 ```
 `onion_address` read from `/var/lib/onionpress/onion_address` (fallback: `status.json`.onion_address). `current_generation` = `basename(readlink(/var/www/html/site/current))` or null.
+
+`onion_reachable`/`onion_http_code` (added moss#917, receiver_version 1.1): the health checker's dual-probe external-reachability result (`check_external_reachability` in `src/onionpress/health.py`), mirrored from `status.json` (fields `onion_reachable`/`onion_http_code`, written by both `linux/onionpress-service.py`'s `write_status()` and Mac `menubar.py`'s `write_status_to_volume()`). `onion_reachable` is `null` — not `false` — until the checker has actually completed a Check-5 probe at least once (e.g. right after commit, before the next health-poll tick); callers must treat `null` as "not yet known", not "confirmed unreachable". A receiver older than 1.1 omits both fields entirely — treat their absence the same as `null`.
 
 ### POST /generation?id=<genid>   Content-Type: application/x-tar
 - Body = raw tar (plain, not gzipped) of the generation dir CONTENTS at tar root (files like `index.html`, `assets/…` at top level — created with `tar -cf x.tar -C <gendir> .`).

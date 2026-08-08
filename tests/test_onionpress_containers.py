@@ -280,6 +280,20 @@ class TestFarmWorkers(unittest.TestCase):
         call_args = docker.run.call_args[0][0]
         self.assertIn("onionheaven-takeover-0", call_args)
 
+    def test_start_farm_worker_passes_bridge_config(self):
+        with open(self.paths.config_file, "w") as f:
+            f.write(
+                "TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 FPRINT\n"
+                "TOR_CLIENT_TRANSPORT_PLUGIN=snowflake\n"
+            )
+        docker = mock.Mock(spec=Docker)
+        docker.run.return_value = _ok("container-id")
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        cm.start_farm_worker(0)
+        call_args = docker.run.call_args[0][0]
+        self.assertIn("TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 FPRINT", call_args)
+        self.assertIn("TOR_CLIENT_TRANSPORT_PLUGIN=snowflake", call_args)
+
     def test_stop_farm_no_workers(self):
         docker = mock.Mock(spec=Docker)
         docker.run.return_value = _ok("")  # no containers
@@ -370,6 +384,28 @@ class TestBuildEnv(unittest.TestCase):
         env = cm._build_env()
         self.assertEqual(env["TOR_IMPL"], "tor")
         self.assertEqual(env["CLOUDFLARE_TUNNEL_TOKEN"], "mytoken")
+
+    def test_build_env_omits_bridge_vars_by_default(self):
+        docker = mock.Mock(spec=Docker)
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        env = cm._build_env()
+        self.assertNotIn("TOR_BRIDGE_LINES", env)
+        self.assertNotIn("TOR_CLIENT_TRANSPORT_PLUGIN", env)
+
+    def test_build_env_reads_bridge_config(self):
+        with open(self.paths.config_file, "w") as f:
+            f.write(
+                "TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 FPRINT1;snowflake 192.0.2.2:80 FPRINT2\n"
+                "TOR_CLIENT_TRANSPORT_PLUGIN=snowflake\n"
+            )
+        docker = mock.Mock(spec=Docker)
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        env = cm._build_env()
+        self.assertEqual(
+            env["TOR_BRIDGE_LINES"],
+            "snowflake 192.0.2.1:80 FPRINT1;snowflake 192.0.2.2:80 FPRINT2",
+        )
+        self.assertEqual(env["TOR_CLIENT_TRANSPORT_PLUGIN"], "snowflake")
 
 
 if __name__ == "__main__":

@@ -86,6 +86,15 @@ class ContainerManager:
         if cf_token:
             env["CLOUDFLARE_TUNNEL_TOKEN"] = cf_token
 
+        # Bridge / pluggable-transport support for censored networks — see
+        # entrypoint.sh for how these drive the generated torrc.
+        bridge_lines = read_value(self.paths.config_file, "TOR_BRIDGE_LINES", "")
+        if bridge_lines:
+            env["TOR_BRIDGE_LINES"] = bridge_lines
+            env["TOR_CLIENT_TRANSPORT_PLUGIN"] = read_value(
+                self.paths.config_file, "TOR_CLIENT_TRANSPORT_PLUGIN", ""
+            )
+
         return env
 
     # -- Core lifecycle --
@@ -288,6 +297,8 @@ class ContainerManager:
             self.paths.config_file, "ONIONHEAVEN_MAX_SERVICES",
             DEFAULTS["ONIONHEAVEN_MAX_SERVICES"],
         )
+        bridge_lines = read_value(self.paths.config_file, "TOR_BRIDGE_LINES", "")
+        transport_plugin = read_value(self.paths.config_file, "TOR_CLIENT_TRANSPORT_PLUGIN", "")
 
         result = self.docker.run([
             "run", "-d",
@@ -298,6 +309,8 @@ class ContainerManager:
             "--log-opt", "max-file=3",
             "-e", f"TZ={os.environ.get('TZ', 'UTC')}",
             "-e", f"TOR_IMPL={tor_impl}",
+            "-e", f"TOR_BRIDGE_LINES={bridge_lines}",
+            "-e", f"TOR_CLIENT_TRANSPORT_PLUGIN={transport_plugin}",
             "-e", "TAKEOVER_WORKER=1",
             "-e", f"CONTAINER_NAME={name}",
             "-e", f"MAX_TAKEOVER_SERVICES={max_services}",
