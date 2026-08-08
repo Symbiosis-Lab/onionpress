@@ -22,6 +22,12 @@ on:
   # so the branch trigger is what lets this run before it is merged.
   push:
     branches: [feat/fork-tor-image]
+    # Only when the image itself changes — a rebuild takes ~6 minutes and
+    # publishes a new digest, so every unrelated push would invalidate the pin
+    # that was just made.
+    paths:
+      - "app/Resources/docker/tor/**"
+      - ".github/workflows/fork-tor-image.yml"
   workflow_dispatch:
     inputs:
       tag:
