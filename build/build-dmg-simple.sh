@@ -6,6 +6,16 @@ set -e
 
 echo "Building onionpress DMG installer (simple mode)..."
 
+# Release mode: ONIONPRESS_RELEASE=1 (or --release) forbids every
+# single-arch fallback — a published DMG must run on Intel Macs too.
+# Two things change: the Python tier selection below refuses the uv
+# (single-arch) fallback, and the universal-arch gate after bundle
+# assembly becomes a hard failure instead of a warning.
+RELEASE_BUILD="${ONIONPRESS_RELEASE:-0}"
+for arg in "$@"; do
+    [ "$arg" = "--release" ] && RELEASE_BUILD=1
+done
+
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -416,6 +426,17 @@ UNIVERSAL_PYTHON="/Library/Frameworks/Python.framework/Versions/3.14/bin/python3
 if [ -x "$UNIVERSAL_PYTHON" ]; then
     echo "Using universal2 Python: $UNIVERSAL_PYTHON"
     "$UNIVERSAL_PYTHON" -m venv "$MENUBAR_BUILD_DIR/venv"
+elif [ "$RELEASE_BUILD" = "1" ]; then
+    # Release builds may NOT fall through to the single-arch uv tier.
+    # v2.4.107-moss.4 shipped exactly that way: the build box lacked
+    # python.org Python, tier 2 kicked in, and an arm64-only MenubarApp
+    # went out in a public release — on Intel it silently never appears.
+    echo "ERROR: release build (ONIONPRESS_RELEASE=1) requires python.org" >&2
+    echo "  universal2 Python 3.14. The uv fallback is single-arch and is" >&2
+    echo "  for local dev builds only. Install it with:" >&2
+    echo "    curl -LO https://www.python.org/ftp/python/3.14.6/python-3.14.6-macos11.pkg" >&2
+    echo "    sudo installer -pkg python-3.14.6-macos11.pkg -target /" >&2
+    exit 1
 elif command -v uv >/dev/null 2>&1; then
     echo "Using uv-managed Python 3.14 (single-arch — local dev build)"
     UV_PYTHON=$(uv python find 3.14 2>/dev/null || true)
@@ -510,6 +531,47 @@ echo "  Version verified: $BUILT_VERSION"
 
 cd "$PROJECT_DIR"
 echo "Standalone MenubarApp built successfully"
+
+# Universal-arch gate: verify the ARTIFACT, not the inputs. Every Mach-O
+# in the assembled bundle must carry both x86_64 and arm64. v2.4.107-moss.4
+# shipped 57 arm64-only files (the whole py2app Python runtime) because the
+# Python fallback tier leaked into a release; the CLI/receiver were still
+# universal, so moss's capability probe passed and the breakage on Intel
+# was silent. This gate catches any single-arch file regardless of cause.
+echo "Verifying every Mach-O in the bundle is universal (x86_64 + arm64)..."
+MACHO_CHECKED=0
+MACHO_BAD=0
+while IFS= read -r macho; do
+    [ -n "$macho" ] || continue
+    MACHO_CHECKED=$((MACHO_CHECKED + 1))
+    archs=$(lipo -archs "$macho" 2>/dev/null || echo "unreadable")
+    case "$archs" in
+        *x86_64*arm64*|*arm64*x86_64*) ;;
+        *)
+            echo "  NOT UNIVERSAL ($archs): ${macho#"$APP_PATH"/}" >&2
+            MACHO_BAD=$((MACHO_BAD + 1))
+            ;;
+    esac
+done < <(find "$APP_PATH" -type f -print0 | xargs -0 file 2>/dev/null \
+         | grep 'Mach-O' | grep -v ' (for architecture ' | cut -d: -f1 | sort -u)
+# ^ `file` emits extra per-slice lines for universal binaries
+#   ("path (for architecture x86_64): Mach-O ..."); those are not paths —
+#   filtering them out keeps the path extraction honest.
+
+if [ "$MACHO_CHECKED" -eq 0 ]; then
+    echo "ERROR: arch gate found no Mach-O files at all — the gate itself" >&2
+    echo "  is broken (find/file parsing). Refusing to continue blind." >&2
+    exit 1
+elif [ "$MACHO_BAD" -gt 0 ]; then
+    echo "ERROR: $MACHO_BAD of $MACHO_CHECKED Mach-O files are not universal." >&2
+    if [ "$RELEASE_BUILD" = "1" ]; then
+        echo "  Release build: refusing to package a DMG that cannot run on Intel." >&2
+        exit 1
+    fi
+    echo "  Non-release build: continuing (this DMG only runs on this machine's arch)." >&2
+else
+    echo "  ✓ arch gate: $MACHO_CHECKED Mach-O files checked, 0 single-arch"
+fi
 
 # Ad-hoc sign the entire app bundle (inside-out)
 # This ensures macOS treats the app consistently across multiple users.

@@ -106,7 +106,12 @@ def check_for_update(current_version, log=None):
     Returns ``(release_data, latest_version)`` if an update is available,
     or ``None`` if already up to date (or on error).
     """
-    url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
+    # Forked installs self-update from the fork, NOT Brewster's upstream —
+    # upstream has no moss receiver, so silently updating back to it would
+    # strip the integration. Image refs stay on Brewster's registry (we
+    # reuse the published images unchanged); only the app self-update repo
+    # moves to the fork.
+    url = "https://api.github.com/repos/Symbiosis-Lab/onionpress/releases/latest"
     try:
         result = subprocess.run(
             ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",

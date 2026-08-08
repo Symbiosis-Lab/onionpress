@@ -1,0 +1,126 @@
+name: Build the fork's Tor image
+
+# Upstream's docker-publish.yml builds the tor image on a self-hosted Apple
+# Silicon runner this fork does not have, and pushes to upstream's GHCR — so
+# every job in it is guarded off here. That left the fork unable to ship an
+# image at all, and the compose file pinned to upstream's digest.
+#
+# That pin is fine until the fork changes something *inside* the image. It
+# has: bridge / pluggable-transport support needs `snowflake-client` and
+# `obfs4proxy` installed in the image and an entrypoint that writes the
+# ClientTransportPlugin line. On a censored network, publishing cannot work
+# without them — TOR_BRIDGE_LINES flows all the way to a container that has
+# nothing to consume it.
+#
+# So this workflow builds the same image from the same context, on GitHub's
+# free runners for both architectures (public repo), and pushes it to the
+# fork's own GHCR. It is a separate file rather than an edit to
+# docker-publish.yml so upstream merges keep applying cleanly.
+
+on:
+  # `workflow_dispatch` only registers once the file is on the default branch,
+  # so the branch trigger is what lets this run before it is merged.
+  push:
+    branches: [feat/fork-tor-image]
+    # Only when the image itself changes — a rebuild takes ~6 minutes and
+    # publishes a new digest, so every unrelated push would invalidate the pin
+    # that was just made.
+    paths:
+      - "app/Resources/docker/tor/**"
+      - ".github/workflows/fork-tor-image.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra tag to publish alongside :latest (e.g. moss.7)"
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/symbiosis-lab/onionpress-tor
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    # Only ever runs in the fork; upstream has its own pipeline.
+    if: github.repository != 'brewsterkahle/onionpress'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      # Both arches build natively — the Dockerfile compiles Arti and mkp224o
+      # from source, which under qemu takes hours rather than minutes.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: app/Resources/docker/tor
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.IMAGE }}:build-${{ matrix.arch }}
+          cache-from: type=gha,scope=fork-tor-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=fork-tor-${{ matrix.arch }}
+
+  merge:
+    name: Merge manifests
+    if: github.repository != 'brewsterkahle/onionpress'
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Create multi-arch manifest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t ${{ env.IMAGE }}:latest \
+            ${{ env.IMAGE }}:build-amd64 \
+            ${{ env.IMAGE }}:build-arm64
+
+          TAG="${{ inputs.tag }}"
+          if [ -n "$TAG" ]; then
+            docker buildx imagetools create -t ${{ env.IMAGE }}:"$TAG" \
+              ${{ env.IMAGE }}:build-amd64 \
+              ${{ env.IMAGE }}:build-arm64
+          fi
+
+      # The compose file pins by digest, so the digest is the deliverable —
+      # print it where whoever runs this can copy it straight into
+      # app/Resources/docker/docker-compose.yml.
+      - name: Report the digest to pin
+        run: |
+          set -euo pipefail
+          DIGEST=$(docker buildx imagetools inspect ${{ env.IMAGE }}:latest \
+            --format '{{println .Manifest.Digest}}' | head -1)
+          echo "Pin this in app/Resources/docker/docker-compose.yml:"
+          echo "  ${{ env.IMAGE }}:latest@${DIGEST}"
+          {
+            echo "### Tor image published"
+            echo ""
+            echo '```'
+            echo "${{ env.IMAGE }}:latest@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

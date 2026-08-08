@@ -1,0 +1,118 @@
+name: Build DMG
+
+# Builds the universal (x86_64 + arm64) OnionPress DMG on a GitHub macOS
+# runner, so the arch of a published artifact never again depends on what
+# happens to be installed on one laptop (v2.4.107-moss.4 shipped an
+# arm64-only MenubarApp for exactly that reason).
+#
+# Triggers:
+#   - tags matching v*-moss.*   — builds; tags WITHOUT a "-ci." suffix also
+#     publish a prerelease with the DMG attached. Tags like
+#     v2.4.107-moss.5-ci.3 are iteration builds: artifact only, no release.
+#   - workflow_dispatch         — build + artifact, no release.
+#
+# moss reaches the DMG by exact pinned URL, never by "latest", so the
+# release is created as prerelease and never marked latest.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*-moss.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    # Fork-only workflow: never run on the upstream repo.
+    if: github.repository == 'Symbiosis-Lab/onionpress'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install python.org universal2 Python 3.14
+        run: |
+          curl -fsSLO --retry 5 --retry-delay 5 \
+            https://www.python.org/ftp/python/3.14.6/python-3.14.6-macos11.pkg
+          sudo installer -pkg python-3.14.6-macos11.pkg -target /
+          PY=/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14
+          ARCHS=$(lipo -archs "$PY")
+          echo "installed Python archs: $ARCHS"
+          case "$ARCHS" in
+            *x86_64*arm64*|*arm64*x86_64*) echo "universal2 Python confirmed" ;;
+            *) echo "ERROR: installed Python is not universal2 ($ARCHS)"; exit 1 ;;
+          esac
+
+      - name: Cache pinned binary downloads
+        uses: actions/cache@v4
+        with:
+          path: build/.cache/bin
+          key: dmg-bin-${{ hashFiles('build/build-dmg-simple.sh') }}
+
+      - name: Build DMG (release mode)
+        run: |
+          set -o pipefail
+          ONIONPRESS_RELEASE=1 ./build/build-dmg-simple.sh 2>&1 | tee build-dmg.log
+
+      - name: Compute sha256
+        id: sha
+        run: |
+          SHA256=$(shasum -a 256 build/onionpress.dmg | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "onionpress.dmg sha256: $SHA256" | tee -a build-dmg.log
+          echo "### onionpress.dmg" >> "$GITHUB_STEP_SUMMARY"
+          echo "sha256: \`$SHA256\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload DMG as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: onionpress-dmg
+          path: build/onionpress.dmg
+          if-no-files-found: error
+
+      - name: Create prerelease (final moss tags only)
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-ci.')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Universal (x86_64 + arm64) OnionPress DMG, built by CI."
+            echo
+            echo "- workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- onionpress.dmg sha256: \`${{ steps.sha.outputs.sha256 }}\`"
+            echo
+            echo "Pinned by moss plugins/onionpress/stack-manifest.json — reached"
+            echo "by exact URL, never via latest."
+          } > release-notes.md
+          gh release create "$GITHUB_REF_NAME" build/onionpress.dmg \
+            --prerelease \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md
+
+      # Auth-free feedback channel: the dev box driving this workflow has
+      # git deploy-key access but no GitHub API auth, so run logs are pushed
+      # to the ci-logs branch where a plain `git fetch` can read them.
+      - name: Publish build log to ci-logs branch
+        if: always()
+        run: |
+          LOGDIR="$RUNNER_TEMP/ci-logs"
+          rm -rf "$LOGDIR" && mkdir -p "$LOGDIR" && cd "$LOGDIR"
+          git init -q -b ci-logs
+          git config user.name "onionpress-ci"
+          git config user.email "ci@users.noreply.github.com"
+          git remote add origin \
+            "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth 1 origin ci-logs; then
+            git reset -q --soft FETCH_HEAD
+          fi
+          DEST="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          if [ -f "$GITHUB_WORKSPACE/build-dmg.log" ]; then
+            cp "$GITHUB_WORKSPACE/build-dmg.log" "$DEST"
+          else
+            echo "(no build log produced — failed before the build step)" > "$DEST"
+          fi
+          git add -A
+          git commit -q -m "logs: run ${GITHUB_RUN_ID} (${GITHUB_REF_NAME}) status=${{ job.status }}"
+          git push -q origin HEAD:ci-logs

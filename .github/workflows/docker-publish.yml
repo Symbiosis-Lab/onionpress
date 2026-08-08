@@ -20,6 +20,9 @@ jobs:
 
   build-tor-amd64:
     name: Build Tor image (amd64)
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -44,6 +47,9 @@ jobs:
 
   build-tor-arm64:
     name: Build Tor image (arm64)
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: read
@@ -81,6 +87,9 @@ jobs:
 
   merge-tor:
     name: Merge Tor manifests
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: ubuntu-latest
     needs: [build-tor-amd64, build-tor-arm64]
     permissions:
@@ -111,6 +120,9 @@ jobs:
 
   build-wp-amd64:
     name: Build WordPress image (amd64)
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -135,6 +147,9 @@ jobs:
 
   build-wp-arm64:
     name: Build WordPress image (arm64)
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: read
@@ -172,6 +187,9 @@ jobs:
 
   merge-wp:
     name: Merge WordPress manifests
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: ubuntu-latest
     needs: [build-wp-amd64, build-wp-arm64]
     permissions:
@@ -202,6 +220,9 @@ jobs:
 
   build-stress-worker-amd64:
     name: Build stress worker image (amd64)
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: ubuntu-latest
     needs: [merge-tor]
     permissions:
@@ -225,6 +246,9 @@ jobs:
 
   build-stress-worker-arm64:
     name: Build stress worker image (arm64)
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: [self-hosted, macOS, ARM64]
     needs: [merge-tor]
     permissions:
@@ -263,6 +287,9 @@ jobs:
 
   merge-stress-worker:
     name: Merge stress worker manifests
+    # Fork guard: these jobs exist for upstream (three need self-hosted
+    # runners this fork does not have; the rest would push to our GHCR).
+    if: github.repository == 'brewsterkahle/onionpress'
     runs-on: ubuntu-latest
     needs: [build-stress-worker-amd64, build-stress-worker-arm64]
     permissions:
