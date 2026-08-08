@@ -38,6 +38,51 @@ apply_bridge_config() {
     echo "Bridge/pluggable-transport support enabled (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
 }
 
+# Arti equivalent of apply_bridge_config(): TOR_IMPL=arti is this deployment's
+# actual default (~/.onionpress/config sets it explicitly), and every Arti
+# code path below launches "arti proxy -c <file>.toml" straight from the
+# image-baked config — apply_bridge_config() only ever touches /etc/tor/torrc,
+# so on TOR_IMPL=arti, TOR_BRIDGE_LINES was silently never applied to
+# anything. Arti's bridges live in a [bridges] TOML table, not a torrc line,
+# so this patches the given arti config file instead of any global filename.
+# Idempotent against `docker restart` (same container, same on-disk file)
+# re-running the entrypoint and appending the table twice, which arti's TOML
+# parser rejects as a duplicate key.
+apply_arti_bridge_config() {
+    target="$1"
+    [ -n "$TOR_BRIDGE_LINES" ] || return 0
+    grep -q '^\[bridges\]' "$target" 2>/dev/null && return 0
+    {
+        echo ""
+        echo "[bridges]"
+        echo "enabled = true"
+        echo "bridges = ["
+        echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
+            # Same trim/prefix-strip as apply_bridge_config() — TOR_BRIDGE_LINES
+            # is shared between both implementations.
+            bridge_line=$(echo "$bridge_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            bridge_line="${bridge_line#Bridge }"
+            [ -n "$bridge_line" ] && printf '  "%s",\n' "$bridge_line"
+        done
+        echo "]"
+        case "$TOR_CLIENT_TRANSPORT_PLUGIN" in
+            snowflake)
+                echo ""
+                echo "[[bridges.transports]]"
+                echo 'protocols = ["snowflake"]'
+                echo 'path = "/usr/bin/snowflake-client"'
+                ;;
+            obfs4)
+                echo ""
+                echo "[[bridges.transports]]"
+                echo 'protocols = ["obfs4"]'
+                echo 'path = "/usr/bin/obfs4proxy"'
+                ;;
+        esac
+    } >> "$target"
+    echo "Bridge/pluggable-transport support enabled for $target (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
+}
+
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
 
@@ -108,6 +153,7 @@ TORRC_EOF
         python3 /tor-watchdog.py &
     else
         # Start Arti with OnionHeaven config (SOCKS + keystore for takeover services)
+        apply_arti_bridge_config /etc/arti/arti-onionheaven.toml
         su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
         TOR_PID=$!
         sleep 2
@@ -179,6 +225,7 @@ TORRC_EOF
             python3 /tor-watchdog.py &
         else
             # Start Arti with OnionHeaven config (SOCKS + keystore)
+            apply_arti_bridge_config /etc/arti/arti-onionheaven.toml
             su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
             TOR_PID=$!
             sleep 2
@@ -277,6 +324,7 @@ TORRC_EOF
             su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc"
         else
             echo "SOCKS-only mode: starting Arti SOCKS proxy (no onion services)..."
+            apply_arti_bridge_config /etc/arti/arti-polling.toml
             su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml" 2>&1 | tee -a "$ARTI_LOG"
         fi
     fi
@@ -420,6 +468,7 @@ else
     done
 
     # Start Arti in background (log to persistent file + docker logs)
+    apply_arti_bridge_config /etc/arti/arti.toml
     su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" 2>&1 | tee -a "$ARTI_LOG" &
     ARTI_PID=$!
     sleep 2
