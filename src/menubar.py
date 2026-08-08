@@ -18,6 +18,7 @@ import signal
 import socket
 import atexit
 import re
+from urllib.parse import urlsplit, quote
 
 # Add scripts directory to path for imports
 script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -277,8 +278,12 @@ class OnionPressApp(rumps.App):
         except (OSError, ValueError):
             pass  # corrupt or unreadable — proceed to normal detection
 
-        # Detect port offset for multi-user support
-        _port_config = op_config.detect_port_offset()
+        # Detect port offset for multi-user support. resolve_port_offset()
+        # reads our own running container's published port first (if a
+        # stack is already up) and only allocates via bind-probing when
+        # nothing is running yet — see its docstring for why the bind
+        # probe alone can't answer "what port is our own stack on".
+        _port_config = op_config.resolve_port_offset()
         self.wp_port = _port_config.wp_port
         self.socks_port = _port_config.socks_port
         self.proxy_port = _port_config.proxy_port
@@ -456,6 +461,7 @@ class OnionPressApp(rumps.App):
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
         self.local_site_item = rumps.MenuItem("Open Local Site", callback=self.open_local_site)
+        self.wp_admin_item = rumps.MenuItem("Open WordPress Admin...", callback=self.open_wp_admin)
         self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
         self._onionheaven_alert_in_menu = False
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
@@ -466,6 +472,7 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
             self.browser_menu_item,
             self.local_site_item,
+            self.wp_admin_item,
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
@@ -473,7 +480,7 @@ class OnionPressApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("View Logs", callback=self.view_logs),
             rumps.MenuItem("View Web Usage Log", callback=self.view_web_log),
-            rumps.MenuItem("Settings...", callback=self.open_settings),
+            rumps.MenuItem("App Settings...", callback=self.open_settings),
             rumps.separator,
             rumps.MenuItem("Backup...", callback=self.backup),
             rumps.MenuItem("Restore...", callback=self.restore),
@@ -2152,6 +2159,7 @@ class OnionPressApp(rumps.App):
                 self.browser_menu_item.set_callback(self.open_tor_browser)
                 self.local_site_item.title = f"Open Local Site ({self.local_url})"
                 self.local_site_item.set_callback(self.open_local_site)
+                self.wp_admin_item.set_callback(self.open_wp_admin)
             elif state in ("starting", "offline", "stuck", "stalled"):
                 if state == "starting":
                     self.icon = self.icon_starting
@@ -2179,6 +2187,7 @@ class OnionPressApp(rumps.App):
                 self.browser_menu_item.set_callback(self.open_local_site)
                 self.local_site_item.title = ""
                 self.local_site_item.set_callback(None)
+                self.wp_admin_item.set_callback(self.open_wp_admin)
             else:
                 # Stopped
                 self.icon = self.icon_stopped
@@ -2195,6 +2204,7 @@ class OnionPressApp(rumps.App):
                 self.browser_menu_item.set_callback(None)
                 self.local_site_item.title = ""
                 self.local_site_item.set_callback(None)
+                self.wp_admin_item.set_callback(None)
 
         # Execute on main thread
         _main_thread(do_update)
@@ -2771,6 +2781,32 @@ class OnionPressApp(rumps.App):
         thread = threading.Thread(target=generator, daemon=True)
         thread.start()
 
+    def _resync_ports(self):
+        """Re-read our own container's published port after start/restart.
+
+        __init__ resolves the offset once; a stop/start can bring the
+        stack up on a different offset than that snapshot (e.g. another
+        process — the `onionpress` CLI, a stale env var — raced us and
+        picked its own). Comparing against what Docker actually published
+        keeps self.wp_port (and everything derived from it: local_url,
+        onion_proxy globals, ONIONPRESS_*_PORT env vars) truthful instead
+        of silently mis-addressed for the rest of the session.
+        """
+        running_port = launcher_ops.get_running_wp_port()
+        if running_port is None or running_port == self.wp_port:
+            return
+        offset = running_port - 8080
+        self.log(f"Port resync: was {self.wp_port}, running stack is on {running_port}")
+        self.wp_port = running_port
+        self.socks_port = 9050 + offset
+        self.proxy_port = 9077 + offset
+        os.environ["ONIONPRESS_PORT_OFFSET"] = str(offset)
+        os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
+        os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
+        os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
+        onion_proxy.PROXY_PORT = self.proxy_port
+        onion_proxy.PHP_PROXY_PORT = self.wp_port
+
     @property
     def local_url(self):
         """The local URL for accessing WordPress."""
@@ -2799,34 +2835,32 @@ class OnionPressApp(rumps.App):
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
     def _generate_login_url(self, base_url):
-        """Generate a one-time auto-login URL for the admin user.
+        """Generate a one-time auto-login URL that lands on base_url logged in.
 
-        Creates a random token, stores it as a WordPress transient (2-min TTL)
-        via wp eval, and returns base_url with ?op_login=TOKEN appended.
-        Falls back to the plain URL if token generation fails.
+        Mints a token via launcher_ops.mint_op_login_token() (resolves the
+        real administrator and stores the token as a WordPress transient,
+        2-min TTL) and points the URL at /wp-login.php rather than at
+        base_url directly. base_url may be served by the static-first
+        Apache config (moss pre-rendered HTML ahead of WordPress), where
+        PHP never runs and a token appended there is never read by
+        anything; wp-login.php always executes PHP, so the auto-login
+        mu-plugin's `init` hook runs and redirects back to base_url once
+        the auth cookies are set. Falls back to the plain URL if minting
+        fails.
         """
-        try:
-            import secrets as _secrets
-            token = _secrets.token_urlsafe(32)
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            result = subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "eval",
-                 f"set_transient('op_login_{token}', 1, 120);",
-                 "--allow-root"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=10
-            )
-            if result.returncode == 0:
-                sep = '&' if '?' in base_url else '?'
-                url = f"{base_url}{sep}op_login={token}"
-                self.log("Generated auto-login URL")
-                return url
-            else:
-                self.log(f"Auto-login token failed: {result.stderr[-200:]}")
-        except Exception as e:
-            self.log(f"Auto-login token error: {e}")
-        return base_url
+        token = launcher_ops.mint_op_login_token()
+        if not token:
+            self.log("Auto-login token failed")
+            return base_url
+
+        parts = urlsplit(base_url)
+        redirect_to = parts.path or "/"
+        if parts.query:
+            redirect_to += f"?{parts.query}"
+        login_base = f"{parts.scheme}://{parts.netloc}/wp-login.php"
+        url = f"{login_base}?op_login={token}&redirect_to={quote(redirect_to, safe='')}"
+        self.log("Generated auto-login URL")
+        return url
 
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
@@ -2835,6 +2869,14 @@ class OnionPressApp(rumps.App):
         url = self._generate_login_url(local_base)
         subprocess.run(["open", url])
         self.log(f"Opened local site: {url}")
+
+    def open_wp_admin(self, _):
+        """Open the WordPress admin panel — the only place Archive.org
+        credentials and other WordPress-side settings can be configured."""
+        admin_base = f"{self.local_url}/wp-admin/admin.php?page=onionpress-settings"
+        url = self._generate_login_url(admin_base)
+        subprocess.run(["open", url])
+        self.log(f"Opened WordPress admin: {url}")
 
     def monitor_tor_browser_install(self):
         """Monitor for Tor Browser installation and offer to open site when detected."""
@@ -3058,6 +3100,7 @@ class OnionPressApp(rumps.App):
             # Start the service normally
             self.update_splash_status("Starting your site...")
             subprocess.run([self.launcher_script, "start"])
+            self._resync_ports()
 
             # Poll until WordPress is responding (replaces fixed sleep)
             self.update_splash_status("Starting your site...")
@@ -3733,6 +3776,7 @@ class OnionPressApp(rumps.App):
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
+            self._resync_ports()
 
             # Poll until WordPress is responding (replaces fixed sleep)
             max_wait = 60

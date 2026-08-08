@@ -212,7 +212,23 @@ except OSError:
     echo "$offset"
 }
 
-# Use pre-set offset from menubar app if available, otherwise detect
+# Use pre-set offset from menubar app if available, otherwise detect.
+if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
+    # Standalone use (Terminal, not launched via the menubar app): if our
+    # own WordPress container is already running, read its published port
+    # directly instead of re-detecting via socket bind. Once the stack is
+    # up, detect_port_offset()'s bind probe only ever reports "in use" —
+    # it can't tell "in use by us" from "in use by someone else" — so a
+    # standalone `onionpress status` run right after the menubar app
+    # started the stack would otherwise conclude a bogus +10000 offset.
+    # Mirrors linux/onionpress's read of $DATA_DIR/status.json, but macOS
+    # has no host-side status.json to read, so ask Docker directly.
+    _running_wp_addr=$(docker port onionpress-wordpress 80 2>/dev/null | head -1)
+    _running_wp_port="${_running_wp_addr##*:}"
+    if [ -n "$_running_wp_port" ] && [ "$_running_wp_port" -ge 8080 ] 2>/dev/null; then
+        ONIONPRESS_PORT_OFFSET=$((_running_wp_port - 8080))
+    fi
+fi
 if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
     ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
 fi
