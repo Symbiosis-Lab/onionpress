@@ -11,6 +11,12 @@
   - Exception: file paths like `/var/lib/tor/hidden_service/` and Docker image names like `goldy/tor-hidden-service` cannot change — those are external identifiers.
 - When writing new code, docs, issues, or UI text, always use "OnionPress" and "onion service".
 
+## Design Principle: Follow OnionPress's Own Mechanisms
+- This is Brewster Kahle's project (Internet Archive). Where it already has a designed mechanism for something, **extend that mechanism** rather than inventing a parallel one, even when a bespoke fix looks faster.
+- Examples already in the codebase: the Arti bridge fix (2026-08-09) extended `apply_bridge_config()`'s pattern into a new `apply_arti_bridge_config()` rather than adding a separate bridge-config path for Arti; the watchdog-escalation work extended `tor-watchdog.py`'s existing check/recover loop with more rungs rather than adding a second supervisor process.
+- Applies equally to the `moss/plugins/onionpress` integration layer — see ADR-050 there ("moss owns the serving outcome; OnionPress keeps the work") for the cross-repo version of this same rule: moss delegates recovery work to OnionPress's own mechanisms and only acts once those are exhausted, rather than reimplementing them.
+- Before finishing any change here, check whether it reached for a new mechanism where one already existed.
+
 ## Key Architecture
 - macOS menubar app (py2app built from `src/menubar.py`)
 - Launcher shell script at `app/MacOS/onionpress` (assembled into `OnionPress.app/Contents/MacOS/` at build time)
