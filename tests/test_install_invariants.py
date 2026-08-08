@@ -844,6 +844,103 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
         )
 
 
+class TestLaunchersPassBridgeSettingsToTor(unittest.TestCase):
+    """Both bash launchers must read the bridge settings out of the config
+    file and export them, using a parser that keeps the whole value.
+
+    Incident: the settings were implemented in containers.py (the Python
+    start path) and documented in config-template.txt, but never added to
+    either bash launcher. moss drives the bash path, so publishing from
+    behind a national firewall brought Tor up with empty bridge vars every
+    time and stalled at 5% bootstrap — a feature that was shipped, written
+    up, and unreachable.
+
+    The parser matters as much as the read. Every other config read in
+    these scripts is `grep "^KEY=" | cut -d= -f2`, which stops at the first
+    `=`. A snowflake bridge line carries fingerprint=, url=, fronts=, ice=
+    and utls-imitate=, so `cut` truncates it mid-line to something that
+    still looks like a valid bridge line and silently never bootstraps.
+    """
+
+    KEYS = ("TOR_BRIDGE_LINES", "TOR_CLIENT_TRANSPORT_PLUGIN")
+    LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+
+    def _assignment(self, script, key):
+        """The `KEY=$(...)` command substitution that populates `key`."""
+        m = re.search(rf"^\s*{key}=\$\((.*)\)\s*$", script, re.MULTILINE)
+        return m.group(1) if m else None
+
+    def test_both_launchers_read_and_export_bridge_settings(self):
+        for path in self.LAUNCHERS:
+            script = _read(path)
+            for key in self.KEYS:
+                assigned = self._assignment(script, key)
+                self.assertIsNotNone(
+                    assigned,
+                    f"{path} never reads {key} from the config file. Tor will "
+                    "start with the bridge unset and stall at 5% bootstrap on "
+                    "a censored network.",
+                )
+                # Either the sed form inline, or a helper that uses it — both
+                # launchers must preserve the whole value, however they spell it.
+                self.assertRegex(
+                    assigned,
+                    r"sed -n|read_config_value",
+                    f"{path} reads {key} with something other than a "
+                    f"value-preserving parser: {assigned!r}",
+                )
+            self.assertIn(
+                "export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN", script,
+                f"{path} reads the bridge settings but never exports them, so "
+                "docker compose cannot substitute them into the tor service.",
+            )
+
+    def test_bridge_settings_are_never_read_with_cut(self):
+        for path in self.LAUNCHERS:
+            script = _read(path)
+            for key in self.KEYS:
+                assigned = self._assignment(script, key) or ""
+                self.assertNotIn(
+                    "cut -d=", assigned,
+                    f"{path} parses {key} with `cut -d=`, which truncates a "
+                    "snowflake bridge line at its first `=` (fingerprint=). "
+                    "The result still looks like a bridge line and silently "
+                    "never bootstraps. Use sed -n 's/^KEY=//p' | head -1.",
+                )
+            # ...and the shared helper, where one is used, must not either.
+            helper = re.search(
+                r"read_config_value\(\)\s*\{(.*?)^\}", script,
+                re.DOTALL | re.MULTILINE)
+            if helper:
+                self.assertNotIn(
+                    "cut -d=", helper.group(1),
+                    f"{path}: read_config_value() truncates values at the "
+                    "first `=`, which breaks every snowflake bridge line.",
+                )
+
+    def test_bridge_bootstrap_gets_a_longer_wait(self):
+        """A bootstrap over a pluggable transport is minutes, not seconds.
+
+        Measured 5m26s on a censored network — snowflake-client cycled
+        through three proxies before one held. Both launchers waited a flat
+        120s, so they reported failure on a bootstrap that was succeeding,
+        and moss inherited the false negative.
+        """
+        for path in self.LAUNCHERS:
+            script = _read(path)
+            m = re.search(
+                r"wait_for_services\(\)\s*\{(.*?)local waited=", script,
+                re.DOTALL)
+            self.assertIsNotNone(
+                m, f"{path}: could not find wait_for_services()'s wait setup")
+            self.assertIn(
+                "TOR_BRIDGE_LINES", m.group(1),
+                f"{path}: wait_for_services() does not extend its timeout when "
+                "a bridge is configured — a bridged bootstrap takes several "
+                "minutes and will be reported as a failure.",
+            )
+
+
 class TestMultisiteModuleExports(unittest.TestCase):
     """The WP-provisioning helpers used to live as parallel bash
     implementations in app/MacOS/onionpress and linux/onionpress.

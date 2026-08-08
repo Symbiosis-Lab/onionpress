@@ -163,6 +163,46 @@ UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
 EOF
     fi
+elif [ -f "$RESOURCES_DIR/config-template.txt" ]; then
+    # An existing config is never regenerated, so a key added to the template
+    # after a user first installed reached nobody who upgraded — the setting
+    # was documented, shipped, and invisible. A Mac upgraded from 2026-07-30
+    # held a 28-byte config, and the snowflake bridge settings the template
+    # describes simply were not in it.
+    #
+    # So append keys the template has and this config lacks, commented out,
+    # with the template's own explanatory comment block above them. Appending
+    # COMMENTED is what makes this safe to run on every launch: it can only add
+    # documentation, never change behaviour, and never touches a value the
+    # user set. Matching is on `^KEY=` against both live and commented forms,
+    # so a key the user already commented out stays as they left it.
+    # The comment block immediately above a key is carried with it — that block
+    # is where the template explains the setting and, for the bridge keys, holds
+    # the ready-to-uncomment snowflake lines. Appending a bare `#TOR_BRIDGE_LINES=`
+    # without it would be documentation that documents nothing.
+    _tpl_comments=""
+    while IFS= read -r _tpl_line; do
+        case "$_tpl_line" in
+            "")
+                _tpl_comments=""
+                ;;
+            \#*)
+                _tpl_comments="${_tpl_comments}${_tpl_line}
+"
+                ;;
+            *=*)
+                _tpl_key="${_tpl_line%%=*}"
+                if ! grep -qE "^#? *${_tpl_key}=" "$DATA_DIR/config" 2>/dev/null; then
+                    {
+                        printf '\n'
+                        [ -n "$_tpl_comments" ] && printf '%s' "$_tpl_comments"
+                        printf '#%s\n' "$_tpl_line"
+                    } >> "$DATA_DIR/config"
+                fi
+                _tpl_comments=""
+                ;;
+        esac
+    done < "$RESOURCES_DIR/config-template.txt"
 fi
 
 # Prefer bundled binaries
@@ -245,6 +285,30 @@ if [ -f "$DATA_DIR/config" ]; then
     fi
 fi
 export TOR_IMPL
+
+# Bridge / pluggable transport, for networks that block Tor outright.
+#
+# docker-compose.yml declares these on the tor service as
+# ${TOR_BRIDGE_LINES:-} / ${TOR_CLIENT_TRANSPORT_PLUGIN:-}, and entrypoint.sh
+# turns them into UseBridges / ClientTransportPlugin / Bridge lines. Until this
+# block existed, only containers.py (the Python path) populated them — so a
+# start through THIS script, which is the path moss drives, always brought Tor
+# up with empty bridge vars and could never bootstrap behind a national
+# firewall.
+#
+# `sed -n 's/^KEY=//p'`, NOT the `cut -d= -f2` the reads above use: a snowflake
+# bridge line carries fingerprint=, url=, fronts=, ice= and utls-imitate=, so
+# cutting at the first `=` truncates it to something that still looks like a
+# bridge line and silently never bootstraps. `head -1` stops a duplicated key
+# from producing a multi-line value.
+read_config_value() {
+    [ -f "$DATA_DIR/config" ] || return 0
+    sed -n "s/^$1=//p" "$DATA_DIR/config" | head -1
+}
+
+TOR_BRIDGE_LINES=$(read_config_value TOR_BRIDGE_LINES)
+TOR_CLIENT_TRANSPORT_PLUGIN=$(read_config_value TOR_CLIENT_TRANSPORT_PLUGIN)
+export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN
 
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
@@ -1548,11 +1612,23 @@ get_healthcheck_address() {
 # Function to wait for services to be ready using active probing
 wait_for_services() {
     cd "$DOCKER_DIR"
+    # A direct bootstrap takes 30-90s. Over a pluggable transport it takes
+    # several minutes — measured 5m26s on a censored network, where
+    # snowflake-client cycled through three proxies ("timeout waiting for
+    # DataChannel.OnOpen") before one held. At the old flat 120s this script
+    # reported failure on a bootstrap that was succeeding, and everything
+    # downstream — including moss's publish flow — inherited that false
+    # negative. The wait is therefore keyed to whether a bridge is configured,
+    # not to a single guess about how fast the network is.
     local max_wait=120
+    if [ -n "$TOR_BRIDGE_LINES" ]; then
+        max_wait=600
+    fi
     local waited=0
     local wp_ready=false
     local onion_ready=false
     local onion_addr=""
+    local last_bootstrap=""
 
     log "Waiting for services to be ready (polling with curl)..."
 
@@ -1581,6 +1657,17 @@ wait_for_services() {
         # (SOCKS proxy doesn't work through Colima VM port forwarding,
         # so we test the actual path: tor -> wordpress via Docker network)
         if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+            # Report bootstrap progress whenever it MOVES. A percentage that
+            # climbs is the difference between "slow" and "stuck" for anyone
+            # watching — a human, or moss, which scores this same log to drive
+            # its install progress. Logging it every poll instead would bury
+            # the log in identical lines.
+            _bootstrap=$(docker compose logs --tail 200 tor 2>/dev/null \
+                | sed -n 's/.*Bootstrapped \([0-9]*\)%.*/\1/p' | tail -1)
+            if [ -n "$_bootstrap" ] && [ "$_bootstrap" != "$last_bootstrap" ]; then
+                log "Tor bootstrap: ${_bootstrap}%"
+                last_bootstrap="$_bootstrap"
+            fi
             # Check Tor is bootstrapped
             if docker compose logs --tail 100 tor 2>/dev/null | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
                 # Check WordPress is reachable from Tor container
@@ -1614,6 +1701,16 @@ wait_for_services() {
 
     # Timed out — report what we have
     log "WARNING: Services not fully ready after ${max_wait}s (wp=${wp_ready}, onion=${onion_ready})"
+    # Name the likely cause rather than only the symptom. Tor parked in the low
+    # single digits is not slow — it has no route to the network at all, and on
+    # a censored link that means no bridge is configured.
+    if [ "$onion_ready" = false ] && [ -n "$last_bootstrap" ] && [ "$last_bootstrap" -lt 10 ] 2>/dev/null; then
+        if [ -z "$TOR_BRIDGE_LINES" ]; then
+            log "Tor stalled at ${last_bootstrap}% with no bridge configured — if this network blocks Tor, set TOR_CLIENT_TRANSPORT_PLUGIN and TOR_BRIDGE_LINES in $DATA_DIR/config and start again."
+        else
+            log "Tor stalled at ${last_bootstrap}% despite a configured bridge — the bridge lines may be stale; re-copy them from Tor Browser."
+        fi
+    fi
     if [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
         ONION_ADDR="$onion_addr"
     else
