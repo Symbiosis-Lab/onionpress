@@ -283,6 +283,20 @@ if [ -f "$DATA_DIR/config" ]; then
     [ -n "$_val" ] && export ONIONHEAVEN_PROPAGATION_DELAY="$_val"
     _val=$(grep "^ONIONHEAVEN_HUB_THRESHOLD=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export ONIONHEAVEN_HUB_THRESHOLD="$_val"
+
+    # Bridge / pluggable transport, for networks that block Tor outright.
+    # docker-compose.yml declares these on the tor service and entrypoint.sh
+    # turns them into UseBridges / ClientTransportPlugin / Bridge lines; until
+    # this existed, only containers.py populated them, so a start through this
+    # script always brought Tor up with empty bridge vars.
+    #
+    # `sed -n 's/^KEY=//p'` rather than the `cut -d= -f2` above: a snowflake
+    # bridge line carries fingerprint=, url=, fronts=, ice= and utls-imitate=,
+    # so cutting at the first `=` truncates it to something that still looks
+    # like a bridge line and silently never bootstraps.
+    TOR_BRIDGE_LINES=$(sed -n 's/^TOR_BRIDGE_LINES=//p' "$DATA_DIR/config" | head -1)
+    TOR_CLIENT_TRANSPORT_PLUGIN=$(sed -n 's/^TOR_CLIENT_TRANSPORT_PLUGIN=//p' "$DATA_DIR/config" | head -1)
+    export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN
 fi
 
 # ─── Parse global flags ────────────────────────────────────────────
@@ -1374,7 +1388,14 @@ write_shared_onion_address() {
 
 wait_for_services() {
     cd "$DOCKER_DIR"
+    # A direct bootstrap takes 30-90s. Over a pluggable transport it takes
+    # several minutes — measured 5m26s on a censored network, where
+    # snowflake-client cycled through three proxies before one held. At a flat
+    # 120s this reports failure on a bootstrap that is succeeding.
     local max_wait=120
+    if [ -n "$TOR_BRIDGE_LINES" ]; then
+        max_wait=600
+    fi
     local waited=0
     local wp_ready=false
     local onion_ready=false
