@@ -1119,6 +1119,38 @@ function onionpress_wayback_sweep_iteration() {
 }
 add_action( 'onionpress_wayback_sweep', 'onionpress_wayback_sweep' );
 
+/**
+ * Clear the sweep back-off and make wp-cron run `onionpress_wayback_sweep`
+ * right now instead of waiting for the next organic page view. WP-Cron is
+ * pseudo-cron — `wp_schedule_single_event()` alone just marks the event
+ * due; nothing runs it until some request triggers WP's cron check. On a
+ * low-traffic onion site that "some request" may not happen for a long
+ * time, so we also fire the same non-blocking loopback to wp-cron.php
+ * that the admin "kick" button uses, forcing the check right away.
+ */
+function onionpress_wayback_kick_now() {
+    delete_option( OP_WB_OPT_BACKOFF_UNTIL );
+    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+    $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
+    wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+}
+
+/**
+ * Invalidate the home page + feed captures so the next kick re-archives
+ * them. Skipped when a capture is already in flight — see save_post's
+ * comment below for why that matters.
+ */
+function onionpress_wayback_invalidate_sitewide() {
+    $home_state = onionpress_wayback_opt_read( OP_WB_OPT_HOME );
+    $feed_state = onionpress_wayback_opt_read( OP_WB_OPT_FEED );
+    if ( empty( $home_state['job_id'] ) ) {
+        delete_option( OP_WB_OPT_HOME );
+    }
+    if ( empty( $feed_state['job_id'] ) ) {
+        delete_option( OP_WB_OPT_FEED );
+    }
+}
+
 // ────────────── save_post hook: invalidate home/feed + retry post ───
 // Imported social posts (Twitter/Mastodon/Bluesky — anything with a
 // `_source_id` meta) are captured exactly once and never re-archived
@@ -1147,14 +1179,7 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     // drop the job_id, causing the next sweep to resubmit and burn an
     // SPN slot. Coalescing bursts is structural, not explicit — one row
     // per subsite already collapses N saves into ≤1 fresh submission.
-    $home_state = onionpress_wayback_opt_read( OP_WB_OPT_HOME );
-    $feed_state = onionpress_wayback_opt_read( OP_WB_OPT_FEED );
-    if ( empty( $home_state['job_id'] ) ) {
-        delete_option( OP_WB_OPT_HOME );
-    }
-    if ( empty( $feed_state['job_id'] ) ) {
-        delete_option( OP_WB_OPT_FEED );
-    }
+    onionpress_wayback_invalidate_sitewide();
 
     // Re-archive on edit, but only for original posts. Imported social
     // posts (anything with _source_id) stay archived once.
@@ -1174,10 +1199,9 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         ) );
     }
 
-    // Also clear any site-wide back-off so the immediate sweep runs.
-    delete_option( OP_WB_OPT_BACKOFF_UNTIL );
-
-    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+    // Kick the sweep now rather than waiting for wp-cron's next organic
+    // fire — a fresh publish is exactly when a human is likely watching.
+    onionpress_wayback_kick_now();
     onionpress_wayback_log( 'save_post ' . $post_id . ': cleared home/feed'
         . ( $update && ! $is_imported ? ' + post meta' : '' ) . ', scheduled immediate sweep' );
 }, 10, 3 );
@@ -1334,7 +1358,6 @@ add_action( 'admin_post_onionpress_wayback_action', function () {
             // exit cleanly without disrupting it — but clearing the
             // lock first breaks any truly-stuck state.
             delete_option( 'op_wayback_sweep_lock' );
-            delete_option( OP_WB_OPT_BACKOFF_UNTIL );
             // Clear WP's `doing_cron` lock too. If a previous wp-cron
             // spawn died mid-run without cleaning up (container restart,
             // pkill), this transient blocks new wp-cron fires for up to
@@ -1342,14 +1365,7 @@ add_action( 'admin_post_onionpress_wayback_action', function () {
             // refreshes it via race, so it can stay stuck for a long
             // time in practice. Clearing it lets cron fire immediately.
             delete_transient( 'doing_cron' );
-            // Schedule an immediate cron fire so the sweep starts in a
-            // separate request (admin page doesn't hang for the whole
-            // daemon run).
-            wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
-            // Also spawn a loopback to wp-cron.php so WP actually runs
-            // scheduled events right now (WP-Cron only fires on HTTP).
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            onionpress_wayback_kick_now();
             $msg = 'Daemon kicked — archiving will begin within a few seconds.';
             break;
         case 'clear_backoff':

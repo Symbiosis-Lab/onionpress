@@ -528,6 +528,19 @@ function onionpress_moss_route_commit( $request ) {
 
     onionpress_moss_gc_generations();
 
+    // A commit is moss's whole publish — it replaces the entire static
+    // site in one atomic flip rather than creating/updating individual
+    // WordPress posts, so the wayback archiver's post-level save_post
+    // hook never fires for it. Re-archive home + feed the same way
+    // save_post does for a WordPress-side publish, following the
+    // archiver's own invalidate-then-kick mechanism instead of adding a
+    // second submission path.
+    if ( function_exists( 'onionpress_wayback_invalidate_sitewide' )
+        && function_exists( 'onionpress_wayback_kick_now' ) ) {
+        onionpress_wayback_invalidate_sitewide();
+        onionpress_wayback_kick_now();
+    }
+
     $addr = onionpress_moss_onion_address();
     $url  = $addr !== '' ? 'http://' . $addr . '/' : '';
     return new WP_REST_Response(

@@ -389,5 +389,98 @@ class TestWaybackCommentResnapshot(unittest.TestCase):
         self.assertEqual(self._meta(pid, "_op_wayback_resnapshot_done"), "")
 
 
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestWaybackKickAndInvalidate(unittest.TestCase):
+    """`onionpress_wayback_kick_now()` / `_invalidate_sitewide()` are the
+    shared mechanism behind every "archive right now" trigger: the
+    save_post hook, the admin "kick" button, and (via the moss receiver)
+    a moss publish. Covers the mechanism itself, not each caller."""
+
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
+
+    def setUp(self):
+        _eval("delete_option('op_wayback_home_state'); "
+              "delete_option('op_wayback_feed_state'); "
+              "update_option('op_wayback_backoff_until', time() + 999, false); "
+              "wp_clear_scheduled_hook('onionpress_wayback_sweep');",
+              self.url)
+
+    def test_kick_now_clears_backoff_and_schedules_sweep(self):
+        _eval("onionpress_wayback_kick_now();", self.url)
+        backoff = _eval("echo (string) get_option('op_wayback_backoff_until', '');",
+                         self.url)
+        self.assertEqual(backoff, "", "backoff option should be deleted")
+        scheduled = _eval(
+            "echo wp_next_scheduled('onionpress_wayback_sweep') ? '1' : '0';",
+            self.url)
+        self.assertEqual(scheduled, "1", "sweep should be scheduled for immediate run")
+
+    def test_invalidate_sitewide_clears_home_and_feed_when_idle(self):
+        _eval("update_option('op_wayback_home_state', array('archived_at'=>'x'), false); "
+              "update_option('op_wayback_feed_state', array('archived_at'=>'x'), false);",
+              self.url)
+        _eval("onionpress_wayback_invalidate_sitewide();", self.url)
+        home = _eval("echo (string) get_option('op_wayback_home_state', '');", self.url)
+        feed = _eval("echo (string) get_option('op_wayback_feed_state', '');", self.url)
+        self.assertEqual(home, "")
+        self.assertEqual(feed, "")
+
+    def test_invalidate_sitewide_skips_home_with_job_in_flight(self):
+        """A capture already submitted must not be wiped — the in-flight
+        SPN job will render the current content anyway; clearing the
+        option here would just burn a duplicate submission on the next
+        sweep. Mirrors the reasoning in save_post's own comment."""
+        _eval("update_option('op_wayback_home_state', "
+              "array('job_id'=>'abc123'), false);", self.url)
+        _eval("onionpress_wayback_invalidate_sitewide();", self.url)
+        home = _eval("echo (string) get_option('op_wayback_home_state', '');", self.url)
+        self.assertNotEqual(home, "", "home state with a job in flight must survive")
+
+
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestMossCommitTriggersArchive(unittest.TestCase):
+    """moss's publish is a static-file generation commit, not a WordPress
+    post transition — save_post never fires for it. The commit route
+    must itself invalidate + kick the wayback archiver, or a moss
+    publish is silently never archived."""
+
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
+
+    def setUp(self):
+        _eval("update_option('op_wayback_home_state', array('archived_at'=>'x'), false); "
+              "wp_clear_scheduled_hook('onionpress_wayback_sweep');",
+              self.url)
+
+    def test_commit_route_invalidates_and_kicks(self):
+        # Exercise the same two calls onionpress_moss_route_commit() makes
+        # on a successful flip, guarded exactly as the receiver guards
+        # them (function_exists), rather than driving the REST route
+        # end-to-end (that needs a real generation dir + local-request
+        # trust, out of scope for this unit-level check).
+        _eval("""
+        if ( function_exists( 'onionpress_wayback_invalidate_sitewide' )
+            && function_exists( 'onionpress_wayback_kick_now' ) ) {
+            onionpress_wayback_invalidate_sitewide();
+            onionpress_wayback_kick_now();
+        }
+        """, self.url)
+        home = _eval("echo (string) get_option('op_wayback_home_state', '');", self.url)
+        self.assertEqual(home, "", "commit must invalidate the home capture")
+        scheduled = _eval(
+            "echo wp_next_scheduled('onionpress_wayback_sweep') ? '1' : '0';",
+            self.url)
+        self.assertEqual(scheduled, "1", "commit must kick an immediate sweep")
+
+
 if __name__ == "__main__":
     unittest.main()
