@@ -10,23 +10,32 @@ TOR_IMPL="${TOR_IMPL:-tor}"
 # Bridge / pluggable-transport support (censored networks). Config-driven via
 # TOR_BRIDGE_LINES (one "Bridge ..." line per entry, joined with ';' since
 # ~/.onionpress/config has no multi-line values) and TOR_CLIENT_TRANSPORT_PLUGIN
-# ("snowflake" or "obfs4"). Applied to every C-Tor torrc this entrypoint
-# generates — main, onionheaven, takeover-worker, and SOCKS-only modes all run
-# their own Tor process that needs to reach the network. Must be baked in at
-# generation time: /etc/tor/torrc is rewritten from scratch on every start, so
-# a runtime edit is silently discarded on restart, and Tor can't pick up a new
+# — a comma-separated list of transports ("snowflake", "obfs4", "meek_lite").
+# Listing several matters because a censored network rarely leaves every
+# transport usable in the same window: snowflake's WebRTC rendezvous, obfs4's
+# fixed bridge IPs, and meek's domain-fronting fail independently, so we hand
+# Tor bridges for all of them and let it race whichever the network allows
+# through right now. Applied to every C-Tor torrc this entrypoint generates —
+# main, onionheaven, takeover-worker, and SOCKS-only modes all run their own
+# Tor process that needs to reach the network. Must be baked in at generation
+# time: /etc/tor/torrc is rewritten from scratch on every start, so a runtime
+# edit is silently discarded on restart, and Tor can't pick up a new
 # ClientTransportPlugin via SIGHUP — only a real restart applies it.
 apply_bridge_config() {
     [ -n "$TOR_BRIDGE_LINES" ] || return 0
     echo "UseBridges 1" >> /etc/tor/torrc
-    case "$TOR_CLIENT_TRANSPORT_PLUGIN" in
-        snowflake)
-            echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client" >> /etc/tor/torrc
-            ;;
-        obfs4)
-            echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy" >> /etc/tor/torrc
-            ;;
-    esac
+    # One ClientTransportPlugin line per named transport. meek_lite/obfs2/obfs3/
+    # scramblesuit are all implemented by the same obfs4proxy binary.
+    for transport in $(echo "$TOR_CLIENT_TRANSPORT_PLUGIN" | tr ',' ' '); do
+        case "$transport" in
+            snowflake)
+                echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client" >> /etc/tor/torrc
+                ;;
+            obfs4|meek_lite|obfs2|obfs3|scramblesuit)
+                echo "ClientTransportPlugin $transport exec /usr/bin/obfs4proxy" >> /etc/tor/torrc
+                ;;
+        esac
+    done
     echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
         # Trim leading/trailing whitespace (e.g. a space after a ';'
         # separator) before checking for a redundant "Bridge " prefix —
@@ -65,20 +74,25 @@ apply_arti_bridge_config() {
             [ -n "$bridge_line" ] && printf '  "%s",\n' "$bridge_line"
         done
         echo "]"
-        case "$TOR_CLIENT_TRANSPORT_PLUGIN" in
-            snowflake)
-                echo ""
-                echo "[[bridges.transports]]"
-                echo 'protocols = ["snowflake"]'
-                echo 'path = "/usr/bin/snowflake-client"'
-                ;;
-            obfs4)
-                echo ""
-                echo "[[bridges.transports]]"
-                echo 'protocols = ["obfs4"]'
-                echo 'path = "/usr/bin/obfs4proxy"'
-                ;;
-        esac
+        # One [[bridges.transports]] stanza per named transport, same
+        # comma-separated list and same race rationale as apply_bridge_config().
+        for transport in $(echo "$TOR_CLIENT_TRANSPORT_PLUGIN" | tr ',' ' '); do
+            case "$transport" in
+                snowflake)
+                    pt_path="/usr/bin/snowflake-client"
+                    ;;
+                obfs4|meek_lite|obfs2|obfs3|scramblesuit)
+                    pt_path="/usr/bin/obfs4proxy"
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+            echo ""
+            echo "[[bridges.transports]]"
+            printf 'protocols = ["%s"]\n' "$transport"
+            printf 'path = "%s"\n' "$pt_path"
+        done
     } >> "$target"
     echo "Bridge/pluggable-transport support enabled for $target (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
 }

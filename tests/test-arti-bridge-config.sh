@@ -118,6 +118,59 @@ else
     fail "idempotency violated: found $count [bridges] tables after running twice"
 fi
 
+# --- (d) multiple transports: comma-separated list yields one stanza each ---
+# A censored network rarely leaves every transport usable at once, so the
+# config lists several and Arti races them; each must get its own
+# [[bridges.transports]] stanza mapped to the right binary.
+TOR_BRIDGE_LINES="snowflake 192.0.2.1:80 FPRINT1;obfs4 192.0.2.9:443 FPRINT9 cert=abc iat-mode=0;meek_lite 192.0.2.20:80 FPRINT20 url=https://example.invalid front=x"
+TOR_CLIENT_TRANSPORT_PLUGIN="snowflake,obfs4,meek_lite"
+export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN
+target="$TMPDIR_TEST/multi.toml"
+printf 'listen_addr = "0.0.0.0:9050"\n' > "$target"
+apply_arti_bridge_config "$target"
+
+stanza_count=$(grep -c '\[\[bridges.transports\]\]' "$target")
+if [ "$stanza_count" -eq 3 ]; then
+    pass "one [[bridges.transports]] stanza per listed transport"
+else
+    fail "expected 3 transport stanzas, found $stanza_count"
+fi
+
+if grep -q 'protocols = \["snowflake"\]' "$target" \
+   && grep -q 'protocols = \["obfs4"\]' "$target" \
+   && grep -q 'protocols = \["meek_lite"\]' "$target"; then
+    pass "names each transport in its own stanza"
+else
+    fail "missing one of the snowflake/obfs4/meek_lite stanzas"
+fi
+
+# snowflake → snowflake-client; obfs4 and meek_lite both → obfs4proxy.
+if [ "$(grep -c 'path = "/usr/bin/snowflake-client"' "$target")" -eq 1 ] \
+   && [ "$(grep -c 'path = "/usr/bin/obfs4proxy"' "$target")" -eq 2 ]; then
+    pass "maps each transport to the correct binary (obfs4proxy shared by obfs4+meek_lite)"
+else
+    fail "transport-to-binary mapping wrong"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -c '
+import sys
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        sys.exit(0)
+with open(sys.argv[1], "rb") as f:
+    tomllib.load(f)
+' "$target"; then
+        pass "multi-transport output parses as valid TOML"
+    else
+        fail "multi-transport output is not valid TOML"
+    fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     echo "All apply_arti_bridge_config() tests passed."
     exit 0
