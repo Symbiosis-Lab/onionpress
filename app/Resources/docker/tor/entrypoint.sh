@@ -24,6 +24,15 @@ TOR_IMPL="${TOR_IMPL:-tor}"
 apply_bridge_config() {
     [ -n "$TOR_BRIDGE_LINES" ] || return 0
     echo "UseBridges 1" >> /etc/tor/torrc
+    # Upstream proxy for the pluggable transport's dial-out. When TOR_UPSTREAM_PROXY
+    # is set, C Tor exports it to the PT as TOR_PT_PROXY, so obfs4proxy makes the
+    # bridge connection THROUGH this proxy (e.g. a local VPN's SOCKS port) — the
+    # only thing that reliably crosses an aggressively-censored network in the
+    # windows where every direct transport is being disrupted. Emitted only
+    # alongside a bridge on purpose: with a proxy but no bridge, Tor would hand the
+    # proxy public *relay* IPs, and a VPN that blocklists Tor relays routes those
+    # direct (→ GFW reset); a bridge IP isn't relay-listed, so the proxy tunnels it.
+    [ -n "${TOR_UPSTREAM_PROXY:-}" ] && echo "Socks5Proxy $TOR_UPSTREAM_PROXY" >> /etc/tor/torrc
     # One ClientTransportPlugin line per named transport. meek_lite/obfs2/obfs3/
     # scramblesuit are all implemented by the same obfs4proxy binary.
     for transport in $(echo "$TOR_CLIENT_TRANSPORT_PLUGIN" | tr ',' ' '); do
