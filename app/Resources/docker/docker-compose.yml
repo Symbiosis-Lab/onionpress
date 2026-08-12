@@ -1,6 +1,6 @@
 services:
   tor:
-    image: ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:3caa6eb34faae56ad7686991ca6598cc81281352c5530856af34ecddaceed8dd
+    image: ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545
     container_name: onionpress-tor
     logging:
       driver: json-file
@@ -16,6 +16,7 @@ services:
       - TOR_IMPL=${TOR_IMPL:-tor}
       - TOR_BRIDGE_LINES=${TOR_BRIDGE_LINES:-}
       - TOR_CLIENT_TRANSPORT_PLUGIN=${TOR_CLIENT_TRANSPORT_PLUGIN:-}
+      - TOR_UPSTREAM_PROXY=${TOR_UPSTREAM_PROXY:-}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
     volumes:
       - arti-state:/var/lib/arti/
@@ -131,7 +132,7 @@ services:
     restart: unless-stopped
 
   onionheaven:
-    image: ${ONIONHEAVEN_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:3caa6eb34faae56ad7686991ca6598cc81281352c5530856af34ecddaceed8dd}
+    image: ${ONIONHEAVEN_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545}
     container_name: onionheaven
     logging:
       driver: json-file
@@ -147,6 +148,7 @@ services:
       - TOR_IMPL=${TOR_IMPL:-tor}
       - TOR_BRIDGE_LINES=${TOR_BRIDGE_LINES:-}
       - TOR_CLIENT_TRANSPORT_PLUGIN=${TOR_CLIENT_TRANSPORT_PLUGIN:-}
+      - TOR_UPSTREAM_PROXY=${TOR_UPSTREAM_PROXY:-}
       - NO_ONION_SERVICE=1
       - ONIONHEAVEN=1
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}

@@ -145,8 +145,18 @@ CLOUDFLARE_TUNNEL_TOKEN=
 # https://bridges.torproject.org/, or — if that is blocked too — by emailing
 # bridges@torproject.org from a Gmail or Riseup address with "get transport
 # obfs4" in the body.
+#
+# TOR_UPSTREAM_PROXY (host:port) routes the pluggable transport's own dial-out
+# through a local SOCKS5 proxy — for networks where even the bridge connection
+# is disrupted but a separate circumvention proxy works. Only obfs4 honors it
+# (snowflake's client rejects proxies), and it only takes effect alongside
+# TOR_BRIDGE_LINES: with a proxy but no bridge, Tor would hand the proxy
+# public relay IPs, which is exactly what such networks reset. The address
+# must be reachable from inside the container (a proxy on the host's
+# loopback is not — forward it to the docker-bridge gateway first).
 TOR_CLIENT_TRANSPORT_PLUGIN=
 TOR_BRIDGE_LINES=
+TOR_UPSTREAM_PROXY=
 
 # Register with OnionHeaven
 # Default: "yes" (register this site with the OnionHeaven)

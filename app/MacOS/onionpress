@@ -246,6 +246,23 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export TOR_IMPL
 
+# Bridge / pluggable-transport config for censored networks — compose
+# interpolates these into the tor containers' environment, and entrypoint.sh
+# turns them into torrc directives. The Python path (containers.py
+# _build_env) already passes them; without this mirror, a launcher-driven
+# `compose up` interpolates them empty and RECREATES a bridge-configured tor
+# container without its bridges. cut -f2- because bridge lines carry '='
+# inside cert=/url=/ice= values — -f2 would truncate at the first one.
+TOR_BRIDGE_LINES=""
+TOR_CLIENT_TRANSPORT_PLUGIN=""
+TOR_UPSTREAM_PROXY=""
+if [ -f "$DATA_DIR/config" ]; then
+    TOR_BRIDGE_LINES=$(grep "^TOR_BRIDGE_LINES=" "$DATA_DIR/config" | cut -d= -f2-)
+    TOR_CLIENT_TRANSPORT_PLUGIN=$(grep "^TOR_CLIENT_TRANSPORT_PLUGIN=" "$DATA_DIR/config" | cut -d= -f2-)
+    TOR_UPSTREAM_PROXY=$(grep "^TOR_UPSTREAM_PROXY=" "$DATA_DIR/config" | cut -d= -f2-)
+fi
+export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN TOR_UPSTREAM_PROXY
+
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
 # mounted into the Colima VM.
@@ -291,6 +308,9 @@ _start_takeover_worker() {
         --log-opt max-file=3 \
         -e TZ="${TZ:-UTC}" \
         -e TOR_IMPL="${TOR_IMPL:-tor}" \
+        -e TOR_BRIDGE_LINES="${TOR_BRIDGE_LINES:-}" \
+        -e TOR_CLIENT_TRANSPORT_PLUGIN="${TOR_CLIENT_TRANSPORT_PLUGIN:-}" \
+        -e TOR_UPSTREAM_PROXY="${TOR_UPSTREAM_PROXY:-}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-10}" \

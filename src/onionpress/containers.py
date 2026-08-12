@@ -94,6 +94,11 @@ class ContainerManager:
             env["TOR_CLIENT_TRANSPORT_PLUGIN"] = read_value(
                 self.paths.config_file, "TOR_CLIENT_TRANSPORT_PLUGIN", ""
             )
+            # Only meaningful alongside a bridge (entrypoint.sh emits
+            # Socks5Proxy only then), so it rides inside the same guard.
+            env["TOR_UPSTREAM_PROXY"] = read_value(
+                self.paths.config_file, "TOR_UPSTREAM_PROXY", ""
+            )
 
         return env
 
@@ -299,6 +304,7 @@ class ContainerManager:
         )
         bridge_lines = read_value(self.paths.config_file, "TOR_BRIDGE_LINES", "")
         transport_plugin = read_value(self.paths.config_file, "TOR_CLIENT_TRANSPORT_PLUGIN", "")
+        upstream_proxy = read_value(self.paths.config_file, "TOR_UPSTREAM_PROXY", "")
 
         result = self.docker.run([
             "run", "-d",
@@ -311,6 +317,7 @@ class ContainerManager:
             "-e", f"TOR_IMPL={tor_impl}",
             "-e", f"TOR_BRIDGE_LINES={bridge_lines}",
             "-e", f"TOR_CLIENT_TRANSPORT_PLUGIN={transport_plugin}",
+            "-e", f"TOR_UPSTREAM_PROXY={upstream_proxy}",
             "-e", "TAKEOVER_WORKER=1",
             "-e", f"CONTAINER_NAME={name}",
             "-e", f"MAX_TAKEOVER_SERVICES={max_services}",
