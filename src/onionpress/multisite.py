@@ -358,6 +358,18 @@ def install_static_site_conf(
     if r.returncode != 0:
         log(f"WARNING: Failed to enable static-site Apache conf: "
             f"{r.stderr.strip()[:200]}")
+        # The chain is not atomic: a2enconf can succeed and then
+        # `apache2ctl graceful` fail, leaving the conf-enabled symlink in
+        # place while Apache still serves the old config. That is exactly
+        # the state ensure_static_site_conf's presence probe reads as
+        # "healthy" — so it would short-circuit forever on a conf that
+        # never took effect, recreating the silent-forever failure this
+        # pair exists to end. Back the symlink out so the probe stays
+        # honest and the next start retries.
+        try:
+            _exec_sh("a2disconf onionpress-static-site", docker_bin=docker_bin)
+        except Exception:
+            pass  # best-effort cleanup; the warning above is the signal
         return False
 
     log("Static-first Apache conf installed "
@@ -389,7 +401,17 @@ def ensure_static_site_conf(
 
     Cheap by design — one `test -e` in the container on the happy path,
     with no docker cp and no Apache reload, so it is safe to call on every
-    start including the fast already-running path.
+    start including the fast already-running path. The tradeoff is that it
+    tests presence, not content: an app update shipping a revised
+    onionpress-static-site.conf will NOT refresh a stale one already in the
+    container. That is deliberate — comparing content on every start costs
+    a docker cp plus an Apache reload, and an app update recreates the
+    container anyway (dropping the conf entirely), so provision_post_install
+    installs the new version on the very next start.
+
+    Only the macOS launcher needs this. The Linux launcher's `start` has no
+    already-running short-circuit — it always runs start_containers, which
+    already calls provision-post-install with --apache-conf-dir.
 
     Returns True if the conf is present or was successfully restored.
     Best-effort like install_static_site_conf: never raises, so it can
@@ -401,18 +423,32 @@ def ensure_static_site_conf(
             "test -e /etc/apache2/conf-enabled/onionpress-static-site.conf",
             docker_bin=docker_bin,
         )
-    except Exception as e:  # container down, docker missing, timeout
-        log(f"WARNING: could not check static-site Apache conf: {e}")
+        if present.returncode == 0:
+            return True
+
+        # Tell "the conf is absent" apart from "I couldn't ask". `test -e`
+        # reports absence with rc=1 and an EMPTY stderr; the docker CLI
+        # reports a dead daemon or a stopped/absent container with rc=1 and
+        # a message ON stderr. Without this split, a stopped container logs
+        # the recreate-detected line below and runs a pointless copy —
+        # inverting the diagnostic value of the one line this whole
+        # function exists to emit.
+        if present.stderr.strip():
+            log("WARNING: could not check static-site Apache conf: "
+                f"{present.stderr.strip()[:200]}")
+            return False
+
+        log("Static-first Apache conf missing (container recreated?) — "
+            "reinstalling so moss generations are served ahead of WordPress")
+        return install_static_site_conf(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
+        )
+    except Exception as e:  # docker missing, daemon hang, timeout
+        # Deliberately spans the reinstall as well as the probe: _docker_cp
+        # and _exec_sh raise TimeoutExpired/OSError rather than returning a
+        # non-zero rc, and this function promises callers it never raises.
+        log(f"WARNING: could not ensure static-site Apache conf: {e}")
         return False
-
-    if present.returncode == 0:
-        return True
-
-    log("Static-first Apache conf missing (container recreated?) — "
-        "reinstalling so moss generations are served ahead of WordPress")
-    return install_static_site_conf(
-        conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
-    )
 
 
 def install_onionpress_theme(

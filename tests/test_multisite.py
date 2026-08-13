@@ -256,6 +256,45 @@ class TestInstallStaticSiteConf(unittest.TestCase):
         # Never tries to enable a conf it failed to copy.
         ex.assert_not_called()
 
+    def test_backs_the_conf_out_when_the_reload_fails(self):
+        # a2enconf && apache2ctl graceful is not atomic. If the symlink is
+        # created and then the reload fails, the conf LOOKS installed to
+        # ensure_static_site_conf's presence probe while Apache is still
+        # serving the old config — so every later start short-circuits on a
+        # conf that never took effect. Undoing the symlink keeps the probe
+        # honest and lets the next start retry.
+        exec_calls = []
+
+        def fake_exec(command, **kwargs):
+            exec_calls.append(command)
+            return _err(stderr="apache2ctl: syntax error")
+
+        with mock.patch.object(multisite, "_docker_cp", return_value=_ok()), \
+             mock.patch.object(multisite, "_exec_sh", side_effect=fake_exec), \
+             mock.patch("os.path.isfile", return_value=True):
+            ok = multisite.install_static_site_conf(
+                conf_dir="/x", log_func=lambda _: None)
+
+        self.assertFalse(ok)
+        self.assertEqual(len(exec_calls), 2)
+        self.assertIn("a2disconf onionpress-static-site", exec_calls[1])
+
+    def test_reload_failure_survives_a_failing_rollback(self):
+        # The rollback is best-effort: it shells out too, and must not turn
+        # a reported failure into a raised one on the launcher's start path.
+        def fake_exec(command, **kwargs):
+            if "a2disconf" in command:
+                raise subprocess.TimeoutExpired(cmd="docker", timeout=60)
+            return _err(stderr="boom")
+
+        with mock.patch.object(multisite, "_docker_cp", return_value=_ok()), \
+             mock.patch.object(multisite, "_exec_sh", side_effect=fake_exec), \
+             mock.patch("os.path.isfile", return_value=True):
+            ok = multisite.install_static_site_conf(
+                conf_dir="/x", log_func=lambda _: None)
+
+        self.assertFalse(ok)
+
 
 class TestEnsureStaticSiteConf(unittest.TestCase):
     """The conf lands in container rootfs, not a volume, so a container
@@ -281,16 +320,41 @@ class TestEnsureStaticSiteConf(unittest.TestCase):
                       ex.call_args_list[0].args[0])
 
     def test_reinstalls_when_conf_missing(self):
-        with mock.patch.object(multisite, "_exec_sh", return_value=_err()), \
+        # `test -e` on a missing file: rc=1 with NOTHING on stderr. That
+        # empty stderr is load-bearing — see the docker-error test below.
+        with mock.patch.object(multisite, "_exec_sh",
+                               return_value=_err(stderr="")), \
              mock.patch.object(multisite, "install_static_site_conf",
                                return_value=True) as inst:
             ok = multisite.ensure_static_site_conf(
-                conf_dir="/x/docker/wordpress", log_func=lambda _: None)
+                conf_dir="/x/docker/wordpress", docker_bin="/b/docker",
+                log_func=lambda _: None)
 
         self.assertTrue(ok)
         inst.assert_called_once()
         self.assertEqual(inst.call_args.kwargs.get("conf_dir"),
                          "/x/docker/wordpress")
+        # The launcher passes a bundled docker binary; losing it here would
+        # send the repair to a docker that may not be on PATH.
+        self.assertEqual(inst.call_args.kwargs.get("docker_bin"), "/b/docker")
+
+    def test_docker_error_is_not_mistaken_for_a_missing_conf(self):
+        # A stopped container or dead daemon also exits non-zero, but writes
+        # to stderr. Treating that as "conf missing" would log the
+        # recreate-detected line and run a doomed copy — turning the one
+        # diagnostic this function exists to emit into a false alarm.
+        logged = []
+        with mock.patch.object(
+                multisite, "_exec_sh",
+                return_value=_err(stderr="Error: No such container")), \
+             mock.patch.object(multisite, "install_static_site_conf") as inst:
+            ok = multisite.ensure_static_site_conf(
+                conf_dir="/x", log_func=logged.append)
+
+        self.assertFalse(ok)
+        inst.assert_not_called()
+        self.assertTrue(any("could not check" in m for m in logged), logged)
+        self.assertFalse(any("recreated" in m for m in logged), logged)
 
     def test_never_raises_when_docker_unavailable(self):
         # This runs on the launcher's start path, so an exception escaping
@@ -304,6 +368,33 @@ class TestEnsureStaticSiteConf(unittest.TestCase):
 
         self.assertFalse(ok)
         inst.assert_not_called()
+
+    def test_never_raises_when_the_repair_itself_raises(self):
+        # The probe is not the only thing that can throw: the reinstall
+        # shells out too, and _docker_cp/_exec_sh raise TimeoutExpired on a
+        # wedged daemon rather than returning non-zero. A `try` around only
+        # the probe would let that escape into the launcher.
+        with mock.patch.object(multisite, "_exec_sh",
+                               return_value=_err(stderr="")), \
+             mock.patch.object(
+                 multisite, "install_static_site_conf",
+                 side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=60)):
+            ok = multisite.ensure_static_site_conf(
+                conf_dir="/x", log_func=lambda _: None)
+
+        self.assertFalse(ok)
+
+    def test_reports_failure_when_the_repair_fails(self):
+        # A failed reinstall must not be laundered into a success — moss
+        # would go on publishing to a site the onion never serves.
+        with mock.patch.object(multisite, "_exec_sh",
+                               return_value=_err(stderr="")), \
+             mock.patch.object(multisite, "install_static_site_conf",
+                               return_value=False):
+            ok = multisite.ensure_static_site_conf(
+                conf_dir="/x", log_func=lambda _: None)
+
+        self.assertFalse(ok)
 
 
 class TestProvisionInjectsStaticConf(unittest.TestCase):
