@@ -54,11 +54,19 @@ define( 'OP_WB_STALE_PENDING_SEC', 300 );
 // chunks at a 40s timeout.
 //
 // What the budget actually protects is the lock. The loop heartbeats
-// op_wayback_sweep_lock once per iteration, so an iteration that outruns
-// OP_WB_LOOP_LOCK_STALE_SEC lets a second daemon declare the lock dead and
-// start up alongside this one, both writing the same records. Hence a
-// value comfortably under that threshold rather than the old 45.
-define( 'OP_WB_SWEEP_BUDGET_SEC', 240 );
+// op_wayback_sweep_lock around each iteration, so an iteration that
+// outruns OP_WB_LOOP_LOCK_STALE_SEC lets a second daemon declare the lock
+// dead and start up alongside this one, both writing the same records.
+//
+// The bound has to be stated as budget PLUS overshoot, because every gate
+// is checked on phase entry and the phase it admits then runs to its own
+// timeout. Each phase re-checks, so at most one can overshoot:
+//   poll    entering at the line: 1 group             = +40s
+//   CDX     entering at the line: 1 group             = +25s
+//   submit  entering at the line: 20s probe + 1 group = +60s  <- worst
+// So one iteration is at most BUDGET + 60. At the old 240 that is exactly
+// 300 — the stale threshold, with no margin at all. 200 leaves 40s.
+define( 'OP_WB_SWEEP_BUDGET_SEC', 200 );
 
 // Don't poll a job younger than this — SPN's minimum capture time is
 // ~20s, so polling immediately wastes a Tor round-trip on a guaranteed
@@ -90,6 +98,12 @@ define( 'OP_WB_LOOP_LOCK_STALE_SEC', 300 );// lock not heartbeated in this long 
 // the read stale. Recycling on a timer breaks that circuit: cron starts
 // a fresh process with a fresh cache within a minute or two.
 define( 'OP_WB_LOOP_MAX_SEC',      1800 ); // recycle the daemon every 30 min
+
+// How long a self-reachability verdict may be reused. One iteration
+// visits every subsite and asks once per subsite, but the answer belongs
+// to the onion service, not the subsite. Short enough that a recovering
+// onion is noticed within an iteration or two.
+define( 'OP_WB_SELF_REACHABLE_TTL',  60 );
 
 // Back-off durations (written to op_wayback_backoff_until option).
 define( 'OP_WB_BACKOFF_NO_SLOTS',    20 );  // SPN says available=0
@@ -229,6 +243,18 @@ function onionpress_wayback_self_reachable( $onion ) {
     if ( $mock !== null ) {
         return (bool) $mock;
     }
+    // Short-lived memo. The daemon calls this once per subsite per loop
+    // iteration, and the answer is a property of the onion service, not of
+    // the subsite — on a four-blog network that was four identical 20s Tor
+    // round-trips inside one iteration, spent out of the same budget the
+    // iteration has to finish in. Deliberately a TTL and not a plain
+    // static: this process lives up to OP_WB_LOOP_MAX_SEC, and caching a
+    // "down" verdict for half an hour would outlast the outage.
+    static $memo = array(); // onion => array( expires_at, result )
+    $mono = microtime( true );
+    if ( isset( $memo[ $onion ] ) && $memo[ $onion ][0] > $mono ) {
+        return $memo[ $onion ][1];
+    }
     $ch = curl_init( 'http://' . $onion . '/' );
     onionpress_wayback_curl_common( $ch );
     curl_setopt_array( $ch, array(
@@ -239,7 +265,9 @@ function onionpress_wayback_self_reachable( $onion ) {
     curl_exec( $ch );
     $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
     curl_close( $ch );
-    return $code === 200 || $code === 301;
+    $ok = ( $code === 200 || $code === 301 );
+    $memo[ $onion ] = array( $mono + OP_WB_SELF_REACHABLE_TTL, $ok );
+    return $ok;
 }
 
 /**
@@ -303,6 +331,17 @@ function onionpress_wayback_user_status() {
 function onionpress_wayback_curl_multi( array $setups ) {
     if ( empty( $setups ) ) {
         return array();
+    }
+    // Test hook: return a keyed array of ['code'=>int,'body'=>string] to
+    // stand in for the whole parallel fetch. This is the only seam below
+    // the per-caller mocks, and it exists so the response-handling code
+    // above it — chunk/result alignment, the HTTP-200 gate, the
+    // coverage bookkeeping in poll_parallel — can be tested at all.
+    // Mocking each caller instead left that code with no tests, which is
+    // precisely where a silent misclassification would live.
+    $mock = apply_filters( 'onionpress_wayback_curl_multi_mock', null, $setups );
+    if ( is_array( $mock ) ) {
+        return $mock;
     }
     $mh = curl_multi_init();
     $handles = array();
@@ -545,7 +584,16 @@ function onionpress_wayback_poll_parallel( array $job_ids, &$covered = null ) {
         foreach ( $raw as $i => $r ) {
             if ( $r['code'] !== 200 || empty( $r['body'] ) ) continue;
             $data = @json_decode( $r['body'], true );
-            if ( ! is_array( $data ) ) continue;
+            // Must be a JSON *list* of status dicts. A 200 carrying an
+            // object — {"message":"..."} for a rate limit, an auth error,
+            // a maintenance notice — decodes to an array too, and counting
+            // that as an answer would mark all 20 job_ids in the batch
+            // covered on the strength of a response containing no statuses
+            // at all. The forgotten loop would then read it as "SPN
+            // answered and mentioned none of them" and resubmit the batch:
+            // the same over-eager clearing the coverage tracking exists to
+            // prevent, just through a narrower door.
+            if ( ! is_array( $data ) || ! array_is_list( $data ) ) continue;
             // This batch answered, so every job_id in it is now accounted
             // for: any of them missing from $data really is one SPN has
             // forgotten, not one we failed to ask about. Keyed by $i,
@@ -842,8 +890,34 @@ function onionpress_wayback_queue_totals() {
 function onionpress_wayback_sweep_loop( $token ) {
     $lock_key     = 'op_wayback_sweep_lock';
     $loop_start   = microtime( true );
-    $totals       = array( 'submitted' => 0, 'success' => 0, 'cdx' => 0, 'error' => 0, 'forgotten' => 0 );
+    // Every key here is summed from sweep_iteration()'s return, by name —
+    // a key present in one and not the other silently stays 0, so the two
+    // lists have to be kept in step. 'lost' is here because a sustained
+    // poll outage is otherwise invisible in the summary lines an operator
+    // actually reads: each sweep prints its own poll-lost, but the drained
+    // and recycling lines are where you go to ask why nothing happened.
+    $totals       = array(
+        'submitted' => 0, 'success' => 0, 'cdx' => 0,
+        'error'     => 0, 'forgotten' => 0, 'lost' => 0,
+    );
     $last_progress = $loop_start;
+
+    // Refresh the lock's timestamp, but only while it is still ours —
+    // stamping our token onto a successor's claim would evict a daemon
+    // that legitimately took over. Returns false once we have lost it.
+    //
+    // MUST be called in the invoking blog's context, never between a
+    // switch_to_blog() and its restore: options are per-subsite, so a
+    // heartbeat inside a switch writes a second lock into the wrong
+    // options table and leaves the real one to go stale.
+    $heartbeat = function () use ( $lock_key, $token ) {
+        $cur = (string) get_option( $lock_key, '' );
+        if ( strpos( $cur, $token . ':' ) !== 0 ) {
+            return false;
+        }
+        update_option( $lock_key, $token . ':' . time(), false );
+        return true;
+    };
 
     onionpress_wayback_log( 'Loop: starting daemon sweep (token=' . substr( $token, 0, 6 ) . ')' );
     $iter = 0;
@@ -852,12 +926,10 @@ function onionpress_wayback_sweep_loop( $token ) {
         // Lock ownership check — if another daemon has claimed the
         // lock (possible if our heartbeat lapsed past stale threshold),
         // exit gracefully. Also heartbeats the ts if we still own it.
-        $cur = (string) get_option( $lock_key, '' );
-        if ( strpos( $cur, $token . ':' ) !== 0 ) {
+        if ( ! $heartbeat() ) {
             onionpress_wayback_log( 'Loop: lock taken by another daemon, exiting (token=' . substr( $token, 0, 6 ) . ', iter=' . $iter . ')' );
             return;
         }
-        update_option( $lock_key, $token . ':' . time(), false );
 
         // Lifetime cap. Exiting here is not giving up: the queue is
         // unchanged and the next cron tick starts a fresh daemon that picks
@@ -874,11 +946,11 @@ function onionpress_wayback_sweep_loop( $token ) {
         if ( $runtime >= $max_sec ) {
             onionpress_wayback_log( sprintf(
                 'Loop: recycling after %dm%02ds (%d iterations, cap=%ds) — '
-                . 'submitted=%d archived=%d cdx-hit=%d forgotten=%d errors=%d; '
+                . 'submitted=%d archived=%d cdx-hit=%d forgotten=%d errors=%d poll-lost=%d; '
                 . 'cron restarts a fresh daemon',
                 intdiv( $runtime, 60 ), $runtime % 60, $iter - 1, $max_sec,
                 $totals['submitted'], $totals['success'], $totals['cdx'],
-                $totals['forgotten'], $totals['error']
+                $totals['forgotten'], $totals['error'], $totals['lost']
             ) );
             // Hand off immediately rather than making the queue wait out
             // LOCK_STALE_SEC for a daemon we know has exited cleanly.
@@ -888,11 +960,15 @@ function onionpress_wayback_sweep_loop( $token ) {
             // drive pseudo-cron. Deliberately NOT kick_now(): that also
             // clears the back-off, and a back-off set by the sweep we are
             // recycling out of is a decision worth keeping.
-            wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array(
-                'timeout' => 0.01, 'blocking' => false, 'sslverify' => false,
-            ) );
+            //
+            // Gated on a non-zero lifetime because a cap of 0 is the test
+            // seam: firing a real loopback there would start a genuine
+            // half-hour production daemon out of a unit test, and at cap=0
+            // every successor would recycle on its own first iteration —
+            // a restart loop rather than a handoff.
+            if ( $runtime > 0 ) {
+                onionpress_wayback_schedule_sweep_now( 'recycle' );
+            }
             return;
         }
 
@@ -908,6 +984,15 @@ function onionpress_wayback_sweep_loop( $token ) {
 
         $any_work = false;
         foreach ( $sites as $site ) {
+            // Heartbeat per SUBSITE, not just per loop iteration. Each
+            // sweep_iteration() below gets its own OP_WB_SWEEP_BUDGET_SEC,
+            // so on a four-blog network one pass through this foreach can
+            // run four full budgets — far past OP_WB_LOOP_LOCK_STALE_SEC —
+            // while the lock's timestamp sat untouched from the top of the
+            // iteration. A second daemon would then read the lock as dead
+            // and both would write the same records. Before switch_to_blog,
+            // because the lock lives in the invoking blog's options table.
+            $heartbeat();
             $bid = (int) $site->blog_id;
             if ( function_exists( 'switch_to_blog' ) ) {
                 switch_to_blog( $bid );
@@ -963,10 +1048,10 @@ function onionpress_wayback_sweep_loop( $token ) {
         if ( ! $any_work ) {
             $runtime = (int) ( microtime( true ) - $loop_start );
             onionpress_wayback_log( sprintf(
-                'Loop: drained — %d iterations, %dm%02ds, submitted=%d archived=%d cdx-hit=%d forgotten=%d errors=%d',
+                'Loop: drained — %d iterations, %dm%02ds, submitted=%d archived=%d cdx-hit=%d forgotten=%d errors=%d poll-lost=%d',
                 $iter, intdiv( $runtime, 60 ), $runtime % 60,
                 $totals['submitted'], $totals['success'], $totals['cdx'],
-                $totals['forgotten'], $totals['error']
+                $totals['forgotten'], $totals['error'], $totals['lost']
             ) );
             return;
         }
@@ -983,12 +1068,13 @@ function onionpress_wayback_sweep_loop( $token ) {
             $sub_per_min = round( ( $totals['submitted'] * 60 ) / $runtime, 1 );
             $qstats = onionpress_wayback_queue_totals();
             onionpress_wayback_log( sprintf(
-                'Loop progress: %dm%02ds iter=%d | archived=%d/%d (%s/min captured, %s remaining) | submitted=%d (%s/min) cdx=%d forgotten=%d errors=%d',
+                'Loop progress: %dm%02ds iter=%d | archived=%d/%d (%s/min captured, %s remaining) | submitted=%d (%s/min) cdx=%d forgotten=%d errors=%d poll-lost=%d',
                 intdiv( $runtime, 60 ), $runtime % 60, $iter,
                 $qstats['archived'], $qstats['total'],
                 $cap_per_min, $qstats['remaining'],
                 $totals['submitted'], $sub_per_min,
-                $totals['cdx'], $totals['forgotten'], $totals['error']
+                $totals['cdx'], $totals['forgotten'], $totals['error'],
+                $totals['lost']
             ) );
         }
 
@@ -999,6 +1085,14 @@ function onionpress_wayback_sweep_loop( $token ) {
         $sleep = ( $backoff_until > $now )
             ? ( $backoff_until - $now )
             : OP_WB_LOOP_IDLE_SLEEP;
+        // Heartbeat before sleeping, not just at the top of the iteration.
+        // The sleep sits OUTSIDE the work the sweep budget bounds, and with
+        // OP_WB_BACKOFF_UNREACHABLE it is 120s — so a budget-length iteration
+        // followed by an unreachable back-off leaves the lock untouched for
+        // well past OP_WB_LOOP_LOCK_STALE_SEC on the nominal path, not in
+        // some worst case. A second daemon then declares this one dead and
+        // both write the same records.
+        $heartbeat();
         sleep( max( 5, $sleep ) );
     }
 }
@@ -1023,6 +1117,13 @@ function onionpress_wayback_sweep_iteration() {
         return;
     }
 
+    // Start the clock here, not after the status call. The budget's whole
+    // job is to keep one iteration inside OP_WB_LOOP_LOCK_STALE_SEC, and
+    // the status call below can sit on a 20s Tor timeout — 20s the lock
+    // heartbeat experiences and, until this moved, the budget did not.
+    // It also makes the elapsed= in the log the iteration's real cost.
+    $deadline = microtime( true ) + OP_WB_SWEEP_BUDGET_SEC;
+
     // Gate: do we have SPN slots? If the check itself fails (Tor
     // jitter, SPN briefly unreachable), assume we have slots and
     // proceed. The worst case is one wasted submit batch — better
@@ -1034,13 +1135,14 @@ function onionpress_wayback_sweep_iteration() {
         ? OP_WB_SUBMIT_BATCH_MAX // optimistic default
         : (int) ( $user['available'] ?? 0 );
     if ( $user !== null && $available <= 0 ) {
-        update_option( OP_WB_OPT_BACKOFF_UNTIL, $now + OP_WB_BACKOFF_NO_SLOTS, false );
+        // time() rather than $now for the same reason as the unreachable
+        // back-off below: $now predates the status call this branch reacts
+        // to, and a 20s pause dated 20s ago is not a pause.
+        update_option( OP_WB_OPT_BACKOFF_UNTIL, time() + OP_WB_BACKOFF_NO_SLOTS, false );
         onionpress_wayback_log( 'Sweep paused: available=0 processing='
             . ( $user['processing'] ?? '?' ) . ', backing off ' . OP_WB_BACKOFF_NO_SLOTS . 's' );
         return;
     }
-
-    $deadline = microtime( true ) + OP_WB_SWEEP_BUDGET_SEC;
 
     // ---- Step A: poll all outstanding job_ids in batches ----
     $in_flight = onionpress_wayback_posts_with_in_flight();
@@ -1078,6 +1180,29 @@ function onionpress_wayback_sweep_iteration() {
         if ( $age === null || $age >= OP_WB_YOUNG_JOB_SKIP_SEC ) {
             $ripe_job_ids[] = $jid;
         }
+    }
+    // Counted before the budget cap below trims the list, so the log keeps
+    // telling these two apart: "too young to be worth polling" and "no time
+    // left to poll it this iteration" are different problems.
+    $skipped_young = count( $in_flight ) - count( $ripe_job_ids );
+
+    // Bound the poll by the time left, the same way the submit below is
+    // bounded. poll_parallel runs ceil(N / (CONCURRENT_MAX * STATUS_BATCH_MAX))
+    // SEQUENTIAL groups, each able to sit on its 40s curl timeout, so its
+    // cost grows with the backlog without limit — it was the one phase of
+    // the iteration with no budget check at all, and the phase most likely
+    // to blow the budget is exactly the one that runs when the queue is
+    // deepest. Jobs cut here are simply absent from $ripe_job_ids, so they
+    // are neither polled nor judged forgotten; the next iteration takes
+    // them. Floor at one group so a huge backlog still makes progress.
+    $poll_per_group  = OP_WB_CONCURRENT_MAX * OP_WB_STATUS_BATCH_MAX;
+    $poll_groups_fit = max( 1, (int) floor(
+        max( 0, $deadline - microtime( true ) ) / 40
+    ) );
+    $poll_cap     = $poll_groups_fit * $poll_per_group;
+    $polled_capped = max( 0, count( $ripe_job_ids ) - $poll_cap );
+    if ( $polled_capped > 0 ) {
+        $ripe_job_ids = array_slice( $ripe_job_ids, 0, $poll_cap );
     }
 
     $polled_success = 0;
@@ -1234,8 +1359,12 @@ function onionpress_wayback_sweep_iteration() {
     // can run 320s on its own — long enough to outlive the lock heartbeat
     // no matter what the phase-entry check said. Floor at one group:
     // making no progress at all is worse than one slightly long iteration.
+    // The reachability probe below runs before the submit and costs up to
+    // its own 20s timeout, so the batch has to be sized out of what is left
+    // AFTER paying for it — otherwise the probe is 20s the budget granted
+    // to the submit and then spent on something else.
     $groups_that_fit = max( 1, (int) floor(
-        max( 0, $deadline - microtime( true ) ) / 40
+        max( 0, $deadline - microtime( true ) - 20 ) / 40
     ) );
     $budget = max( 0, min(
         OP_WB_SUBMIT_BATCH_MAX,
@@ -1280,7 +1409,13 @@ function onionpress_wayback_sweep_iteration() {
         // spends a slot to archive a failure page and comes back
         // error:no-captures. Back off instead, using the constant that
         // existed for this and was likewise never referenced.
-        update_option( OP_WB_OPT_BACKOFF_UNTIL, $now + OP_WB_BACKOFF_UNREACHABLE, false );
+        // time(), not $now: $now was captured at the top of the iteration,
+        // before a status call, a poll and a CDX pass that between them can
+        // burn the whole budget. Dating the back-off from then makes a 120s
+        // pause into a 40s one on a normal sweep, and into no pause at all
+        // on the slow sweeps this gate exists for — the daemon would go
+        // straight back to probing every 30s while logging "backing off".
+        update_option( OP_WB_OPT_BACKOFF_UNTIL, time() + OP_WB_BACKOFF_UNREACHABLE, false );
         $submit_skip = 'own onion unreachable';
         onionpress_wayback_log( 'Sweep paused: own onion not answering over Tor, '
             . 'backing off ' . OP_WB_BACKOFF_UNREACHABLE . 's rather than '
@@ -1314,16 +1449,20 @@ function onionpress_wayback_sweep_iteration() {
     // avail now says outright when it is a guess rather than a reading.
     $elapsed = round( microtime( true ) - ( $deadline - OP_WB_SWEEP_BUDGET_SEC ), 2 );
     $notes   = array();
-    if ( $user === null )      $notes[] = 'spn-status=unreachable';
-    if ( $polled_lost > 0 )    $notes[] = 'poll-lost=' . $polled_lost;
-    if ( $cdx_skipped > 0 )    $notes[] = 'cdx-deferred=' . $cdx_skipped;
-    if ( $submit_skip !== '' ) $notes[] = 'submit-skipped=' . str_replace( ' ', '-', $submit_skip );
+    if ( $user === null )       $notes[] = 'spn-status=unreachable';
+    if ( $polled_lost > 0 )     $notes[] = 'poll-lost=' . $polled_lost;
+    if ( $polled_capped > 0 )   $notes[] = 'poll-capped=' . $polled_capped;
+    // "skipped", not "deferred": the $cdx_defer path retires its records,
+    // this one deliberately leaves them for the next sweep. Borrowing the
+    // other path's name would tell a reader the opposite of what happened.
+    if ( $cdx_skipped > 0 )     $notes[] = 'cdx-skipped=' . $cdx_skipped;
+    if ( $submit_skip !== '' )  $notes[] = 'submit-skipped=' . str_replace( ' ', '-', $submit_skip );
     onionpress_wayback_log( sprintf(
         'Sweep: avail=%d%s in-flight=%d polled(success=%d cdx-hit=%d err=%d pending=%d '
         . 'forgotten=%d skipped-young=%d) queued=%d submitted=%d elapsed=%ss%s',
         $available, ( $user === null ? '?' : '' ), count( $in_flight ),
         $polled_success, $polled_cdx_hit, $polled_error, $polled_pending, $polled_unknown,
-        count( $in_flight ) - count( $ripe_job_ids ),
+        $skipped_young,
         count( $to_submit ), $submitted, $elapsed,
         $notes ? ' [' . implode( ' ', $notes ) . ']' : ''
     ) );
@@ -1334,24 +1473,44 @@ function onionpress_wayback_sweep_iteration() {
         'cdx'       => $polled_cdx_hit,
         'error'     => $polled_error,
         'forgotten' => $polled_unknown,
+        'lost'      => $polled_lost,
     );
 }
 add_action( 'onionpress_wayback_sweep', 'onionpress_wayback_sweep' );
 
 /**
- * Clear the sweep back-off and make wp-cron run `onionpress_wayback_sweep`
- * right now instead of waiting for the next organic page view. WP-Cron is
- * pseudo-cron — `wp_schedule_single_event()` alone just marks the event
- * due; nothing runs it until some request triggers WP's cron check. On a
- * low-traffic onion site that "some request" may not happen for a long
- * time, so we also fire the same non-blocking loopback to wp-cron.php
- * that the admin "kick" button uses, forcing the check right away.
+ * Make wp-cron run `onionpress_wayback_sweep` as soon as possible.
+ * $reason is a short slug ('kick', 'recycle', 'comment') identifying the
+ * caller; it is passed as the event's argument and MUST be distinct per
+ * caller — see below.
+ */
+function onionpress_wayback_schedule_sweep_now( $reason ) {
+    // The argument is load-bearing, not annotation. wp_schedule_single_event()
+    // silently refuses — returns false, and every caller here discarded that
+    // return — when an event for the same hook with the same args already
+    // exists within 10 minutes. The recurring watchdog entry has args=[] and
+    // a 300s interval, so it is ALWAYS inside that window: every no-args
+    // call this plugin made scheduled precisely nothing, and what actually
+    // ran the sweep was the recurring event happening to be due. That made
+    // "archive right now" mean "within the next five minutes", which is not
+    // what publish-then-archive is supposed to feel like. Confirmed against
+    // the running WordPress rather than inferred from the docs.
+    wp_schedule_single_event( time(), 'onionpress_wayback_sweep', array( $reason ) );
+    // WP-Cron is pseudo-cron: scheduling only marks the event due, and
+    // nothing runs it until some request triggers WP's cron check. On a
+    // low-traffic onion site that request may not arrive for a long time,
+    // so fire the loopback ourselves and don't wait on it.
+    $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
+    wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+}
+
+/**
+ * Clear the sweep back-off and start a sweep immediately. Used by the
+ * admin "kick" button and by the moss commit route.
  */
 function onionpress_wayback_kick_now() {
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );
-    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
-    $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-    wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+    onionpress_wayback_schedule_sweep_now( 'kick' );
 }
 
 /**
@@ -1465,7 +1624,7 @@ add_action( 'wp_insert_comment', function ( $comment_id, $comment ) {
         'last_error_at'   => '',
     ) );
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );
-    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+    onionpress_wayback_schedule_sweep_now( 'comment' );
     onionpress_wayback_log( 'wp_insert_comment ' . $comment_id
         . ' on post ' . $post_id . ': cleared snapshot for re-archive (one-shot)' );
 }, 10, 2 );
@@ -1490,7 +1649,17 @@ add_action( 'init', function () {
         foreach ( (array) $cron as $ts => $hooks ) {
             if ( isset( $hooks['onionpress_wayback_sweep'] ) ) {
                 foreach ( $hooks['onionpress_wayback_sweep'] as $sig => $entry ) {
-                    if ( ( $entry['schedule'] ?? '' ) !== 'onionpress_wayback_watchdog' ) {
+                    // Only RECURRING entries under the wrong interval. A
+                    // one-shot has schedule === false, and every immediate
+                    // sweep — kick, recycle handoff, comment re-snapshot —
+                    // is a one-shot. This ran on every init, including the
+                    // init inside the very wp-cron.php request the kick had
+                    // just fired, so it deleted those events moments before
+                    // wp_cron() would have run them. Between that and the
+                    // dedupe documented on schedule_sweep_now(), "sweep now"
+                    // had two independent reasons to do nothing at all.
+                    $schedule = $entry['schedule'] ?? '';
+                    if ( $schedule && $schedule !== 'onionpress_wayback_watchdog' ) {
                         wp_unschedule_event( $ts, 'onionpress_wayback_sweep', $entry['args'] ?? array() );
                     }
                 }

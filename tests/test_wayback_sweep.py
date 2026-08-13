@@ -8,23 +8,25 @@ self_reachable) — no real Tor/SPN traffic.
 
 Coverage focus: behaviors that are easy to break during refactors.
   1. Queue totals aggregate across every subsite in the network.
-  2. CDX rescue: SPN flips success->error, CDX still has a capture;
-     the post must end up archived via the CDX timestamp, not errored.
-  3. Young-job skip: a job submitted in the last 15s must NOT be
+  2. Young-job skip: a job submitted in the last 15s must NOT be
      polled (wastes a Tor round-trip on a guaranteed "pending").
-  4. Submit path: a fresh post with no job_id gets one, with a
+  3. Submit path: a fresh post with no job_id gets one, with a
      matching submitted_at, on a successful submit.
-  5. Lock mutex: a fresh lock blocks a second sweep invocation.
+  4. Lock mutex: a fresh lock blocks a second sweep invocation.
 
 The rest guard the ways this engine has actually wedged in production,
 all of which shared one shape — it kept logging a healthy sweep while
 archiving nothing:
-  6. A job SPN has FORGOTTEN (absent from /save/status, not "pending"
+  5. A job SPN has FORGOTTEN (absent from /save/status, not "pending"
      or "error") must be cleared, or that URL deadlocks permanently.
-  7. A job whose status batch never came back must NOT be cleared —
+  6. A job whose status batch never came back must NOT be cleared —
      failing to ask is not the same as being told it is gone.
-  8. A job SPN did answer for must not also be swept up as forgotten,
-     or the CDX rescue loses a capture out from under itself.
+  7. CDX rescue + the $answered guard, in one iteration: an SPN "error"
+     must be verified against CDX before being written off, and must
+     not be swept up as forgotten on the way there.
+  8. Coverage bookkeeping in poll_parallel itself, driven through the
+     curl seam rather than mocked past: only a batch that came back as
+     a JSON list of statuses counts as an answer about its job_ids.
   9. The daemon must recycle on a timer and hand its lock back. It ran
      70 hours in one PHP request, serving option reads from a cache
      that predated the fix being applied to the database.
@@ -140,11 +142,43 @@ class TestWaybackSweepIteration(unittest.TestCase):
     def setUp(self):
         _wp(["option", "delete", "op_wayback_backoff_until"],
             url=self.url, timeout=15)
+        self._save_sitewide_state()
         r = _wp(["post", "create", "--post_type=post", "--post_status=publish",
                  "--post_title=wayback-test-" + self._testMethodName,
                  "--porcelain"], url=self.url, timeout=15)
         self.post_id = int(r.stdout.strip())
         self.addCleanup(self._cleanup_post)
+
+    def _save_sitewide_state(self):
+        """Snapshot the home/feed capture options and restore them after.
+
+        These tests run against a LIVE site, and the home/feed captures are
+        real archive records kept in wp_options rather than post meta. A
+        sweep iteration writes them, and one test seeds them outright — so
+        without this, running the suite marks the site's home page
+        unarchived and the next real sweep spends an SPN slot re-capturing
+        it. The post each test creates is disposable; these options are not.
+        """
+        php = """
+        echo base64_encode(json_encode(array(
+            'op_wayback_home_state' => get_option('op_wayback_home_state', null),
+            'op_wayback_feed_state' => get_option('op_wayback_feed_state', null),
+        )));
+        """
+        saved = _eval(php, self.url)
+        self.addCleanup(self._restore_sitewide_state, saved)
+
+    def _restore_sitewide_state(self, saved):
+        php = """
+        $s = json_decode(base64_decode('%s'), true);
+        if (!is_array($s)) { echo 'no-snapshot'; return; }
+        foreach ($s as $opt => $val) {
+            if ($val === null) { delete_option($opt); }
+            else { update_option($opt, $val, false); }
+        }
+        echo 'restored';
+        """ % saved
+        _eval(php, self.url)
 
     def _cleanup_post(self):
         _wp(["post", "delete", str(self.post_id), "--force"],
@@ -168,41 +202,6 @@ class TestWaybackSweepIteration(unittest.TestCase):
         add_filter('onionpress_wayback_user_status_mock',
                    function() {{ return array('available' => {available}, 'processing' => 0); }});
         """
-
-    def test_cdx_rescues_spn_error(self):
-        """SPN flips success->error; CDX still has capture -> post archived via CDX."""
-        self._set_meta("_op_wayback_job_id", "jid-cdx-test")
-        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 120))
-
-        php = self._common_mocks() + """
-        add_filter('onionpress_wayback_poll_parallel_mock',
-                   function($_, $job_ids) {
-            return array(array(
-                'job_id'     => 'jid-cdx-test',
-                'status'     => 'error',
-                'status_ext' => 'error:no-captures',
-            ));
-        }, 10, 2);
-        add_filter('onionpress_wayback_cdx_lookup_parallel_mock',
-                   function($_, $urls) {
-            $out = array();
-            foreach ($urls as $k => $v) { $out[$k] = '20260101120000'; }
-            return $out;
-        }, 10, 2);
-        add_filter('onionpress_wayback_submit_parallel_mock',
-                   function($_, $urls) {
-            return array_fill_keys(array_keys($urls), '');
-        }, 10, 2);
-        onionpress_wayback_sweep_iteration();
-        echo 'ok';
-        """
-        _eval(php, self.url)
-        self.assertNotEqual("", self._get_meta("_op_wayback_archived_at"),
-            "post should be archived via CDX rescue")
-        self.assertEqual("20260101120000", self._get_meta("_op_wayback_snapshot_ts"),
-            "snapshot_ts should come from the CDX timestamp")
-        self.assertEqual("", self._get_meta("_op_wayback_job_id"),
-            "job_id should be cleared after success")
 
     def test_young_job_is_not_polled(self):
         """A job submitted < YOUNG_JOB_SKIP_SEC ago MUST NOT be polled."""
@@ -262,17 +261,25 @@ class TestWaybackSweepIteration(unittest.TestCase):
         self.assertEqual("", self._get_meta("_op_wayback_submitted_at"),
             "submitted_at must be cleared alongside the job_id")
 
-    def test_answered_job_is_not_also_treated_as_forgotten(self):
-        """The forgotten-sweep runs before the CDX rescue pass, so a job SPN
-        DID answer for must be excluded from it by the $answered set. If it
-        were not, an errored job would be queued for CDX rescue and have its
-        job_id cleared out from under that rescue in the same iteration —
-        losing a capture that CDX would have recovered.
+    def test_cdx_rescue_and_the_answered_guard(self):
+        """Two behaviours that only separate when they run in one iteration.
 
-        Both other forgotten-path tests mock the poll as returning nothing,
-        which leaves $answered empty and never exercises the guard at all.
-        Here SPN answers about one job and stays silent about another, both
-        old enough to clear.
+        1. CDX rescue: SPN flips success->error while the capture is still
+           in CDX, so an errored job must be verified against CDX before
+           being written off, and archived from the CDX timestamp.
+        2. The $answered guard: the forgotten-sweep runs BEFORE that rescue,
+           so a job SPN did answer for must be excluded from it. The guard
+           is what protects the errored records the over-budget CDX path
+           deliberately leaves in flight — without it the next sweep clears
+           exactly those job_ids and the deferral means nothing.
+
+        Asserting on the returned counters, not just the final meta, is
+        the point. Both paths end up writing the same archived_at and
+        snapshot_ts, so a state-only assertion passes with the guard
+        deleted: the forgotten-sweep clears the job_id, then the rescue —
+        holding its own pre-loop snapshot of the errored records —
+        overwrites the result. `forgotten` is the only observable that
+        tells the two apart.
         """
         self._set_meta("_op_wayback_job_id", "jid-answered-test")
         self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 4000))
@@ -301,22 +308,30 @@ class TestWaybackSweepIteration(unittest.TestCase):
                    function($_, $urls) {
             return array_fill_keys(array_keys($urls), '');
         }, 10, 2);
-        onionpress_wayback_sweep_iteration();
+        $stats = onionpress_wayback_sweep_iteration();
         $home = get_option('op_wayback_home_state', array());
-        echo json_encode(array('home_job' => $home['job_id'] ?? ''));
+        $stats['home_job'] = $home['job_id'] ?? '';
+        echo json_encode($stats);
         """
-        out = _eval(php, self.url)
+        stats = json.loads(_eval(php, self.url))
 
-        # The answered job reached CDX rescue and was archived from the
-        # timestamp — proof it was not swept up as "forgotten" first.
+        # Exactly one job was forgotten — the silent one. Two would mean
+        # the answered job was swept up as well.
+        self.assertEqual(1, stats["forgotten"],
+            "only the job SPN stayed silent about may count as forgotten; "
+            f"got {stats['forgotten']} — the $answered guard is not holding")
+        self.assertEqual(1, stats["cdx"],
+            f"the answered job should have been rescued via CDX; got {stats}")
+        # ...and the rescue wrote a real record, from the CDX timestamp.
         self.assertEqual("20260202120000", self._get_meta("_op_wayback_snapshot_ts"),
-            "an SPN-answered job must reach the CDX rescue pass, not be "
-            "cleared as forgotten before it gets there")
+            "snapshot_ts should come from the CDX timestamp")
         self.assertNotEqual("", self._get_meta("_op_wayback_archived_at"),
             "the answered job should end up archived via CDX")
+        self.assertEqual("", self._get_meta("_op_wayback_job_id"),
+            "job_id should be cleared once the capture is recorded")
         # The job SPN stayed silent about is the one that gets cleared.
-        self.assertIn('"home_job":""', out.replace(" ", ""),
-            f"the unanswered job should have been cleared; got: {out}")
+        self.assertEqual("", stats["home_job"],
+            f"the unanswered job should have been cleared; got: {stats}")
 
     def test_job_whose_batch_never_answered_is_not_cleared(self):
         """poll_parallel chunks job_ids 20 at a time and silently drops any
@@ -349,6 +364,10 @@ class TestWaybackSweepIteration(unittest.TestCase):
         self.assertEqual("jid-lost-batch-test", self._get_meta("_op_wayback_job_id"),
             "a job whose status batch never came back must keep its job_id — "
             "we did not learn that SPN forgot it, only that we failed to ask")
+        self.assertNotEqual("", self._get_meta("_op_wayback_submitted_at"),
+            "submitted_at must survive alongside the job_id — clearing it "
+            "alone would make the record read as a zombie on the next sweep "
+            "and get it cleared there instead")
 
     def test_recently_submitted_job_survives_an_empty_poll(self):
         """A guard against over-clearing, not a regression test — it passes
@@ -405,6 +424,92 @@ class TestWaybackSweepIteration(unittest.TestCase):
 
 
 @unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestWaybackPollCoverage(unittest.TestCase):
+    """poll_parallel's own response handling, driven through the curl seam.
+
+    Every sweep test above mocks poll_parallel wholesale, which leaves its
+    body — the chunking, the chunk/result alignment, the HTTP-200 gate and
+    the coverage bookkeeping — with no test at all. That body is where a
+    misread response turns into "SPN forgot these 20 jobs", so it is the
+    last place that should be untested. The default of the wholesale mock
+    also happens to be the optimistic case (everything covered), i.e. the
+    opposite of the real function's failure mode, so a test passing there
+    says nothing about production.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
+
+    def _poll(self, responses_php):
+        """Poll 25 ids (j0..j24) => two chunks of 20 and 5, one parallel
+        group. $responses_php returns the mocked curl_multi result."""
+        php = """
+        add_filter('onionpress_wayback_curl_multi_mock', function($_, $setups) {
+            %s
+        }, 10, 2);
+        $ids = array();
+        for ($i = 0; $i < 25; $i++) { $ids[] = 'j' . $i; }
+        $covered = null;
+        $res = onionpress_wayback_poll_parallel($ids, $covered);
+        echo json_encode(array(
+            'results' => $res,
+            'covered' => array_keys($covered),
+        ));
+        """ % responses_php
+        return json.loads(_eval(php, self.url))
+
+    def test_only_the_batch_that_answered_counts_as_covered(self):
+        """One chunk answers, the other times out. Coverage must follow the
+        chunk boundary exactly: $parallel_group[$i] has to line up with the
+        keys curl_multi returns, or the coverage map describes the wrong
+        jobs and the forgotten-sweep clears a batch nobody asked about."""
+        out = self._poll("""
+            return array(
+                0 => array('code' => 200,
+                           'body' => '[{"job_id":"j3","status":"pending"}]'),
+                1 => array('code' => 0, 'body' => ''),   // Tor timeout
+            );
+        """)
+        self.assertEqual(
+            ["j%d" % i for i in range(20)], sorted(out["covered"], key=lambda s: int(s[1:])),
+            "exactly the 20 ids of the chunk that answered must be covered")
+        self.assertNotIn("j20", out["covered"],
+            "an id from the chunk that timed out must NOT be marked covered — "
+            "that is what makes one 40s timeout resubmit a whole batch")
+        self.assertEqual(1, len(out["results"]))
+        self.assertEqual("j3", out["results"][0]["job_id"])
+
+    def test_a_200_that_is_not_a_status_list_covers_nothing(self):
+        """SPN answers 200 with a JSON *object* — a rate-limit or auth
+        envelope, {"message": ...}. That decodes to a PHP array and used to
+        pass the is_array() gate, marking all 20 ids in the batch covered on
+        a response carrying no statuses whatsoever. The forgotten-sweep then
+        reads it as "SPN answered and mentioned none of them" and resubmits
+        the lot: the exact over-clearing the coverage tracking exists to
+        prevent, reached through a narrower door."""
+        out = self._poll("""
+            return array(
+                0 => array('code' => 200,
+                           'body' => '{"message":"You have reached the limit '
+                                     . 'of active sessions"}'),
+                1 => array('code' => 200, 'body' => '[]'),
+            );
+        """)
+        self.assertNotIn("j0", out["covered"],
+            "a 200 carrying an object, not a list of statuses, is not an "
+            "answer about any job in the batch")
+        # The empty-list chunk IS a real answer: SPN said "none of these
+        # five are known to me", which is what the forgotten path acts on.
+        self.assertEqual(["j20", "j21", "j22", "j23", "j24"], sorted(out["covered"]),
+            "an empty JSON list is a valid answer and must count as covered")
+        self.assertEqual([], out["results"])
+
+
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
 class TestWaybackSweepLock(unittest.TestCase):
     """Token-lock mutex semantics for the sweep entry point."""
 
@@ -456,34 +561,71 @@ class TestWaybackSweepLock(unittest.TestCase):
         What matters is the handoff, not just the exit: the lock must be
         released, or the queue stalls for LOCK_STALE_SEC on every recycle.
         """
-        php = """
+        # The filter doubles as the sentinel. `echo 'ran'` after the sweep
+        # proves nothing — the mutex can reject the invocation and return
+        # immediately, and the echo still fires. Counting entries into the
+        # loop body is the only way to observe that the daemon actually
+        # started, which is exactly what the second half asserts.
+        preamble = """
         add_filter('onionpress_wayback_self_reachable_mock',
                    function() { return true; });
         add_filter('onionpress_wayback_user_status_mock',
                    function() { return array('available' => 0); });
-        // Cap of 0 => recycle on the very first iteration.
-        add_filter('onionpress_wayback_loop_max_sec', function() { return 0; });
-        onionpress_wayback_sweep();
-        echo (string) get_option('op_wayback_sweep_lock', '(gone)');
+        // Cap of 0 => recycle on the very first iteration, before any
+        // network-touching work, and (see below) without a real loopback.
+        add_filter('onionpress_wayback_loop_max_sec', function() {
+            update_option('op_test_loop_entered',
+                          1 + (int) get_option('op_test_loop_entered', 0), false);
+            return 0;
+        });
+        // Belt and braces on the loopback the recycle would otherwise fire.
+        // site_url() resolves inside this container, so an unguarded POST
+        // to wp-cron.php would start a genuine unmocked daemon out of a
+        // unit test — real Tor, real SPN submissions, holding the lock for
+        // OP_WB_LOOP_MAX_SEC and breaking every test that follows.
+        add_filter('pre_http_request', function($pre, $args, $url) {
+            update_option('op_test_http_attempts',
+                          1 + (int) get_option('op_test_http_attempts', 0), false);
+            return new WP_Error('blocked-by-test', 'no outbound HTTP in tests');
+        }, 10, 3);
         """
-        out = _eval(php, self.url).strip()
-        self.assertEqual("(gone)", out,
+        php = """
+        delete_option('op_test_loop_entered');
+        delete_option('op_test_http_attempts');
+        """ + preamble + """
+        onionpress_wayback_sweep();
+        echo json_encode(array(
+            'lock'     => (string) get_option('op_wayback_sweep_lock', '(gone)'),
+            'entered'  => (int) get_option('op_test_loop_entered', 0),
+            'attempts' => (int) get_option('op_test_http_attempts', 0),
+        ));
+        """
+        first = json.loads(_eval(php, self.url))
+        self.addCleanup(lambda: _wp(
+            ["option", "delete", "op_test_loop_entered"], url=self.url, timeout=15))
+        self.addCleanup(lambda: _wp(
+            ["option", "delete", "op_test_http_attempts"], url=self.url, timeout=15))
+
+        self.assertEqual(1, first["entered"], "the daemon should have run its loop once")
+        self.assertEqual("(gone)", first["lock"],
             "a recycling daemon must delete its lock so the successor can "
-            f"claim it immediately rather than waiting it out; got: {out}")
+            f"claim it immediately rather than waiting it out; got: {first['lock']}")
+        # A cap of 0 means every successor recycles on its own first
+        # iteration, so firing the handoff there is a restart loop, not a
+        # handoff — the production path is gated on a non-zero lifetime.
+        self.assertEqual(0, first["attempts"],
+            "a zero-lifetime recycle must not fire the loopback")
 
         # And the successor really can claim it — the property that makes
-        # the recycle a handoff instead of a stall.
-        php2 = """
-        add_filter('onionpress_wayback_self_reachable_mock',
-                   function() { return true; });
-        add_filter('onionpress_wayback_user_status_mock',
-                   function() { return array('available' => 0); });
-        add_filter('onionpress_wayback_loop_max_sec', function() { return 0; });
+        # the recycle a handoff instead of a stall. Asserted by the loop
+        # entry counter reaching 2, not by the sweep call returning.
+        php2 = preamble + """
         onionpress_wayback_sweep();
-        echo 'second-sweep-ran';
+        echo (int) get_option('op_test_loop_entered', 0);
         """
-        self.assertIn("second-sweep-ran", _eval(php2, self.url),
-            "a fresh sweep must be able to start straight after a recycle")
+        self.assertEqual("2", _eval(php2, self.url).strip(),
+            "a fresh sweep must be able to start straight after a recycle — "
+            "it must reach the loop body, not bounce off a surviving lock")
 
 
 @unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
