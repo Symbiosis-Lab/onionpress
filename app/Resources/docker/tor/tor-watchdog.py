@@ -46,6 +46,50 @@ CONNECT_RETRY_DELAY = 5
 HS_BASE_DIR = "/var/lib/tor/hidden_service"
 
 # ---------------------------------------------------------------------------
+# Descriptor warming
+# ---------------------------------------------------------------------------
+# Onion latency is bimodal, and the client descriptor cache is the whole
+# difference. Measured against the address below: ~3.6s with its descriptor
+# cached, 25-70s without one, and Tor abandons the attempt entirely at ~70s. So
+# the wayback plugin's Save Page Now calls did not merely get slow after a Tor
+# restart, a laptop sleep or a descriptor expiry — they failed wholesale, and
+# for a long time that read as "archive.org's onion is down". It is not: it
+# answers in ~4s once the descriptor is in hand.
+#
+# Onions we depend on but do not run. The default is the Save Page Now endpoint
+# that onionpress-wayback-archive.php posts to, so warming works out of the box;
+# TOR_WARM_ONIONS (comma- or space-separated) adds to it for deployments that
+# depend on other onions. A subdomain and the .onion suffix are both fine here —
+# _hs_address is what reduces them to the bare id HSFETCH accepts.
+DEPENDENCY_ONIONS = (
+    "web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion",
+)
+
+# How often to re-check that those descriptors are still cached.
+#
+# The check is a GETINFO against Tor's own cache — local, no circuits, free —
+# and an HSFETCH only follows for an address that has actually gone cold. So the
+# cadence is bounded by how long we are willing to leave a cold descriptor lying
+# there, not by what it costs. A descriptor lives up to 3h in the client cache,
+# but that is not what empties it in practice: SIGNAL NEWNYM (which
+# do_dropguards sends) purges the cache outright, a Tor restart takes it with
+# the process, and a laptop sleep outlasts it. None of those are on a schedule,
+# so the interval is really the width of the window in which an SPN call can
+# still catch us cold. 5 minutes keeps that window small, and reuses the
+# heartbeat cadence already in this file so the log reads at one rhythm.
+WARM_DESCRIPTOR_INTERVAL = 300
+
+# v3 addresses are base32 over a fixed 35-byte payload, so they are always
+# exactly this long and drawn from this alphabet. Anything else in the warm set
+# is a typo, and belongs in the log rather than on the control port.
+_V3_ADDR_LEN = 56
+_V3_ADDR_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz234567")
+
+# Addresses already complained about, so a typo in TOR_WARM_ONIONS costs one log
+# line rather than one every WARM_DESCRIPTOR_INTERVAL for the life of the run.
+_warned_bad_addresses = set()
+
+# ---------------------------------------------------------------------------
 # The escalation ladder
 # ---------------------------------------------------------------------------
 # Everything above recovers Tor *within* its current process. That is not
@@ -409,7 +453,8 @@ class WatchdogState:
         self.hs_desc_upload_started_since_recovery = False
         self.hs_desc_upload_failed_since_recovery = False
         self.hs_desc_last_failed_reason = ""
-        self.onion_addresses = []  # for HSFETCH
+        self.onion_addresses = []  # the warm set — ours + DEPENDENCY_ONIONS
+        self.last_warm_check = 0  # 0 = warm on the next pass that can fetch
         self.services = []  # discovered onion services
         self.services_active = False  # True when ADD_ONION has been done
         self.sleeping = False  # True between USR1 (sleep) and USR2 (wake)
@@ -427,17 +472,18 @@ class WatchdogState:
 # Actions
 # ---------------------------------------------------------------------------
 def _hsfetch_missing_descriptors(cmd_sock, state):
-    """Check client descriptor cache and HSFETCH any missing addresses.
+    """Check the client descriptor cache and HSFETCH whatever went cold.
 
-    Called right after bootstrap hits 100%. Queries the control port
-    (read-only) for each address we care about, and only HSFETCHes
-    the ones that aren't cached. Safe on cold start — no competing
-    descriptors to poison the cache.
+    Queries the control port (read-only) for every address in the warm set and
+    only HSFETCHes the ones that aren't cached, so a warm cache costs nothing
+    but a handful of local GETINFOs.
+
+    Called periodically from `check_stalls`, because a descriptor is not
+    permanent — see WARM_DESCRIPTOR_INTERVAL for what actually empties the
+    cache. The caller is what decides *when* it is safe to fetch; this function
+    assumes circuits exist and that nothing of ours is mid-publication.
     """
-    if not state.onion_addresses:
-        state.onion_addresses = discover_onion_addresses()
-    if not state.onion_addresses:
-        return
+    state.onion_addresses = discover_onion_addresses()
     for addr in state.onion_addresses:
         resp = send_cmd(cmd_sock, f"GETINFO hs/client/desc/id/{addr}")
         if "hs-descriptor" in resp:
@@ -445,28 +491,68 @@ def _hsfetch_missing_descriptors(cmd_sock, state):
         resp = send_cmd(cmd_sock, f"HSFETCH {addr}")
         if "250" in resp:
             log(f"HSFETCH {addr[:16]}... — descriptor not cached, fetching")
+        else:
+            log(f"HSFETCH {addr[:16]}... — failed: {resp.strip()[:100]}")
+
+
+def _hs_address(value):
+    """Reduce a hostname to the bare service id HSFETCH takes, or None.
+
+    Stripping ".onion" is not enough. The Save Page Now endpoint is
+    `web.<id>.onion`, and Tor answers the "web." prefix with "551 Invalid
+    address" rather than a descriptor (measured against a live control port) —
+    which in the log is indistinguishable from a fetch that simply failed, so
+    the warming would have looked like it was running and not working. Anything
+    that isn't a v3 address comes back as None rather than being handed to the
+    control port.
+    """
+    host = value.strip().lower()
+    if host.endswith(".onion"):
+        host = host[:-len(".onion")]
+    host = host.rsplit(".", 1)[-1]  # drop any subdomain: web.<id>, ftp.<id>, ...
+    if len(host) != _V3_ADDR_LEN or not _V3_ADDR_CHARS.issuperset(host):
+        return None
+    return host
 
 
 def discover_onion_addresses():
-    """Find onion addresses for HSFETCH — our own services + the content address."""
+    """The warm set: addresses we want a client descriptor for, at all times.
+
+    Ours (own services + the content address) so a reachability check doesn't
+    pay the cold-descriptor penalty, plus DEPENDENCY_ONIONS because the wayback
+    plugin's SPN calls pay it too. Both are ordinary client-side lookups, so one
+    warm cache serves both.
+
+    Re-read on every pass rather than cached once: in the SOCKS-only containers
+    the content address only appears on the shared volume *after* the service
+    comes up, and DEPENDENCY_ONIONS makes the list non-empty from the first
+    pass, so a "discover only while empty" cache would never pick it up.
+    """
     addresses = set()
     for path in glob.glob(f"{HS_BASE_DIR}/*/hostname"):
         try:
             with open(path) as f:
-                addr = f.read().strip()
-                if addr.endswith(".onion"):
-                    addresses.add(addr.replace(".onion", ""))
+                addresses.add(f.read().strip())
         except OSError:
             pass
     # Content address (shared volume) — for reachability checks
     try:
         with open("/var/lib/onionpress/onion_address") as f:
-            addr = f.read().strip()
-            if addr.endswith(".onion"):
-                addresses.add(addr.replace(".onion", ""))
+            addresses.add(f.read().strip())
     except OSError:
         pass
-    return list(addresses)
+    addresses.update(DEPENDENCY_ONIONS)
+    addresses.update(os.environ.get("TOR_WARM_ONIONS", "").replace(",", " ").split())
+
+    ids = set()
+    for raw in addresses:
+        addr = _hs_address(raw)
+        if addr:
+            ids.add(addr)
+        elif raw and raw not in _warned_bad_addresses:
+            _warned_bad_addresses.add(raw)
+            log(f"Not a v3 onion address, leaving it out of the warm set: {raw[:80]}")
+    return sorted(ids)
 
 
 def do_dropguards(cmd_sock, state, reason):
@@ -891,6 +977,12 @@ def check_stalls(cmd_sock, state):
         if state.not_serving_since:
             down_for = int(now - state.not_serving_since)
             log(f"Serving again after {down_for}s")
+            # Circuits are back, which means they were gone — a sleep, a
+            # restart, or a NEWNYM — and the client descriptor cache came back
+            # empty with them. Warm on this pass rather than up to
+            # WARM_DESCRIPTOR_INTERVAL later: waking up is exactly when the
+            # next SPN call is most likely to land on a cold descriptor.
+            state.last_warm_check = 0
         state.not_serving_since = 0
         # A recovered stack is not a degraded one. Clearing here (rather than
         # never) is what lets the ladder work again after the network returns —
@@ -1005,6 +1097,36 @@ def check_stalls(cmd_sock, state):
                        f"not serving for {down_for}s after "
                        f"{DEGRADED_AFTER_RESTARTS} Tor restarts — the network "
                        f"itself looks unreachable")
+
+    # ── Keep the descriptors we depend on warm ───────────────────────────────
+    # Housekeeping, so it runs after the ladder has had its say. Two gates:
+    #
+    #   - circuits, because an HSFETCH without them goes nowhere and would just
+    #     burn the interval;
+    #   - no publication of OUR OWN descriptor in flight. That window is the
+    #     one place fetching and publishing compete for the same Tor, and the
+    #     HS_DESC stall branch above may be about to DEL+ADD to force a
+    #     republish. Standing down costs at most one interval.
+    #
+    # `state.services` is empty in the SOCKS-only containers, so the second gate
+    # never closes there — which is the point. onionheaven publishes nothing and
+    # is the Tor the wayback plugin's SPN calls actually go through
+    # (socks5h://onionheaven:9050, see onionpress_wayback_curl_common), so it is
+    # the container that most needs the warm cache.
+    publishing = (state.services
+                  and state.last_recovery_time > 0
+                  and not state.hs_desc_uploaded_since_recovery)
+    if (state.bootstrapped and circuits_up and not publishing
+            and now - state.last_warm_check >= WARM_DESCRIPTOR_INTERVAL):
+        state.last_warm_check = now
+        try:
+            _hsfetch_missing_descriptors(cmd_sock, state)
+        except Exception as e:
+            # Never fatal. The top-level handler exits(1) on an unhandled
+            # exception, and losing the watchdog — the escalation ladder, the
+            # state file moss reads — over a slow SPN call would be a far worse
+            # trade than a cold descriptor.
+            log(f"Descriptor warming failed: {e}")
 
     # Publish what we know, whether or not we acted. moss has to be able to
     # answer "is my site live" at any moment, not only after a failure.

@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 _WATCHDOG = os.path.join(
@@ -314,6 +315,138 @@ class TestStateFile(unittest.TestCase):
 
     def test_an_unwritable_path_is_never_fatal(self):
         tw.write_state_file(_serving_state(), True, path="/proc/nope/state.json")
+
+
+_SPN_ID = "archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad"
+
+
+class _WarmSetFixture(unittest.TestCase):
+    """Isolate the warm set from the host: no /var/lib/tor, no inherited env."""
+
+    def setUp(self):
+        self._base = tw.HS_BASE_DIR
+        self._env = os.environ.pop("TOR_WARM_ONIONS", None)
+        tw._warned_bad_addresses.clear()
+
+    def tearDown(self):
+        tw.HS_BASE_DIR = self._base
+        os.environ.pop("TOR_WARM_ONIONS", None)
+        if self._env is not None:
+            os.environ["TOR_WARM_ONIONS"] = self._env
+
+
+class TestDescriptorWarming(_WarmSetFixture):
+    """The failure this exists for: SPN calls dying because a descriptor is cold.
+
+    Measured against archive.org's onion — ~3.6s with its descriptor cached,
+    25-70s without, and Tor abandons the attempt at ~70s. Every Save Page Now
+    call therefore failed wholesale after a Tor restart or a laptop sleep, and
+    it read as "archive.org's onion is down" for a long time.
+    """
+
+    def _warm_set(self):
+        with tempfile.TemporaryDirectory() as root:
+            tw.HS_BASE_DIR = root
+            return tw.discover_onion_addresses()
+
+    def test_the_spn_address_loses_its_subdomain_as_well_as_its_suffix(self):
+        # HSFETCH takes the bare 56-char id. Handing it "web." earns a 552,
+        # which in the log is indistinguishable from a fetch that just failed —
+        # so warming would have looked like it was running and not working.
+        self.assertEqual(tw._hs_address(f"web.{_SPN_ID}.onion"), _SPN_ID)
+
+    def test_anything_that_is_not_a_v3_address_stays_off_the_control_port(self):
+        self.assertIsNone(tw._hs_address("web.archive.org"))
+        self.assertIsNone(tw._hs_address(""))
+
+    def test_spn_is_warmed_with_no_configuration_at_all(self):
+        self.assertIn(_SPN_ID, self._warm_set())
+
+    def test_tor_warm_onions_adds_to_the_default_rather_than_replacing_it(self):
+        os.environ["TOR_WARM_ONIONS"] = f"{'b' * 56}.onion, {'c' * 56}"
+        warm = self._warm_set()
+        self.assertEqual(warm, sorted([_SPN_ID, "b" * 56, "c" * 56]))
+
+    def test_only_a_cold_descriptor_costs_a_fetch(self):
+        cached, cold = "a" * 56, "b" * 56
+        os.environ["TOR_WARM_ONIONS"] = f"{cached} {cold}"
+        sock = FakeSock({
+            f"GETINFO hs/client/desc/id/{cached}":
+                f"250+hs/client/desc/id/{cached}=\r\nhs-descriptor 3\r\n.\r\n250 OK",
+            f"GETINFO hs/client/desc/id/{cold}": "551 Not found",
+        })
+        with tempfile.TemporaryDirectory() as root:
+            tw.HS_BASE_DIR = root
+            tw._hsfetch_missing_descriptors(sock, tw.WatchdogState())
+
+        self.assertIn(f"HSFETCH {cold}", sock.sent)
+        self.assertNotIn(f"HSFETCH {cached}", sock.sent)
+
+
+class TestWarmingRunsWhereTheSpnTrafficGoes(_WarmSetFixture):
+    """onionheaven is the container that has to warm, and it is the SOCKS-only one.
+
+    onionpress-wayback-archive.php points CURLOPT_PROXY at
+    socks5h://onionheaven:9050, so a gate that skipped NO_ONION_SERVICE
+    containers would leave the whole change a no-op for the traffic it exists
+    to speed up.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._write = tw.write_state_file
+        tw.write_state_file = lambda *a, **kw: None
+
+    def tearDown(self):
+        tw.write_state_file = self._write
+        super().tearDown()
+
+    def _check_stalls(self, state):
+        sock = FakeSock({
+            "GETINFO status/circuit-established":
+                "250-status/circuit-established=1\r\n250 OK",
+        })
+        with tempfile.TemporaryDirectory() as root:
+            tw.HS_BASE_DIR = root
+            tw.check_stalls(sock, state)
+        return sock
+
+    def _socks_only_state(self):
+        """onionheaven's shape: bootstrapped, circuits, and nothing published."""
+        s = tw.WatchdogState()
+        s.bootstrapped = True
+        return s
+
+    def test_a_socks_only_container_warms_the_spn_descriptor(self):
+        sock = self._check_stalls(self._socks_only_state())
+        self.assertIn(f"HSFETCH {_SPN_ID}", sock.sent)
+
+    def test_warming_repeats_on_its_own_interval(self):
+        # The gap the old call site left: descriptors expire, laptops sleep,
+        # and a single warm at bootstrap goes cold long before the next SPN run.
+        state = self._socks_only_state()
+        self.assertIn(f"HSFETCH {_SPN_ID}", self._check_stalls(state).sent)
+        self.assertNotIn(f"HSFETCH {_SPN_ID}", self._check_stalls(state).sent)
+
+        state.last_warm_check -= tw.WARM_DESCRIPTOR_INTERVAL
+        self.assertIn(f"HSFETCH {_SPN_ID}", self._check_stalls(state).sent)
+
+    def test_circuits_coming_back_warms_now_rather_than_an_interval_later(self):
+        # Waking is exactly when the cache is empty and an SPN call is most
+        # likely to land on a cold descriptor.
+        state = self._socks_only_state()
+        state.not_serving_since = time.time() - 10
+        state.last_warm_check = time.time()  # warmed recently; timer not due
+        self.assertIn(f"HSFETCH {_SPN_ID}", self._check_stalls(state).sent)
+
+    def test_a_publication_of_our_own_is_never_interrupted(self):
+        # The one window where fetching and publishing compete for the same
+        # Tor. Only the serving container has it; onionheaven publishes nothing.
+        state = _serving_state()
+        state.last_recovery_time = time.time()
+        state.hs_desc_uploaded_since_recovery = False
+        sock = self._check_stalls(state)
+        self.assertFalse(any(c.startswith("HSFETCH") for c in sock.sent))
 
 
 class TestConfiguredTransports(unittest.TestCase):

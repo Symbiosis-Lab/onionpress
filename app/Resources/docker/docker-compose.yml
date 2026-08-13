@@ -17,6 +17,9 @@ services:
       - TOR_BRIDGE_LINES=${TOR_BRIDGE_LINES:-}
       - TOR_CLIENT_TRANSPORT_PLUGIN=${TOR_CLIENT_TRANSPORT_PLUGIN:-}
       - TOR_UPSTREAM_PROXY=${TOR_UPSTREAM_PROXY:-}
+      # Extra onions tor-watchdog.py keeps a client descriptor cached for, on
+      # top of its DEPENDENCY_ONIONS default. Empty is the normal case.
+      - TOR_WARM_ONIONS=${TOR_WARM_ONIONS:-}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
     volumes:
       - arti-state:/var/lib/arti/
@@ -149,6 +152,9 @@ services:
       - TOR_BRIDGE_LINES=${TOR_BRIDGE_LINES:-}
       - TOR_CLIENT_TRANSPORT_PLUGIN=${TOR_CLIENT_TRANSPORT_PLUGIN:-}
       - TOR_UPSTREAM_PROXY=${TOR_UPSTREAM_PROXY:-}
+      # Same warm set as the tor container. This is the Tor the wayback
+      # plugin's SPN calls go through, so it is the one that must stay warm.
+      - TOR_WARM_ONIONS=${TOR_WARM_ONIONS:-}
       - NO_ONION_SERVICE=1
       - ONIONHEAVEN=1
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
