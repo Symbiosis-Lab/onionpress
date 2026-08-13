@@ -315,9 +315,13 @@ def install_static_site_conf(
     is never built from our Dockerfile locally. Baking onionpress-static-
     site.conf into that image would force us to rebuild + host a fork image.
     Copying it in the same way the mu-plugins are (docker cp into the live
-    container) reuses Brewster's published image unchanged. The conf lands
-    in the container's ephemeral rootfs, so it is re-injected on every
-    start — a container recreate can never silently drop it.
+    container) reuses Brewster's published image unchanged. Mind the
+    asymmetry with the mu-plugins, though: those land in /var/www/html,
+    which is a Docker volume and so persists, whereas /etc/apache2 is
+    container rootfs. This conf survives a restart but NOT a container
+    recreate, and the provisioning path that calls this does not run when
+    the launcher's `start` short-circuits on an already-running stack.
+    `ensure_static_site_conf` closes that gap — see its docstring.
 
     `conf_dir` is the on-disk directory holding onionpress-static-site.conf
     (Mac: `$RESOURCES_DIR/docker/wordpress`; Linux: `$INSTALL_DIR/docker/
@@ -359,6 +363,56 @@ def install_static_site_conf(
     log("Static-first Apache conf installed "
         "(moss generations served ahead of WordPress)")
     return True
+
+
+def ensure_static_site_conf(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Guarantee the static-first Apache conf is present, cheaply.
+
+    Why this is separate from install_static_site_conf: /etc/apache2 is
+    container rootfs, not a Docker volume, so the conf is destroyed by any
+    container RECREATE (compose recreate, image change, stack update); a
+    plain restart keeps it. provision_post_install normally re-injects it
+    on the next start, but the launcher's `start` exits early when a
+    publish receiver is already answering ("stack is already running,
+    nothing to do") and so never reaches that provisioning.
+
+    A recreate done behind the launcher's back therefore leaves the conf
+    missing indefinitely, and the failure is silent in the worst way: moss
+    publishes keep succeeding, the receiver keeps reporting the correct
+    current generation, and the onion just serves the WordPress theme
+    instead of the published site.
+
+    Cheap by design — one `test -e` in the container on the happy path,
+    with no docker cp and no Apache reload, so it is safe to call on every
+    start including the fast already-running path.
+
+    Returns True if the conf is present or was successfully restored.
+    Best-effort like install_static_site_conf: never raises, so it can
+    never turn a healthy start into a failed one.
+    """
+    log = log_func or _noop_log
+    try:
+        present = _exec_sh(
+            "test -e /etc/apache2/conf-enabled/onionpress-static-site.conf",
+            docker_bin=docker_bin,
+        )
+    except Exception as e:  # container down, docker missing, timeout
+        log(f"WARNING: could not check static-site Apache conf: {e}")
+        return False
+
+    if present.returncode == 0:
+        return True
+
+    log("Static-first Apache conf missing (container recreated?) — "
+        "reinstalling so moss generations are served ahead of WordPress")
+    return install_static_site_conf(
+        conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
+    )
 
 
 def install_onionpress_theme(

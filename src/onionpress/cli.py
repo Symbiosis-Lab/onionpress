@@ -751,6 +751,15 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("ensure-archive-s3-keys",
                    help="Fetch shared archive.org S3 keys for Wayback archiving")
 
+    p_essc = sub.add_parser(
+        "ensure-static-site-conf",
+        help="Restore the static-first Apache conf if a container recreate "
+             "dropped it (cheap no-op when already present)",
+    )
+    p_essc.add_argument(
+        "--apache-conf-dir", required=True,
+        help="Source directory containing onionpress-static-site.conf")
+
     p_scrub = sub.add_parser(
         "scrub",
         help="Full lifecycle test: backup → uninstall → install → restore → verify",
@@ -824,6 +833,16 @@ def main(argv: list[str] = None) -> int:
             managed=args.managed,
             log_func=print,
         )
+    elif args.command == "ensure-static-site-conf":
+        from . import multisite
+        # Deliberately always 0: this runs on the launcher's fast
+        # already-running path, where a missing container or a docker
+        # hiccup must not turn a healthy `start` into a reported failure.
+        multisite.ensure_static_site_conf(
+            conf_dir=args.apache_conf_dir,
+            log_func=print,
+        )
+        return 0
     elif args.command == "configure-ia-plugin":
         from . import multisite
         return 0 if multisite.configure_ia_plugin(log_func=print) else 1

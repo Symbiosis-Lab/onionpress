@@ -257,6 +257,55 @@ class TestInstallStaticSiteConf(unittest.TestCase):
         ex.assert_not_called()
 
 
+class TestEnsureStaticSiteConf(unittest.TestCase):
+    """The conf lands in container rootfs, not a volume, so a container
+    recreate drops it — and the launcher's already-running fast path exits
+    before provision_post_install could put it back. ensure_static_site_conf
+    is the guard for exactly that, and it has to stay cheap when nothing is
+    wrong because it runs on every start.
+    """
+
+    def test_no_op_when_conf_already_enabled(self):
+        with mock.patch.object(multisite, "_exec_sh",
+                               return_value=_ok()) as ex, \
+             mock.patch.object(multisite, "install_static_site_conf") as inst:
+            ok = multisite.ensure_static_site_conf(
+                conf_dir="/x/docker/wordpress", log_func=lambda _: None)
+
+        self.assertTrue(ok)
+        # Just the presence probe: no reinstall, and — the point of the
+        # cheap path — no Apache reload on an already-healthy start.
+        inst.assert_not_called()
+        self.assertEqual(len(ex.call_args_list), 1)
+        self.assertIn("conf-enabled/onionpress-static-site.conf",
+                      ex.call_args_list[0].args[0])
+
+    def test_reinstalls_when_conf_missing(self):
+        with mock.patch.object(multisite, "_exec_sh", return_value=_err()), \
+             mock.patch.object(multisite, "install_static_site_conf",
+                               return_value=True) as inst:
+            ok = multisite.ensure_static_site_conf(
+                conf_dir="/x/docker/wordpress", log_func=lambda _: None)
+
+        self.assertTrue(ok)
+        inst.assert_called_once()
+        self.assertEqual(inst.call_args.kwargs.get("conf_dir"),
+                         "/x/docker/wordpress")
+
+    def test_never_raises_when_docker_unavailable(self):
+        # This runs on the launcher's start path, so an exception escaping
+        # here would turn a perfectly healthy already-running stack into a
+        # failed `start`.
+        with mock.patch.object(multisite, "_exec_sh",
+                               side_effect=OSError("docker gone")), \
+             mock.patch.object(multisite, "install_static_site_conf") as inst:
+            ok = multisite.ensure_static_site_conf(
+                conf_dir="/x", log_func=lambda _: None)
+
+        self.assertFalse(ok)
+        inst.assert_not_called()
+
+
 class TestProvisionInjectsStaticConf(unittest.TestCase):
     """provision_post_install only injects the static conf when a conf_dir
     is supplied — pre-moss callers that omit it keep the old behavior.

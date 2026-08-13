@@ -2035,6 +2035,21 @@ main() {
             # future work added to `start` must stay below this block for the
             # same reason.
             if _receiver_port=$(receiver_answering_port); then
+                # A container recreate behind the launcher's back (compose
+                # recreate, image change, stack update) wipes the static-first
+                # Apache conf, because /etc/apache2 is container rootfs and not
+                # a volume. This early exit is precisely the path such a stack
+                # takes on every later `start`, so without a check here the
+                # onion serves the WordPress theme instead of the published
+                # moss site indefinitely — and silently, since publishes and
+                # the receiver both go on reporting success. Cheap: a single
+                # `test -e` in the container unless the conf is really gone.
+                #
+                # TRAP SAFETY (see above): this writes no PID file and installs
+                # no trap, and `|| true` stops it changing this branch's exit
+                # status under `set -e`.
+                bundled_python -m onionpress.cli ensure-static-site-conf \
+                    --apache-conf-dir "$DOCKER_DIR/wordpress" || true
                 log "start: receiver already answering on port $_receiver_port — stack is already running, nothing to do"
                 echo "OnionPress is already running (http://localhost:${_receiver_port})."
                 exit 0
