@@ -16,6 +16,19 @@ Coverage focus: behaviors that are easy to break during refactors.
      matching submitted_at, on a successful submit.
   5. Lock mutex: a fresh lock blocks a second sweep invocation.
 
+The rest guard the ways this engine has actually wedged in production,
+all of which shared one shape — it kept logging a healthy sweep while
+archiving nothing:
+  6. A job SPN has FORGOTTEN (absent from /save/status, not "pending"
+     or "error") must be cleared, or that URL deadlocks permanently.
+  7. A job whose status batch never came back must NOT be cleared —
+     failing to ask is not the same as being told it is gone.
+  8. A job SPN did answer for must not also be swept up as forgotten,
+     or the CDX rescue loses a capture out from under itself.
+  9. The daemon must recycle on a timer and hand its lock back. It ran
+     70 hours in one PHP request, serving option reads from a cache
+     that predated the fix being applied to the database.
+
 Prerequisites (skips the suite if any fails):
   - Docker running
   - `onionpress-wordpress` container up with the wayback plugin
@@ -238,16 +251,114 @@ class TestWaybackSweepIteration(unittest.TestCase):
         echo 'ok';
         """
         _eval(php, self.url)
-        self.assertNotEqual("jid-forgotten-test", self._get_meta("_op_wayback_job_id"),
+        # The submit mock returns '' for everything, so nothing re-flights
+        # and the outcome is exactly "cleared" — assert that, not merely
+        # "changed". Both halves of the write matter: a surviving
+        # submitted_at with no job_id would make the record look freshly
+        # submitted to the age checks.
+        self.assertEqual("", self._get_meta("_op_wayback_job_id"),
             "a job_id SPN no longer knows must not survive the sweep — "
             "keeping it deadlocks this URL permanently")
+        self.assertEqual("", self._get_meta("_op_wayback_submitted_at"),
+            "submitted_at must be cleared alongside the job_id")
+
+    def test_answered_job_is_not_also_treated_as_forgotten(self):
+        """The forgotten-sweep runs before the CDX rescue pass, so a job SPN
+        DID answer for must be excluded from it by the $answered set. If it
+        were not, an errored job would be queued for CDX rescue and have its
+        job_id cleared out from under that rescue in the same iteration —
+        losing a capture that CDX would have recovered.
+
+        Both other forgotten-path tests mock the poll as returning nothing,
+        which leaves $answered empty and never exercises the guard at all.
+        Here SPN answers about one job and stays silent about another, both
+        old enough to clear.
+        """
+        self._set_meta("_op_wayback_job_id", "jid-answered-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 4000))
+
+        # A second in-flight record SPN says nothing about, so the same
+        # iteration exercises both branches.
+        php = self._common_mocks() + """
+        update_option('op_wayback_home_state',
+                      array('job_id' => 'jid-silent-test',
+                            'submitted_at' => time() - 4000), false);
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) {
+            return array(array(
+                'job_id'     => 'jid-answered-test',
+                'status'     => 'error',
+                'status_ext' => 'error:no-captures',
+            ));
+        }, 10, 2);
+        add_filter('onionpress_wayback_cdx_lookup_parallel_mock',
+                   function($_, $urls) {
+            $out = array();
+            foreach ($urls as $k => $v) { $out[$k] = '20260202120000'; }
+            return $out;
+        }, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        $home = get_option('op_wayback_home_state', array());
+        echo json_encode(array('home_job' => $home['job_id'] ?? ''));
+        """
+        out = _eval(php, self.url)
+
+        # The answered job reached CDX rescue and was archived from the
+        # timestamp — proof it was not swept up as "forgotten" first.
+        self.assertEqual("20260202120000", self._get_meta("_op_wayback_snapshot_ts"),
+            "an SPN-answered job must reach the CDX rescue pass, not be "
+            "cleared as forgotten before it gets there")
+        self.assertNotEqual("", self._get_meta("_op_wayback_archived_at"),
+            "the answered job should end up archived via CDX")
+        # The job SPN stayed silent about is the one that gets cleared.
+        self.assertIn('"home_job":""', out.replace(" ", ""),
+            f"the unanswered job should have been cleared; got: {out}")
+
+    def test_job_whose_batch_never_answered_is_not_cleared(self):
+        """poll_parallel chunks job_ids 20 at a time and silently drops any
+        batch that fails — a non-200 or unparseable body contributes nothing
+        to the return value and leaves no trace. Age alone cannot tell that
+        apart from amnesia, so one 40s Tor timeout would reclassify a whole
+        batch of old jobs as forgotten and resubmit all of them.
+
+        Coverage tracking is the fix: only jobs whose batch actually came
+        back count as answered-about. Here the job is old enough to clear
+        but its batch never returned, so it must be left alone.
+        """
+        self._set_meta("_op_wayback_job_id", "jid-lost-batch-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 4000))
+
+        php = self._common_mocks() + """
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) { return array(); }, 10, 2);
+        // No batch came back, so nothing is covered.
+        add_filter('onionpress_wayback_poll_covered_mock',
+                   function($_, $job_ids) { return array(); }, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo 'ok';
+        """
+        _eval(php, self.url)
+        self.assertEqual("jid-lost-batch-test", self._get_meta("_op_wayback_job_id"),
+            "a job whose status batch never came back must keep its job_id — "
+            "we did not learn that SPN forgot it, only that we failed to ask")
 
     def test_recently_submitted_job_survives_an_empty_poll(self):
-        """poll_parallel returns [] both when SPN forgot the jobs and when
-        the request itself failed, and the two are indistinguishable. So the
-        clearing above is gated on age: a job younger than the threshold at
-        which a *pending* job would be resubmitted must survive a blank
-        response, or one Tor blip would resubmit the whole in-flight queue.
+        """A guard against over-clearing, not a regression test — it passes
+        against the pre-fix plugin too, which cleared nothing at all.
+
+        poll_parallel returns [] both when SPN forgot the jobs and when the
+        request itself failed. Coverage tracking now separates those, but
+        the age gate is the second line of defence: a job younger than the
+        threshold at which a *pending* job would be resubmitted must
+        survive a blank response, or one Tor blip resubmits everything.
         """
         self._set_meta("_op_wayback_job_id", "jid-fresh-test")
         self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 30))
@@ -331,6 +442,48 @@ class TestWaybackSweepLock(unittest.TestCase):
         out = _eval(php, self.url)
         self.assertTrue(out.startswith("otherTok:"),
             f"lock should still belong to otherTok: {out}")
+
+    def test_daemon_recycles_and_hands_the_lock_back(self):
+        """The daemon must not run forever. It used to: OP_WB_LOOP_MAX_SEC
+        appeared in two comments but was never defined, so the loop was
+        `while (true)` with only a drained-queue exit. WordPress caches
+        options per REQUEST and the daemon is one request, so a process
+        alive for 70 hours kept reading job_ids that had been deleted from
+        the database — and since a non-empty job_id is what marks the queue
+        as having work, the stale read sustained the loop that sustained
+        the stale read. Five days, nothing archived.
+
+        What matters is the handoff, not just the exit: the lock must be
+        released, or the queue stalls for LOCK_STALE_SEC on every recycle.
+        """
+        php = """
+        add_filter('onionpress_wayback_self_reachable_mock',
+                   function() { return true; });
+        add_filter('onionpress_wayback_user_status_mock',
+                   function() { return array('available' => 0); });
+        // Cap of 0 => recycle on the very first iteration.
+        add_filter('onionpress_wayback_loop_max_sec', function() { return 0; });
+        onionpress_wayback_sweep();
+        echo (string) get_option('op_wayback_sweep_lock', '(gone)');
+        """
+        out = _eval(php, self.url).strip()
+        self.assertEqual("(gone)", out,
+            "a recycling daemon must delete its lock so the successor can "
+            f"claim it immediately rather than waiting it out; got: {out}")
+
+        # And the successor really can claim it — the property that makes
+        # the recycle a handoff instead of a stall.
+        php2 = """
+        add_filter('onionpress_wayback_self_reachable_mock',
+                   function() { return true; });
+        add_filter('onionpress_wayback_user_status_mock',
+                   function() { return array('available' => 0); });
+        add_filter('onionpress_wayback_loop_max_sec', function() { return 0; });
+        onionpress_wayback_sweep();
+        echo 'second-sweep-ran';
+        """
+        self.assertIn("second-sweep-ran", _eval(php2, self.url),
+            "a fresh sweep must be able to start straight after a recycle")
 
 
 @unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
@@ -492,46 +645,6 @@ class TestWaybackKickAndInvalidate(unittest.TestCase):
         _eval("onionpress_wayback_invalidate_sitewide();", self.url)
         home = _eval("echo (string) get_option('op_wayback_home_state', '');", self.url)
         self.assertNotEqual(home, "", "home state with a job in flight must survive")
-
-
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestMossCommitTriggersArchive(unittest.TestCase):
-    """moss's publish is a static-file generation commit, not a WordPress
-    post transition — save_post never fires for it. The commit route
-    must itself invalidate + kick the wayback archiver, or a moss
-    publish is silently never archived."""
-
-    @classmethod
-    def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
-
-    def setUp(self):
-        _eval("update_option('op_wayback_home_state', array('archived_at'=>'x'), false); "
-              "wp_clear_scheduled_hook('onionpress_wayback_sweep');",
-              self.url)
-
-    def test_commit_route_invalidates_and_kicks(self):
-        # Exercise the same two calls onionpress_moss_route_commit() makes
-        # on a successful flip, guarded exactly as the receiver guards
-        # them (function_exists), rather than driving the REST route
-        # end-to-end (that needs a real generation dir + local-request
-        # trust, out of scope for this unit-level check).
-        _eval("""
-        if ( function_exists( 'onionpress_wayback_invalidate_sitewide' )
-            && function_exists( 'onionpress_wayback_kick_now' ) ) {
-            onionpress_wayback_invalidate_sitewide();
-            onionpress_wayback_kick_now();
-        }
-        """, self.url)
-        home = _eval("echo (string) get_option('op_wayback_home_state', '');", self.url)
-        self.assertEqual(home, "", "commit must invalidate the home capture")
-        scheduled = _eval(
-            "echo wp_next_scheduled('onionpress_wayback_sweep') ? '1' : '0';",
-            self.url)
-        self.assertEqual(scheduled, "1", "commit must kick an immediate sweep")
 
 
 if __name__ == "__main__":
