@@ -895,14 +895,25 @@ function onionpress_wayback_retry_ready( array $state, $now ) {
     if ( $at <= 0 ) {
         return true;
     }
-    // A last_error_at in the future means the clock moved backwards (a laptop
-    // resuming with a corrected time, most often). Treat it as ready rather
-    // than as a back-off lasting until the clock catches up, which on a large
-    // correction would be indistinguishable from the record being abandoned.
-    if ( $at > $now ) {
+    $delay = onionpress_wayback_retry_delay( $state['error_count'] ?? 1 );
+    // A last_error_at FAR in the future means the clock moved backwards — a
+    // laptop resuming with a corrected time, most often. Treat that as ready,
+    // because a back-off lasting until the clock catches up is
+    // indistinguishable from the record being abandoned.
+    //
+    // "Far" is doing real work here. $now is whatever the caller had, and the
+    // sweep captures it once at the top of an iteration that then runs for up
+    // to the whole budget — so a failure recorded by the poll is legitimately
+    // stamped LATER than the $now the submit phase is comparing against, with
+    // no clock skew involved at all. Treating any future value as ready let a
+    // URL that had just failed be resubmitted by the very iteration that
+    // failed it: observed live, the feed came back from one sweep with a new
+    // job_id and error_count already at 2. Only a jump bigger than the
+    // back-off itself is skew rather than ordering.
+    if ( $at - $now > $delay ) {
         return true;
     }
-    return ( $now - $at ) >= onionpress_wayback_retry_delay( $state['error_count'] ?? 1 );
+    return ( $now - $at ) >= $delay;
 }
 
 // ────────────────────── state read/write helpers ────────────────────
@@ -1914,7 +1925,13 @@ function onionpress_wayback_sweep_iteration() {
         // A URL SPN has just failed is still unarchived and still has no
         // job_id — the exact state this loop selects on. Without the gate it
         // is resubmitted every sweep for as long as it keeps failing.
-        if ( ! onionpress_wayback_retry_ready( $state, $now ) ) { $cooling++; continue; }
+        // time(), not $now: $now predates the poll above, and the poll is
+        // where a failure is recorded. Against the stale $now a last_error_at
+        // just written reads as a FUTURE timestamp, takes the clock-skew
+        // escape hatch in retry_ready, and the URL that failed seconds ago is
+        // resubmitted in the very same iteration — the storm, narrowed to one
+        // resubmit per sweep rather than removed. Observed live before this.
+        if ( ! onionpress_wayback_retry_ready( $state, time() ) ) { $cooling++; continue; }
         $to_submit[ $rec['key'] ] = $rec['url'];
         $records_by_key[ $rec['key'] ] = $rec;
     }
@@ -1923,7 +1940,7 @@ function onionpress_wayback_sweep_iteration() {
         $posts = onionpress_wayback_posts_needing_submit( $budget - count( $to_submit ) );
         foreach ( $posts as $rec ) {
             if ( count( $to_submit ) >= $budget ) break;
-            if ( ! onionpress_wayback_retry_ready( $rec['read'](), $now ) ) { $cooling++; continue; }
+            if ( ! onionpress_wayback_retry_ready( $rec['read'](), time() ) ) { $cooling++; continue; }
             $to_submit[ $rec['key'] ] = $rec['url'];
             $records_by_key[ $rec['key'] ] = $rec;
         }

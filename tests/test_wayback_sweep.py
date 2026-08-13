@@ -471,6 +471,47 @@ class TestWaybackSweepIteration(SitewideStateMixin, unittest.TestCase):
                          "the failure count must advance, or the back-off never grows")
         self.assertNotEqual("", self._get_meta("_op_wayback_last_error_at"))
 
+    def test_a_failure_stamped_mid_iteration_still_counts_as_cooling(self):
+        """The poll and the submit are two phases of ONE iteration, and the
+        sweep captures $now once at the top — before the poll that records
+        a failure. So a last_error_at written by that poll is legitimately
+        LATER than the $now the submit phase compares against, with no
+        clock skew involved. An escape hatch that treats any future
+        timestamp as ready therefore lets a URL that just failed be
+        resubmitted by the very iteration that failed it.
+
+        Observed live: the feed came back from one sweep with a new job_id
+        and error_count already at 2. It does not reproduce in a mocked
+        iteration, where every phase lands in the same second — it needed
+        the real one that ran 76s — so the property is asserted directly.
+        Only a jump bigger than the back-off itself is skew rather than
+        ordering.
+        """
+        verdicts = json.loads(_eval("""
+        $now   = time();
+        $delay = onionpress_wayback_retry_delay(1);
+        echo json_encode(array(
+            // Stamped a phase later than the caller's clock: ordering.
+            'one_phase_ahead'  => onionpress_wayback_retry_ready(
+                array('last_error_at' => $now + 80, 'error_count' => 1), $now),
+            'just_now'         => onionpress_wayback_retry_ready(
+                array('last_error_at' => $now, 'error_count' => 1), $now),
+            'cooled_off'       => onionpress_wayback_retry_ready(
+                array('last_error_at' => $now - $delay, 'error_count' => 1), $now),
+            // Beyond any ordering explanation: the clock moved backwards.
+            'clock_went_back'  => onionpress_wayback_retry_ready(
+                array('last_error_at' => $now + $delay * 10, 'error_count' => 1), $now),
+        ));
+        """, self.url))
+        self.assertFalse(verdicts["one_phase_ahead"],
+            "a failure stamped mid-iteration must still be cooling — this is "
+            "the resubmit-in-the-same-sweep bug")
+        self.assertFalse(verdicts["just_now"])
+        self.assertTrue(verdicts["cooled_off"])
+        self.assertTrue(verdicts["clock_went_back"],
+            "a genuine backwards clock jump must not strand the record until "
+            "the clock catches up")
+
     def test_a_failed_capture_is_not_resubmitted_on_the_next_sweep(self):
         """The retry storm. A URL SPN failed returns to "no archived_at, no
         job_id" — exactly what posts_needing_submit selects on — so before
