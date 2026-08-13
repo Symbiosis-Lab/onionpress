@@ -976,7 +976,18 @@ function onionpress_wayback_sweep_iteration() {
     // Add home + feed in-flight jobs
     foreach ( onionpress_wayback_sitewide_records() as $rec ) {
         $state = $rec['read']();
-        if ( ! empty( $state['job_id'] ) && empty( $state['archived_at'] ) ) {
+        // Poll on job_id alone, exactly as posts_with_in_flight() does.
+        // Requiring an empty archived_at here used to open a second door
+        // into the same deadlock: finalize_success writes archived_at and
+        // clears job_id in two separate writes, so a process that dies
+        // between them (autoheal restart, Apache wedge) leaves a sitewide
+        // record with BOTH set. Such a record was excluded from the poll
+        // here, skipped by the submit step (which ignores anything already
+        // archived), and refused by invalidate_sitewide (which will not
+        // touch a record with a job_id) — while the loop's drain probe
+        // counted its job_id as outstanding work. Unreachable and
+        // undrainable: the daemon spins forever, logging a clean sweep.
+        if ( ! empty( $state['job_id'] ) ) {
             $in_flight[ $state['job_id'] ] = array(
                 'key'          => $rec['key'],
                 'url'          => $rec['url'],
