@@ -222,6 +222,31 @@ define( 'OP_WB_OPT_HOME',          'op_wayback_home_state' );
 define( 'OP_WB_OPT_FEED',          'op_wayback_feed_state' );
 define( 'OP_WB_OPT_BACKOFF_UNTIL', 'op_wayback_backoff_until' );
 
+// Every page of the live moss generation keeps its state in this ONE option,
+// shaped { generation: '<id>', urls: { '<path>': {job_id, archived_at, …} } }.
+// One row rather than one option per page: the set is bounded (see
+// OP_WB_MOSS_MAX_PAGES), the whole thing is read and written atomically, and
+// the sweep holds a single-instance lock so there is no concurrent writer to
+// lose an update to. The generation id rides along because it is what makes a
+// publish re-archive — see onionpress_wayback_moss_records().
+define( 'OP_WB_OPT_MOSS',          'op_wayback_moss_state' );
+
+// Ceiling on how many moss pages are tracked. This is a storage bound, not a
+// throughput one — the sweep already drains whatever it enumerates across
+// iterations at OP_WB_SUBMIT_BATCH_MAX a time. At roughly 150 serialized
+// bytes per archived page, 1000 pages is ~150 kB in one non-autoloaded
+// option, which is unremarkable; a hundred thousand would not be. Pages past
+// the cap are not archived, and the enumeration log line says so rather than
+// dropping them silently.
+define( 'OP_WB_MOSS_MAX_PAGES', 1000 );
+
+// How many files the fallback directory walk may look at before giving up on
+// the pages it has found so far. Only reached when a generation ships no
+// sitemap.xml AND carries a very large tree; the walk already refuses to
+// descend into moss's asset mount, which is what makes a normal site cost far
+// less than this.
+define( 'OP_WB_MOSS_SCAN_MAX', 20000 );
+
 // ─────────────────────────── logging + helpers ──────────────────────
 
 function onionpress_wayback_log( $msg ) {
@@ -272,10 +297,31 @@ function onionpress_wayback_home_url_full() {
     return 'http://' . $onion . $path;
 }
 
+/**
+ * The feed URL to archive.
+ *
+ * `/feed/` is a WordPress route. A moss generation replaces the whole site at
+ * the onion root and publishes its feed at `/rss.xml` — it emits nothing at
+ * `/feed/` at all, so on a moss site the archiver was submitting WordPress's
+ * own empty feed to SPN, sweep after sweep, and never once archiving the feed
+ * a reader actually subscribes to.
+ *
+ * Decided by the file being there, not by "is a generation live": moss emits
+ * rss.xml and sitemap.xml only once its site_url is *deployed* (`has_rss` in
+ * its renderer gates both), so a site published before its onion name was
+ * registered genuinely has no rss.xml and WordPress's route is still the only
+ * feed that exists.
+ */
 function onionpress_wayback_feed_url_full() {
     $onion = onionpress_wayback_onion_addr();
     if ( empty( $onion ) ) {
         return '';
+    }
+    if ( onionpress_wayback_moss_is_owner() ) {
+        $gen = onionpress_wayback_moss_generation();
+        if ( $gen !== null && is_file( $gen['dir'] . '/rss.xml' ) ) {
+            return 'http://' . $onion . '/rss.xml';
+        }
     }
     $path = wp_parse_url( home_url( '/' ), PHP_URL_PATH ) ?: '/';
     return 'http://' . $onion . rtrim( $path, '/' ) . '/feed/';
@@ -838,6 +884,213 @@ function onionpress_wayback_opt_write( $option_key, array $patch ) {
     update_option( $option_key, $raw, false /* no autoload */ );
 }
 
+// ─────────────────────────── moss generation ────────────────────────
+
+/**
+ * Where the live generation is symlinked. The moss receiver owns this path;
+ * read its constant when the receiver is loaded rather than keeping a second
+ * copy of the same string in two mu-plugins that must agree.
+ */
+function onionpress_wayback_moss_current_path() {
+    return defined( 'ONIONPRESS_MOSS_CURRENT' )
+        ? ONIONPRESS_MOSS_CURRENT
+        : '/var/www/html/site/current';
+}
+
+/**
+ * The live moss generation as array( 'id' => …, 'dir' => … ), or null when
+ * no generation is serving (a plain WordPress site, or a first run before
+ * moss has ever committed).
+ *
+ * realpath() is load-bearing, though not for the reason it looks like. The
+ * walk below is indifferent to it — PHP descends a symlinked start path
+ * perfectly well, unlike find(1), which needs -L. What resolving buys is the
+ * ID: `site/current` is a symlink whose own basename is the constant
+ * "current". Read the id off the unresolved path and it never changes, so
+ * every publish matches the generation already recorded, the per-page map
+ * never resets, and new content is silently never submitted — the generation
+ * id is the entire mechanism by which a publish re-archives.
+ */
+function onionpress_wayback_moss_generation() {
+    $real = realpath( onionpress_wayback_moss_current_path() );
+    if ( $real === false || ! is_dir( $real ) ) {
+        return null;
+    }
+    return array( 'id' => basename( $real ), 'dir' => $real );
+}
+
+function onionpress_wayback_moss_is_owner() {
+    return onionpress_wayback_moss_generation() !== null;
+}
+
+/**
+ * Every page path the live generation serves, as absolute site paths ('/',
+ * '/about/', …).
+ *
+ * sitemap.xml first, because moss writes it from its own build manifest and
+ * it is therefore the authoritative list. Only the PATH of each <loc> is
+ * used: the host in there comes from moss's persisted site_url, which is
+ * whatever was configured at build time and can be stale or even
+ * http://localhost — archiving that would submit URLs nobody can fetch.
+ *
+ * The walk is the fallback because moss gates sitemap.xml (and rss.xml) on
+ * its site_url being "deployed", so a site built before its onion name was
+ * registered ships neither. Without the fallback those sites would archive
+ * nothing at all and the reason would be invisible.
+ */
+function onionpress_wayback_moss_paths( array $gen ) {
+    $paths   = array();
+    $sitemap = $gen['dir'] . '/sitemap.xml';
+
+    if ( is_readable( $sitemap ) && function_exists( 'simplexml_load_file' ) ) {
+        $prev = libxml_use_internal_errors( true );
+        $xml  = simplexml_load_file( $sitemap );
+        libxml_clear_errors();
+        libxml_use_internal_errors( $prev );
+        if ( $xml !== false && isset( $xml->url ) ) {
+            foreach ( $xml->url as $u ) {
+                $path = wp_parse_url( (string) $u->loc, PHP_URL_PATH );
+                if ( is_string( $path ) && $path !== '' ) {
+                    $paths[ $path ] = true;
+                }
+            }
+        }
+    }
+    if ( $paths ) {
+        return array_keys( $paths );
+    }
+
+    // Fallback: a page is a directory carrying index.html. Skip moss's asset
+    // mount — it holds the hashed css/js and the generated OG images, which
+    // on a real site outnumber the pages by an order of magnitude and can
+    // never contain one.
+    $scanned = 0;
+    $dir     = new RecursiveDirectoryIterator( $gen['dir'], FilesystemIterator::SKIP_DOTS );
+    $filter  = new RecursiveCallbackFilterIterator( $dir, function ( $file ) {
+        return $file->getFilename() !== '_moss';
+    } );
+    foreach ( new RecursiveIteratorIterator( $filter ) as $file ) {
+        if ( ++$scanned > OP_WB_MOSS_SCAN_MAX ) {
+            onionpress_wayback_log( sprintf(
+                'moss: directory walk hit its %d-file ceiling; enumerated %d page(s) before stopping',
+                OP_WB_MOSS_SCAN_MAX, count( $paths )
+            ) );
+            break;
+        }
+        if ( $file->getFilename() !== 'index.html' ) {
+            continue;
+        }
+        $rel = substr( $file->getPath(), strlen( $gen['dir'] ) );
+        $rel = str_replace( '\\', '/', $rel );
+        $paths[ $rel === '' ? '/' : rtrim( $rel, '/' ) . '/' ] = true;
+    }
+    return array_keys( $paths );
+}
+
+/**
+ * Patch one moss page's state inside the single OP_WB_OPT_MOSS row.
+ *
+ * Refuses to write into a generation that is no longer the live one. A job
+ * submitted against the previous generation can land here after a publish
+ * has already reset the map, and finalize_success writes archived_at and
+ * clears job_id in two separate calls — without this guard a late write
+ * resurrects a row for a page the new generation may not even serve, and
+ * nothing would ever retire it.
+ */
+function onionpress_wayback_moss_write( $gen_id, $path, array $patch ) {
+    $state = onionpress_wayback_opt_read( OP_WB_OPT_MOSS );
+    if ( (string) ( $state['generation'] ?? '' ) !== (string) $gen_id ) {
+        return;
+    }
+    $urls = isset( $state['urls'] ) && is_array( $state['urls'] ) ? $state['urls'] : array();
+    $row  = isset( $urls[ $path ] ) && is_array( $urls[ $path ] ) ? $urls[ $path ] : array();
+    foreach ( $patch as $k => $v ) {
+        if ( $v === '' || $v === 0 || $v === 0.0 ) {
+            unset( $row[ $k ] );
+        } else {
+            $row[ $k ] = $v;
+        }
+    }
+    if ( $row ) {
+        $urls[ $path ] = $row;
+    } else {
+        unset( $urls[ $path ] );
+    }
+    $state['urls'] = $urls;
+    update_option( OP_WB_OPT_MOSS, $state, false /* no autoload */ );
+}
+
+/**
+ * The live generation's pages as work records, in the same shape posts and
+ * home/feed already use, so poll / CDX rescue / finalize / back-off all
+ * apply to them unchanged.
+ *
+ * $covered lets the caller pass the URLs home/feed already claim. moss's
+ * sitemap lists '/' too, so without it the site root would be submitted
+ * twice per sweep against an SPN account whose concurrent slots are counted
+ * in single digits.
+ */
+function onionpress_wayback_moss_records( array $covered = array() ) {
+    $onion = onionpress_wayback_onion_addr();
+    if ( $onion === '' ) {
+        return array();
+    }
+    $gen = onionpress_wayback_moss_generation();
+    if ( $gen === null ) {
+        return array();
+    }
+
+    // A publish is a new generation id, and that is what makes the new
+    // content get archived: the per-page map is keyed to the generation it
+    // describes, so replacing it retires every row in one write.
+    $state = onionpress_wayback_opt_read( OP_WB_OPT_MOSS );
+    if ( (string) ( $state['generation'] ?? '' ) !== (string) $gen['id'] ) {
+        update_option(
+            OP_WB_OPT_MOSS,
+            array( 'generation' => $gen['id'], 'urls' => array() ),
+            false /* no autoload */
+        );
+        onionpress_wayback_log( sprintf(
+            'moss: generation %s is live (was %s) — re-archiving its pages',
+            $gen['id'], ( $state['generation'] ?? '(none)' )
+        ) );
+    }
+
+    $paths = onionpress_wayback_moss_paths( $gen );
+    sort( $paths );
+    $total = count( $paths );
+    if ( $total > OP_WB_MOSS_MAX_PAGES ) {
+        $paths = array_slice( $paths, 0, OP_WB_MOSS_MAX_PAGES );
+        onionpress_wayback_log( sprintf(
+            'moss: %d page(s) found, tracking the first %d (OP_WB_MOSS_MAX_PAGES); %d not archived',
+            $total, OP_WB_MOSS_MAX_PAGES, $total - OP_WB_MOSS_MAX_PAGES
+        ) );
+    }
+
+    $records = array();
+    foreach ( $paths as $path ) {
+        $url = 'http://' . $onion . $path;
+        if ( isset( $covered[ $url ] ) ) {
+            continue;
+        }
+        $gen_id = $gen['id'];
+        $records[] = array(
+            'key'   => 'moss:' . $path,
+            'url'   => $url,
+            'read'  => function () use ( $path ) {
+                $s = onionpress_wayback_opt_read( OP_WB_OPT_MOSS );
+                return isset( $s['urls'][ $path ] ) && is_array( $s['urls'][ $path ] )
+                    ? $s['urls'][ $path ]
+                    : array();
+            },
+            'write' => function ( $patch ) use ( $gen_id, $path ) {
+                onionpress_wayback_moss_write( $gen_id, $path, $patch );
+            },
+        );
+    }
+    return $records;
+}
+
 // ───────────────────── work queue (posts + home/feed) ───────────────
 
 /**
@@ -933,7 +1186,30 @@ function onionpress_wayback_sitewide_records() {
             },
         );
     }
-    return $records;
+    // Home and feed are the only two URLs WordPress can name generically. When
+    // moss is serving, they are 2 of N — every other page it publishes was
+    // outside the queue entirely, which is why a site could report
+    // "archived=5/5" while none of its actual pages had ever been submitted.
+    return array_merge( $records, onionpress_wayback_moss_records( $covered ) );
+}
+
+/**
+ * Does any sitewide URL still need attention? A record needs work unless it
+ * has an archived_at and no job_id in flight.
+ *
+ * Derived from the records rather than from named options so it cannot drift
+ * from what the sweep would do — the multisite loop uses this to decide it
+ * may skip a subsite entirely, and a stale answer there means content is
+ * silently never archived.
+ */
+function onionpress_wayback_sitewide_has_work() {
+    foreach ( onionpress_wayback_sitewide_records() as $rec ) {
+        $state = call_user_func( $rec['read'] );
+        if ( empty( $state['archived_at'] ) || ! empty( $state['job_id'] ) ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ──────────────────────────── sweep ─────────────────────────────────
@@ -1163,15 +1439,14 @@ function onionpress_wayback_sweep_loop( $token ) {
                     ),
                     'fields' => 'ids',
                 ) );
-                // Home + feed are tracked in wp_options, not post meta, so the
+                // Sitewide URLs are tracked in wp_options, not post meta, so the
                 // post probes above miss them. A subsite with every post archived
                 // can still need work if save_post invalidated its home/feed
-                // capture (state cleared) or a home/feed job is in flight. Treat
-                // a state as "needs work" unless archived_at is set AND no job_id.
-                $home_state    = onionpress_wayback_opt_read( OP_WB_OPT_HOME );
-                $feed_state    = onionpress_wayback_opt_read( OP_WB_OPT_FEED );
-                $sitewide_work = empty( $home_state['archived_at'] ) || ! empty( $home_state['job_id'] )
-                              || empty( $feed_state['archived_at'] ) || ! empty( $feed_state['job_id'] );
+                // capture (state cleared), a job is in flight, or a moss publish
+                // put new pages in the queue. Ask the records themselves rather
+                // than reading home/feed options directly — that is what keeps
+                // this in step with what the sweep will actually try to do.
+                $sitewide_work = onionpress_wayback_sitewide_has_work();
                 if ( empty( $remaining ) && empty( $in_flight ) && ! $sitewide_work ) {
                     // No work on this subsite — skip.
                     continue;
