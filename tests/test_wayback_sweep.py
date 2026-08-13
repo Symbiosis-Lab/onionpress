@@ -215,6 +215,58 @@ class TestWaybackSweepIteration(unittest.TestCase):
         self.assertNotIn("jid-young-test", out,
             f"young job should not be polled; poll got: {out}")
 
+    def test_job_spn_has_forgotten_is_cleared(self):
+        """SPN has a behavior its API doesn't document: a job_id it has
+        entirely forgotten comes back ABSENT from /save/status rather than
+        as 'pending' or 'error'. Every finalize branch keys off a returned
+        status dict, so such a job matched nothing, kept its job_id, and
+        was skipped by the submit step forever. This site's home and feed
+        sat that way for five days, archiving nothing, while every sweep
+        logged a healthy avail=40.
+        """
+        self._set_meta("_op_wayback_job_id", "jid-forgotten-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 4000))
+
+        php = self._common_mocks() + """
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) { return array(); }, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo 'ok';
+        """
+        _eval(php, self.url)
+        self.assertNotEqual("jid-forgotten-test", self._get_meta("_op_wayback_job_id"),
+            "a job_id SPN no longer knows must not survive the sweep — "
+            "keeping it deadlocks this URL permanently")
+
+    def test_recently_submitted_job_survives_an_empty_poll(self):
+        """poll_parallel returns [] both when SPN forgot the jobs and when
+        the request itself failed, and the two are indistinguishable. So the
+        clearing above is gated on age: a job younger than the threshold at
+        which a *pending* job would be resubmitted must survive a blank
+        response, or one Tor blip would resubmit the whole in-flight queue.
+        """
+        self._set_meta("_op_wayback_job_id", "jid-fresh-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 30))
+
+        php = self._common_mocks() + """
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) { return array(); }, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo 'ok';
+        """
+        _eval(php, self.url)
+        self.assertEqual("jid-fresh-test", self._get_meta("_op_wayback_job_id"),
+            "a young job must survive an empty poll — it is far more likely "
+            "the poll failed than that SPN forgot a job submitted seconds ago")
+
     def test_submit_assigns_job_id(self):
         """A fresh post (no job_id) gets one on a successful submit."""
         php = self._common_mocks() + f"""

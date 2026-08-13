@@ -67,6 +67,20 @@ define( 'OP_WB_YOUNG_JOB_SKIP_SEC', 15 );
 define( 'OP_WB_LOOP_IDLE_SLEEP',    30 );  // between iterations when work was done
 define( 'OP_WB_LOOP_NOWORK_SLEEP',  90 );  // when iteration found nothing to submit
 define( 'OP_WB_LOOP_LOCK_STALE_SEC', 300 );// lock not heartbeated in this long = dead
+// Hard ceiling on one daemon's lifetime. The comments above and on
+// onionpress_wayback_sweep_loop have always described this cap, but the
+// constant was never defined and the loop was `while (true)` with no
+// time-based exit — so a daemon that always found work ran forever.
+//
+// That is not merely untidy. WordPress caches options and post queries
+// per REQUEST, and this daemon is a single request; a process that never
+// exits never refreshes those caches. One that had been alive 70 hours
+// went on reading a job_id that had been deleted from the database hours
+// earlier, and because a non-empty job_id is itself what marks the queue
+// "still has work", the stale read kept the loop alive that was keeping
+// the read stale. Recycling on a timer breaks that circuit: cron starts
+// a fresh process with a fresh cache within a minute or two.
+define( 'OP_WB_LOOP_MAX_SEC',      1800 ); // recycle the daemon every 30 min
 
 // Back-off durations (written to op_wayback_backoff_until option).
 define( 'OP_WB_BACKOFF_NO_SLOTS',    20 );  // SPN says available=0
@@ -792,6 +806,26 @@ function onionpress_wayback_sweep_loop( $token ) {
         }
         update_option( $lock_key, $token . ':' . time(), false );
 
+        // Lifetime cap. Exiting here is not giving up: the queue is
+        // unchanged and the next cron tick starts a fresh daemon that picks
+        // up exactly where this one stopped — but with an empty option and
+        // query cache, so it sees the database as it actually is. See
+        // OP_WB_LOOP_MAX_SEC. Deliberately below the ownership check: it
+        // releases the lock, so it must first be sure the lock is ours.
+        $runtime = (int) ( microtime( true ) - $loop_start );
+        if ( $runtime >= OP_WB_LOOP_MAX_SEC ) {
+            onionpress_wayback_log( sprintf(
+                'Loop: recycling after %dm%02ds (%d iterations, cap=%ds) — '
+                . 'submitted=%d archived=%d cdx-hit=%d errors=%d; cron restarts a fresh daemon',
+                intdiv( $runtime, 60 ), $runtime % 60, $iter, OP_WB_LOOP_MAX_SEC,
+                $totals['submitted'], $totals['success'], $totals['cdx'], $totals['error']
+            ) );
+            // Hand off immediately rather than making the queue wait out
+            // LOCK_STALE_SEC for a daemon we know has exited cleanly.
+            delete_option( $lock_key );
+            return;
+        }
+
         // Visit every subsite in the network. The daemon may have been
         // invoked from any site's cron; we need to do work on whichever
         // subsite actually has unarchived posts. Skip subsites whose
@@ -966,6 +1000,7 @@ function onionpress_wayback_sweep_iteration() {
     $polled_error   = 0;
     $polled_pending = 0;
     $polled_cdx_hit = 0;
+    $polled_unknown = 0;
     $results        = onionpress_wayback_poll_parallel( $ripe_job_ids );
 
     // First pass: finalize successes and pending; collect error-jobs for
@@ -975,10 +1010,12 @@ function onionpress_wayback_sweep_iteration() {
     $cdx_check_urls  = array();
     $cdx_check_recs  = array();
     $cdx_check_exts  = array();
+    $answered        = array();
     foreach ( $results as $res ) {
         if ( ! is_array( $res ) ) continue;
         $jid = (string) ( $res['job_id'] ?? '' );
         if ( ! isset( $in_flight[ $jid ] ) ) continue;
+        $answered[ $jid ] = true;
         $rec    = $in_flight[ $jid ];
         $status = (string) ( $res['status'] ?? '' );
 
@@ -1012,6 +1049,35 @@ function onionpress_wayback_sweep_iteration() {
                 $polled_pending++;
             }
         }
+    }
+
+    // Every branch above keys off a status dict SPN actually returned. But
+    // SPN has a fourth behaviour its API doesn't document: a job_id it has
+    // entirely forgotten is simply ABSENT from the /save/status response —
+    // no 'success', no 'error', not even 'pending'. Such a job matches no
+    // branch, so it is never finalized and never cleared, while Step B
+    // skips any record still carrying a job_id. That is a permanent
+    // deadlock, and it is not theoretical: this site's home and feed sat
+    // on forgotten job_ids for five days, archiving nothing, while the
+    // sweep logged a healthy avail=40 every single minute.
+    //
+    // Treat "ripe, polled, and unanswered" exactly like stale-pending. The
+    // STALE_PENDING_SEC gate keeps a transient failure cheap: poll_parallel
+    // returns [] both for "SPN forgot them" and for "the request failed",
+    // and we cannot tell those apart, so only jobs already past the age at
+    // which the code above would resubmit a *pending* job are cleared here.
+    // Worst case on a Tor blip is one redundant resubmit — the same
+    // tradeoff the available-slots gate already takes deliberately.
+    foreach ( $ripe_job_ids as $jid ) {
+        if ( isset( $answered[ $jid ] ) || ! isset( $in_flight[ $jid ] ) ) continue;
+        $rec = $in_flight[ $jid ];
+        $age = $rec['submitted_at'] ? ( $now - $rec['submitted_at'] ) : null;
+        if ( $age !== null && $age <= OP_WB_STALE_PENDING_SEC ) continue;
+        $rec['write']( array( 'job_id' => '', 'submitted_at' => '' ) );
+        $polled_unknown++;
+        onionpress_wayback_log( 'SPN forgot ' . $rec['key'] . ' (job_id absent from status response'
+            . ( $age === null ? ', no submitted_at' : ', age=' . $age . 's' )
+            . '), clearing for resubmit' );
     }
 
     // Second pass: for each SPN-errored job, verify against Wayback's
@@ -1105,8 +1171,8 @@ function onionpress_wayback_sweep_iteration() {
 
     $elapsed = round( microtime( true ) - ( $deadline - OP_WB_SWEEP_BUDGET_SEC ), 2 );
     onionpress_wayback_log( sprintf(
-        'Sweep: avail=%d polled(success=%d cdx-hit=%d err=%d pending=%d skipped-young=%d) submitted=%d elapsed=%ss',
-        $available, $polled_success, $polled_cdx_hit, $polled_error, $polled_pending,
+        'Sweep: avail=%d polled(success=%d cdx-hit=%d err=%d pending=%d forgotten=%d skipped-young=%d) submitted=%d elapsed=%ss',
+        $available, $polled_success, $polled_cdx_hit, $polled_error, $polled_pending, $polled_unknown,
         count( $in_flight ) - count( $ripe_job_ids ), $submitted, $elapsed
     ) );
 
