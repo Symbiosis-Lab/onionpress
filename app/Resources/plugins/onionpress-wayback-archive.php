@@ -177,6 +177,36 @@ define( 'OP_WB_LOOP_MAX_SEC',      1800 ); // recycle the daemon every 30 min
 // onion is noticed within an iteration or two.
 define( 'OP_WB_SELF_REACHABLE_TTL',  60 );
 
+// Per-URL retry back-off, after SPN has reported an error for that URL.
+//
+// SPN failing a URL is not a reason to stop trying it — captures fail for
+// transient reasons all the time, and the CDX rescue verifies each error
+// against the record before writing it off. But nothing gated the RETRY.
+// A failed URL returns to "no archived_at, no job_id", which is exactly
+// what posts_needing_submit selects on, so it was resubmitted on the very
+// next sweep and every sweep after that, forever.
+//
+// Measured on this stack before the fix: 17 submissions, 9 errors, 2.4
+// submissions a minute, a 100% failure rate — against an SPN account shared
+// by every OnionPress node. The archiver was not retrying, it was storming,
+// and the cost of that landed on other people's sites.
+//
+// Doubling from 5 minutes to a day (300, 600, 1200, … 86400) puts ~9
+// submissions in a permanently-failing URL's first day rather than ~3400,
+// and still retries a transient failure within five minutes. Recorded per
+// record in error_count, cleared the moment a capture succeeds.
+define( 'OP_WB_RETRY_BASE_SEC',  300 );
+define( 'OP_WB_RETRY_MAX_SEC', 86400 );
+
+// Candidate over-fetch when assembling a submit batch. The back-off above is
+// per record and exponential in that record's own error_count, so it cannot
+// be expressed in the meta_query — it is applied as the batch is built.
+// Asking for exactly the budget would let the newest N posts, all of them
+// still cooling off, hide every older post that is ready; the queue would
+// stall with work in it. 4x, with a ceiling so the query stays bounded.
+define( 'OP_WB_SUBMIT_CANDIDATE_FACTOR', 4 );
+define( 'OP_WB_SUBMIT_CANDIDATE_MAX',  200 );
+
 // Back-off durations (written to op_wayback_backoff_until option).
 define( 'OP_WB_BACKOFF_NO_SLOTS',    20 );  // SPN says available=0
 define( 'OP_WB_BACKOFF_UNREACHABLE', 120 ); // our own onion not responding
@@ -208,6 +238,7 @@ define( 'OP_WB_META_RESOURCES_COUNT', '_op_wayback_resources_count' );
 define( 'OP_WB_META_OUTLINKS_COUNT',  '_op_wayback_outlinks_count' );
 define( 'OP_WB_META_LAST_ERROR_EXT',  '_op_wayback_last_error_ext' );
 define( 'OP_WB_META_LAST_ERROR_AT',   '_op_wayback_last_error_at' );
+define( 'OP_WB_META_ERROR_COUNT',     '_op_wayback_error_count' );
 // Set when the post has been re-archived once due to a comment being
 // added (i.e. social-importer threading folded a reply into this post).
 // Caps the comment-driven re-archive at one snapshot per post — without
@@ -823,11 +854,55 @@ function onionpress_wayback_finalize_success( callable $write, $url, array $data
     $write( $state );
 }
 
-function onionpress_wayback_finalize_error( callable $write, $ext ) {
+/**
+ * Record a failed capture, and count it. $state is the record's state as
+ * just read, which is where the running count lives — the caller has it in
+ * hand and re-reading through the write callable would be a second query
+ * for a number already sitting on the stack.
+ */
+function onionpress_wayback_finalize_error( callable $write, $ext, array $state = array() ) {
     $write( array(
         'last_error_ext' => (string) $ext,
         'last_error_at'  => time(),
+        'error_count'    => (int) ( $state['error_count'] ?? 0 ) + 1,
     ) );
+}
+
+/**
+ * How long a record must cool off after its Nth consecutive failure.
+ *
+ * The exponent is clamped as well as the result. min() on the product alone
+ * would still evaluate OP_WB_RETRY_BASE_SEC * 2^N first, and a record that
+ * somehow accumulated a few thousand failures would overflow to INF before
+ * the clamp ever saw it — (int) INF is undefined behaviour across PHP
+ * versions and has been 0 on some, which would turn the ceiling into no
+ * back-off at all on exactly the record that needs it most.
+ */
+function onionpress_wayback_retry_delay( $error_count ) {
+    $n = max( 1, (int) $error_count );
+    return (int) min(
+        OP_WB_RETRY_MAX_SEC,
+        OP_WB_RETRY_BASE_SEC * pow( 2, min( $n - 1, 30 ) )
+    );
+}
+
+/**
+ * May this record be submitted again yet? True for anything that has never
+ * failed, so the ordinary path pays one array lookup.
+ */
+function onionpress_wayback_retry_ready( array $state, $now ) {
+    $at = (int) ( $state['last_error_at'] ?? 0 );
+    if ( $at <= 0 ) {
+        return true;
+    }
+    // A last_error_at in the future means the clock moved backwards (a laptop
+    // resuming with a corrected time, most often). Treat it as ready rather
+    // than as a back-off lasting until the clock catches up, which on a large
+    // correction would be indistinguishable from the record being abandoned.
+    if ( $at > $now ) {
+        return true;
+    }
+    return ( $now - $at ) >= onionpress_wayback_retry_delay( $state['error_count'] ?? 1 );
 }
 
 // ────────────────────── state read/write helpers ────────────────────
@@ -837,6 +912,10 @@ function onionpress_wayback_post_read( $post_id ) {
         'archived_at' => (int)    get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ),
         'job_id'      => (string) get_post_meta( $post_id, OP_WB_META_JOB_ID,       true ),
         'submitted_at'=> (int)    get_post_meta( $post_id, OP_WB_META_SUBMITTED_AT, true ),
+        // Read by the retry gate. A record that skipped these would be
+        // treated as never having failed, which is the storm this fixes.
+        'last_error_at'=> (int)   get_post_meta( $post_id, OP_WB_META_LAST_ERROR_AT, true ),
+        'error_count' => (int)    get_post_meta( $post_id, OP_WB_META_ERROR_COUNT,   true ),
     );
 }
 
@@ -856,6 +935,7 @@ function onionpress_wayback_post_write( $post_id, array $patch ) {
         'outlinks_count'  => OP_WB_META_OUTLINKS_COUNT,
         'last_error_ext'  => OP_WB_META_LAST_ERROR_EXT,
         'last_error_at'   => OP_WB_META_LAST_ERROR_AT,
+        'error_count'     => OP_WB_META_ERROR_COUNT,
     );
     foreach ( $patch as $key => $val ) {
         if ( ! isset( $mapping[ $key ] ) ) continue;
@@ -1100,10 +1180,17 @@ function onionpress_wayback_moss_records( array $covered = array() ) {
  * home/feed go through the same code path.
  */
 function onionpress_wayback_posts_needing_submit( $limit ) {
+    // Over-fetch: the caller drops records still cooling off from a failed
+    // capture, and that back-off is per record and exponential in its own
+    // error_count, so it cannot be expressed here. Asking for exactly the
+    // budget lets the newest N posts — all of them cooling — hide every
+    // older post that is ready, and the queue stalls with work in it.
+    $limit      = max( 1, (int) $limit );
+    $candidates = min( OP_WB_SUBMIT_CANDIDATE_MAX, $limit * OP_WB_SUBMIT_CANDIDATE_FACTOR );
     $posts = get_posts( array(
         'post_status'      => 'publish',
         'post_type'        => array( 'post', 'page' ),
-        'numberposts'      => (int) $limit,
+        'numberposts'      => $candidates,
         'orderby'          => 'date',
         'order'            => 'DESC',
         'meta_query'       => array(
@@ -1152,6 +1239,7 @@ function onionpress_wayback_posts_with_in_flight() {
             'key'          => 'post:' . $post_id,
             'url'          => $url,
             'submitted_at' => (int) get_post_meta( $post_id, OP_WB_META_SUBMITTED_AT, true ),
+            'error_count'  => (int) get_post_meta( $post_id, OP_WB_META_ERROR_COUNT, true ),
             'write'        => function( $patch ) use ( $post_id ) {
                 onionpress_wayback_post_write( $post_id, $patch );
             },
@@ -1599,6 +1687,10 @@ function onionpress_wayback_sweep_iteration() {
                 'key'          => $rec['key'],
                 'url'          => $rec['url'],
                 'submitted_at' => (int) ( $state['submitted_at'] ?? 0 ),
+                // Denormalised for the same reason as submitted_at: the poll
+                // loop carries no 'read', and finalize_error needs the running
+                // count to advance the back-off exponent.
+                'error_count'  => (int) ( $state['error_count'] ?? 0 ),
                 'write'        => $rec['write'],
             );
         }
@@ -1668,7 +1760,8 @@ function onionpress_wayback_sweep_iteration() {
 
         if ( $status === 'success' ) {
             onionpress_wayback_finalize_success( $rec['write'], $rec['url'], $res );
-            $rec['write']( array( 'job_id' => '', 'submitted_at' => '', 'last_error_ext' => '', 'last_error_at' => '' ) );
+            $rec['write']( array( 'job_id' => '', 'submitted_at' => '',
+                'last_error_ext' => '', 'last_error_at' => '', 'error_count' => '' ) );
             $polled_success++;
             onionpress_wayback_log( 'Archived ' . $rec['key'] . ' ts=' . (string) ( $res['timestamp'] ?? '' )
                 . ' dur=' . (string) ( $res['duration_sec'] ?? '' ) );
@@ -1756,7 +1849,7 @@ function onionpress_wayback_sweep_iteration() {
     $cdx_defer   = $over_budget ? array() : array_slice( $cdx_check_urls, 5, null, true );
     foreach ( $cdx_defer as $jid => $url ) {
         $rec = $cdx_check_recs[ $jid ];
-        onionpress_wayback_finalize_error( $rec['write'], $cdx_check_exts[ $jid ] );
+        onionpress_wayback_finalize_error( $rec['write'], $cdx_check_exts[ $jid ], $rec );
         $rec['write']( array( 'job_id' => '', 'submitted_at' => '' ) );
         $polled_error++;
     }
@@ -1772,13 +1865,14 @@ function onionpress_wayback_sweep_iteration() {
                     'job_id'         => '',
                     'submitted_at'   => '',
                     'last_error_ext' => '',
+                    'error_count'    => '',
                     'last_error_at'  => '',
                 ) );
                 $polled_cdx_hit++;
                 onionpress_wayback_log( 'CDX rescued ' . $rec['key'] . ' ts=' . $ts
                     . ' (SPN said ' . $cdx_check_exts[ $jid ] . ')' );
             } else {
-                onionpress_wayback_finalize_error( $rec['write'], $cdx_check_exts[ $jid ] );
+                onionpress_wayback_finalize_error( $rec['write'], $cdx_check_exts[ $jid ], $rec );
                 $rec['write']( array( 'job_id' => '', 'submitted_at' => '' ) );
                 $polled_error++;
             }
@@ -1810,12 +1904,17 @@ function onionpress_wayback_sweep_iteration() {
     ) );
     $to_submit = array();      // map: key → url
     $records_by_key = array(); // map: key → record (for write-back)
+    $cooling     = 0;          // records skipped by the per-URL retry back-off
 
     foreach ( onionpress_wayback_sitewide_records() as $rec ) {
         if ( count( $to_submit ) >= $budget ) break;
         $state = $rec['read']();
         if ( ! empty( $state['archived_at'] ) ) continue;
         if ( ! empty( $state['job_id'] ) ) continue;
+        // A URL SPN has just failed is still unarchived and still has no
+        // job_id — the exact state this loop selects on. Without the gate it
+        // is resubmitted every sweep for as long as it keeps failing.
+        if ( ! onionpress_wayback_retry_ready( $state, $now ) ) { $cooling++; continue; }
         $to_submit[ $rec['key'] ] = $rec['url'];
         $records_by_key[ $rec['key'] ] = $rec;
     }
@@ -1824,6 +1923,7 @@ function onionpress_wayback_sweep_iteration() {
         $posts = onionpress_wayback_posts_needing_submit( $budget - count( $to_submit ) );
         foreach ( $posts as $rec ) {
             if ( count( $to_submit ) >= $budget ) break;
+            if ( ! onionpress_wayback_retry_ready( $rec['read'](), $now ) ) { $cooling++; continue; }
             $to_submit[ $rec['key'] ] = $rec['url'];
             $records_by_key[ $rec['key'] ] = $rec;
         }
@@ -1940,6 +2040,10 @@ function onionpress_wayback_sweep_iteration() {
     // operator should never have to infer from an absent token whether the
     // slot count was read or invented.
     $notes[] = 'spn-status=' . $spn_status;
+    // A queue that is full of cooling records looks exactly like an empty
+    // one from queued=/submitted= alone — which is how the storm went
+    // unnoticed in the first place, only in the other direction.
+    if ( $cooling > 0 )         $notes[] = 'retry-cooling=' . $cooling;
     if ( $polled_lost > 0 )     $notes[] = 'poll-lost=' . $polled_lost;
     if ( $polled_capped > 0 )   $notes[] = 'poll-capped=' . $polled_capped;
     // "skipped", not "deferred": the $cdx_defer path retires its records,
@@ -2064,6 +2168,7 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
             'outlinks_count'  => '',
             'last_error_ext'  => '',
             'last_error_at'   => '',
+            'error_count'     => '',
         ) );
     }
 
@@ -2112,6 +2217,7 @@ add_action( 'wp_insert_comment', function ( $comment_id, $comment ) {
         'outlinks_count'  => '',
         'last_error_ext'  => '',
         'last_error_at'   => '',
+        'error_count'     => '',
     ) );
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );
     onionpress_wayback_schedule_sweep_now( 'comment' );

@@ -405,6 +405,150 @@ class TestWaybackSweepIteration(SitewideStateMixin, unittest.TestCase):
             "a young job must survive an empty poll — it is far more likely "
             "the poll failed than that SPN forgot a job submitted seconds ago")
 
+    def _submit_everything_mock(self):
+        """Hand every submitted URL a job_id, so 'did this get submitted?'
+        is answerable by looking at the post's meta afterwards."""
+        return """
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {
+            $out = array();
+            foreach ($urls as $k => $u) { $out[$k] = 'jid-submitted-' . md5($u); }
+            return $out;
+        }, 10, 2);
+        """
+
+    def test_an_error_cdx_cannot_rescue_is_recorded_as_a_failure(self):
+        """The other side of the CDX rescue, and the only path that reaches
+        finalize_error. The rescue test above covers the CDX *hit*, so this
+        branch had never once run under test — and it crashed the whole
+        sweep the first time it did on the live stack, on an in-flight
+        record that carries no read callable. The counter that drives the
+        retry back-off is written here or nowhere.
+        """
+        self._set_meta("_op_wayback_job_id", "jid-unrescuable-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 4000))
+        self._set_meta("_op_wayback_error_count", "2")
+
+        php = self._common_mocks() + """
+        add_filter('onionpress_wayback_poll_parallel_mock', function($_, $job_ids) {
+            return array(array(
+                'job_id'     => 'jid-unrescuable-test',
+                'status'     => 'error',
+                'status_ext' => 'error:no-captures',
+            ));
+        }, 10, 2);
+        add_filter('onionpress_wayback_poll_covered_mock', function($_, $job_ids) {
+            return array_fill_keys($job_ids, true);
+        }, 10, 2);
+        // CDX has nothing: the capture really is lost.
+        add_filter('onionpress_wayback_cdx_lookup_parallel_mock',
+                   function($_, $urls) { return array(); }, 10, 2);
+        add_filter('onionpress_wayback_submit_parallel_mock', function($_, $urls) {
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        echo json_encode(onionpress_wayback_sweep_iteration());
+        """
+        stats = json.loads(_eval(php, self.url))
+        self.assertEqual(1, stats["error"])
+        self.assertEqual("", self._get_meta("_op_wayback_job_id"),
+                         "an unrescuable job must be cleared for a later retry")
+        self.assertEqual("3", self._get_meta("_op_wayback_error_count"),
+                         "the failure count must advance, or the back-off never grows")
+        self.assertNotEqual("", self._get_meta("_op_wayback_last_error_at"))
+
+    def test_a_failed_capture_is_not_resubmitted_on_the_next_sweep(self):
+        """The retry storm. A URL SPN failed returns to "no archived_at, no
+        job_id" — exactly what posts_needing_submit selects on — so before
+        the back-off it was resubmitted every sweep for as long as it kept
+        failing. Measured live: 17 submissions, 9 errors, 2.4/min, a 100%
+        failure rate, against an SPN account shared by every OnionPress
+        node. The cost of that lands on other people's sites.
+        """
+        self._set_meta("_op_wayback_last_error_at", str(int(time.time())))
+        self._set_meta("_op_wayback_error_count", "1")
+
+        _eval(self._common_mocks() + self._submit_everything_mock()
+              + "onionpress_wayback_sweep_iteration(); echo 'ok';", self.url)
+        self.assertEqual("", self._get_meta("_op_wayback_job_id"),
+            "a URL that failed seconds ago must not be resubmitted this sweep")
+
+    def test_a_cooled_off_failure_is_retried(self):
+        """The other half: the back-off must expire. A capture that failed
+        for a transient reason has to get another chance, or one bad sweep
+        retires a URL permanently."""
+        self._set_meta("_op_wayback_last_error_at",
+                       str(int(time.time()) - 301))   # just past RETRY_BASE_SEC
+        self._set_meta("_op_wayback_error_count", "1")
+
+        _eval(self._common_mocks() + self._submit_everything_mock()
+              + "onionpress_wayback_sweep_iteration(); echo 'ok';", self.url)
+        self.assertTrue(self._get_meta("_op_wayback_job_id").startswith("jid-submitted-"),
+            "a URL whose back-off has expired must be retried")
+
+    def test_a_successful_capture_clears_the_failure_count(self):
+        """Otherwise the exponent is permanent: a URL that failed eight
+        times, succeeded, then hit one transient failure would wait ten
+        hours rather than five minutes."""
+        self._set_meta("_op_wayback_job_id", "jid-recovering-test")
+        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 100))
+        self._set_meta("_op_wayback_error_count", "8")
+        self._set_meta("_op_wayback_last_error_at", str(int(time.time()) - 100))
+
+        php = self._common_mocks() + """
+        add_filter('onionpress_wayback_poll_parallel_mock', function($_, $job_ids) {
+            return array(array(
+                'job_id' => 'jid-recovering-test', 'status' => 'success',
+                'timestamp' => '20260813000000', 'duration_sec' => 1.0,
+            ));
+        }, 10, 2);
+        add_filter('onionpress_wayback_poll_covered_mock', function($_, $job_ids) {
+            return array_fill_keys($job_ids, true);
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo 'ok';
+        """
+        _eval(php, self.url)
+        self.assertNotEqual("", self._get_meta("_op_wayback_archived_at"))
+        self.assertEqual("", self._get_meta("_op_wayback_error_count"),
+            "a success must reset the back-off exponent, not leave it standing")
+        self.assertEqual("", self._get_meta("_op_wayback_last_error_at"))
+
+    def test_the_submit_query_over_fetches_past_cooling_posts(self):
+        """The back-off is per record and exponential in that record's own
+        error_count, so it cannot go in the meta_query — it is applied when
+        the batch is assembled. Asking the query for exactly the budget
+        would let the newest N posts, all of them cooling, hide every older
+        post that is ready, and the queue would stall with work in it."""
+        r = _wp(["post", "create", "--post_type=post", "--post_status=publish",
+                 "--post_title=wayback-overfetch-probe", "--porcelain"],
+                url=self.url, timeout=15)
+        second = int(r.stdout.strip())
+        self.addCleanup(lambda: _wp(["post", "delete", str(second), "--force"],
+                                    url=self.url, timeout=15))
+        n = int(_eval("echo count(onionpress_wayback_posts_needing_submit(1));",
+                      self.url))
+        self.assertGreater(n, 1,
+            "a budget of 1 must still consider more than one candidate")
+
+    def test_the_retry_delay_doubles_and_is_capped(self):
+        curve = json.loads(_eval("""
+        $out = array();
+        foreach (array(0,1,2,3,10,100000) as $n) {
+            $out[] = onionpress_wayback_retry_delay($n);
+        }
+        echo json_encode($out);
+        """, self.url))
+        base, cap = curve[1], curve[-1]
+        self.assertEqual(curve[0], base, "never-failed and first-failure agree")
+        self.assertEqual(curve[2], base * 2)
+        self.assertEqual(curve[3], base * 4)
+        self.assertEqual(curve[4], cap, "the curve reaches its ceiling")
+        # The exponent is clamped as well as the result. min() on the product
+        # alone still evaluates BASE * 2^100000 first, and (int) INF has been
+        # 0 on some PHP versions — which would turn the ceiling into no
+        # back-off at all, on exactly the record that needs it most.
+        self.assertEqual(curve[5], cap, "a runaway count must not overflow to 0")
+
     def test_submit_assigns_job_id(self):
         """A fresh post (no job_id) gets one on a successful submit."""
         php = self._common_mocks() + f"""
