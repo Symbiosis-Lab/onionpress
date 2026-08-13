@@ -23,6 +23,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 // daemon-style inner loop for up to OP_WB_LOOP_MAX_SEC, so cron only
 // has to fire as a watchdog that restarts the loop if it died. 5 min
 // is plenty — if the loop is still running, cron is a no-op (mutex).
+//
+// Deliberately NOT raised alongside OP_WB_LOOP_LOCK_STALE_SEC. A fire that
+// lands while the daemon is alive costs one option read, and this interval is
+// what bounds how long a dead daemon's stale lock sits unclaimed (worst case
+// LOCK_STALE + this), so raising it would only slow recovery. It also has to
+// stay under the 10-minute window wp_schedule_single_event() dedupes within —
+// see onionpress_wayback_schedule_sweep_now(), where "the recurring entry is
+// ALWAYS inside that window" is load-bearing for how the kick path behaves.
 define( 'OP_WB_CRON_INTERVAL', 300 );
 
 // Max new submissions per sweep tick. Through onionheaven SOCKS, 40
@@ -47,26 +55,74 @@ define( 'OP_WB_STATUS_BATCH_MAX', 20 );
 // SPN — clear the job_id so the next tick resubmits fresh.
 define( 'OP_WB_STALE_PENDING_SEC', 300 );
 
-// Per-sweep wall-clock budget, enforced between phases (CDX rescue,
+// Per-request Tor timeouts. Both are ceilings paid only by a request that
+// fails to make progress: a warm onion round-trip measures ~3.6s and comes
+// nowhere near either.
+//
+// They are sized for the COLD path, because that is the one that decides
+// whether the archiver works at all after a restart. The first connection to
+// an onion has to fetch its descriptor from an HSDir and build a rendezvous
+// circuit, measured at 25-70s; Tor abandons the attempt around 70s. At the
+// previous CONNECTTIMEOUT of 15 every request in the minutes after a Tor
+// restart, a laptop wake, or a NEWNYM that flushed the descriptor cache
+// failed before the lookup could possibly have finished — and the sweep
+// reported that as SPN being unreachable, which it was not.
+//
+// 70 for the connect because 70 is where Tor itself gives up: a connect still
+// outstanding past that is waiting on something Tor has already abandoned, so
+// a larger ceiling buys nothing and only burns wall clock that the sweep
+// budget below then has to account for. 75 total leaves the HTTP exchange the
+// few seconds a warm round-trip costs, on top of a connect that used its
+// whole allowance.
+//
+// tor-watchdog.py keeps these descriptors warm (see its WARM_DESCRIPTOR_
+// INTERVAL), so the cold path should be rare. These ceilings are the floor
+// for correctness when it is not — not the normal case.
+define( 'OP_WB_CONNECT_TIMEOUT_SEC', 70 );
+define( 'OP_WB_REQUEST_TIMEOUT_SEC', 75 );
+
+// Per-sweep wall-clock budget, enforced between phases (poll, CDX rescue,
 // submit). It used to be 45 and enforced nowhere — $deadline was computed
 // and then only ever used to derive `elapsed` for the log — so the real
 // worst case was unbounded: submit_parallel alone can run 8 sequential
-// chunks at a 40s timeout.
+// chunks at a full request timeout.
 //
 // What the budget actually protects is the lock. The loop heartbeats
-// op_wayback_sweep_lock around each iteration, so an iteration that
-// outruns OP_WB_LOOP_LOCK_STALE_SEC lets a second daemon declare the lock
-// dead and start up alongside this one, both writing the same records.
+// op_wayback_sweep_lock around each iteration and around each subsite, so an
+// iteration that outruns OP_WB_LOOP_LOCK_STALE_SEC lets a second daemon
+// declare the lock dead and start up alongside this one, both writing the
+// same records.
 //
-// The bound has to be stated as budget PLUS overshoot, because every gate
-// is checked on phase entry and the phase it admits then runs to its own
-// timeout. Each phase re-checks, so at most one can overshoot:
-//   poll    entering at the line: 1 group             = +40s
-//   CDX     entering at the line: 1 group             = +25s
-//   submit  entering at the line: 20s probe + 1 group = +60s  <- worst
-// So one iteration is at most BUDGET + 60. At the old 240 that is exactly
-// 300 — the stale threshold, with no margin at all. 200 leaves 40s.
-define( 'OP_WB_SWEEP_BUDGET_SEC', 200 );
+// The bound has to be stated as budget PLUS overshoot, because every gate is
+// checked on phase entry and the phase it admits then runs to its own
+// timeout. Writing T for OP_WB_REQUEST_TIMEOUT_SEC (75s), each phase can
+// overshoot by at most one T:
+//   poll    groups = max(1, floor(left / T)); the floor is the only way a
+//           group starts with less than T left               = +T
+//   CDX     entered only under the deadline, one group       = +T
+//   submit  entered only under the deadline — but it pays a reachability
+//           probe first, which is itself a full request, so the deadline is
+//           re-checked AFTER the probe and the group likewise only starts
+//           under it                                          = +T
+// Each phase re-checks before starting, so at most one of them overshoots:
+//   one iteration ≤ BUDGET + T = 450 + 75 = 525s
+// which is what OP_WB_LOOP_LOCK_STALE_SEC = BUDGET + 2T = 600 is derived
+// from. (Under the old 40s timeouts this read 200 + 60 = 260 against a 300
+// threshold. Raising the timeouts for the cold Tor path invalidated every
+// number in it — the same 200 with T=75 would allow 200 + 150 = 350 against
+// that 300, i.e. a nominal iteration that outlives the lock.)
+//
+// The budget also SIZES the batches, because both phases divide the time
+// left by T, and that is why it had to grow rather than shrink. 450 keeps
+// throughput at parity with the old 200/40s pair once the status probe is
+// paid (~4s warm):
+//   submit  floor((446 - 75) / 75) = 4 groups × 5 = 20 URLs
+//           (old: floor((196 - 20) / 40) = 4 groups × 5 = 20 URLs)
+//   poll    floor(446 / 75)        = 5 groups × 100 = 500 job_ids
+//           (old: floor(196 / 40)  = 4 groups × 100 = 400 job_ids)
+// Leaving the budget at 200 would not have been merely slower: it would have
+// sized the submit down to a single group of 5 URLs per iteration.
+define( 'OP_WB_SWEEP_BUDGET_SEC', 450 );
 
 // Don't poll a job younger than this — SPN's minimum capture time is
 // ~20s, so polling immediately wastes a Tor round-trip on a guaranteed
@@ -83,7 +139,23 @@ define( 'OP_WB_YOUNG_JOB_SKIP_SEC', 15 );
 // view wakes wp-cron) sees a stale lock and restarts.
 define( 'OP_WB_LOOP_IDLE_SLEEP',    30 );  // between iterations when work was done
 define( 'OP_WB_LOOP_NOWORK_SLEEP',  90 );  // when iteration found nothing to submit
-define( 'OP_WB_LOOP_LOCK_STALE_SEC', 300 );// lock not heartbeated in this long = dead
+// Lock not heartbeated in this long = dead. Two gaps have to fit under it,
+// because heartbeats bracket the work rather than happening inside it:
+//   - one sweep_iteration, worst case BUDGET + T = 525s (the budget comment
+//     above derives that; the heartbeat is per subsite, so it is ONE
+//     iteration that has to fit, not the whole pass over the network);
+//   - the inter-iteration sleep, OP_WB_LOOP_IDLE_SLEEP normally and at most
+//     the longest back-off — OP_WB_BACKOFF_BAD_CREDENTIALS at 300s.
+// 600 = BUDGET + 2T covers the first with a whole request timeout to spare
+// and the second twice over.
+//
+// The cost of the cold Tor path is paid here: a genuinely dead daemon is now
+// reclaimed in up to 10 minutes rather than 5. That is the trade for a daemon
+// that can sit through a 70s descriptor lookup without a second one deciding
+// it has died mid-request and starting up alongside it — which is strictly
+// worse, because two daemons write the same records. Recovery latency stays
+// bounded on the other side by OP_WB_CRON_INTERVAL, deliberately left at 300.
+define( 'OP_WB_LOOP_LOCK_STALE_SEC', 600 );
 // Hard ceiling on one daemon's lifetime. The comments above and on
 // onionpress_wayback_sweep_loop have always described this cap, but the
 // constant was never defined and the loop was `while (true)` with no
@@ -108,6 +180,17 @@ define( 'OP_WB_SELF_REACHABLE_TTL',  60 );
 // Back-off durations (written to op_wayback_backoff_until option).
 define( 'OP_WB_BACKOFF_NO_SLOTS',    20 );  // SPN says available=0
 define( 'OP_WB_BACKOFF_UNREACHABLE', 120 ); // our own onion not responding
+// SPN cannot accept our work until a human changes a setting: either no S3
+// keys are configured at all, or SPN answered 401/403 for the ones that are.
+// Long, because nothing about either state improves on a timer — but not
+// permanent, because a 403 through Tor might not have been about our keys at
+// all. Someone who has just fixed their keys presses the admin page's Kick
+// button, which clears the back-off outright.
+//
+// Any value here is bounded by OP_WB_LOOP_LOCK_STALE_SEC: the loop sleeps a
+// back-off out BETWEEN heartbeats, so a back-off past the stale threshold
+// would have a live daemon declare itself dead. 300 against 600 leaves half.
+define( 'OP_WB_BACKOFF_BAD_CREDENTIALS', 300 );
 // No OP_WB_BACKOFF_SPN_DOWN: an unreachable /save/status/user does NOT
 // back the sweep off. The gate below says why — a status call failing is
 // usually Tor jitter, and pausing every sweep for it starves the queue
@@ -222,7 +305,10 @@ function onionpress_wayback_curl_common( $ch ) {
         CURLOPT_PROXYTYPE         => CURLPROXY_SOCKS5_HOSTNAME,
         CURLOPT_SSL_VERIFYPEER    => false,
         CURLOPT_SSL_VERIFYHOST    => 0,
-        CURLOPT_CONNECTTIMEOUT    => 15,
+        // Through socks5h the SOCKS handshake does not complete until Tor has
+        // the descriptor and a rendezvous circuit, so a cold onion's whole
+        // 25-70s lands in curl's CONNECT phase — see the constant.
+        CURLOPT_CONNECTTIMEOUT    => OP_WB_CONNECT_TIMEOUT_SEC,
     ) );
 }
 
@@ -245,14 +331,13 @@ function onionpress_wayback_self_reachable( $onion ) {
     }
     // Short-lived memo. The daemon calls this once per subsite per loop
     // iteration, and the answer is a property of the onion service, not of
-    // the subsite — on a four-blog network that was four identical 20s Tor
+    // the subsite — on a four-blog network that was four identical Tor
     // round-trips inside one iteration, spent out of the same budget the
     // iteration has to finish in. Deliberately a TTL and not a plain
     // static: this process lives up to OP_WB_LOOP_MAX_SEC, and caching a
     // "down" verdict for half an hour would outlast the outage.
     static $memo = array(); // onion => array( expires_at, result )
-    $mono = microtime( true );
-    if ( isset( $memo[ $onion ] ) && $memo[ $onion ][0] > $mono ) {
+    if ( isset( $memo[ $onion ] ) && $memo[ $onion ][0] > microtime( true ) ) {
         return $memo[ $onion ][1];
     }
     $ch = curl_init( 'http://' . $onion . '/' );
@@ -260,13 +345,19 @@ function onionpress_wayback_self_reachable( $onion ) {
     curl_setopt_array( $ch, array(
         CURLOPT_NOBODY         => true,
         CURLOPT_FOLLOWLOCATION => false, // a 302 means redirector, not us
-        CURLOPT_TIMEOUT        => 20,
+        CURLOPT_TIMEOUT        => OP_WB_REQUEST_TIMEOUT_SEC,
     ) );
     curl_exec( $ch );
     $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
     curl_close( $ch );
     $ok = ( $code === 200 || $code === 301 );
-    $memo[ $onion ] = array( $mono + OP_WB_SELF_REACHABLE_TTL, $ok );
+    // Expiry dated from AFTER the probe, not from before it. The probe can now
+    // outlast the TTL on a cold descriptor (75s ceiling against a 60s TTL), and
+    // dating the entry from the start of a probe that slow writes a memo that
+    // is already expired — every subsite would re-probe and the memo would
+    // cost a dictionary write for nothing, precisely on the slow path it
+    // exists to protect.
+    $memo[ $onion ] = array( microtime( true ) + OP_WB_SELF_REACHABLE_TTL, $ok );
     return $ok;
 }
 
@@ -284,22 +375,48 @@ function onionpress_wayback_job_age( array $rec, $now ) {
 }
 
 /**
- * GET /save/status/user. Returns the decoded body or null on failure.
+ * GET /save/status/user. Returns the decoded body, or null when we have no
+ * usable slot count.
+ *
+ * $status is an out-param carrying WHY, because null used to mean three
+ * unrelated things at once — no credentials configured, credentials SPN
+ * refused, and a request that never came back — and the caller collapsed all
+ * three into the same optimistic available=40. The log then printed an
+ * identical healthy "avail=40" whichever it was, which cost one whole
+ * debugging session spent looking for an outage in a service that had been
+ * answering the entire time. Same out-param shape as poll_parallel's
+ * $covered, and for the same reason: the return value cannot express the
+ * distinction, and guessing at it is what did the damage.
+ *
+ *   'ok'             body parsed and carries an available count
+ *   'no-credentials' no S3 keys configured — we never asked SPN anything
+ *   'rejected'       SPN answered 401/403: it refuses these keys
+ *   'timeout'        no HTTP response at all — Tor could not reach SPN
+ *   'http-<code>'    SPN answered, but not with a 200
+ *   'malformed'      a 200 whose body is not a status object we understand
  */
-function onionpress_wayback_user_status() {
+function onionpress_wayback_user_status( &$status = null ) {
     // Test hook: return an array to short-circuit the SPN call.
     $mock = apply_filters( 'onionpress_wayback_user_status_mock', null );
     if ( $mock !== null ) {
+        // A non-array mock means "the call did not produce a slot count", and
+        // its default cause is the common one. The companion filter is how a
+        // test names a different cause — the credential branches below have
+        // no other seam, exactly as poll_parallel's covered-mock exists so
+        // "the batch never came back" can be expressed at all.
+        $status = is_array( $mock ) ? 'ok' : (string) apply_filters(
+            'onionpress_wayback_user_status_reason_mock', 'timeout' );
         return is_array( $mock ) ? $mock : null;
     }
     $auth = onionpress_wayback_auth_header();
     if ( empty( $auth ) ) {
+        $status = 'no-credentials';
         return null;
     }
     $ch = curl_init( 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status/user?t=' . time() );
     onionpress_wayback_curl_common( $ch );
     curl_setopt_array( $ch, array(
-        CURLOPT_TIMEOUT    => 20,
+        CURLOPT_TIMEOUT    => OP_WB_REQUEST_TIMEOUT_SEC,
         CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Authorization: ' . $auth,
@@ -308,11 +425,37 @@ function onionpress_wayback_user_status() {
     $response = curl_exec( $ch );
     $code     = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
     curl_close( $ch );
-    if ( $code !== 200 || ! $response ) {
+    if ( $code === 0 ) {
+        // curl never got an HTTP response: SOCKS refused, descriptor lookup
+        // gave up, or the transfer outran OP_WB_REQUEST_TIMEOUT_SEC. All of
+        // them are "we could not ask", which is the case the optimistic
+        // proceed in the caller is for.
+        $status = 'timeout';
         return null;
     }
+    if ( $code === 401 || $code === 403 ) {
+        $status = 'rejected';
+        return null;
+    }
+    if ( $code !== 200 ) {
+        $status = 'http-' . $code;
+        return null;
+    }
+    // An empty 200 body falls through to the parse below deliberately: it is
+    // a 200 that carries no slot count, which is 'malformed', not 'http-200'.
     $body = @json_decode( (string) $response, true );
-    return is_array( $body ) ? $body : null;
+    // A 200 without an `available` key is not a slot count. It used to fall
+    // through to (int) ( $user['available'] ?? 0 ) in the caller, so SPN
+    // answering 200 with {"message":"…"} — a rate-limit notice, a maintenance
+    // page — read as available=0 and set a back-off on a number nothing had
+    // reported. Say we don't know instead, and let a real 429 on the submit
+    // be what backs the sweep off.
+    if ( ! is_array( $body ) || ! isset( $body['available'] ) ) {
+        $status = 'malformed';
+        return null;
+    }
+    $status = 'ok';
+    return $body;
 }
 
 // ────────────────────────── SPN submit + poll ───────────────────────
@@ -421,7 +564,7 @@ function onionpress_wayback_submit_parallel( array $urls ) {
                         'skip_first_archive'  => 1,
                         'js_behavior_timeout' => 0,
                     ) ),
-                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_TIMEOUT    => OP_WB_REQUEST_TIMEOUT_SEC,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -499,7 +642,7 @@ function onionpress_wayback_cdx_one_pass( array $urls ) {
             $setups[ $key ] = function ( $ch ) use ( $endpoint, $headers ) {
                 curl_setopt_array( $ch, array(
                     CURLOPT_URL        => $endpoint,
-                    CURLOPT_TIMEOUT    => 25,
+                    CURLOPT_TIMEOUT    => OP_WB_REQUEST_TIMEOUT_SEC,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -535,8 +678,8 @@ function onionpress_wayback_poll_parallel( array $job_ids, &$covered = null ) {
     // tell "SPN answered and did not mention this job" (it forgot it) from
     // "the batch carrying this job never came back" (we simply don't know).
     // Both look identical in the return value — an absent entry — and
-    // conflating them means one 40s Tor timeout silently reclassifies a
-    // whole 20-job batch as forgotten and resubmits it.
+    // conflating them means one timed-out Tor request silently reclassifies
+    // a whole 20-job batch as forgotten and resubmits it.
     $covered = array();
     if ( empty( $job_ids ) ) {
         return array();
@@ -575,7 +718,7 @@ function onionpress_wayback_poll_parallel( array $job_ids, &$covered = null ) {
                     CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status',
                     CURLOPT_POST       => true,
                     CURLOPT_POSTFIELDS => http_build_query( array( 'job_ids' => implode( ',', $chunk ) ) ),
-                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_TIMEOUT    => OP_WB_REQUEST_TIMEOUT_SEC,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -776,7 +919,9 @@ function onionpress_wayback_sitewide_records() {
     $items = array();
     if ( $home ) $items[ OP_WB_OPT_HOME ] = $home;
     if ( $feed ) $items[ OP_WB_OPT_FEED ] = $feed;
+    $covered = array();
     foreach ( $items as $opt_key => $url ) {
+        $covered[ $url ] = true;
         $records[] = array(
             'key'   => 'opt:' . $opt_key,
             'url'   => $url,
@@ -1086,12 +1231,14 @@ function onionpress_wayback_sweep_loop( $token ) {
             ? ( $backoff_until - $now )
             : OP_WB_LOOP_IDLE_SLEEP;
         // Heartbeat before sleeping, not just at the top of the iteration.
-        // The sleep sits OUTSIDE the work the sweep budget bounds, and with
-        // OP_WB_BACKOFF_UNREACHABLE it is 120s — so a budget-length iteration
-        // followed by an unreachable back-off leaves the lock untouched for
-        // well past OP_WB_LOOP_LOCK_STALE_SEC on the nominal path, not in
-        // some worst case. A second daemon then declares this one dead and
-        // both write the same records.
+        // The sleep sits OUTSIDE the work the sweep budget bounds, and a
+        // back-off runs to 120s (OP_WB_BACKOFF_UNREACHABLE) or 300s
+        // (OP_WB_BACKOFF_BAD_CREDENTIALS) — so a budget-length iteration
+        // followed by a back-off leaves the lock untouched for well past
+        // OP_WB_LOOP_LOCK_STALE_SEC on the nominal path, not in some worst
+        // case. A second daemon then declares this one dead and both write
+        // the same records. This heartbeat is also why no back-off constant
+        // may approach LOCK_STALE: the sleep below is one uninterrupted gap.
         $heartbeat();
         sleep( max( 5, $sleep ) );
     }
@@ -1118,10 +1265,10 @@ function onionpress_wayback_sweep_iteration() {
     }
 
     // Start the clock here, not after the status call. The budget's whole
-    // job is to keep one iteration inside OP_WB_LOOP_LOCK_STALE_SEC, and
-    // the status call below can sit on a 20s Tor timeout — 20s the lock
-    // heartbeat experiences and, until this moved, the budget did not.
-    // It also makes the elapsed= in the log the iteration's real cost.
+    // job is to keep one iteration inside OP_WB_LOOP_LOCK_STALE_SEC, and the
+    // status call below can sit on a full OP_WB_REQUEST_TIMEOUT_SEC — time
+    // the lock heartbeat experiences and, until this moved, the budget did
+    // not. It also makes the elapsed= in the log the iteration's real cost.
     $deadline = microtime( true ) + OP_WB_SWEEP_BUDGET_SEC;
 
     // Gate: do we have SPN slots? If the check itself fails (Tor
@@ -1130,14 +1277,26 @@ function onionpress_wayback_sweep_iteration() {
     // than a 60-120s global backoff starving every sweep while we
     // wait for Tor to recover. If the account is genuinely at
     // capacity, the submits will return 429 and we'll back off then.
-    $user = onionpress_wayback_user_status();
+    //
+    // $spn_status is what makes that optimism auditable: it names which of
+    // the several ways this call can fail actually happened, so the guessed
+    // available=40 below is never again indistinguishable in the log from a
+    // reading. The submit gate reads it too — two of those causes are ones
+    // proceeding cannot survive; see the branch there for the argument.
+    $spn_status = 'ok';
+    $user = onionpress_wayback_user_status( $spn_status );
     $available = ( $user === null )
         ? OP_WB_SUBMIT_BATCH_MAX // optimistic default
+        // The ?? is now only reachable through the test mock: a real body
+        // without an `available` key comes back as null/'malformed', which is
+        // the whole point of that branch. Kept so a mock returning a bare
+        // array is a zero rather than a PHP warning.
         : (int) ( $user['available'] ?? 0 );
     if ( $user !== null && $available <= 0 ) {
         // time() rather than $now for the same reason as the unreachable
         // back-off below: $now predates the status call this branch reacts
-        // to, and a 20s pause dated 20s ago is not a pause.
+        // to, and a pause dated before the call that prompted it is not a
+        // pause — on a cold descriptor the call alone can outlast it.
         update_option( OP_WB_OPT_BACKOFF_UNTIL, time() + OP_WB_BACKOFF_NO_SLOTS, false );
         onionpress_wayback_log( 'Sweep paused: available=0 processing='
             . ( $user['processing'] ?? '?' ) . ', backing off ' . OP_WB_BACKOFF_NO_SLOTS . 's' );
@@ -1188,16 +1347,18 @@ function onionpress_wayback_sweep_iteration() {
 
     // Bound the poll by the time left, the same way the submit below is
     // bounded. poll_parallel runs ceil(N / (CONCURRENT_MAX * STATUS_BATCH_MAX))
-    // SEQUENTIAL groups, each able to sit on its 40s curl timeout, so its
-    // cost grows with the backlog without limit — it was the one phase of
-    // the iteration with no budget check at all, and the phase most likely
+    // SEQUENTIAL groups, each able to sit on a full OP_WB_REQUEST_TIMEOUT_SEC,
+    // so its cost grows with the backlog without limit — it was the one phase
+    // of the iteration with no budget check at all, and the phase most likely
     // to blow the budget is exactly the one that runs when the queue is
     // deepest. Jobs cut here are simply absent from $ripe_job_ids, so they
     // are neither polled nor judged forgotten; the next iteration takes
-    // them. Floor at one group so a huge backlog still makes progress.
+    // them. Floor at one group so a huge backlog still makes progress — that
+    // floor is this phase's whole contribution to the overshoot the budget
+    // comment accounts for, one request timeout.
     $poll_per_group  = OP_WB_CONCURRENT_MAX * OP_WB_STATUS_BATCH_MAX;
     $poll_groups_fit = max( 1, (int) floor(
-        max( 0, $deadline - microtime( true ) ) / 40
+        max( 0, $deadline - microtime( true ) ) / OP_WB_REQUEST_TIMEOUT_SEC
     ) );
     $poll_cap     = $poll_groups_fit * $poll_per_group;
     $polled_capped = max( 0, count( $ripe_job_ids ) - $poll_cap );
@@ -1277,9 +1438,9 @@ function onionpress_wayback_sweep_iteration() {
     // being read as amnesia:
     //
     //  - $poll_covered — only batches that came back HTTP 200 and parsed
-    //    count. Without this, one 40s Tor timeout on a single 20-job batch
-    //    would reclassify all 20 as forgotten and resubmit them, and at
-    //    100+ in flight that is several batches per sweep.
+    //    count. Without this, one timed-out Tor request carrying a 20-job
+    //    batch would reclassify all 20 as forgotten and resubmit them, and
+    //    at 100+ in flight that is several batches per sweep.
     //  - STALE_PENDING_SEC — the same age at which the branch above gives
     //    up on a job SPN *did* answer 'pending' for. A job SPN has genuinely
     //    forgotten cannot be younger than that in any useful sense.
@@ -1355,16 +1516,17 @@ function onionpress_wayback_sweep_iteration() {
     // they never starve, then fresh post URLs.
     // Bound the batch by the time left as well as by slots. submit_parallel
     // runs ceil(N / OP_WB_CONCURRENT_MAX) SEQUENTIAL groups, each able to
-    // sit on its 40s curl timeout, so at the full 40-URL budget one call
-    // can run 320s on its own — long enough to outlive the lock heartbeat
-    // no matter what the phase-entry check said. Floor at one group:
-    // making no progress at all is worse than one slightly long iteration.
-    // The reachability probe below runs before the submit and costs up to
-    // its own 20s timeout, so the batch has to be sized out of what is left
-    // AFTER paying for it — otherwise the probe is 20s the budget granted
-    // to the submit and then spent on something else.
+    // sit on a full OP_WB_REQUEST_TIMEOUT_SEC, so at the full 40-URL budget
+    // one call can run 600s on its own — long enough to outlive the lock
+    // heartbeat no matter what the phase-entry check said. Floor at one
+    // group: making no progress at all is worse than one slightly long
+    // iteration. The reachability probe below runs before the submit and is
+    // itself a full request, so the batch has to be sized out of what is left
+    // AFTER paying for it — otherwise the probe spends time the budget had
+    // already granted to the submit.
     $groups_that_fit = max( 1, (int) floor(
-        max( 0, $deadline - microtime( true ) - 20 ) / 40
+        max( 0, $deadline - microtime( true ) - OP_WB_REQUEST_TIMEOUT_SEC )
+        / OP_WB_REQUEST_TIMEOUT_SEC
     ) );
     $budget = max( 0, min(
         OP_WB_SUBMIT_BATCH_MAX,
@@ -1395,7 +1557,43 @@ function onionpress_wayback_sweep_iteration() {
     $submitted   = 0;
     $hit_429     = false;
     $submit_skip = '';
-    if ( ! empty( $to_submit ) && microtime( true ) >= $deadline ) {
+    if ( ! empty( $to_submit )
+         && ( $spn_status === 'no-credentials' || $spn_status === 'rejected' ) ) {
+        // The one place where the optimistic-proceed above is the wrong
+        // answer, and the reason splitting user_status()'s null was worth
+        // doing at all. submit_parallel presents the SAME Authorization
+        // header this status call just used: with no keys it returns '' for
+        // every URL without touching the network, and with keys SPN has just
+        // refused it would spend eight sequential Tor groups collecting eight
+        // batches of 401s — every 30s, for as long as the daemon lives.
+        //
+        // The optimism elsewhere is optimism about OUR knowledge. A status
+        // call that timed out tells us nothing about SPN, so we guess in the
+        // direction that keeps the queue moving and let a real 429 correct
+        // us. A 401/403 is not missing knowledge: it is SPN answering, and
+        // the answer is no. Treating an explicit refusal as "we didn't hear
+        // back, carry on" is not optimism, it is discarding a reply.
+        //
+        // It still self-heals if the refusal was not about us — an
+        // archive.org maintenance or rate-limit page can 403 without ever
+        // reading our keys. The back-off expires on its own and the admin
+        // page's Kick button clears it outright, which is what someone who
+        // has just corrected their keys will press. Deliberately NOT a latch.
+        //
+        // Only the submit is gated. Polling still runs: job_ids submitted
+        // while the keys were good are answered by /save/status regardless,
+        // and abandoning in-flight work over a credential problem would turn
+        // a fixable misconfiguration into lost captures.
+        update_option( OP_WB_OPT_BACKOFF_UNTIL,
+            time() + OP_WB_BACKOFF_BAD_CREDENTIALS, false );
+        $submit_skip = 'spn ' . $spn_status;
+        onionpress_wayback_log( 'Sweep paused: SPN ' . (
+            $spn_status === 'rejected'
+                ? 'rejected our Save Page Now credentials (401/403)'
+                : 'credentials not configured'
+            ) . ', backing off ' . OP_WB_BACKOFF_BAD_CREDENTIALS . 's rather than '
+            . 'submitting ' . count( $to_submit ) . ' URL(s) it would refuse the same way' );
+    } elseif ( ! empty( $to_submit ) && microtime( true ) >= $deadline ) {
         // Step A ate the whole budget. Submitting now would push the
         // iteration past OP_WB_LOOP_LOCK_STALE_SEC without heartbeating the
         // lock, at which point a second daemon claims it and two of them
@@ -1420,6 +1618,17 @@ function onionpress_wayback_sweep_iteration() {
         onionpress_wayback_log( 'Sweep paused: own onion not answering over Tor, '
             . 'backing off ' . OP_WB_BACKOFF_UNREACHABLE . 's rather than '
             . 'submitting ' . count( $to_submit ) . ' URL(s) SPN would fail to capture' );
+    } elseif ( ! empty( $to_submit ) && microtime( true ) >= $deadline ) {
+        // The probe above is a full request in its own right, and it runs
+        // AFTER the gate that admitted it — on a cold descriptor it can spend
+        // OP_WB_REQUEST_TIMEOUT_SEC before returning true. Re-check rather
+        // than assume the pre-probe verdict still holds: without this the
+        // phase's worst case is probe + group = two request timeouts of
+        // overshoot, and the arithmetic on OP_WB_SWEEP_BUDGET_SEC — and so
+        // OP_WB_LOOP_LOCK_STALE_SEC derived from it — is stated in terms of
+        // one. Named apart from plain 'over budget' because the two say
+        // different things about where the time went.
+        $submit_skip = 'over budget after reachability probe';
     }
     if ( ! empty( $to_submit ) && $submit_skip === '' ) {
         $submit_results = onionpress_wayback_submit_parallel( $to_submit );
@@ -1449,7 +1658,13 @@ function onionpress_wayback_sweep_iteration() {
     // avail now says outright when it is a guess rather than a reading.
     $elapsed = round( microtime( true ) - ( $deadline - OP_WB_SWEEP_BUDGET_SEC ), 2 );
     $notes   = array();
-    if ( $user === null )       $notes[] = 'spn-status=unreachable';
+    // Unconditional, unlike every other note here. The others report an
+    // exception and are silent on the nominal path; this one has to say
+    // something on every line, because the failure it describes is precisely
+    // that a healthy-looking line and a broken one were byte-identical. An
+    // operator should never have to infer from an absent token whether the
+    // slot count was read or invented.
+    $notes[] = 'spn-status=' . $spn_status;
     if ( $polled_lost > 0 )     $notes[] = 'poll-lost=' . $polled_lost;
     if ( $polled_capped > 0 )   $notes[] = 'poll-capped=' . $polled_capped;
     // "skipped", not "deferred": the $cdx_defer path retires its records,
@@ -1870,7 +2085,13 @@ function onionpress_wayback_admin_page() {
                     <td>
                         <?php if ( $backoff_secs > 0 ) : ?>
                             <span style="color:#a00;">Active</span> — pauses sweeps for <?php echo esc_html( $backoff_secs ); ?> more seconds.
-                            Typically set when SPN reports <code>available=0</code> or a transport error.
+                            Typically set when SPN reports <code>available=0</code>, when this
+                            site's own onion is not answering over Tor, or when SPN will not
+                            accept the Save Page Now credentials. The last one is the case to
+                            act on: check the Archive.org S3 keys, then press
+                            <em>Kick the daemon now</em> to clear this immediately.
+                            The exact cause is on the most recent <code>Sweep:</code> log
+                            line, as <code>spn-status=…</code>.
                         <?php else : ?>
                             <span style="color:#008000;">None</span>
                         <?php endif; ?>
@@ -1942,8 +2163,14 @@ function onionpress_wayback_admin_page() {
             timeout. The moment your heartbeat resumes, the takeover lifts and your real
             WordPress serves again.</p>
         <p>If the daemon dies (crash, reboot, Mac sleep), the mutex lock goes stale after
-            5 minutes and the next WordPress page view causes wp-cron to restart the daemon
-            from the persisted cursor. No progress is lost; no duplicates are created.</p>
+            <?php echo esc_html( round( OP_WB_LOOP_LOCK_STALE_SEC / 60 ) ); ?> minutes and
+            the next WordPress page view causes wp-cron to restart the daemon
+            from the persisted cursor. No progress is lost; no duplicates are created.
+            The threshold has to clear the slowest thing a live daemon can be doing between
+            heartbeats — a single Tor request to a cold onion service takes up to
+            <?php echo esc_html( OP_WB_REQUEST_TIMEOUT_SEC ); ?> seconds — so it is generous
+            on purpose: declaring a working daemon dead is worse than waiting, because two
+            daemons would then archive the same pages twice.</p>
     </div>
     <?php
 }
