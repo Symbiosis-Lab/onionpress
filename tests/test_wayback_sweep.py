@@ -202,13 +202,29 @@ class TestWaybackSweepIteration(SitewideStateMixin, unittest.TestCase):
         return r.stdout.strip()
 
     def _common_mocks(self, available=40):
-        """Short-circuit reachability + user_status so the iteration
-        reaches the poll/submit phases."""
+        """Short-circuit every network seam so the iteration reaches the
+        poll/submit phases without touching Tor or SPN.
+
+        The submit no-op is a DEFAULT rather than something each test opts
+        into, because the cost of forgetting it is not a slow test — it is
+        real captures against the Save Page Now account shared by every
+        OnionPress node. One test here did forget, and the captures it
+        triggered are in the Wayback Machine. A test that wants a different
+        submit result adds its own filter after this one, which wins by
+        running later on the same hook.
+
+        Only the submit is defaulted. Poll and CDX are reads: leaving them
+        live costs a Tor round-trip, not a capture, and defaulting them
+        would quietly change what "no answer" means for the tests built
+        around that distinction.
+        """
         return f"""
         add_filter('onionpress_wayback_self_reachable_mock',
                    function() {{ return true; }});
         add_filter('onionpress_wayback_user_status_mock',
                    function() {{ return array('available' => {available}, 'processing' => 0); }});
+        add_filter('onionpress_wayback_submit_parallel_mock',
+                   function($_, $urls) {{ return array_fill_keys(array_keys($urls), ''); }}, 10, 2);
         """
 
     def test_young_job_is_not_polled(self):
@@ -437,9 +453,8 @@ class TestWaybackSweepIteration(SitewideStateMixin, unittest.TestCase):
                 'status_ext' => 'error:no-captures',
             ));
         }, 10, 2);
-        add_filter('onionpress_wayback_poll_covered_mock', function($_, $job_ids) {
-            return array_fill_keys($job_ids, true);
-        }, 10, 2);
+        add_filter('onionpress_wayback_poll_covered_mock',
+                   function($_, $job_ids) { return $job_ids; }, 10, 2);
         // CDX has nothing: the capture really is lost.
         add_filter('onionpress_wayback_cdx_lookup_parallel_mock',
                    function($_, $urls) { return array(); }, 10, 2);
@@ -501,9 +516,8 @@ class TestWaybackSweepIteration(SitewideStateMixin, unittest.TestCase):
                 'timestamp' => '20260813000000', 'duration_sec' => 1.0,
             ));
         }, 10, 2);
-        add_filter('onionpress_wayback_poll_covered_mock', function($_, $job_ids) {
-            return array_fill_keys($job_ids, true);
-        }, 10, 2);
+        add_filter('onionpress_wayback_poll_covered_mock',
+                   function($_, $job_ids) { return $job_ids; }, 10, 2);
         onionpress_wayback_sweep_iteration();
         echo 'ok';
         """
