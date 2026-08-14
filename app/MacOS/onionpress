@@ -1097,7 +1097,6 @@ install_docker() {
     fi
 }
 
-# Function to update Docker images if enabled
 # Re-apply each digest-pinned image's own tag, so a prune cannot reclaim the
 # images this stack is pinned to.
 #
@@ -1136,6 +1135,7 @@ retag_pinned_images() {
     done <<< "$refs"
 }
 
+# Function to update Docker images if enabled
 update_images() {
     # Check if auto-update is enabled in config
     local update_enabled="no"
@@ -1665,6 +1665,7 @@ wait_for_services() {
     local wp_ready=false
     local onion_ready=false
     local onion_addr=""
+    local last_bootstrap_pct=""
 
     log "Waiting for services to be ready (polling with curl)..."
 
@@ -1693,8 +1694,29 @@ wait_for_services() {
         # (SOCKS proxy doesn't work through Colima VM port forwarding,
         # so we test the actual path: tor -> wordpress via Docker network)
         if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+            local tor_log
+            tor_log=$(docker compose logs --tail 100 tor 2>/dev/null)
+
+            # Surface Tor's own bootstrap percentage. This is the longest single
+            # stretch of a start — 30-90s, longer on a censored link — and until
+            # now nothing reported movement inside it, so a caller watching the
+            # log saw one number for the whole wait and could not tell a slow
+            # bootstrap from a hung one. moss parses these lines to drive its
+            # install progress bar (parse_bootstrap_pct in stack_install.rs);
+            # the format is load-bearing, so keep the "Tor bootstrap: N%" prefix
+            # and the integer if this line is ever touched.
+            #
+            # Emitted only when N moves, not once per poll, so a 60s bootstrap
+            # adds a handful of lines rather than thirty duplicates.
+            local pct
+            pct=$(printf '%s\n' "$tor_log" | grep -oE 'Bootstrapped [0-9]+%' | tail -1 | grep -oE '[0-9]+')
+            if [ -n "$pct" ] && [ "$pct" != "$last_bootstrap_pct" ]; then
+                log "Tor bootstrap: ${pct}%"
+                last_bootstrap_pct="$pct"
+            fi
+
             # Check Tor is bootstrapped
-            if docker compose logs --tail 100 tor 2>/dev/null | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
+            if printf '%s\n' "$tor_log" | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
                 # Check WordPress is reachable from Tor container
                 if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
                     log "✓ Onion service ready: ${onion_addr}"

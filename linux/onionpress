@@ -1457,6 +1457,7 @@ wait_for_services() {
     local wp_ready=false
     local onion_ready=false
     local onion_addr=""
+    local last_bootstrap_pct=""
 
     log "Waiting for services to be ready..."
 
@@ -1490,7 +1491,21 @@ wait_for_services() {
 
         # Check Tor bootstrap
         if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-            if docker compose logs --tail 100 tor 2>/dev/null | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
+            local tor_log
+            tor_log=$(docker compose logs --tail 100 tor 2>/dev/null)
+
+            # Surface Tor's own bootstrap percentage — see the macOS launcher for
+            # the full reasoning. The "Tor bootstrap: N%" format is parsed by
+            # moss (parse_bootstrap_pct in stack_install.rs) and is load-bearing.
+            # Emitted only when N moves, not once per poll.
+            local pct
+            pct=$(printf '%s\n' "$tor_log" | grep -oE 'Bootstrapped [0-9]+%' | tail -1 | grep -oE '[0-9]+')
+            if [ -n "$pct" ] && [ "$pct" != "$last_bootstrap_pct" ]; then
+                log "Tor bootstrap: ${pct}%"
+                last_bootstrap_pct="$pct"
+            fi
+
+            if printf '%s\n' "$tor_log" | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
                 if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
                     log "Onion service ready: ${onion_addr}"
                     onion_ready=true

@@ -1469,5 +1469,75 @@ class TestThePruneCannotEatTheImagesWeArePinnedTo(unittest.TestCase):
             )
 
 
+class TestLauncherEmitsTorBootstrapProgress(unittest.TestCase):
+    """`wait_for_services` must report Tor's bootstrap percentage as it moves.
+
+    The Tor bootstrap is the longest single stretch of a start — 30-90s,
+    and far longer on a censored link. Nothing reported movement inside
+    it, so anything watching the launcher's output saw one number for the
+    whole wait and could not distinguish a slow bootstrap from a hung one.
+    moss's install progress bar sat at 99% for that entire window.
+
+    moss parses these lines (`parse_bootstrap_pct`, its
+    src-tauri/src/system/stack_install.rs) with a case-insensitive split on
+    `tor bootstrap:` followed by digits, taking the LAST match. So the
+    prefix and the integer are a cross-repo contract, which is exactly the
+    kind of thing that gets reworded by someone tidying log strings — hence
+    a test rather than a comment alone.
+    """
+
+    LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+
+    def _wait_for_services_body(self, path):
+        body = _read(path)
+        m = re.search(
+            r"^wait_for_services\(\)\s*\{(.*?)^\}", body, re.S | re.M
+        )
+        self.assertIsNotNone(m, f"{path}: no wait_for_services() found")
+        return m.group(1)
+
+    def test_each_launcher_logs_the_percentage_moss_parses(self):
+        for path in self.LAUNCHERS:
+            with self.subTest(launcher=path):
+                fn = self._wait_for_services_body(path)
+                self.assertRegex(
+                    fn,
+                    r'log\s+"Tor bootstrap: \$\{?\w+\}?%"',
+                    f"{path}: wait_for_services must `log \"Tor bootstrap: "
+                    "N%\"`. moss splits on the literal `tor bootstrap:` to "
+                    "drive its install progress bar; without this line the "
+                    "bar has nothing to move on during the longest step of a "
+                    "start.",
+                )
+
+    def test_the_percentage_comes_from_tors_own_bootstrap_lines(self):
+        """Not a synthetic counter — a fabricated percentage that keeps
+        climbing while Tor is stuck is worse than no percentage at all.
+        """
+        for path in self.LAUNCHERS:
+            with self.subTest(launcher=path):
+                fn = self._wait_for_services_body(path)
+                self.assertRegex(
+                    fn,
+                    r"grep -oE '\\?Bootstrapped \[0-9\]\+%'",
+                    f"{path}: the percentage must be extracted from Tor's own "
+                    "`Bootstrapped N%` output, so it reflects real progress.",
+                )
+
+    def test_it_logs_only_when_the_number_moves(self):
+        """One line per poll would be ~30 duplicate lines per start, which
+        buries the milestone lines moss also keys off.
+        """
+        for path in self.LAUNCHERS:
+            with self.subTest(launcher=path):
+                fn = self._wait_for_services_body(path)
+                self.assertRegex(
+                    fn,
+                    r'\[ "\$pct" != "\$last_bootstrap_pct" \]',
+                    f"{path}: the bootstrap line must be guarded on the "
+                    "percentage having changed since the last poll.",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
