@@ -13,7 +13,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from onionpress.platform import OnionPressPaths
 from onionpress.config import PortConfig
 from onionpress.docker import Docker, DockerResult
-from onionpress.containers import ContainerManager, ContainerStatus, CORE_SERVICES
+from onionpress.containers import (
+    ContainerManager,
+    ContainerStatus,
+    CORE_SERVICES,
+    ONIONHEAVEN_IMAGE,
+)
 
 
 def _make_paths(tmpdir):
@@ -295,6 +300,52 @@ class TestFarmWorkers(unittest.TestCase):
         self.assertIn("TOR_BRIDGE_LINES=snowflake 192.0.2.1:80 FPRINT", call_args)
         self.assertIn("TOR_CLIENT_TRANSPORT_PLUGIN=snowflake", call_args)
         self.assertIn("TOR_UPSTREAM_PROXY=172.19.0.1:15235", call_args)
+
+    def test_start_farm_worker_defaults_to_the_forks_own_image(self):
+        """The default must carry the pluggable transports, or bridges are a lie.
+
+        A worker is handed TOR_BRIDGE_LINES and TOR_CLIENT_TRANSPORT_PLUGIN
+        unconditionally. Upstream's tor image ships neither obfs4proxy nor
+        snowflake-client, so defaulting to it produced workers configured for a
+        transport they had no binary to execute — and it started cleanly, so
+        nothing surfaced it until a takeover was attempted on a censored network.
+        """
+        docker = mock.Mock(spec=Docker)
+        docker.run.return_value = _ok("container-id")
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        cm.start_farm_worker(0)
+        call_args = docker.run.call_args[0][0]
+        self.assertIn(ONIONHEAVEN_IMAGE, call_args)
+        self.assertIn("symbiosis-lab", ONIONHEAVEN_IMAGE)
+        self.assertIn("@sha256:", ONIONHEAVEN_IMAGE)
+
+    def test_start_farm_worker_reads_the_image_from_config_not_env(self):
+        """Resolved via the config file, because that is what the menubar reads.
+
+        The menubar app does not inherit the launcher's exported environment, so
+        an os.environ lookup here would silently fall through to the default on
+        the one path that actually spawns workers.
+        """
+        with open(self.paths.config_file, "w") as f:
+            f.write("ONIONPRESS_TOR_IMAGE=onionpress-tor:veee\n")
+        docker = mock.Mock(spec=Docker)
+        docker.run.return_value = _ok("container-id")
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        with mock.patch.dict(os.environ, {"ONIONPRESS_TOR_IMAGE": "wrong:fromenv"}):
+            cm.start_farm_worker(0)
+        call_args = docker.run.call_args[0][0]
+        self.assertIn("onionpress-tor:veee", call_args)
+        self.assertNotIn("wrong:fromenv", call_args)
+
+    def test_start_farm_worker_honours_the_older_variable_name(self):
+        """ONIONHEAVEN_IMAGE predates the digest pins and still has to work."""
+        with open(self.paths.config_file, "w") as f:
+            f.write("ONIONHEAVEN_IMAGE=onionpress-tor:legacy\n")
+        docker = mock.Mock(spec=Docker)
+        docker.run.return_value = _ok("container-id")
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        cm.start_farm_worker(0)
+        self.assertIn("onionpress-tor:legacy", docker.run.call_args[0][0])
 
     def test_stop_farm_no_workers(self):
         docker = mock.Mock(spec=Docker)

@@ -149,7 +149,10 @@ services:
     restart: unless-stopped
 
   onionheaven:
-    image: ${ONIONHEAVEN_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545}
+    # ONIONPRESS_TOR_IMAGE is the one knob for "which tor-derived image do we
+    # run"; ONIONHEAVEN_IMAGE stays honoured because it is the older spelling
+    # and predates the digest pins.
+    image: ${ONIONPRESS_TOR_IMAGE:-${ONIONHEAVEN_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545}}
     container_name: onionheaven
     logging:
       driver: json-file
@@ -174,6 +177,14 @@ services:
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - TOR_PROPAGATION_DELAY=${ONIONHEAVEN_PROPAGATION_DELAY:-180}
       - ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD=${ONIONHEAVEN_MAX_SERVICES:-50}
+      # This container spawns takeover workers through the docker socket, so it
+      # needs to know which image they get. Without these it could only ever use
+      # onionheaven_common.py's compiled-in default, which is how the override
+      # stopped at the container boundary and every worker came up on the
+      # default image no matter what was configured. Empty is fine: the reader
+      # treats "" as unset and falls through.
+      - ONIONPRESS_TOR_IMAGE=${ONIONPRESS_TOR_IMAGE:-}
+      - ONIONHEAVEN_IMAGE=${ONIONHEAVEN_IMAGE:-}
     volumes:
       - arti-state-polling:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress

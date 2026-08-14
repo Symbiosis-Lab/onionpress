@@ -500,9 +500,23 @@ def db_ensure_schema(conn):
 # Farm mode helpers
 # ---------------------------------------------------------------------------
 
-# Docker image for takeover workers (same as main tor image)
-TAKEOVER_IMAGE = os.environ.get("ONIONHEAVEN_IMAGE",
-                                "ghcr.io/brewsterkahle/onionpress-tor:latest")
+# Keep in step with the `tor` service in docker-compose.yml and with
+# ONIONHEAVEN_IMAGE in src/onionpress/containers.py; build/refresh-image-digests.sh
+# rewrites all of them together.
+TOR_IMAGE_DEFAULT = ("ghcr.io/symbiosis-lab/onionpress-tor:latest"
+                     "@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545")
+
+# Docker image for takeover workers. The comment used to say "same as main tor
+# image" and it was not: this defaulted to upstream's floating :latest while
+# compose ran the fork's build, and upstream's image carries neither
+# obfs4proxy nor snowflake-client. Takeover workers are handed
+# TOR_BRIDGE_LINES and TOR_CLIENT_TRANSPORT_PLUGIN regardless, so on a censored
+# network every worker was configured for a transport it had no binary to run.
+# Nothing surfaced it, because the launcher pulls upstream's image anyway, so
+# the wrong image was always present and started cleanly.
+TAKEOVER_IMAGE = (os.environ.get("ONIONPRESS_TOR_IMAGE")
+                  or os.environ.get("ONIONHEAVEN_IMAGE")
+                  or TOR_IMAGE_DEFAULT)
 MAX_SERVICES_PER_WORKER = int(os.environ.get("ONIONHEAVEN_MAX_SERVICES", "50"))
 
 # Next index for naming new takeover containers

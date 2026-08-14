@@ -20,9 +20,19 @@ from .platform import OnionPressPaths
 
 CORE_SERVICES = ["wordpress", "db", "onionheaven", "autoheal"]
 ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
-# Pinned to digest — must match docker-compose.yml and linux/onionpress.
-# Refresh all three together via build/refresh-image-digests.sh.
-ONIONHEAVEN_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:e06286cbcbf6b34b1fe29636ffeea381c1aa96050c947e0d4ef7250f64993ea2"
+# Image for takeover workers, pinned to digest — must match the `tor` service in
+# docker-compose.yml and TOR_IMAGE_DEFAULT in onionheaven_common.py. Refresh them
+# together via build/refresh-image-digests.sh.
+#
+# This is the fork's build, not upstream's, and that is the point: upstream's tor
+# image ships neither obfs4proxy nor snowflake-client, so a worker started from it
+# on a censored network gets bridge lines it cannot execute. ONIONPRESS_TOR_IMAGE
+# overrides it (ONIONHEAVEN_IMAGE still honoured for compatibility) so a locally
+# built image can be used without editing an installed bundle.
+ONIONHEAVEN_IMAGE = (
+    "ghcr.io/symbiosis-lab/onionpress-tor:latest"
+    "@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545"
+)
 
 
 @dataclass
@@ -293,17 +303,30 @@ class ContainerManager:
 
     # -- OnionHeaven farm --
 
-    def start_farm_worker(self, idx: int, image: str = ONIONHEAVEN_IMAGE) -> bool:
+    def start_farm_worker(self, idx: int, image: str | None = None) -> bool:
         """Start a single OnionHeaven takeover worker container.
 
         Args:
             idx: Worker index (0, 1, 2, ...).
-            image: Docker image to use.
+            image: Docker image to use. None resolves it from the config file
+                the same way every other setting here is resolved.
 
         Returns True on success.
         """
         name = f"onionheaven-takeover-{idx}"
         self._log(f"Starting farm worker {name}...")
+
+        # Resolved from the config file, not os.environ: this runs in the
+        # menubar app, which reads ~/.onionpress/config and does not inherit the
+        # launcher's exported environment. Reading env here would look correct
+        # and silently fall through to the default on the path that actually
+        # spawns workers. Same reason every other value below uses read_value.
+        if image is None:
+            image = (
+                read_value(self.paths.config_file, "ONIONPRESS_TOR_IMAGE", "")
+                or read_value(self.paths.config_file, "ONIONHEAVEN_IMAGE", "")
+                or ONIONHEAVEN_IMAGE
+            )
 
         tor_impl = read_value(self.paths.config_file, "TOR_IMPL", "tor")
         max_services = read_value(
