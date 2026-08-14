@@ -38,8 +38,15 @@ CANDIDATE_PORTS = (8080, 18080, 28080, 38080, 48080)
 STATUS_PATH = "/wp-json/onionpress/v1/status"
 
 
-def _receiver_answering(port, timeout=1.0):
-    """True if something on `port` answers /status like the receiver does."""
+def _receiver_answering(port, timeout=2.0):
+    """True if something on `port` answers /status like the receiver does.
+
+    The timeout matches the launcher's own probe (`--max-time 2`) on purpose.
+    At 1s this was the more impatient of the two, so a real WordPress receiver
+    that answered in between read as absent here and as present there — which
+    is not a race but a straight disagreement, and it made the guards below
+    wave through a run they existed to skip.
+    """
     try:
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}{STATUS_PATH}", timeout=timeout
@@ -119,12 +126,31 @@ class TestLauncherStartIdempotent(unittest.TestCase):
         }
 
     def _serve_stub_receiver(self):
-        """Bind the first free candidate port; skip if all five are taken."""
+        """Bind the port the launcher will actually find, or skip.
+
+        receiver_answering_port() walks the ladder and stops at the FIRST port
+        answering /status. This used to bind the first port it could *get*,
+        which is the other end of the same ladder: on a developer Mac running
+        a real OnionPress, 8080 was taken so the stub landed on 18080, the
+        launcher found the real receiver on 8080 first, and the assertions
+        then described someone else's stack — `start` genuinely no-oped, so
+        the failure was an assertIn on the port number rather than anything
+        that pointed at the cause. CI has a clean ladder and never saw it.
+
+        So: refuse to run behind a real receiver, and step over a port held by
+        something that is not one (a stray dev server) exactly the way the
+        launcher's probe steps over it.
+        """
         for port in CANDIDATE_PORTS:
+            if _receiver_answering(port):
+                self.skipTest(
+                    f"a receiver already answers on {port}; the launcher would "
+                    "find it before any stub bound further up the ladder"
+                )
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", port), _StubReceiver)
             except OSError:
-                continue
+                continue  # bound by a non-receiver; the launcher skips it too
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             self.addCleanup(thread.join, 5)
@@ -190,7 +216,8 @@ class TestLauncherStartIdempotent(unittest.TestCase):
         is still a genuine collision (a `start` mid-boot), still exit 1."""
         answering = [p for p in CANDIDATE_PORTS if _receiver_answering(p)]
         if answering:
-            self.skipTest(f"a real OnionPress receiver is answering on {answering}")
+            self.skipTest(f"a real OnionPress receiver is answering on {answering}; "
+                          "this test needs an empty ladder to reach fall-through")
 
         owner_pid = os.getpid()
         self._write_pidfile(owner_pid)
