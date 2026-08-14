@@ -34,6 +34,17 @@ archiving nothing:
      files on disk. This site reported archived=5/5 while archiving none
      of its own content: the five were leftover WordPress defaults, and
      the moss pages a reader actually sees had never been in the queue.
+ 11. ...and they belong to ONE site. The generation is container-global
+     while its state option is per-subsite, so enumerating it on every
+     subsite submitted every page N times over.
+ 12. Enumeration must survive a directory it cannot read, and must not be
+     repeated three times per subsite per iteration.
+
+And one about the suite itself: it must be structurally incapable of
+making a real Save Page Now capture. See TestOutboundHttpIsBlocked and the
+_HTTP_GUARD_PHP comment — the mocks below cover the sweep's own network
+calls, but a published post reaches SPN by a path no filter in this process
+can see.
 
 Prerequisites (skips the suite if any fails):
   - Docker running
@@ -42,6 +53,7 @@ Prerequisites (skips the suite if any fails):
   - At least one subsite to target
 """
 
+import base64
 import json
 import shutil
 import subprocess
@@ -50,20 +62,70 @@ import unittest
 
 _WP = "onionpress-wordpress"
 
+# ── the outbound-HTTP block ──────────────────────────────────────────────
+#
+# onionpress_wayback_schedule_sweep_now() ends with a non-blocking
+# wp_remote_post() at site_url('wp-cron.php'). Apache answers that inside this
+# container, and it is a SEPARATE HTTP request — the add_filter() mocks a
+# `wp eval` installs live in THIS process and do not apply to it. What that
+# loopback starts is a genuine unmocked daemon: real Tor, real Save Page Now
+# captures, against the archive.org account shared by every OnionPress node,
+# holding the sweep lock for up to OP_WB_LOOP_MAX_SEC afterwards.
+#
+# Every content-creating test reaches it. `wp post create --post_status=publish`
+# fires save_post -> kick_now (measured: two loopback POSTs per created post),
+# and wp_insert_comment fires the same path. It has already happened: captures
+# triggered by this suite are in the Wayback Machine.
+#
+# So the block is not a filter a test opts into — one test remembering is worth
+# nothing when the next one forgets. It is a `--require` file loaded by EVERY
+# `wp` invocation _wp() makes, which is every way this suite can reach
+# WordPress at all. A missing file makes wp-cli exit non-zero on the first
+# command rather than quietly restoring the old behaviour, which is the right
+# direction to fail in.
+_HTTP_GUARD_PATH = "/tmp/op-wayback-test-no-http.php"
+_HTTP_GUARD_LOG = "/tmp/op-wayback-test-blocked.log"
+_HTTP_GUARD_PHP = """<?php
+// Installed by tests/test_wayback_sweep.py. See the comment there.
+WP_CLI::add_hook( 'after_wp_load', function () {
+    add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
+        @file_put_contents( '%s', time() . ' ' . $url . "\\n", FILE_APPEND );
+        return new WP_Error( 'op-test-no-outbound-http',
+            'the wayback test suite blocks outbound HTTP: ' . $url );
+    }, 0, 3 );
+} );
+""" % _HTTP_GUARD_LOG
 
-def _docker_exec(args, **kwargs):
+
+def _docker_exec_raw(args, user=None, **kwargs):
+    pre = ["docker", "exec"] + (["-u", user] if user else []) + [_WP]
     return subprocess.run(
-        ["docker", "exec", _WP] + args,
+        pre + args,
         capture_output=True, text=True, encoding='utf-8',
         errors='replace', **kwargs,
     )
 
 
-def _wp(args, url=None, **kwargs):
-    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root"]
+def _docker_exec(args, user=None, **kwargs):
+    """Run a command in the container. NOT for `wp` — see the refusal below."""
+    # Anything that reaches WordPress must go through _wp(), because that is
+    # where the outbound-HTTP block is attached. Refusing `wp` here is what
+    # keeps the block from being one forgotten helper call away from being
+    # off — the same reason it is not a per-test filter.
+    if args and args[0] == "wp":
+        raise AssertionError(
+            "run wp through _wp(), never _docker_exec: _wp attaches the "
+            "outbound-HTTP block that stops a test making real Save Page Now "
+            "captures")
+    return _docker_exec_raw(args, user=user, **kwargs)
+
+
+def _wp(args, url=None, user=None, **kwargs):
+    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root",
+                           "--require=" + _HTTP_GUARD_PATH]
     if url:
         cmd.append("--url=" + url)
-    return _docker_exec(cmd, **kwargs)
+    return _docker_exec_raw(cmd, user=user, **kwargs)
 
 
 def _docker_available():
@@ -76,19 +138,59 @@ def _docker_available():
     return r.returncode == 0 and "true" in r.stdout
 
 
-def _pick_site():
+def _install_http_guard():
+    """Push the guard into the container before any `wp` runs. Raises rather
+    than skipping: a suite that cannot install the block must not be one that
+    quietly runs without it."""
+    r = subprocess.run(
+        ["docker", "exec", "-i", _WP, "sh", "-c", "cat > " + _HTTP_GUARD_PATH],
+        input=_HTTP_GUARD_PHP, capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            "could not install the outbound-HTTP block at %s: %s"
+            % (_HTTP_GUARD_PATH, r.stderr.strip()))
+
+
+_DOCKER = _docker_available()
+if _DOCKER:
+    _install_http_guard()
+
+
+def _sites():
     r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
             timeout=15)
     if r.returncode != 0 or not r.stdout.strip():
-        return None
-    sites = json.loads(r.stdout)
+        return []
+    return json.loads(r.stdout)
+
+
+def _pick_site():
+    sites = _sites()
     sub = [s for s in sites if s.get("path") != "/"]
     return sub[0] if sub else (sites[0] if sites else None)
 
 
-def _eval(php, url):
+def _pick_main_site():
+    """The site moss serves. Its generation is a container-global tree of URLs
+    rooted at the onion address, so it belongs to the site at '/' and to no
+    subsite — see onionpress_wayback_moss_serves_this_site()."""
+    for s in _sites():
+        if s.get("path") == "/":
+            return s
+    return None
+
+
+def _pick_subsite():
+    for s in _sites():
+        if s.get("path") != "/":
+            return s
+    return None
+
+
+def _eval(php, url, user=None):
     """Run PHP inside WP, return stdout (stripped)."""
-    r = _wp(["eval", php], url=url, timeout=90)
+    r = _wp(["eval", php], url=url, user=user, timeout=90)
     return r.stdout.strip()
 
 
@@ -127,7 +229,57 @@ class SitewideStateMixin:
         _eval(php, self.url)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
+class TestOutboundHttpIsBlocked(unittest.TestCase):
+    """The suite must be structurally incapable of a real Save Page Now
+    capture. See the _HTTP_GUARD_PHP comment for the mechanism it defeats.
+
+    This is a test about the harness, and it earns its place because the
+    failure it guards is silent: nothing about a test run that spawned a real
+    daemon looks different from one that did not, and the evidence turns up
+    days later as captures in the Wayback Machine and a shared account's
+    slots spent on someone else's behalf.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
+
+    def test_the_wordpress_http_api_is_blocked(self):
+        out = _eval("""
+        $r = wp_remote_post(site_url('wp-cron.php?doing_wp_cron=' . microtime(true)),
+                            array('timeout' => 0.01, 'blocking' => false));
+        echo is_wp_error($r) ? 'blocked:' . $r->get_error_code() : 'ALLOWED';
+        """, self.url)
+        self.assertEqual("blocked:op-test-no-outbound-http", out,
+            "wp_remote_post reached the network from a test process; every "
+            "sweep-triggering test is then one loopback away from a real "
+            "unmocked daemon")
+
+    def test_publishing_a_post_cannot_start_a_real_sweep(self):
+        """The block has to sit on the path that actually fires it, which is
+        NOT `wp eval`: `wp post create` runs save_post -> kick_now in its own
+        process, where no filter a test installs can reach. Asserting that the
+        loopback was attempted AND blocked is what tells the guard apart from
+        a guard that happens to be pointed somewhere harmless."""
+        _docker_exec(["sh", "-c", "> " + _HTTP_GUARD_LOG])
+        r = _wp(["post", "create", "--post_type=post", "--post_status=publish",
+                 "--post_title=wayback-http-guard-probe", "--porcelain"],
+                url=self.url, timeout=15)
+        pid = int(r.stdout.strip())
+        self.addCleanup(lambda: _wp(["post", "delete", str(pid), "--force"],
+                                    url=self.url, timeout=15))
+        blocked = _docker_exec(["cat", _HTTP_GUARD_LOG]).stdout
+        self.assertIn("wp-cron.php", blocked,
+            "publishing a post did not even attempt the wp-cron loopback — "
+            "either the trigger moved or the guard is not loaded, and both "
+            "mean this suite's safety is no longer being verified")
+
+
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestWaybackQueueTotals(unittest.TestCase):
     """Queue totals aggregate correctly across every subsite."""
 
@@ -167,7 +319,7 @@ class TestWaybackQueueTotals(unittest.TestCase):
             f"aggregated total {totals['total']} < this subsite's {one}")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestWaybackSweepIteration(SitewideStateMixin, unittest.TestCase):
     """Sweep iteration behavior with mocked network functions."""
 
@@ -630,7 +782,7 @@ class TestWaybackSweepIteration(SitewideStateMixin, unittest.TestCase):
         self.assertGreater(int(submitted_at), int(time.time()) - 60)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestWaybackPollCoverage(unittest.TestCase):
     """poll_parallel's own response handling, driven through the curl seam.
 
@@ -716,7 +868,7 @@ class TestWaybackPollCoverage(unittest.TestCase):
         self.assertEqual([], out["results"])
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestWaybackSweepLock(unittest.TestCase):
     """Token-lock mutex semantics for the sweep entry point."""
 
@@ -785,11 +937,12 @@ class TestWaybackSweepLock(unittest.TestCase):
                           1 + (int) get_option('op_test_loop_entered', 0), false);
             return 0;
         });
-        // Belt and braces on the loopback the recycle would otherwise fire.
-        // site_url() resolves inside this container, so an unguarded POST
-        // to wp-cron.php would start a genuine unmocked daemon out of a
-        // unit test — real Tor, real SPN submissions, holding the lock for
-        // OP_WB_LOOP_MAX_SEC and breaking every test that follows.
+        // The COUNTER for the assertion below, not the safety net — the
+        // suite-wide block installed by _wp()'s --require file is what makes
+        // the loopback unreachable, here and in every other test. This one
+        // exists because "a zero-lifetime recycle must not fire the loopback"
+        // is a claim about the plugin, and it needs something that observes
+        // the attempt rather than merely preventing it.
         add_filter('pre_http_request', function($pre, $args, $url) {
             update_option('op_test_http_attempts',
                           1 + (int) get_option('op_test_http_attempts', 0), false);
@@ -835,7 +988,7 @@ class TestWaybackSweepLock(unittest.TestCase):
             "it must reach the loop body, not bounce off a surviving lock")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestWaybackCommentResnapshot(unittest.TestCase):
     """`wp_insert_comment` triggers exactly one re-archive of the parent
     post — and only for imported posts that already have a snapshot.
@@ -943,7 +1096,7 @@ class TestWaybackCommentResnapshot(unittest.TestCase):
         self.assertEqual(self._meta(pid, "_op_wayback_resnapshot_done"), "")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestWaybackKickAndInvalidate(SitewideStateMixin, unittest.TestCase):
     """`onionpress_wayback_kick_now()` / `_invalidate_sitewide()` are the
     shared mechanism behind every "archive right now" trigger: the
@@ -997,7 +1150,7 @@ class TestWaybackKickAndInvalidate(SitewideStateMixin, unittest.TestCase):
         self.assertNotEqual(home, "", "home state with a job in flight must survive")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestMossPageEnumeration(unittest.TestCase):
     """Which pages of a moss generation the archiver can see.
 
@@ -1013,10 +1166,36 @@ class TestMossPageEnumeration(unittest.TestCase):
             raise unittest.SkipTest("no site available")
         cls.url = s["url"].rstrip("/") + "/"
 
-    def _fixture(self, name, with_sitemap=False, extra=()):
+    # The real thing, byte for byte, minus the <loc> list. A bare <urlset>
+    # was the fixture for a while and it tested a shape production never
+    # emits: moss writes the sitemaps.org default namespace, under which
+    # $xml->url resolves only because SimpleXML treats an unprefixed default
+    # namespace as the document's own. The code was right and the fixture
+    # could not have caught it becoming wrong.
+    _SITEMAP_HEAD = ('<?xml version="1.0" encoding="UTF-8"?>'
+                     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+
+    def _fixture(self, name, sitemap=None, extra=(), unreadable=()):
         """A two-page generation: '/' and '/about/', plus whatever `extra`
-        asks for. Returns the directory path."""
+        asks for. `sitemap` is None, 'urlset' or 'index'; `unreadable` names
+        directories to create with mode 0000. Returns the directory path."""
         d = "/tmp/wb-moss-" + name
+        # A deliberately WRONG host in the sitemap: moss persists whatever
+        # site_url was configured at build time, and archiving that host
+        # would submit URLs nobody can fetch. Only the path may be taken.
+        bodies = {
+            None: "",
+            "urlset": (self._SITEMAP_HEAD
+                       + "<url><loc>http://localhost:8080/</loc></url>"
+                       + "<url><loc>http://localhost:8080/about/</loc></url>"
+                       + "</urlset>"),
+            # What moss emits past 50k URLs: an index OF sitemaps, whose
+            # children are <sitemap>, not <url>.
+            "index": ('<?xml version="1.0" encoding="UTF-8"?>'
+                      '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                      "<sitemap><loc>http://localhost:8080/sitemap-1.xml</loc></sitemap>"
+                      "</sitemapindex>"),
+        }
         php = """
         $d = 'DIR';
         exec('rm -rf ' . escapeshellarg($d));
@@ -1027,46 +1206,104 @@ class TestMossPageEnumeration(unittest.TestCase):
             @mkdir(dirname($d . $rel), 0755, true);
             file_put_contents($d . $rel, 'x');
         }
-        if (SITEMAP) {
-            // A deliberately WRONG host: moss persists whatever site_url was
-            // configured at build time, and archiving that host would submit
-            // URLs nobody can fetch. Only the path may be taken.
-            file_put_contents($d . '/sitemap.xml',
-                '<urlset><url><loc>http://localhost:8080/</loc></url>'
-              . '<url><loc>http://localhost:8080/about/</loc></url></urlset>');
+        $sitemap = base64_decode('SITEMAP');
+        if ($sitemap !== '') { file_put_contents($d . '/sitemap.xml', $sitemap); }
+        foreach (UNREADABLE as $rel) {
+            @mkdir($d . $rel, 0755, true);
+            file_put_contents($d . $rel . '/index.html', 'hidden');
+            chmod($d . $rel, 0000);
         }
         echo 'built';
         """
         php = (php.replace("DIR", d)
                   .replace("EXTRA", "array(" + ",".join(
                       "'%s'" % e for e in extra) + ")")
-                  .replace("SITEMAP", "true" if with_sitemap else "false"))
+                  .replace("UNREADABLE", "array(" + ",".join(
+                      "'%s'" % u for u in unreadable) + ")")
+                  .replace("SITEMAP", base64.b64encode(
+                      bodies[sitemap].encode()).decode()))
         self.assertEqual(_eval(php, self.url), "built")
+        # chmod 0000 dirs need root to remove.
         self.addCleanup(_docker_exec, ["rm", "-rf", d])
         return d
 
-    def _paths(self, directory):
+    def _paths(self, directory, user=None):
         php = ("$p = onionpress_wayback_moss_paths(array('id'=>'fx','dir'=>'%s'));"
                " sort($p); echo json_encode($p);" % directory)
-        return json.loads(_eval(php, self.url))
+        return json.loads(_eval(php, self.url, user=user))
 
     def test_sitemap_supplies_the_paths_and_never_the_host(self):
-        d = self._fixture("sitemap", with_sitemap=True)
-        self.assertEqual(self._paths(d), ["/", "/about/"])
-
-    def test_a_generation_without_a_sitemap_is_still_enumerated(self):
-        """moss gates sitemap.xml on its site_url being deployed, so a site
-        published before its onion name was registered ships none. Without
-        the walk those sites archive nothing and the reason is invisible."""
-        d = self._fixture("walk", with_sitemap=False)
+        d = self._fixture("sitemap", sitemap="urlset")
         self.assertEqual(self._paths(d), ["/", "/about/"])
 
     def test_the_walk_does_not_descend_the_asset_mount(self):
-        """_moss/ holds hashed css/js and generated OG images — on a real
-        site an order of magnitude more files than pages, and never a page."""
-        d = self._fixture("assets", with_sitemap=False,
+        """The fallback walk, which moss sites reach whenever sitemap.xml is
+        absent — moss gates it on the site_url being deployed, so a site
+        published before its onion name was registered ships none.
+
+        _moss/ holds hashed css/js and generated OG images — on a real site
+        an order of magnitude more files than pages, and never a page."""
+        d = self._fixture("assets", sitemap=None,
                           extra=("/_moss/og/index.html",))
         self.assertEqual(self._paths(d), ["/", "/about/"])
+
+    def test_a_sitemap_index_falls_back_to_the_walk(self):
+        """Past ~50k URLs moss emits a <sitemapindex>, whose children are
+        <sitemap> and not <url>, so isset($xml->url) is false. We deliberately
+        do not follow it — such a site is two orders of magnitude past
+        OP_WB_MOSS_MAX_PAGES, so the extra pages are ones this plugin refuses
+        to track anyway — and fall through to the walk, which is a documented
+        decision rather than an accident. This pins that: an index must
+        enumerate, not return nothing."""
+        d = self._fixture("index", sitemap="index")
+        self.assertEqual(self._paths(d), ["/", "/about/"])
+
+    def test_an_unreadable_directory_does_not_kill_the_sweep(self):
+        """RecursiveDirectoryIterator raises UnexpectedValueException on a
+        directory it cannot open, and nothing caught it. Reproduced in this
+        container as www-data ("Failed to open directory: Permission denied"):
+        the throw propagated out of sitewide_has_work(), out of
+        sweep_iteration(), and killed the sweep as a PHP fatal on every cron
+        fire until the permission was fixed — with no plugin log line saying
+        so.
+
+        Runs as www-data on purpose. The rest of this suite runs as root,
+        which can read a 0000 directory, so the bug is invisible from there:
+        it is the WEB user that the daemon actually runs as.
+        """
+        d = self._fixture("perm", sitemap=None, unreadable=("/secret",))
+        self.assertEqual(self._paths(d, user="www-data"), ["/", "/about/"],
+            "an unreadable subdirectory must cost its own subtree and "
+            "nothing else")
+
+    def test_the_page_list_is_memoized_per_generation(self):
+        """One sweep iteration asks for the page list three times per subsite
+        — the has-work probe, the poll's records and the submit's — so a
+        four-blog network ran twelve full enumerations every 30 seconds. On
+        the fallback walk that is up to OP_WB_MOSS_SCAN_MAX stats each.
+
+        The memo is keyed on the generation, which is what keeps it honest: a
+        publish is a new id, so it cannot serve yesterday's pages. Asserted by
+        mutating the tree between two calls in ONE request — the second call
+        must not see the change, and a call for a different generation must.
+        """
+        d = self._fixture("memo", sitemap=None)
+        out = json.loads(_eval("""
+        $g = array('id' => 'memo-gen', 'dir' => '%s');
+        $first = onionpress_wayback_moss_paths($g);
+        unlink('%s/about/index.html');
+        $again = onionpress_wayback_moss_paths($g);
+        $fresh = onionpress_wayback_moss_paths(
+            array('id' => 'memo-gen-next', 'dir' => '%s'));
+        sort($first); sort($again); sort($fresh);
+        echo json_encode(compact('first', 'again', 'fresh'));
+        """ % (d, d, d), self.url))
+        self.assertEqual(["/", "/about/"], out["first"])
+        self.assertEqual(out["first"], out["again"],
+            "the same generation must be enumerated once per request")
+        self.assertEqual(["/"], out["fresh"],
+            "a new generation id must re-enumerate — otherwise a publish "
+            "would be invisible to the archiver for the daemon's whole life")
 
     def test_the_generation_id_comes_from_the_target_not_the_link(self):
         """This is what realpath() buys, and it is the whole re-archive
@@ -1095,7 +1332,7 @@ class TestMossPageEnumeration(unittest.TestCase):
                            "a live generation that enumerates zero pages is the bug")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+@unittest.skipUnless(_DOCKER, "requires running onionpress-wordpress container")
 class TestMossPagesReachTheQueue(SitewideStateMixin, unittest.TestCase):
     """The pages a moss generation publishes have to be work items, not
     just files on disk.
@@ -1105,14 +1342,23 @@ class TestMossPagesReachTheQueue(SitewideStateMixin, unittest.TestCase):
     site a reader sees is a moss generation served at the onion root, and
     none of its pages had ever been submitted. The queue was not failing —
     the pages were never in it.
+
+    Pinned to the MAIN site, because that is whose URLs the generation is.
+    It is served at the onion root from one container-global symlink, while
+    sitewide_records() runs once per subsite inside the sweep's network loop
+    and OP_WB_OPT_MOSS is a per-subsite option — so enumerating it everywhere
+    gave every subsite its own map, its own job_ids, and its own submission of
+    the same page.
     """
 
     @classmethod
     def setUpClass(cls):
-        s = _pick_site()
+        s = _pick_main_site()
         if s is None:
-            raise unittest.SkipTest("no site available")
+            raise unittest.SkipTest("no main site available")
         cls.url = s["url"].rstrip("/") + "/"
+        sub = _pick_subsite()
+        cls.sub_url = sub["url"].rstrip("/") + "/" if sub else None
         if _eval("echo onionpress_wayback_moss_is_owner() ? '1' : '0';",
                  cls.url) != "1":
             raise unittest.SkipTest("no moss generation is serving this site")
@@ -1120,14 +1366,14 @@ class TestMossPagesReachTheQueue(SitewideStateMixin, unittest.TestCase):
     def setUp(self):
         self.snapshot_sitewide()
 
-    def _records(self):
+    def _records(self, url=None):
         return json.loads(_eval("""
         $out = array();
         foreach (onionpress_wayback_sitewide_records() as $r) {
             $out[] = array('key' => $r['key'], 'url' => $r['url']);
         }
         echo json_encode($out);
-        """, self.url))
+        """, url or self.url))
 
     def test_moss_pages_are_queued_alongside_home_and_feed(self):
         recs = self._records()
@@ -1143,6 +1389,32 @@ class TestMossPagesReachTheQueue(SitewideStateMixin, unittest.TestCase):
         urls = [r["url"] for r in self._records()]
         self.assertEqual(len(urls), len(set(urls)),
                          "duplicate URL in the queue: " + ", ".join(sorted(urls)))
+
+    def test_a_subsite_contributes_no_moss_pages_and_keeps_its_own_feed(self):
+        """The moss generation is container-global; the option holding its
+        per-page state is not. Every subsite therefore enumerated the same
+        pages and submitted them under its own job_ids: measured on this
+        four-blog network, 12 SPN submissions per drain cycle for 3 distinct
+        URLs, plus four of /rss.xml — against an account whose concurrent
+        slots are in single digits, which is exactly the cost the per-URL
+        back-off exists to keep off other people's sites.
+
+        The feed is the same bug with a sharper edge: gating on
+        moss_is_owner(), a global answer, silently replaced subsite 2's own
+        /op-bluesky-test/feed/ with the MAIN site's /rss.xml, so the subsite
+        archived a feed that was not its own and never archived the one that
+        was.
+        """
+        if self.sub_url is None:
+            self.skipTest("network has no subsite")
+        keys = [r["key"] for r in self._records(self.sub_url)]
+        self.assertFalse([k for k in keys if k.startswith("moss:")],
+            "a subsite must contribute no moss records: " + ", ".join(keys))
+        feed = _eval("echo onionpress_wayback_feed_url_full();", self.sub_url)
+        path = self.sub_url.rstrip("/").rsplit("/", 1)[-1]
+        self.assertTrue(feed.endswith("/%s/feed/" % path),
+            "a subsite must keep its own WordPress feed, not the main site's "
+            "moss rss.xml; got " + feed)
 
     def test_the_feed_queued_is_the_one_readers_subscribe_to(self):
         """/feed/ is a WordPress route. A moss generation publishes at
@@ -1162,49 +1434,121 @@ class TestMossPagesReachTheQueue(SitewideStateMixin, unittest.TestCase):
             self.assertTrue(feed.endswith("/feed/"), feed)
 
     def test_a_publish_puts_every_page_back_in_the_queue(self):
-        """A new generation id is what makes new content get archived: it
-        replaces the map in one write, retiring every row."""
+        """A new generation id is what makes new content get archived. The map
+        is keyed to the generation it describes, so the moment a publish
+        replaces it every page reads as unarchived — and the first write for
+        the new generation drops the retired rows in one go.
+
+        Asserted through the records, and with a purity check, because ASKING
+        must not be what performs the reset. sitewide_has_work() is a
+        predicate the multisite loop calls to decide it may skip a subsite
+        entirely; it used to rewrite this option and log a publish every time
+        it was called, three times per subsite per iteration.
+        """
         live = _eval("$g = onionpress_wayback_moss_generation(); echo $g['id'];",
                      self.url)
-        _eval("""
+        out = json.loads(_eval("""
+        $rec = null;
+        foreach (onionpress_wayback_sitewide_records() as $r) {
+            if (strpos($r['key'], 'moss:') === 0) { $rec = $r; break; }
+        }
+        if ($rec === null) { echo json_encode(array('err' => 'no-moss-record')); return; }
+        $path = substr($rec['key'], strlen('moss:'));
+
+        // A map left behind by an earlier generation, claiming this very page
+        // is already archived, plus a page that generation served and the
+        // live one does not.
         update_option('op_wayback_moss_state', array(
             'generation' => 'moss-from-a-previous-publish',
-            'urls'       => array('/stale/' => array('archived_at' => 1)),
+            'urls'       => array(
+                $path      => array('archived_at' => 1),
+                '/retired/'=> array('archived_at' => 1),
+            ),
         ), false);
-        """, self.url)
-        onionpress = json.loads(_eval("""
-        onionpress_wayback_sitewide_records();
+
+        $before = get_option('op_wayback_moss_state');
+        $state  = call_user_func($rec['read']);
+        $work   = onionpress_wayback_sitewide_has_work();
+        $after  = get_option('op_wayback_moss_state');
+
+        // The first real write is what adopts the live generation.
+        call_user_func($rec['write'], array('job_id' => 'jid-adopt-test'));
         $s = get_option('op_wayback_moss_state', array());
-        echo json_encode(array('gen' => $s['generation'], 'urls' => count($s['urls'])));
+        echo json_encode(array(
+            'path'          => $path,
+            'stale_read'    => $state,
+            'has_work'      => $work,
+            'reads_pure'    => ($before === $after),
+            'gen'           => $s['generation'],
+            'rows'          => array_keys($s['urls']),
+        ));
         """, self.url))
-        self.assertEqual(onionpress["gen"], live)
-        self.assertEqual(onionpress["urls"], 0,
-                         "the retired generation's rows must not survive a publish")
+        self.assertNotIn("err", out, "the live generation enumerated no pages")
+        self.assertEqual([], out["stale_read"],
+            "a row written for a previous generation must not be reported as "
+            "this page's state — that row is what makes the archiver think "
+            "freshly published content is already captured")
+        self.assertTrue(out["has_work"],
+            "every page of a new generation is unarchived, so the site must "
+            "not be skipped by the multisite loop")
+        self.assertTrue(out["reads_pure"],
+            "building records and asking whether work exists must not write "
+            "the option they read")
+        self.assertEqual(live, out["gen"],
+            "the first write must adopt the live generation")
+        self.assertEqual([out["path"]], out["rows"],
+            "adopting must retire every row of the previous generation, "
+            "including pages it served that this one does not")
 
     def test_a_write_from_a_retired_generation_is_refused(self):
         """finalize_success writes archived_at and clears job_id in two
         calls, so a job submitted against the previous generation can land
-        after a publish has already reset the map. Without the guard it
-        resurrects a row for a page the new generation may not serve, and
-        nothing ever retires it."""
-        rows = _eval("""
-        onionpress_wayback_sitewide_records();
-        onionpress_wayback_moss_write('moss-a-generation-that-is-gone',
-                                      '/anything/', array('job_id' => 'late'));
-        $s = get_option('op_wayback_moss_state', array());
-        echo count($s['urls']);
-        """, self.url)
-        self.assertEqual(rows, "0")
+        after a publish. Without the guard it resurrects a row for a page the
+        new generation may not serve, and nothing ever retires it.
 
-    def test_an_unarchived_moss_page_keeps_the_subsite_in_the_sweep(self):
-        """The multisite loop skips a subsite it believes has no work. It
-        used to decide that from the home and feed options alone, so a
-        subsite whose posts were archived could be skipped while its moss
-        pages sat unarchived forever — the same bug one layer up."""
+        The RETURN value is load-bearing, not just the state. The submit step
+        counts a submission only when its write landed: a refusal reporting
+        success is how the sweep came to log submitted=N for job_ids it had
+        thrown away, each of which still runs at SPN, still holds one of the
+        account's few concurrent slots, and is never polled by anyone.
+        """
+        out = json.loads(_eval("""
+        $live = onionpress_wayback_moss_generation();
+        $refused = onionpress_wayback_moss_write('moss-a-generation-that-is-gone',
+                                                 '/anything/', array('job_id' => 'late'));
+        $s1 = get_option('op_wayback_moss_state', array());
+        $ok = onionpress_wayback_moss_write($live['id'], '/anything/',
+                                            array('job_id' => 'current'));
+        $s2 = get_option('op_wayback_moss_state', array());
+        echo json_encode(array(
+            'refused'      => $refused,
+            'retired_row'  => isset($s1['urls']['/anything/']),
+            'accepted'     => $ok,
+            'live_row'     => $s2['urls']['/anything/']['job_id'] ?? '',
+        ));
+        """, self.url))
+        self.assertIs(False, out["refused"],
+            "a write into a retired generation must report failure, or the "
+            "sweep counts a submission whose job_id it just discarded")
+        self.assertFalse(out["retired_row"],
+            "the refused write must not resurrect a row")
+        self.assertIs(True, out["accepted"],
+            "a write for the live generation must report success")
+        self.assertEqual("current", out["live_row"])
+
+    def test_an_unarchived_moss_page_keeps_the_site_in_the_sweep(self):
+        """The multisite loop skips a site it believes has no work. It used to
+        decide that from the home and feed options alone, so a site whose
+        posts were archived could be skipped while its moss pages sat
+        unarchived forever — the same bug one layer up."""
         state = _eval("""
-        // Everything archived: the loop is entitled to skip.
+        // Everything archived and nothing in flight: the loop is entitled to
+        // skip. job_id has to be cleared explicitly, not assumed absent —
+        // this runs against the live site, where the real daemon may have a
+        // capture outstanding on the home page at any moment, and a record
+        // with a job_id counts as work no matter what archived_at says.
         foreach (onionpress_wayback_sitewide_records() as $r) {
-            call_user_func($r['write'], array('archived_at' => time()));
+            call_user_func($r['write'], array('archived_at' => time(), 'job_id' => ''));
         }
         $idle = onionpress_wayback_sitewide_has_work() ? 'work' : 'idle';
 
