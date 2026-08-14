@@ -166,7 +166,7 @@ class TestOnionnameCommands(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self._patches = [
-            mock.patch("onionpress.cli.detect_port_offset"),
+            mock.patch("onionpress.cli.resolve_port_offset"),
             mock.patch("onionpress.cli.ensure_secrets"),
             mock.patch("onionpress.cli.Docker"),
         ]
@@ -308,7 +308,7 @@ class TestPIDLock(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @mock.patch("onionpress.cli.detect_port_offset")
+    @mock.patch("onionpress.cli.resolve_port_offset")
     @mock.patch("onionpress.cli.ensure_secrets")
     @mock.patch("onionpress.cli.Docker")
     def test_pid_lock_lifecycle(self, MockDocker, mock_secrets, mock_ports):
@@ -336,7 +336,7 @@ class TestPIDLock(unittest.TestCase):
         cli._remove_pid_lock()
         self.assertFalse(os.path.exists(pid_file))
 
-    @mock.patch("onionpress.cli.detect_port_offset")
+    @mock.patch("onionpress.cli.resolve_port_offset")
     @mock.patch("onionpress.cli.ensure_secrets")
     @mock.patch("onionpress.cli.Docker")
     def test_stale_pid_lock(self, MockDocker, mock_secrets, mock_ports):

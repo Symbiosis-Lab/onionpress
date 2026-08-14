@@ -13,7 +13,7 @@ from typing import Callable
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, Secrets, ensure_secrets, load_secrets, read_value,
-    PortConfig, detect_port_offset,
+    PortConfig, resolve_port_offset,
 )
 from .platform import OnionPressPaths
 
@@ -47,7 +47,7 @@ class ContainerManager:
     ):
         self.docker = docker
         self.paths = paths
-        self.port_config = port_config or detect_port_offset()
+        self.port_config = port_config or resolve_port_offset()
         self.log_func = log_func
 
     def _log(self, msg: str) -> None:

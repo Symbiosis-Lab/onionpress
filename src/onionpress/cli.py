@@ -15,7 +15,7 @@ from typing import Callable
 from . import __version__
 from .platform import OS, detect_os, resolve_paths, detect_timezone
 from .config import (
-    ensure_config, ensure_secrets, read_value, detect_port_offset,
+    ensure_config, ensure_secrets, read_value, resolve_port_offset,
 )
 from .docker import Docker
 from .containers import ContainerManager
@@ -47,8 +47,8 @@ class OnionPressCLI:
         # Ensure config exists
         ensure_config(self.paths)
 
-        # Detect ports
-        self.port_config = detect_port_offset()
+        # Detect ports (or, if our stack is already running, read them)
+        self.port_config = resolve_port_offset()
 
         # Build env for Docker
         secrets = ensure_secrets(self.paths.secrets_file)

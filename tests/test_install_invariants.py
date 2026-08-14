@@ -1309,5 +1309,111 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
         )
 
 
+class TestAutoLoginSurvivesStaticFirst(unittest.TestCase):
+    """Guard against the auto-login token being minted for a URL that can
+    never read it.
+
+    Incident: WordPress is served static-first (moss pre-rendered HTML
+    ahead of PHP). open_local_site() appended ?op_login=TOKEN straight to
+    the local URL; on the static homepage PHP never runs, so nothing ever
+    reads $_GET['op_login'] and the "auto-login" link just dumped the user
+    on the logged-out homepage. /wp-admin/ and /wp-login.php always
+    execute PHP, so the fix routes every login link through wp-login.php
+    instead of appending the token to whatever page the caller wants.
+    """
+
+    def test_generate_login_url_targets_wp_login_php(self):
+        src = _read("src/menubar.py")
+        m = re.search(
+            r'def\s+_generate_login_url\(self,[^)]*\):(.*?)(?=\n    def\s)',
+            src, re.DOTALL)
+        self.assertIsNotNone(m, "_generate_login_url must exist in src/menubar.py")
+        body = m.group(1)
+        self.assertRegex(
+            body, r'/wp-login\.php',
+            "_generate_login_url must build its URL against /wp-login.php "
+            "— appending the token to an arbitrary base_url silently fails "
+            "whenever that URL is served by the static-first path.",
+        )
+        self.assertRegex(
+            body, r'redirect_to',
+            "_generate_login_url must pass redirect_to so wp-login.php "
+            "sends the user back to the page they asked for, not to the "
+            "login form.",
+        )
+
+    def test_mu_plugin_validates_redirect_to_as_relative_path_only(self):
+        """The mu-plugin must NOT use wp_validate_redirect() for this —
+        that checks the *configured* home_url() host, which this same file
+        already documents as unreliable (the cookie-domain code a few
+        lines above reads $_SERVER['HTTP_HOST'] instead, for exactly this
+        reason). Accepting an absolute or protocol-relative redirect_to
+        unchecked would be an open redirect.
+        """
+        src = _read("app/Resources/plugins/onionpress-auto-login.php")
+        self.assertIn("redirect_to", src)
+        self.assertNotRegex(
+            src, r'wp_validate_redirect\(',
+            "wp_validate_redirect() checks home_url()'s host, which can "
+            "differ from the actual request host (.onion vs localhost) — "
+            "do not reintroduce a call to it here.",
+        )
+        self.assertRegex(
+            src, r"strpos\(\s*\$requested,\s*'/'\s*\)",
+            "redirect_to must be validated as a same-request relative "
+            "path (starts with '/').",
+        )
+        self.assertRegex(
+            src, r"strpos\(\s*\$requested,\s*'//'\s*\)",
+            "redirect_to must reject protocol-relative paths ('//host/...') "
+            "— otherwise it's an open redirect.",
+        )
+
+
+class TestWordPressAdminMenuItem(unittest.TestCase):
+    """Guard the fix for defect 3: there was no menu path to
+    /wp-admin/ at all, so Archive.org credentials (only settable from
+    inside WordPress, at admin.php?page=onionpress-settings) could never
+    be configured, and the OnionHeaven-to-Wayback fallback had nothing to
+    serve.
+    """
+
+    def test_menu_has_wp_admin_item(self):
+        src = _read("src/menubar.py")
+        self.assertRegex(
+            src, r'rumps\.MenuItem\(\s*"Open WordPress Admin\.\.\."\s*,\s*callback=self\.open_wp_admin\s*\)',
+            "The menu must include an Open WordPress Admin... item wired "
+            "to open_wp_admin.",
+        )
+
+    def test_wp_admin_handler_targets_a_php_path(self):
+        src = _read("src/menubar.py")
+        m = re.search(
+            r'def\s+open_wp_admin\(self,[^)]*\):(.*?)(?=\n    def\s)',
+            src, re.DOTALL)
+        self.assertIsNotNone(m, "open_wp_admin must exist in src/menubar.py")
+        body = m.group(1)
+        self.assertRegex(
+            body, r'/wp-admin/admin\.php\?page=onionpress-settings',
+            "open_wp_admin must target admin.php?page=onionpress-settings "
+            "— that's the only page with the Archive.org S3 key fields "
+            "(app/Resources/plugins/onionpress-settings.php).",
+        )
+
+    def test_wp_admin_item_gated_same_as_local_site_item(self):
+        """The admin item must be enabled/disabled in lockstep with
+        local_site_item — both need the WordPress container reachable, and
+        an admin item left clickable while the stack is stopped would open
+        a connection-refused error instead of a WordPress login page.
+        """
+        src = _read("src/menubar.py")
+        self.assertGreaterEqual(
+            src.count("self.wp_admin_item.set_callback("), 3,
+            "wp_admin_item's callback must be toggled alongside "
+            "local_site_item's in every state branch of check_status "
+            "(available / starting-offline-stuck-stalled / stopped).",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
