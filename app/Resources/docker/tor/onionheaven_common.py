@@ -603,6 +603,39 @@ def _ensure_capacity(conn):
         pass
 
 
+# Environment a takeover worker needs to reach the Tor network on its own.
+# The worker runs its own Tor process, and entrypoint.sh builds that Tor's
+# torrc from these variables alone — there is no file-based fallback. This
+# container already holds them (compose passes the same four in), so a worker
+# spawned from here inherits them or it inherits nothing.
+#
+# Nothing surfaced the omission, because on an uncensored network a Tor with
+# no bridge configuration is a *working* Tor. It only bites where OnionHeaven
+# matters most: behind censorship the worker's Tor never bootstraps, so
+# check_worker_bootstrap() never sets bootstrapped=1, _pick_worker() keeps
+# returning None, and every takeover is deferred forever while the address it
+# should be serving stays dark.
+#
+# TOR_WARM_ONIONS is not bridge configuration and is passed unconditionally
+# for the same reason it is in containers.py: a cold descriptor lookup costs
+# 25-70s against archive.org's onion and Tor gives up around 70s, on any
+# network.
+WORKER_NETWORK_ENV = (
+    "TOR_BRIDGE_LINES",
+    "TOR_CLIENT_TRANSPORT_PLUGIN",
+    "TOR_UPSTREAM_PROXY",
+    "TOR_WARM_ONIONS",
+)
+
+
+def _worker_network_env():
+    """docker run -e flags carrying this container's network reachability."""
+    flags = []
+    for key in WORKER_NETWORK_ENV:
+        flags += ["-e", f"{key}={os.environ.get(key, '')}"]
+    return flags
+
+
 def _spawn_worker(conn):
     """Start a new takeover worker container via docker run."""
     global _next_worker_index
@@ -627,6 +660,7 @@ def _spawn_worker(conn):
              "--ulimit", "nofile=10000:10000",
              "-e", f"TZ={tz}",
              "-e", f"TOR_IMPL={tor_impl}",
+             *_worker_network_env(),
              "-e", "TAKEOVER_WORKER=1",
              "-e", f"CONTAINER_NAME={name}",
              "-e", f"MAX_TAKEOVER_SERVICES={MAX_SERVICES_PER_WORKER}",

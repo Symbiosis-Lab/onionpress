@@ -242,5 +242,60 @@ class ExecReleaseTest(unittest.TestCase):
             has=_result(returncode=1)))
 
 
+class SpawnWorkerEnvTest(unittest.TestCase):
+    """_spawn_worker must hand a worker the network config it was given.
+
+    This is the third and only live takeover-worker spawner: the Mac
+    launcher's `start_onionheaven_farm` and containers.py's
+    `start_farm_worker` have no production caller, so every worker a running
+    node ever creates comes from here. It is also the one that was never
+    wired: 14970fb0 fixed its image and 751dd3b9 wired TOR_WARM_ONIONS
+    through the other two, and both passed over this function.
+
+    A worker builds its own torrc from these variables in entrypoint.sh and
+    has no other source for them. Omitting them yields a Tor that starts
+    cleanly and never bootstraps on a censored network — so the worker never
+    reaches bootstrapped=1, _pick_worker() keeps returning None, and the
+    takeover is deferred for as long as the site stays down.
+    """
+
+    def _spawn(self, env):
+        conn = mock.MagicMock()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(onionheaven_common, "subprocess") as sp:
+            sp.run.return_value = _result(returncode=0, stdout="cid")
+            onionheaven_common._spawn_worker(conn)
+        # The `docker rm -f` precedes the `docker run`; we want the run.
+        run_cmd = next(c for c in (call[0][0] for call in sp.run.call_args_list)
+                       if "run" in c)
+        return run_cmd
+
+    def test_bridge_config_reaches_the_worker(self):
+        cmd = self._spawn({
+            "TOR_BRIDGE_LINES": "obfs4 192.0.2.1:19393 FD78A6 cert=zzz iat-mode=0",
+            "TOR_CLIENT_TRANSPORT_PLUGIN": "obfs4",
+            "TOR_UPSTREAM_PROXY": "172.19.0.1:15235",
+        })
+        self.assertIn(
+            "TOR_BRIDGE_LINES=obfs4 192.0.2.1:19393 FD78A6 cert=zzz iat-mode=0",
+            cmd)
+        self.assertIn("TOR_CLIENT_TRANSPORT_PLUGIN=obfs4", cmd)
+        self.assertIn("TOR_UPSTREAM_PROXY=172.19.0.1:15235", cmd)
+
+    def test_warm_onions_reaches_the_worker(self):
+        # Not bridge configuration: a cold descriptor lookup is slow enough
+        # to fail on any network, censored or not.
+        cmd = self._spawn({"TOR_WARM_ONIONS": "example1234.onion"})
+        self.assertIn("TOR_WARM_ONIONS=example1234.onion", cmd)
+
+    def test_unset_values_are_passed_as_empty_not_omitted(self):
+        # Matches the shell and containers.py spawners, and matches what
+        # compose does for the onionheaven container itself: entrypoint.sh
+        # treats "" as unset, so an uncensored node is unaffected.
+        cmd = self._spawn({})
+        for key in onionheaven_common.WORKER_NETWORK_ENV:
+            self.assertIn(f"{key}=", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
