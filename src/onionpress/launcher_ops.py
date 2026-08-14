@@ -6,7 +6,9 @@ direct import), and — eventually — the Mac menubar app.
 
 Each function takes explicit paths and doesn't read environment or globals.
 Platform-aware glue (Tor Browser detection, which container runtime) lives
-in callers.
+in callers. The one exception is DEFAULT_TOR_IMAGE below, which resolves
+the image-override environment variables once at import so every caller
+that omits the argument agrees with the launcher on what to run.
 
 Operations:
 - open_in_browser(url, prefer_tor)         — launch via xdg-open / open / torbrowser-launcher
@@ -22,9 +24,27 @@ import sys
 from typing import Optional
 
 
-# Pinned to digest — must match docker-compose.yml and linux/onionpress.
-# Refresh all three together via build/refresh-image-digests.sh.
-DEFAULT_TOR_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:e06286cbcbf6b34b1fe29636ffeea381c1aa96050c947e0d4ef7250f64993ea2"
+# Pinned to digest — must match the `tor` service default in
+# docker-compose.yml and ONIONPRESS_TOR_IMAGE in linux/onionpress. Refresh
+# them together via build/refresh-image-digests.sh.
+#
+# This is the image mkp224o is run out of (both functions below shell out to
+# `docker run <image> /usr/local/bin/mkp224o`), so it has to be an image the
+# host actually has — and the only tor image the stack ever pulls is the
+# compose default. While this named upstream's build, `docker image inspect`
+# missed on every fresh Linux install, tor_image_has_mkp224o() returned False,
+# and first-run vanity generation was skipped: the user asked for `op2…` and
+# silently got a random address. (The fork's image is built from the same
+# app/Resources/docker/tor context, so it carries mkp224o just the same.)
+#
+# ONIONPRESS_TOR_IMAGE overrides it, with ONIONHEAVEN_IMAGE as the older
+# spelling. The Linux launcher exports whichever is set before running
+# `python3 -m onionpress.cli generate-vanity`, so a locally built image is
+# probed and used instead of the pin, rather than the launcher running one
+# image and the vanity probe another.
+DEFAULT_TOR_IMAGE = os.environ.get("ONIONPRESS_TOR_IMAGE") or os.environ.get(
+    "ONIONHEAVEN_IMAGE"
+) or "ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545"
 
 
 def _tor_browser_lock_paths() -> list:

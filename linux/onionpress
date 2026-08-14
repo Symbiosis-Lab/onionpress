@@ -285,6 +285,36 @@ if [ -f "$DATA_DIR/config" ]; then
     [ -n "$_val" ] && export ONIONHEAVEN_HUB_THRESHOLD="$_val"
 fi
 
+# The tor-derived image this stack runs, in one place. `docker compose`
+# interpolates it into the `tor` and `onionheaven` services, update_images
+# pre-pulls it, write_status probes it for mkp224o, and `op_py
+# generate-vanity` runs mkp224o out of it. Those four have to name the same
+# image or we pull one and run another — which is what happened while these
+# said brewsterkahle: compose ran the fork's build, the pre-pull fetched
+# upstream's, and the mkp224o probe inspected an upstream tag that a default
+# install (UPDATE_ON_LAUNCH=no) never fetches at all.
+#
+# It must be the fork's build. Upstream's tor image ships neither obfs4proxy
+# nor snowflake-client, and the entrypoint is handed TOR_BRIDGE_LINES
+# regardless, so on a censored network it starts cleanly and can never
+# connect.
+#
+# Must match the `tor` service default in
+# app/Resources/docker/docker-compose.yml; build/refresh-image-digests.sh
+# rewrites both together. Precedence: environment, then ~/.onionpress/config,
+# then the pin — an explicit `ONIONPRESS_TOR_IMAGE=… onionpress start` is a
+# deliberate one-off override of a stored setting. ONIONHEAVEN_IMAGE is the
+# older spelling of the same knob and stays honoured in both places.
+_cfg_tor_image=""
+if [ -f "$DATA_DIR/config" ]; then
+    _cfg_tor_image=$(grep "^ONIONPRESS_TOR_IMAGE=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2-)
+    if [ -z "$_cfg_tor_image" ]; then
+        _cfg_tor_image=$(grep "^ONIONHEAVEN_IMAGE=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2-)
+    fi
+fi
+export ONIONPRESS_TOR_IMAGE="${ONIONPRESS_TOR_IMAGE:-${ONIONHEAVEN_IMAGE:-${_cfg_tor_image:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545}}}"
+unset _cfg_tor_image
+
 # ─── Parse global flags ────────────────────────────────────────────
 # --yes / -y skips interactive confirmations (for scripted/automated use).
 # Honour ONIONPRESS_YES inherited from the environment so callers like
@@ -666,8 +696,15 @@ update_images() {
     # GHCR images pinned to digest — must match docker-compose.yml. Refresh
     # with build/refresh-image-digests.sh at each release. mariadb stays
     # on :latest to receive upstream security patches automatically.
+    #
+    # The tor image comes from $ONIONPRESS_TOR_IMAGE rather than a second
+    # copy of the pin: compose is what starts the container, so compose's
+    # default is what has to be pre-pulled. Hardcoding it here meant a
+    # `UPDATE_ON_LAUNCH=yes` install spent the bandwidth on an image the
+    # stack never ran, and left the one it did run on whatever it started
+    # with. It also means an overridden image is the one that gets pulled.
     local images=(
-        "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:e06286cbcbf6b34b1fe29636ffeea381c1aa96050c947e0d4ef7250f64993ea2"
+        "$ONIONPRESS_TOR_IMAGE"
         "ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:278582e9960344e8cf1d296ac6f7020413ad3e5a2eaed6b63603300f47e4c8bd"
         "mariadb:latest"
     )
@@ -1988,8 +2025,13 @@ except: print('false')
         fi
     fi
     local mkp224o_available="false"
-    if docker image inspect ghcr.io/brewsterkahle/onionpress-tor:latest >/dev/null 2>&1; then
+    if docker image inspect "$ONIONPRESS_TOR_IMAGE" >/dev/null 2>&1; then
         # Image presence is enough; we trust the build had mkp224o.
+        # Probe the image the stack actually pulls and runs, not a fixed
+        # upstream tag: this flag is published in status.json for the tray,
+        # and a ref nothing in the stack fetches reports "no mkp224o" on
+        # every install. `docker image inspect` honours an @sha256 suffix,
+        # so the probe follows the pin exactly.
         mkp224o_available="true"
     fi
     local wp_admin_password_file=""

@@ -1116,8 +1116,17 @@ update_images() {
 
     cd "$DOCKER_DIR"
 
-    # Pull latest images (WordPress, MariaDB, Tor)
-    local images=("ghcr.io/brewsterkahle/onionpress-tor:latest" "ghcr.io/brewsterkahle/onionpress-wordpress:latest" "mariadb:latest")
+    # Pull the images we will actually run. The tor entry follows
+    # ONIONPRESS_TOR_IMAGE so this never spends bandwidth fetching an image
+    # compose does not start — it used to name upstream's unpinned :latest
+    # while compose ran the fork's pinned build, so every launch pulled a
+    # ~240MB image that was then ignored, and the one that mattered was never
+    # refreshed here at all.
+    local images=(
+        "${ONIONPRESS_TOR_IMAGE:-${ONIONHEAVEN_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545}}"
+        "ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:278582e9960344e8cf1d296ac6f7020413ad3e5a2eaed6b63603300f47e4c8bd"
+        "mariadb:latest"
+    )
     local updated=false
 
     for image in "${images[@]}"; do
