@@ -163,6 +163,46 @@ UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
 EOF
     fi
+elif [ -f "$RESOURCES_DIR/config-template.txt" ]; then
+    # An existing config is never regenerated, so a key added to the template
+    # after a user first installed reached nobody who upgraded — the setting
+    # was documented, shipped, and invisible. A Mac upgraded from 2026-07-30
+    # held a 28-byte config, and the snowflake bridge settings the template
+    # describes simply were not in it.
+    #
+    # So append keys the template has and this config lacks, commented out,
+    # with the template's own explanatory comment block above them. Appending
+    # COMMENTED is what makes this safe to run on every launch: it can only add
+    # documentation, never change behaviour, and never touches a value the
+    # user set. Matching is on `^KEY=` against both live and commented forms,
+    # so a key the user already commented out stays as they left it.
+    # The comment block immediately above a key is carried with it — that block
+    # is where the template explains the setting and, for the bridge keys, holds
+    # the ready-to-uncomment snowflake lines. Appending a bare `#TOR_BRIDGE_LINES=`
+    # without it would be documentation that documents nothing.
+    _tpl_comments=""
+    while IFS= read -r _tpl_line; do
+        case "$_tpl_line" in
+            "")
+                _tpl_comments=""
+                ;;
+            \#*)
+                _tpl_comments="${_tpl_comments}${_tpl_line}
+"
+                ;;
+            *=*)
+                _tpl_key="${_tpl_line%%=*}"
+                if ! grep -qE "^#? *${_tpl_key}=" "$DATA_DIR/config" 2>/dev/null; then
+                    {
+                        printf '\n'
+                        [ -n "$_tpl_comments" ] && printf '%s' "$_tpl_comments"
+                        printf '#%s\n' "$_tpl_line"
+                    } >> "$DATA_DIR/config"
+                fi
+                _tpl_comments=""
+                ;;
+        esac
+    done < "$RESOURCES_DIR/config-template.txt"
 fi
 
 # Prefer bundled binaries
@@ -1568,7 +1608,18 @@ get_healthcheck_address() {
 # Function to wait for services to be ready using active probing
 wait_for_services() {
     cd "$DOCKER_DIR"
+    # A direct bootstrap takes 30-90s. Over a pluggable transport it takes
+    # several minutes — measured 5m26s on a censored network, where
+    # snowflake-client cycled through three proxies ("timeout waiting for
+    # DataChannel.OnOpen") before one held. At a flat 120s this reported
+    # failure on a bootstrap that was succeeding, and everything downstream —
+    # including moss's publish flow — inherited that false negative. The wait
+    # is therefore keyed to whether a bridge is configured, not to a single
+    # guess about how fast the network is.
     local max_wait=120
+    if [ -n "$TOR_BRIDGE_LINES" ]; then
+        max_wait=600
+    fi
     local waited=0
     local wp_ready=false
     local onion_ready=false
