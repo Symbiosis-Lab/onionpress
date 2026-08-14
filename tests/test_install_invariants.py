@@ -1415,5 +1415,37 @@ class TestWordPressAdminMenuItem(unittest.TestCase):
         )
 
 
+class TestGenerationUploadMemoryLimit(unittest.TestCase):
+    """POST /wp-json/onionpress/v1/generation reads the whole moss generation
+    tar into memory via $request->get_body() before our route callback ever
+    runs (app/Resources/plugins/onionpress-moss-receiver.php). WordPress's
+    REST server buffers that body internally too, so the request needs
+    roughly 2-3x the generation's size in PHP memory. Default memory_limit
+    is 128M; a real ~65MB site generation blew through it with "Allowed
+    memory size ... exhausted" inside WP core's class-wp-rest-server.php —
+    the plugin's own code never even got a chance to run. This is unrelated
+    to upload_max_filesize/post_max_size, which only bound multipart
+    ($_FILES) uploads that PHP streams to a temp file rather than buffering.
+    """
+
+    def test_uploads_ini_raises_memory_limit(self):
+        ini = _read("app/Resources/docker/wordpress/onionpress-uploads.ini")
+        match = re.search(r"^memory_limit\s*=\s*(\d+)([GM])$", ini, re.MULTILINE)
+        self.assertIsNotNone(
+            match,
+            "onionpress-uploads.ini must set memory_limit — the moss "
+            "generation-upload endpoint buffers the whole request body in "
+            "PHP memory and the 128M default is nowhere near enough.",
+        )
+        value, unit = int(match.group(1)), match.group(2)
+        megabytes = value * 1024 if unit == "G" else value
+        self.assertGreaterEqual(
+            megabytes, 512,
+            "memory_limit must be at least 512M — a ~65MB generation "
+            "already needs that much headroom once WP's REST server and "
+            "our own get_body() copy are both counted.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
