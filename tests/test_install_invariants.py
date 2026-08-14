@@ -1349,6 +1349,15 @@ class TestAutoLoginSurvivesStaticFirst(unittest.TestCase):
         lines above reads $_SERVER['HTTP_HOST'] instead, for exactly this
         reason). Accepting an absolute or protocol-relative redirect_to
         unchecked would be an open redirect.
+
+        The validation must also run on the SANITIZED value, not the raw
+        one: wp_redirect() calls wp_sanitize_redirect() internally before
+        it ever sends the Location header, and that strips characters
+        outside a fixed allowlist. Validating the raw string first lets a
+        stripped character between two slashes (e.g. "/\\evil.com") land
+        adjacent after sanitizing and collapse into "//evil.com" — a
+        protocol-relative open redirect that the raw-string check would
+        never see coming.
         """
         src = _read("app/Resources/plugins/onionpress-auto-login.php")
         self.assertIn("redirect_to", src)
@@ -1359,14 +1368,18 @@ class TestAutoLoginSurvivesStaticFirst(unittest.TestCase):
             "do not reintroduce a call to it here.",
         )
         self.assertRegex(
-            src, r"strpos\(\s*\$requested,\s*'/'\s*\)",
-            "redirect_to must be validated as a same-request relative "
-            "path (starts with '/').",
+            src, r"wp_sanitize_redirect\(\s*wp_unslash\(\s*\$_GET\['redirect_to'\]\s*\)\s*\)",
+            "redirect_to must be run through wp_sanitize_redirect() BEFORE "
+            "validation, matching what wp_redirect() will do to it anyway — "
+            "otherwise validation runs on a string that never gets sent.",
         )
         self.assertRegex(
-            src, r"strpos\(\s*\$requested,\s*'//'\s*\)",
-            "redirect_to must reject protocol-relative paths ('//host/...') "
-            "— otherwise it's an open redirect.",
+            src, r"preg_match\(\s*'#\^/\(\$\|\[\^/\\\\\\\\\]\)#'\s*,\s*\$requested\s*\)",
+            "redirect_to must be validated with a single-slash-anchored "
+            "regex on the SANITIZED value, rejecting a second '/' or a "
+            "'\\\\' right after the leading '/' — a strpos()-based check "
+            "on the raw value can be defeated by a character sanitizing "
+            "later strips out.",
         )
 
 
