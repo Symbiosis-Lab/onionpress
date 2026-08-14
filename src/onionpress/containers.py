@@ -82,6 +82,14 @@ class ContainerManager:
         tor_impl = read_value(self.paths.config_file, "TOR_IMPL", "tor")
         env["TOR_IMPL"] = tor_impl
 
+        # Overrides the digest-pinned tor image in docker-compose.yml. Only set
+        # when non-empty: an empty value would interpolate as an empty `image:`
+        # and compose would refuse to start the service at all, which is a worse
+        # failure than ignoring the key. Same guard as the bridge block below.
+        tor_image = read_value(self.paths.config_file, "ONIONPRESS_TOR_IMAGE", "")
+        if tor_image:
+            env["ONIONPRESS_TOR_IMAGE"] = tor_image
+
         cf_token = read_value(self.paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", "")
         if cf_token:
             env["CLOUDFLARE_TUNNEL_TOKEN"] = cf_token

@@ -387,6 +387,35 @@ class TestBuildEnv(unittest.TestCase):
         self.assertEqual(env["TOR_IMPL"], "tor")
         self.assertEqual(env["CLOUDFLARE_TUNNEL_TOKEN"], "mytoken")
 
+    def test_build_env_omits_tor_image_by_default(self):
+        """No key at all, so compose falls through to its digest-pinned default.
+
+        Setting it to "" would be just as wrong as setting it to a bad ref:
+        compose's `${VAR:-default}` treats empty as unset, but anything that
+        later reads the dict (or a `docker run` built from it) would see an
+        image argument of "".
+        """
+        docker = mock.Mock(spec=Docker)
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        env = cm._build_env()
+        self.assertNotIn("ONIONPRESS_TOR_IMAGE", env)
+
+    def test_build_env_reads_tor_image(self):
+        """A locally built tag reaches compose, which is the whole point.
+
+        A digest-pinned `image:` cannot be satisfied by a local build — docker
+        reports no digest for anything built rather than pulled — so without
+        this the only route to a custom tor image was retagging upstream and
+        hand-editing the bundled compose file, both of which get silently
+        reverted.
+        """
+        with open(self.paths.config_file, "w") as f:
+            f.write("ONIONPRESS_TOR_IMAGE=onionpress-tor:veee\n")
+        docker = mock.Mock(spec=Docker)
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        env = cm._build_env()
+        self.assertEqual(env["ONIONPRESS_TOR_IMAGE"], "onionpress-tor:veee")
+
     def test_build_env_omits_bridge_vars_by_default(self):
         docker = mock.Mock(spec=Docker)
         cm = ContainerManager(docker, self.paths, self.port_config)

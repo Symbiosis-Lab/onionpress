@@ -1,6 +1,20 @@
 services:
   tor:
-    image: ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545
+    # Pinned by digest by default, overridable by tag for local builds. The
+    # digest is the supply-chain property worth keeping: it is what makes a
+    # released OnionPress run a known Tor, not whatever `:latest` points at
+    # today. But a digest CANNOT be satisfied by a locally built image —
+    # `docker images --digests` reports <none> for anything built rather than
+    # pulled — so with the digest hard-coded here the only way to run a custom
+    # tor build was to retag the upstream name locally and hand-edit this file
+    # inside the installed .app. Both are silently undone: the retag by the
+    # next pull, the edit by the next time the bundle is re-staged.
+    #
+    # Same shape as ONIONHEAVEN_IMAGE below, and read from the same place as
+    # TOR_IMPL / TOR_BRIDGE_LINES (~/.onionpress/config), so a censored-network
+    # setup that needs a tor image carrying its own pluggable transport is
+    # configuration rather than a patched bundle.
+    image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545}
     container_name: onionpress-tor
     logging:
       driver: json-file

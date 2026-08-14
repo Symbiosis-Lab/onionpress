@@ -246,6 +246,18 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export TOR_IMPL
 
+# Optional override for the tor container image (see docker-compose.yml). Unset
+# by default, so compose falls through to its digest-pinned default; the shell
+# mirror exists for the same reason the bridge block below has one — a
+# launcher-driven `compose up` that did not export this would recreate a
+# custom-image tor container on the pinned upstream image instead. Exported
+# empty is the same as unset to compose's `:-` operator, so no guard is needed.
+ONIONPRESS_TOR_IMAGE=""
+if [ -f "$DATA_DIR/config" ]; then
+    ONIONPRESS_TOR_IMAGE=$(grep "^ONIONPRESS_TOR_IMAGE=" "$DATA_DIR/config" | cut -d= -f2-)
+fi
+export ONIONPRESS_TOR_IMAGE
+
 # Bridge / pluggable-transport config for censored networks — compose
 # interpolates these into the tor containers' environment, and entrypoint.sh
 # turns them into torrc directives. The Python path (containers.py
