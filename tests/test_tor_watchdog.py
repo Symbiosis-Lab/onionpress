@@ -321,18 +321,39 @@ _SPN_ID = "archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad"
 
 
 class _WarmSetFixture(unittest.TestCase):
-    """Isolate the warm set from the host: no /var/lib/tor, no inherited env."""
+    """Isolate the warm set from the host: every source of it, not just some.
+
+    The warm set is built from three inputs — the service directories, the
+    published content address, and TOR_WARM_ONIONS — and a test that pins it
+    exactly is only honest if all three are redirected. Redirecting two was
+    worse than redirecting none: `/var/lib/onionpress/onion_address` does not
+    exist on a dev Mac, so the exact-set assertion passed here and would have
+    failed inside the container and on every real Linux install, where the
+    file exists and quietly adds an address.
+    """
 
     def setUp(self):
         self._base = tw.HS_BASE_DIR
+        self._addr_file = tw.ONION_ADDRESS_FILE
         self._env = os.environ.pop("TOR_WARM_ONIONS", None)
         tw._warned_bad_addresses.clear()
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        tw.HS_BASE_DIR = os.path.join(root.name, "hidden_service")
+        os.mkdir(tw.HS_BASE_DIR)
+        tw.ONION_ADDRESS_FILE = os.path.join(root.name, "onion_address")
 
     def tearDown(self):
         tw.HS_BASE_DIR = self._base
+        tw.ONION_ADDRESS_FILE = self._addr_file
         os.environ.pop("TOR_WARM_ONIONS", None)
         if self._env is not None:
             os.environ["TOR_WARM_ONIONS"] = self._env
+
+    def _publish_our_address(self, address):
+        """Stand in for the launcher copying our hostname onto the volume."""
+        with open(tw.ONION_ADDRESS_FILE, "w") as f:
+            f.write(address + "\n")
 
 
 class TestDescriptorWarming(_WarmSetFixture):
@@ -344,11 +365,6 @@ class TestDescriptorWarming(_WarmSetFixture):
     it read as "archive.org's onion is down" for a long time.
     """
 
-    def _warm_set(self):
-        with tempfile.TemporaryDirectory() as root:
-            tw.HS_BASE_DIR = root
-            return tw.discover_onion_addresses()
-
     def test_the_spn_address_loses_its_subdomain_as_well_as_its_suffix(self):
         # HSFETCH takes the bare 56-char id. Handing it "web." earns a 552,
         # which in the log is indistinguishable from a fetch that just failed —
@@ -359,13 +375,26 @@ class TestDescriptorWarming(_WarmSetFixture):
         self.assertIsNone(tw._hs_address("web.archive.org"))
         self.assertIsNone(tw._hs_address(""))
 
-    def test_spn_is_warmed_with_no_configuration_at_all(self):
-        self.assertIn(_SPN_ID, self._warm_set())
+    def test_the_spn_default_and_our_own_address_are_warmed_with_no_config(self):
+        # Both halves of the out-of-the-box set: the dependency we never
+        # publish, and the address we do. Ours is what a reachability check
+        # would otherwise pay the cold-descriptor penalty on.
+        self._publish_our_address(f"{'d' * 56}.onion")
+        self.assertEqual(tw.warm_onion_addresses(), sorted([_SPN_ID, "d" * 56]))
 
     def test_tor_warm_onions_adds_to_the_default_rather_than_replacing_it(self):
         os.environ["TOR_WARM_ONIONS"] = f"{'b' * 56}.onion, {'c' * 56}"
-        warm = self._warm_set()
-        self.assertEqual(warm, sorted([_SPN_ID, "b" * 56, "c" * 56]))
+        self.assertEqual(tw.warm_onion_addresses(),
+                         sorted([_SPN_ID, "b" * 56, "c" * 56]))
+
+    def test_the_warm_set_is_ours_plus_dependencies_and_ours_is_only_ours(self):
+        # The two readers this pair exists to keep apart: the warmer wants
+        # everything we depend on, the HS_DESC-stall path wants only what we
+        # could actually republish. One list served both and they drifted.
+        self._publish_our_address("d" * 56)
+        self.assertEqual(tw.our_onion_addresses(), ["d" * 56])
+        self.assertIn(_SPN_ID, tw.warm_onion_addresses())
+        self.assertNotIn(_SPN_ID, tw.our_onion_addresses())
 
     def test_only_a_cold_descriptor_costs_a_fetch(self):
         cached, cold = "a" * 56, "b" * 56
@@ -375,9 +404,7 @@ class TestDescriptorWarming(_WarmSetFixture):
                 f"250+hs/client/desc/id/{cached}=\r\nhs-descriptor 3\r\n.\r\n250 OK",
             f"GETINFO hs/client/desc/id/{cold}": "551 Not found",
         })
-        with tempfile.TemporaryDirectory() as root:
-            tw.HS_BASE_DIR = root
-            tw._hsfetch_missing_descriptors(sock, tw.WatchdogState())
+        tw._hsfetch_missing_descriptors(sock)
 
         self.assertIn(f"HSFETCH {cold}", sock.sent)
         self.assertNotIn(f"HSFETCH {cached}", sock.sent)
@@ -406,9 +433,7 @@ class TestWarmingRunsWhereTheSpnTrafficGoes(_WarmSetFixture):
             "GETINFO status/circuit-established":
                 "250-status/circuit-established=1\r\n250 OK",
         })
-        with tempfile.TemporaryDirectory() as root:
-            tw.HS_BASE_DIR = root
-            tw.check_stalls(sock, state)
+        tw.check_stalls(sock, state)
         return sock
 
     def _socks_only_state(self):
@@ -416,10 +441,6 @@ class TestWarmingRunsWhereTheSpnTrafficGoes(_WarmSetFixture):
         s = tw.WatchdogState()
         s.bootstrapped = True
         return s
-
-    def test_a_socks_only_container_warms_the_spn_descriptor(self):
-        sock = self._check_stalls(self._socks_only_state())
-        self.assertIn(f"HSFETCH {_SPN_ID}", sock.sent)
 
     def test_warming_repeats_on_its_own_interval(self):
         # The gap the old call site left: descriptors expire, laptops sleep,
@@ -447,6 +468,49 @@ class TestWarmingRunsWhereTheSpnTrafficGoes(_WarmSetFixture):
         state.hs_desc_uploaded_since_recovery = False
         sock = self._check_stalls(state)
         self.assertFalse(any(c.startswith("HSFETCH") for c in sock.sent))
+
+    def test_a_guard_purge_re_warms_without_waiting_out_the_interval(self):
+        # The purge the "serving again" path cannot see. do_dropguards sends
+        # SIGNAL NEWNYM, which empties the descriptor cache — but it also fires
+        # for "Failed to find node" and guard exhaustion, which happen while
+        # circuit-established=1. In a SOCKS-only container is_serving() stays
+        # true through both, not_serving_since is never set, and the cache
+        # would sit cold for a full WARM_DESCRIPTOR_INTERVAL.
+        state = self._socks_only_state()
+        self.assertIn(f"HSFETCH {_SPN_ID}", self._check_stalls(state).sent)
+        self.assertNotIn(f"HSFETCH {_SPN_ID}", self._check_stalls(state).sent)
+
+        tw.process_event("No usable guards", FakeSock(), state)
+        self.assertIn(f"HSFETCH {_SPN_ID}", self._check_stalls(state).sent)
+
+    def test_a_stall_with_nothing_of_our_own_touches_nothing(self):
+        # onionheaven's shape again, HS_DESC_UPLOAD_TIMEOUT after a recovery.
+        # It publishes no descriptor, so a stalled upload of ours is not a
+        # thing that can have happened here. The branch used to answer it by
+        # NEWNYM-ing — purging the cache the SPN calls live on — and then
+        # HSFETCHing archive.org, the one address it could never republish.
+        state = self._socks_only_state()
+        state.last_recovery_time = time.time() - tw.HS_DESC_UPLOAD_TIMEOUT - 1
+        state.last_warm_check = time.time()  # isolate the branch from the warmer
+
+        sock = self._check_stalls(state)
+        self.assertNotIn("SIGNAL NEWNYM", sock.sent)
+        self.assertFalse(any(c.startswith("HSFETCH") for c in sock.sent))
+
+    def test_a_stall_that_purges_the_cache_hands_the_warm_set_back(self):
+        # With an address of our own there is something to refresh, and the
+        # NEWNYM that refreshes it costs every other descriptor too — so the
+        # warmer has to run again on this same pass rather than 300s later.
+        ours = "d" * 56
+        self._publish_our_address(ours)
+        state = self._socks_only_state()
+        state.last_recovery_time = time.time() - tw.HS_DESC_UPLOAD_TIMEOUT - 1
+        state.last_warm_check = time.time()  # not due, and about to be voided
+
+        sock = self._check_stalls(state)
+        self.assertIn("SIGNAL NEWNYM", sock.sent)
+        self.assertIn(f"HSFETCH {ours}", sock.sent)
+        self.assertIn(f"HSFETCH {_SPN_ID}", sock.sent)
 
 
 class TestConfiguredTransports(unittest.TestCase):

@@ -44,6 +44,14 @@ CONNECT_RETRY_DELAY = 5
 
 # Hidden service key paths
 HS_BASE_DIR = "/var/lib/tor/hidden_service"
+# The address we publish, copied onto the shared volume by the launcher once the
+# service is up. A constant rather than a literal at the read site for the same
+# reason HS_BASE_DIR is one: a test that pins the exact warm set can only be
+# honest if it can redirect every path the set is built from. With this inlined,
+# such a test passed on a dev Mac (no such file) and would have failed inside
+# the container and on every real Linux install, where the file exists and
+# quietly adds an address.
+ONION_ADDRESS_FILE = "/var/lib/onionpress/onion_address"
 
 # ---------------------------------------------------------------------------
 # Descriptor warming
@@ -453,7 +461,6 @@ class WatchdogState:
         self.hs_desc_upload_started_since_recovery = False
         self.hs_desc_upload_failed_since_recovery = False
         self.hs_desc_last_failed_reason = ""
-        self.onion_addresses = []  # the warm set — ours + DEPENDENCY_ONIONS
         self.last_warm_check = 0  # 0 = warm on the next pass that can fetch
         self.services = []  # discovered onion services
         self.services_active = False  # True when ADD_ONION has been done
@@ -471,7 +478,7 @@ class WatchdogState:
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
-def _hsfetch_missing_descriptors(cmd_sock, state):
+def _hsfetch_missing_descriptors(cmd_sock):
     """Check the client descriptor cache and HSFETCH whatever went cold.
 
     Queries the control port (read-only) for every address in the warm set and
@@ -482,9 +489,13 @@ def _hsfetch_missing_descriptors(cmd_sock, state):
     permanent — see WARM_DESCRIPTOR_INTERVAL for what actually empties the
     cache. The caller is what decides *when* it is safe to fetch; this function
     assumes circuits exist and that nothing of ours is mid-publication.
+
+    The warm set is recomputed here and kept local rather than parked on the
+    state object: it had a field, the HS_DESC-stall path read the same field
+    for a different question, and the two readers drifted into disagreeing
+    about what it held. Two callers, two calls, no shared list.
     """
-    state.onion_addresses = discover_onion_addresses()
-    for addr in state.onion_addresses:
+    for addr in warm_onion_addresses():
         resp = send_cmd(cmd_sock, f"GETINFO hs/client/desc/id/{addr}")
         if "hs-descriptor" in resp:
             continue  # already cached
@@ -515,18 +526,27 @@ def _hs_address(value):
     return host
 
 
-def discover_onion_addresses():
-    """The warm set: addresses we want a client descriptor for, at all times.
+def _hs_addresses(values):
+    """Sorted bare service ids for `values`, complaining once about the rest."""
+    ids = set()
+    for raw in values:
+        addr = _hs_address(raw)
+        if addr:
+            ids.add(addr)
+        elif raw and raw not in _warned_bad_addresses:
+            _warned_bad_addresses.add(raw)
+            log(f"Not a v3 onion address, leaving it out of the warm set: {raw[:80]}")
+    return sorted(ids)
 
-    Ours (own services + the content address) so a reachability check doesn't
-    pay the cold-descriptor penalty, plus DEPENDENCY_ONIONS because the wayback
-    plugin's SPN calls pay it too. Both are ordinary client-side lookups, so one
-    warm cache serves both.
 
-    Re-read on every pass rather than cached once: in the SOCKS-only containers
-    the content address only appears on the shared volume *after* the service
-    comes up, and DEPENDENCY_ONIONS makes the list non-empty from the first
-    pass, so a "discover only while empty" cache would never pick it up.
+def our_onion_addresses():
+    """Only the addresses this container publishes: services + the content one.
+
+    Separate from the warm set below because the two answer different
+    questions, and for a while they were one list that answered both badly: the
+    HS_DESC-stall path refreshes OUR descriptor after OUR upload stalled, so
+    handing it archive.org's — which we never publish and cannot republish —
+    made its readers disagree about what the list even held.
     """
     addresses = set()
     for path in glob.glob(f"{HS_BASE_DIR}/*/hostname"):
@@ -537,22 +557,29 @@ def discover_onion_addresses():
             pass
     # Content address (shared volume) — for reachability checks
     try:
-        with open("/var/lib/onionpress/onion_address") as f:
+        with open(ONION_ADDRESS_FILE) as f:
             addresses.add(f.read().strip())
     except OSError:
         pass
+    return _hs_addresses(addresses)
+
+
+def warm_onion_addresses():
+    """The warm set: addresses we want a client descriptor for, at all times.
+
+    Ours so a reachability check doesn't pay the cold-descriptor penalty, plus
+    DEPENDENCY_ONIONS because the wayback plugin's SPN calls pay it too. Both
+    are ordinary client-side lookups, so one warm cache serves both.
+
+    Re-read on every pass rather than cached once: in the SOCKS-only containers
+    the content address only appears on the shared volume *after* the service
+    comes up, and DEPENDENCY_ONIONS makes the list non-empty from the first
+    pass, so a "discover only while empty" cache would never pick it up.
+    """
+    addresses = set(our_onion_addresses())
     addresses.update(DEPENDENCY_ONIONS)
     addresses.update(os.environ.get("TOR_WARM_ONIONS", "").replace(",", " ").split())
-
-    ids = set()
-    for raw in addresses:
-        addr = _hs_address(raw)
-        if addr:
-            ids.add(addr)
-        elif raw and raw not in _warned_bad_addresses:
-            _warned_bad_addresses.add(raw)
-            log(f"Not a v3 onion address, leaving it out of the warm set: {raw[:80]}")
-    return sorted(ids)
+    return _hs_addresses(addresses)
 
 
 def do_dropguards(cmd_sock, state, reason):
@@ -575,6 +602,15 @@ def do_dropguards(cmd_sock, state, reason):
     else:
         log(f"SIGNAL NEWNYM failed: {resp.strip()}")
 
+    # That NEWNYM just purged the client descriptor cache, so re-warm on the
+    # next pass instead of up to WARM_DESCRIPTOR_INTERVAL later. The "serving
+    # again" path in check_stalls does not cover this: DROPGUARDS also fires on
+    # "Failed to find node" and guard exhaustion, both of which happen while
+    # circuit-established=1, so in a SOCKS-only container is_serving() never
+    # goes false, not_serving_since is never set, and nothing would notice that
+    # the cache we depend on had been emptied for the next 300s — exactly the
+    # window an SPN call must not land in.
+    state.last_warm_check = 0
     state.last_dropguards = now
     state.last_recovery_time = now
     state.last_recovery_trigger = reason
@@ -1043,19 +1079,28 @@ def check_stalls(cmd_sock, state):
                 state.hs_desc_last_failed_reason = ""
                 rearmed = True
         else:
-            # SOCKS-only container (no services). Fall back to HSFETCH to
-            # refresh the client-side descriptor cache for known addresses.
-            if not state.onion_addresses:
-                state.onion_addresses = discover_onion_addresses()
-            if state.onion_addresses:
+            # No ADD_ONION services to DEL+ADD, so the most we can do about our
+            # own descriptor is fetch it back. Ours only: this branch exists
+            # because OUR upload stalled, and the onions we merely depend on
+            # are the periodic warmer's job below — which the NEWNYM here would
+            # otherwise sabotage by purging the cache it just filled.
+            ours = our_onion_addresses()
+            if ours:
                 log(f"HS_DESC stall after recovery ({fields}) — no services configured; HSFETCH only")
                 send_cmd(cmd_sock, "SIGNAL NEWNYM")
-                for addr in state.onion_addresses:
+                # The purge costs the whole warm set, not just ours. Hand it
+                # back to the warmer rather than refetching everything here.
+                state.last_warm_check = 0
+                for addr in ours:
                     resp = send_cmd(cmd_sock, f"HSFETCH {addr}")
                     if "250" in resp:
                         log(f"HSFETCH {addr[:16]}... — refreshing descriptor")
             else:
-                log(f"HS_DESC stall after recovery ({fields}) — no services or addresses known; no action")
+                # Reachable, and the normal onionheaven case: it publishes
+                # nothing and has no content address, so there is no descriptor
+                # of ours to stall on. Doing nothing here is right — the warmer
+                # below is what keeps that container's cache hot.
+                log(f"HS_DESC stall after recovery ({fields}) — no services or addresses of our own; no action")
         if not rearmed:
             state.last_recovery_time = 0
 
@@ -1120,12 +1165,14 @@ def check_stalls(cmd_sock, state):
             and now - state.last_warm_check >= WARM_DESCRIPTOR_INTERVAL):
         state.last_warm_check = now
         try:
-            _hsfetch_missing_descriptors(cmd_sock, state)
+            _hsfetch_missing_descriptors(cmd_sock)
         except Exception as e:
-            # Never fatal. The top-level handler exits(1) on an unhandled
-            # exception, and losing the watchdog — the escalation ladder, the
-            # state file moss reads — over a slow SPN call would be a far worse
-            # trade than a cold descriptor.
+            # Never fatal. This is a read of the filesystem plus a run of
+            # control-port commands — a hostname file that vanished mid-read, a
+            # GETINFO answer in a shape we didn't expect, a control port that
+            # closed under us. The top-level handler exits(1) on an unhandled
+            # exception, so any of those would cost the escalation ladder and
+            # the state file moss reads. A cold descriptor is the cheaper loss.
             log(f"Descriptor warming failed: {e}")
 
     # Publish what we know, whether or not we acted. moss has to be able to

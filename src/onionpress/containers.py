@@ -118,6 +118,16 @@ class ContainerManager:
                 self.paths.config_file, "TOR_UPSTREAM_PROXY", ""
             )
 
+        # Deliberately NOT inside the bridge guard above: which descriptors the
+        # watchdog keeps warm has nothing to do with whether we reach the
+        # network through a bridge. Nesting it there would make the knob work
+        # only for censored users, which is the opposite of the truth — it
+        # exists so a cold descriptor lookup does not blow a Save Page Now
+        # timeout, and that happens on any network.
+        warm_onions = read_value(self.paths.config_file, "TOR_WARM_ONIONS", "")
+        if warm_onions:
+            env["TOR_WARM_ONIONS"] = warm_onions
+
         return env
 
     # -- Core lifecycle --
@@ -336,6 +346,7 @@ class ContainerManager:
         bridge_lines = read_value(self.paths.config_file, "TOR_BRIDGE_LINES", "")
         transport_plugin = read_value(self.paths.config_file, "TOR_CLIENT_TRANSPORT_PLUGIN", "")
         upstream_proxy = read_value(self.paths.config_file, "TOR_UPSTREAM_PROXY", "")
+        warm_onions = read_value(self.paths.config_file, "TOR_WARM_ONIONS", "")
 
         result = self.docker.run([
             "run", "-d",
@@ -349,6 +360,7 @@ class ContainerManager:
             "-e", f"TOR_BRIDGE_LINES={bridge_lines}",
             "-e", f"TOR_CLIENT_TRANSPORT_PLUGIN={transport_plugin}",
             "-e", f"TOR_UPSTREAM_PROXY={upstream_proxy}",
+            "-e", f"TOR_WARM_ONIONS={warm_onions}",
             "-e", "TAKEOVER_WORKER=1",
             "-e", f"CONTAINER_NAME={name}",
             "-e", f"MAX_TAKEOVER_SERVICES={max_services}",

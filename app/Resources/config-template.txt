@@ -158,6 +158,26 @@ TOR_CLIENT_TRANSPORT_PLUGIN=
 TOR_BRIDGE_LINES=
 TOR_UPSTREAM_PROXY=
 
+# Extra Onion Addresses to Keep Warm
+# Default: empty (the addresses OnionPress already depends on are covered)
+#
+# Reaching a .onion is fast only if your Tor already holds that service's
+# descriptor. Measured against the Internet Archive's onion: ~3.6s with the
+# descriptor cached, 25-70s without one, and Tor gives up at ~70s — so a cold
+# descriptor does not make a request slow, it makes it fail. OnionPress keeps
+# the descriptors it needs cached in the background: your own address, and the
+# Save Page Now endpoint the Wayback Machine plugin archives through.
+#
+# Add addresses here only if something you run depends on another onion — a
+# mirror, a hub, a service your plugins call. Separate them with commas or
+# spaces. Both "abc...xyz.onion" and a bare "abc...xyz" are accepted, and a
+# value that is not a v3 address is logged and skipped rather than used.
+#
+# Cost is near zero: the check is a local query against Tor's own cache, and a
+# fetch only follows for an address that has actually gone cold.
+#
+TOR_WARM_ONIONS=
+
 # Register with OnionHeaven
 # Default: "yes" (register this site with the OnionHeaven)
 #

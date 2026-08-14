@@ -275,6 +275,19 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN TOR_UPSTREAM_PROXY
 
+# Extra onions tor-watchdog.py keeps a client descriptor cached for, on top of
+# its built-in default (archive.org's Save Page Now endpoint). Same failure as
+# the bridge block above, one variable later: docker-compose.yml interpolates
+# ${TOR_WARM_ONIONS:-} into both tor containers and the watchdog reads it, but
+# nothing ever put it in the environment, so a documented knob silently did
+# nothing wherever it was set. cut -f2- because the value is a comma- or
+# space-separated list, not a single token.
+TOR_WARM_ONIONS=""
+if [ -f "$DATA_DIR/config" ]; then
+    TOR_WARM_ONIONS=$(grep "^TOR_WARM_ONIONS=" "$DATA_DIR/config" | cut -d= -f2-)
+fi
+export TOR_WARM_ONIONS
+
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
 # mounted into the Colima VM.
@@ -323,6 +336,7 @@ _start_takeover_worker() {
         -e TOR_BRIDGE_LINES="${TOR_BRIDGE_LINES:-}" \
         -e TOR_CLIENT_TRANSPORT_PLUGIN="${TOR_CLIENT_TRANSPORT_PLUGIN:-}" \
         -e TOR_UPSTREAM_PROXY="${TOR_UPSTREAM_PROXY:-}" \
+        -e TOR_WARM_ONIONS="${TOR_WARM_ONIONS:-}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-10}" \
