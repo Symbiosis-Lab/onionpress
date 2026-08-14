@@ -1433,6 +1433,64 @@ class TestMossPagesReachTheQueue(SitewideStateMixin, unittest.TestCase):
             # rss.xml, and WordPress's route is the only feed that exists.
             self.assertTrue(feed.endswith("/feed/"), feed)
 
+    def test_a_changed_feed_url_retires_the_record_that_named_the_old_one(self):
+        """The record has to say WHAT it archived, not only that it did.
+
+        Both sitewide urls move — the feed switches from WordPress's /feed/ to
+        moss's /rss.xml the moment a generation ships one — and the state was
+        keyed to neither. So the first success pinned the record forever and
+        the new url was never submitted. archive.org's index for the live test
+        site shows exactly that: /feed/ captured 2026-08-13 (200,
+        application/rss+xml), /rss.xml no capture at any time.
+
+        Driven through the record's own read/write closures, because the
+        sweep only ever sees those; asserting on the option directly would
+        pass while the sweep still skipped the url.
+        """
+        out = json.loads(_eval("""
+        $rec = null;
+        foreach ( onionpress_wayback_sitewide_records() as $r ) {
+            if ( $r['key'] === 'opt:' . OP_WB_OPT_FEED ) { $rec = $r; }
+        }
+        if ( $rec === null ) { echo json_encode(array('no_feed' => true)); return; }
+
+        // Archive it under the url the sweep would actually submit.
+        call_user_func( $rec['write'], array( 'archived_at' => 1700000000 ) );
+        $done = call_user_func( $rec['read'] );
+
+        // Now the stored url names a page this record no longer describes.
+        update_option( OP_WB_OPT_FEED,
+            array_merge( $done, array( 'url' => 'http://example.onion/stale/' ) ),
+            false );
+        $after = call_user_func( $rec['read'] );
+
+        // A row written before the url field existed must NOT be re-submitted:
+        // every site would archive its home page again on upgrade for nothing.
+        $legacy = $done; unset( $legacy['url'] );
+        update_option( OP_WB_OPT_FEED, $legacy, false );
+        $legacy_read = call_user_func( $rec['read'] );
+
+        echo json_encode(array(
+            'stamped'       => (string) ( $done['url'] ?? '' ),
+            'url'           => $rec['url'],
+            'archived'      => (int) ( $done['archived_at'] ?? 0 ),
+            'after_change'  => (int) ( $after['archived_at'] ?? 0 ),
+            'legacy_kept'   => (int) ( $legacy_read['archived_at'] ?? 0 ),
+        ));
+        """, self.url))
+        if out.get("no_feed"):
+            self.skipTest("no feed url on this site")
+        self.assertEqual(out["stamped"], out["url"],
+                         "a write must stamp the url it was archiving")
+        self.assertEqual(out["archived"], 1700000000,
+                         "the record must still read as archived under its own url")
+        self.assertEqual(out["after_change"], 0,
+                         "a state naming a different url must read as unarchived, "
+                         "or the new url is never submitted")
+        self.assertEqual(out["legacy_kept"], 1700000000,
+                         "a row with no url predates the field and must be left "
+                         "alone, not re-submitted on upgrade")
+
     def test_a_publish_puts_every_page_back_in_the_queue(self):
         """A new generation id is what makes new content get archived. The map
         is keyed to the generation it describes, so the moment a publish

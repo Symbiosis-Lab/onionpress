@@ -1426,10 +1426,40 @@ function onionpress_wayback_sitewide_records() {
         $records[] = array(
             'key'   => 'opt:' . $opt_key,
             'url'   => $url,
-            'read'  => function() use ( $opt_key ) {
-                return onionpress_wayback_opt_read( $opt_key );
+            // A state that names a DIFFERENT url describes a different page,
+            // so it cannot answer for this one — report unarchived and let it
+            // be submitted. Both of these urls move: feed_url_full() switches
+            // from WordPress's /feed/ route to moss's /rss.xml the moment a
+            // generation ships one, and home_url_full() follows the onion
+            // address.
+            //
+            // Without this the record only ever recorded THAT it archived,
+            // never WHAT, so the first success pinned it forever. Confirmed
+            // against archive.org's index for the live test site: /feed/ was
+            // captured 2026-08-13 (200, application/rss+xml) and /rss.xml has
+            // no capture at any time — the feed record had been marked done
+            // by the old url and the new one was never once submitted.
+            //
+            // Same shape as moss_write()'s generation guard: state keyed to
+            // what it describes, and a change to that key retires it.
+            'read'  => function() use ( $opt_key, $url ) {
+                $state = onionpress_wayback_opt_read( $opt_key );
+                $stored = (string) ( $state['url'] ?? '' );
+                // Absent on rows written before this field existed. Treating
+                // those as a mismatch would re-submit every site's home page
+                // once on upgrade, for no gain — the url is only known to be
+                // stale when it is present and differs.
+                if ( $stored !== '' && $stored !== $url ) {
+                    return array();
+                }
+                return $state;
             },
-            'write' => function( $patch ) use ( $opt_key ) {
+            'write' => function( $patch ) use ( $opt_key, $url ) {
+                // Stamped on every write, so a row becomes self-describing at
+                // the first thing that happens to it — submission included,
+                // which is what keeps an in-flight job from being credited to
+                // a url that changed while it was out.
+                $patch['url'] = $url;
                 return onionpress_wayback_opt_write( $opt_key, $patch );
             },
         );
