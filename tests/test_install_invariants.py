@@ -1309,5 +1309,47 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
         )
 
 
+class TestStartDoesNotBlockOnTheRegistry(unittest.TestCase):
+    """`start` must not wait on the registry for images it already has.
+
+    Both launchers pull before `docker compose up` so that a MISSING image is
+    fetched rather than built. Without `--policy missing` that call also
+    re-checks every image already on disk, and it is not gated by
+    UPDATE_ON_LAUNCH — so no configuration avoided it and every start paid a
+    registry round trip before a single container came up.
+
+    Linux has carried `--policy missing` since it hit this ("avoids a 5-min
+    network hang on every start when images are already cached"). Mac did not,
+    and on 2026-08-14 a quit/start cycle on a censored network left the onion
+    service down 15+ minutes with all three images already present, the pull
+    retrying layers it did not need. Same class of bug as
+    TestMacLinuxFunctionParity, in the other direction: fixed on one launcher,
+    forgotten on the other.
+    """
+
+    LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+
+    def test_the_pre_up_pull_only_fetches_missing_images(self):
+        for path in self.LAUNCHERS:
+            with self.subTest(launcher=path):
+                body = _read(path)
+                # The pull that gates `up`. Other `compose pull` calls exist
+                # (the explicit update path) and are allowed to be exhaustive
+                # — that is what the user asked for by running them.
+                pulls = re.findall(r"^\s*docker compose pull.*$", body, re.MULTILINE)
+                self.assertTrue(
+                    pulls, f"{path}: no `docker compose pull` found at all"
+                )
+                gating = [p for p in pulls if "--policy missing" in p]
+                self.assertTrue(
+                    gating,
+                    f"{path}: every `docker compose pull` is unconditional. The "
+                    "one before `docker compose up` must pass `--policy "
+                    "missing`, or `start` blocks on the registry with every "
+                    "image already on disk and no config to turn it off.\n"
+                    + "\n".join(pulls),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

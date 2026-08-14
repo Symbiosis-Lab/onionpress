@@ -1331,9 +1331,20 @@ start_containers() {
     # Update images if enabled in config
     update_images
 
-    # Pull pre-built images from GHCR (avoids local build when both image: and build: are set)
-    log "Pulling pre-built images..."
-    docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
+    # Pull pre-built images from GHCR (avoids local build when both image: and
+    # build: are set), but only ones we do not already have. Same --policy
+    # missing the Linux launcher has carried since it hit this: an
+    # unconditional pull makes every `start` block on the registry even when
+    # every image is already on disk, and it is not gated by
+    # UPDATE_ON_LAUNCH, so there was no configuration that avoided it.
+    #
+    # Observed on a censored network 2026-08-14: a quit/start cycle left the
+    # onion service down for 15+ minutes with all three images already
+    # present, the pull retrying layers it did not need. Refreshing images is
+    # update_images' job (UPDATE_ON_LAUNCH=yes) and it runs above; this call
+    # exists only so a MISSING image is fetched before `up`.
+    log "Pulling pre-built images (missing only)..."
+    docker compose pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will use cached)"
 
     # Always start WordPress and DB first
     local max_attempts=3
