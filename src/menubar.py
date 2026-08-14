@@ -4147,6 +4147,9 @@ class OnionPressApp(rumps.App):
                 # new <none> tags to clean up. Dangling-only (no -a) so we
                 # never touch images that aren't in use but are still tagged.
                 if pulled:
+                    # Must precede the prune: a digest-pinned pull lands the
+                    # image untagged, which is exactly what prune reclaims.
+                    self._retag_pinned_images(docker_compose_file)
                     self._prune_dangling_images()
                 return pulled
             else:
@@ -4157,12 +4160,53 @@ class OnionPressApp(rumps.App):
             self.log(f"Error updating Docker images: {e}")
             return False
 
+    def _retag_pinned_images(self, compose_file):
+        """Re-apply each digest-pinned image's own tag before pruning.
+
+        `docker pull repo:tag@sha256:...` stores the image WITHOUT applying
+        the tag, and docker classifies "has a repository, has no tag" as
+        dangling. So the prune below removes exactly the images compose is
+        pinned to, and the next start re-downloads them. Measured on a
+        censored link 2026-08-14: ~1GB reclaimed per launch and then 30-50
+        minutes spent re-fetching it, every launch, forever.
+
+        Re-tagging changes nothing about what runs — compose resolves the
+        pin by digest — and leaves the prune reclaiming only genuinely
+        orphaned layers, which is all issue #230 asked for.
+
+        Best-effort throughout: a failure here costs a re-download, never a
+        failed start, so nothing raises.
+        """
+        try:
+            listing = self._docker.compose(
+                ["config", "--images"],
+                compose_files=[compose_file],
+                timeout=60,
+            )
+            if not listing.ok:
+                self.log("Could not read compose image list — pinned images may be pruned")
+                return
+            for ref in (listing.stdout or "").split():
+                if "@sha256:" not in ref:
+                    continue
+                repo_tag = ref.rsplit("@", 1)[0]
+                # A bare `repo@sha256:...` has no tag to restore. Check the
+                # last path segment so a registry port is not read as one.
+                if ":" not in repo_tag.rsplit("/", 1)[-1]:
+                    continue
+                r = self._docker.run(["tag", ref, repo_tag], timeout=60, quiet=True)
+                if not r.ok:
+                    self.log(f"Could not re-tag {repo_tag} — a prune may discard it")
+        except Exception as e:
+            self.log(f"Image re-tag skipped: {e}")
+
     def _prune_dangling_images(self):
         """Reclaim disk by removing dangling images (issue #230).
 
         Called right after a successful image pull, since that's exactly
-        when old tags become <none>. Safe: docker image prune (no -a)
-        only removes untagged images, never in-use or freshly-tagged ones.
+        when old tags become <none>. Only safe once
+        `_retag_pinned_images` has run: a digest-pinned image carries no
+        tag, so without that it is dangling and this deletes it.
         """
         try:
             r = self._docker.run(

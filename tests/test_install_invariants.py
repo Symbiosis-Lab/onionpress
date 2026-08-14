@@ -1351,5 +1351,123 @@ class TestStartDoesNotBlockOnTheRegistry(unittest.TestCase):
                 )
 
 
+class TestThePruneCannotEatTheImagesWeArePinnedTo(unittest.TestCase):
+    """`docker image prune -f` must never reclaim a digest-pinned image.
+
+    `docker pull repo:tag@sha256:…` stores the image WITHOUT applying the
+    tag, and docker classifies "has a repository, has no tag" as dangling.
+    So a prune run right after pulling deletes the very images compose is
+    pinned to. Measured on a censored link 2026-08-14: every launch logged
+    `Total reclaimed space: 1.01GB` and then spent 30-50 minutes
+    re-downloading exactly what it had just deleted — and the next launch
+    did it again, so the image cache never survived a single restart.
+
+    The fix is to re-apply each pinned ref's own tag before pruning.
+    Compose still resolves the pin by digest, so nothing about what runs
+    changes; the prune goes back to reclaiming only genuinely orphaned
+    layers, which is all issue #230 ever asked for.
+
+    Asserted statically because the failure is invisible at runtime: the
+    prune succeeds, the pull succeeds, and the only symptom is a slow
+    start on a machine nobody is watching with a stopwatch.
+    """
+
+    LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+
+    def test_each_launcher_retags_pinned_images_before_pruning(self):
+        for path in self.LAUNCHERS:
+            with self.subTest(launcher=path):
+                lines = _read(path).splitlines()
+                # Executable lines only — the comments explaining this very
+                # invariant name the command they are warning about.
+                prunes = [
+                    i for i, l in enumerate(lines)
+                    if re.search(r"docker image prune", l)
+                    and not l.lstrip().startswith("#")
+                ]
+                self.assertTrue(
+                    prunes, f"{path}: no `docker image prune` found at all"
+                )
+                for at in prunes:
+                    # A bare invocation, not the `retag_pinned_images() {`
+                    # definition — defining it above the prune protects
+                    # nothing.
+                    retags = [
+                        i for i, l in enumerate(lines[:at])
+                        if re.match(r"^\s*retag_pinned_images\s*$", l)
+                    ]
+                    self.assertTrue(
+                        retags,
+                        f"{path}:{at + 1}: `docker image prune` runs with no "
+                        "retag_pinned_images call before it. A digest-pinned "
+                        "image is untagged and therefore dangling, so this "
+                        "prune deletes the images the stack runs and the next "
+                        "start re-downloads ~1GB.",
+                    )
+
+    def test_the_retag_helper_reads_the_images_compose_actually_runs(self):
+        """One source of truth, not a second hand-maintained list.
+
+        A hardcoded copy of the pins is what made `update_images` pull
+        upstream's tor image while compose ran the fork's (fixed in
+        8c9174df). Deriving the list from compose keeps that from
+        recurring in the retag path.
+        """
+        for path in self.LAUNCHERS:
+            with self.subTest(launcher=path):
+                body = _read(path)
+                m = re.search(
+                    r"^retag_pinned_images\(\)\s*\{(.*?)^\}",
+                    body, re.MULTILINE | re.DOTALL,
+                )
+                self.assertIsNotNone(
+                    m, f"{path}: no retag_pinned_images() function defined"
+                )
+                self.assertIn(
+                    "docker compose config --images", m.group(1),
+                    f"{path}: retag_pinned_images does not derive its refs "
+                    "from compose, so it can drift from what actually runs.",
+                )
+
+    def test_the_menubar_app_retags_before_its_own_prune(self):
+        """menubar.py prunes too, on a path the launchers never see."""
+        body = _read("src/menubar.py")
+        tree = ast.parse(body)
+        prune = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef)
+             and n.name == "_prune_dangling_images"),
+            None,
+        )
+        self.assertIsNotNone(
+            prune, "src/menubar.py: _prune_dangling_images is gone — if the "
+            "prune moved, move this assertion with it."
+        )
+        callers = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef)
+            and any(
+                isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "_prune_dangling_images"
+                for c in ast.walk(n)
+            )
+        ]
+        self.assertTrue(
+            callers, "src/menubar.py: nothing calls _prune_dangling_images"
+        )
+        for fn in callers:
+            names = {
+                c.func.attr for c in ast.walk(fn)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+            }
+            self.assertIn(
+                "_retag_pinned_images", names,
+                f"src/menubar.py:{fn.lineno}: {fn.name} prunes without "
+                "re-tagging the digest-pinned images first, so it deletes "
+                "the images the stack runs.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

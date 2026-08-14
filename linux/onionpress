@@ -676,6 +676,40 @@ install_ia_plugin() {
 
 # ─── Image updates ────────────────────────────────────────────────────
 
+# Re-apply each digest-pinned image's own tag, so a prune cannot reclaim the
+# images this stack is pinned to.
+#
+# `docker pull repo:tag@sha256:…` stores the image WITHOUT applying the tag,
+# and docker classifies "has a repository, has no tag" as dangling — so the
+# `docker image prune -f` below deletes exactly the images compose runs, and
+# the next start re-downloads them. Measured on a censored link 2026-08-14:
+# ~1GB reclaimed and then 30-50 minutes spent re-fetching it, every launch.
+#
+# Re-tagging is the whole fix: compose resolves the pin by digest, so what
+# runs is unchanged, and the prune goes back to reclaiming only genuinely
+# orphaned layers — all issue #230 ever asked for.
+#
+# Refs come from compose rather than a second hardcoded list, for the same
+# reason $ONIONPRESS_TOR_IMAGE is used below: compose is what starts the
+# containers, so compose is what the list has to agree with.
+retag_pinned_images() {
+    local refs ref repo_tag
+    refs=$(cd "$DOCKER_DIR" && docker compose config --images 2>/dev/null) || refs=""
+    if [ -z "$refs" ]; then
+        log "WARNING: could not read compose image list — pinned images may be pruned"
+        return 0
+    fi
+    while IFS= read -r ref; do
+        case "$ref" in *@sha256:*) ;; *) continue ;; esac
+        repo_tag="${ref%@*}"
+        # A bare `repo@sha256:…` has no tag to restore. Test the last path
+        # segment so a registry port (`host:5000/img`) is not read as one.
+        case "${repo_tag##*/}" in *:*) ;; *) continue ;; esac
+        docker tag "$ref" "$repo_tag" >> "$LOG_FILE" 2>&1 ||
+            log "WARNING: could not re-tag $repo_tag — a prune may discard it"
+    done <<< "$refs"
+}
+
 update_images() {
     local update_enabled="no"
     if [ -f "$DATA_DIR/config" ]; then
@@ -721,6 +755,9 @@ update_images() {
     done
 
     if [ "$pulled" = "1" ]; then
+        # Must run BEFORE the prune: the pulls above land digest-pinned
+        # images with no tag, which is precisely what the prune reclaims.
+        retag_pinned_images
         # Issue #230: reclaim disk from old <none> image tags created by
         # the pull above. Dangling-only (no -a) so in-use and freshly
         # tagged images are untouched.
@@ -1219,6 +1256,10 @@ start_containers() {
     if [ "${PIPESTATUS[0]}" -ne 0 ]; then
         log "WARNING: Failed to pull images (will use cached)"
     fi
+    # Unconditional, not gated on UPDATE_ON_LAUNCH: this pull lands untagged
+    # digest-pinned images too. Cheap — `docker tag` on an already-tagged
+    # image is a no-op.
+    retag_pinned_images
 
     # Start WordPress, DB, and OnionHeaven first
     local max_attempts=3
