@@ -6,6 +6,12 @@ RUN curl -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh
 
 # Enable mod_remoteip for PROXY protocol support and add port 81 listener
 # Raise PHP upload limits for large Creations files (videos, HEIC, etc.)
+#
+# This COPY only takes effect for whoever BUILDS this image. Installs that
+# pull the published image by digest get the same file injected at runtime
+# instead, as an overriding conf.d overlay — see
+# src/onionpress/multisite.py:install_uploads_ini. The two paths read this
+# one source file, so they cannot disagree.
 COPY onionpress-uploads.ini /usr/local/etc/php/conf.d/
 
 RUN a2enmod remoteip rewrite headers

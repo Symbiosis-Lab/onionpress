@@ -2123,6 +2123,15 @@ main() {
                 bundled_python -m onionpress.cli ensure-static-site-conf \
                     --apache-conf-dir "$DOCKER_DIR/wordpress" \
                     >> "$LOG_FILE" 2>&1 || true
+                # The same recreate drops the PHP limits overlay from
+                # /usr/local/etc/php/conf.d, restoring the image's lower
+                # memory_limit. That failure is loud rather than silent —
+                # the next moss publish dies on a PHP fatal-error page —
+                # but nothing else on this path would ever put it back.
+                # Same cost and same trap safety as the check above.
+                bundled_python -m onionpress.cli ensure-uploads-ini \
+                    --conf-dir "$DOCKER_DIR/wordpress" \
+                    >> "$LOG_FILE" 2>&1 || true
                 log "start: receiver already answering on port $_receiver_port — stack is already running, nothing to do"
                 echo "OnionPress is already running (http://localhost:${_receiver_port})."
                 exit 0
