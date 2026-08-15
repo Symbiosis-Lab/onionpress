@@ -32,6 +32,14 @@ RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-fo
 COPY onionpress-multisite-init.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/onionpress-multisite-init.sh
 
+# Security audit — applies pending core security releases and scans for
+# wp2shell (CVE-2026-63030) compromise artifacts on every start.
+# The helper does all of the audit's network work through Tor; wp-cli's own
+# core commands bypass the WordPress HTTP API and would go clearnet.
+COPY onionpress-security-audit.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/onionpress-security-audit.sh
+COPY onionpress-core-update.php /usr/local/lib/
+
 # Custom entrypoint: run multisite init in background after WordPress starts,
 # then hand off to the default WordPress entrypoint
 COPY onionpress-entrypoint.sh /usr/local/bin/

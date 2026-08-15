@@ -24,7 +24,7 @@ from typing import Optional
 
 # Pinned to digest — must match docker-compose.yml and linux/onionpress.
 # Refresh all three together via build/refresh-image-digests.sh.
-DEFAULT_TOR_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:e06286cbcbf6b34b1fe29636ffeea381c1aa96050c947e0d4ef7250f64993ea2"
+DEFAULT_TOR_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:ecab8ad6c9a196b308441f1eac787504d8c43fb6ad7638363edb14a41e784e2b"
 
 
 def _tor_browser_lock_paths() -> list:

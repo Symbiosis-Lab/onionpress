@@ -41,6 +41,9 @@ jobs:
           context: app/Resources/docker/tor
           platforms: linux/amd64
           push: true
+          # Always re-resolve FROM (wordpress:latest, rust/debian): without this a
+          # rebuild can silently reuse a cached base and ship an old WordPress.
+          pull: true
           tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64
           cache-from: type=gha,scope=tor-amd64
           cache-to: type=gha,mode=max,scope=tor-amd64
@@ -81,6 +84,7 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/arm64 \
+            --pull \
             --push \
             -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64 \
             app/Resources/docker/tor
@@ -141,6 +145,9 @@ jobs:
           context: app/Resources/docker/wordpress
           platforms: linux/amd64
           push: true
+          # Always re-resolve FROM (wordpress:latest, rust/debian): without this a
+          # rebuild can silently reuse a cached base and ship an old WordPress.
+          pull: true
           tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64
           cache-from: type=gha,scope=wp-amd64
           cache-to: type=gha,mode=max,scope=wp-amd64
@@ -181,6 +188,7 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/arm64 \
+            --pull \
             --push \
             -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64 \
             app/Resources/docker/wordpress
@@ -242,6 +250,9 @@ jobs:
           context: tests/stress
           platforms: linux/amd64
           push: true
+          # Always re-resolve FROM (wordpress:latest, rust/debian): without this a
+          # rebuild can silently reuse a cached base and ship an old WordPress.
+          pull: true
           tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-stress-worker:build-amd64
 
   build-stress-worker-arm64:
@@ -281,6 +292,7 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/arm64 \
+            --pull \
             --push \
             -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-stress-worker:build-arm64 \
             tests/stress

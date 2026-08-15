@@ -33,7 +33,7 @@ services:
       - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_SOCKS_PORT:-9050}:9050"
 
   wordpress:
-    image: ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:278582e9960344e8cf1d296ac6f7020413ad3e5a2eaed6b63603300f47e4c8bd
+    image: ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:6c25a33819e66d6af735c886fbbacf714e887f838c4604433626229448cf011f
     container_name: onionpress-wordpress
     logging:
       driver: json-file
