@@ -4152,7 +4152,7 @@ class OnionPressApp(rumps.App):
                 # Check if onionheaven mode was restored
                 onionheaven_addr = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
                 if restored_addr == onionheaven_addr:
-                    cur_mem = self._read_config_value("VM_MEMORY", "1")
+                    cur_mem = self._read_config_value("VM_MEMORY", "2")
                     try:
                         cur_mem_int = int(cur_mem)
                     except ValueError:

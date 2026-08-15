@@ -78,7 +78,7 @@ class Colima:
         very large hubs, set VM_DISK in ~/.onionpress/config before
         first launch.
         """
-        memory = int(read_value(self.paths.config_file, "VM_MEMORY", "1") or "1")
+        memory = int(read_value(self.paths.config_file, "VM_MEMORY", "2") or "2")
         cpu = int(read_value(self.paths.config_file, "VM_CPU", "2") or "2")
         disk = int(read_value(self.paths.config_file, "VM_DISK", "20") or "20")
         # Hub auto-bump: same vanity-key path the launcher checks.

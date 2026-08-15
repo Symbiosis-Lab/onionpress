@@ -195,7 +195,7 @@ _LABELS = {
 # Settings form definition: (key, default)
 SETTINGS_KEYS = [
     ("ADDRESS_PREFIX", "op2"),
-    ("VM_MEMORY", "1"),
+    ("VM_MEMORY", "2"),
     ("VM_CPU", "2"),
     ("PREVENT_SLEEP", "normal"),
     ("LAUNCH_ON_LOGIN", "yes"),

@@ -173,7 +173,7 @@ initialize_colima() {
 
         # Initialize Colima
         # Read VM memory from config (default: 1 GB)
-        VM_MEMORY=1
+        VM_MEMORY=2
         if [ -f "$DATA_DIR/config" ]; then
             config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
             if [ ! -z "$config_mem" ]; then
