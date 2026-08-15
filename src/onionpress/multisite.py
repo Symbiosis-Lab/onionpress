@@ -52,6 +52,12 @@ MU_PLUGIN_ASSETS = (
     "onionpress-avatar-default.png",
 )
 
+# Where install_uploads_ini drops the PHP limits overlay. The `zz-` prefix
+# is load-bearing: PHP reads conf.d in alphabetical order and the last value
+# wins, so this sorts after the image's own onionpress-uploads.ini and
+# overrides it without overwriting it.
+UPLOADS_INI_PATH = "/usr/local/etc/php/conf.d/zz-onionpress-uploads.ini"
+
 # Multisite constants written to wp-config.php in ensure_multisite. The
 # values are wp-cli `--raw` literals (already-quoted strings stay quoted).
 MULTISITE_CONSTANTS = (
@@ -375,6 +381,140 @@ def install_static_site_conf(
     log("Static-first Apache conf installed "
         "(moss generations served ahead of WordPress)")
     return True
+
+
+def install_uploads_ini(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Inject the PHP limits ini into the running WordPress container at
+    provision time, as an overlay that leaves the image's own copy alone.
+
+    Same reasoning as install_static_site_conf: docker-compose.yml pulls the
+    WordPress image by digest from a registry the fork does not own, so a
+    `COPY` in our Dockerfile only reaches a container someone else built.
+    Runtime injection reuses the published image unchanged.
+
+    Why an overlay under a different name rather than overwriting: unlike
+    onionpress-static-site.conf, the image ALREADY ships
+    /usr/local/etc/php/conf.d/onionpress-uploads.ini — present, but without
+    the memory_limit moss's generation upload needs. PHP reads conf.d in
+    alphabetical order, last value wins, so copying our version to
+    zz-onionpress-uploads.ini overrides the image's without touching it. The
+    image's file stays pristine (an upstream revision of it is not silently
+    clobbered), and backing the injection out is a plain `rm` of a file we
+    alone own.
+
+    The reload is not optional. mod_php reads conf.d when an Apache worker
+    initialises, so `docker cp` alone leaves every live worker on the old
+    limit — verified against a real container: the copy lands, the served
+    value stays 128M, and only `apache2ctl graceful` moves it to 512M.
+
+    `conf_dir` is the on-disk directory holding onionpress-uploads.ini — the
+    same directory install_static_site_conf reads its conf from.
+    Best-effort: a missing file or a not-yet-running container logs a
+    warning and returns False without aborting the provision run.
+    """
+    log = log_func or _noop_log
+    src = os.path.join(conf_dir, "onionpress-uploads.ini")
+    if not os.path.isfile(src):
+        log(f"WARNING: PHP limits ini not found at {src} — "
+            "large moss generations may exhaust PHP's memory_limit")
+        return False
+
+    cp = _docker_cp(
+        src,
+        f"onionpress-wordpress:{UPLOADS_INI_PATH}",
+        docker_bin=docker_bin,
+    )
+    if cp.returncode != 0:
+        log(f"WARNING: Failed to copy PHP limits ini: "
+            f"{cp.stderr.strip()[:200]}")
+        return False
+
+    r = _exec_sh("apache2ctl graceful", docker_bin=docker_bin)
+    if r.returncode != 0:
+        log(f"WARNING: Failed to reload Apache for PHP limits ini: "
+            f"{r.stderr.strip()[:200]}")
+        # Copy-then-reload is not atomic, and the overlay file existing is
+        # exactly what ensure_uploads_ini's probe reads as "healthy" — so a
+        # failed reload would short-circuit every later start on limits
+        # Apache never actually loaded. Remove it so the probe stays honest
+        # and the next start retries.
+        try:
+            _exec_sh(f"rm -f {UPLOADS_INI_PATH}", docker_bin=docker_bin)
+        except Exception:
+            pass  # best-effort cleanup; the warning above is the signal
+        return False
+
+    log("PHP limits ini installed "
+        "(large moss generations can be uploaded)")
+    return True
+
+
+def ensure_uploads_ini(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Guarantee the PHP limits overlay is present, cheaply.
+
+    The container-rootfs/volume asymmetry ensure_static_site_conf exists for
+    applies here too: /usr/local/etc/php/conf.d is rootfs, so a container
+    RECREATE drops the overlay and restores the image's lower limit, while a
+    plain restart keeps it. provision_post_install re-injects on the next
+    full start, but the launcher's `start` exits early when a publish
+    receiver is already answering and never reaches provisioning.
+
+    The failure that leaves behind is not silent, unlike the static-site
+    one — the next moss publish fails outright with a PHP fatal-error page
+    where the receiver's JSON should be. It is, though, indefinite: nothing
+    else on the start path would ever put the overlay back.
+
+    Cheap by design — one `test -e` on the happy path, no docker cp and no
+    Apache reload, so it is safe on every start including the fast
+    already-running path. Same deliberate tradeoff as
+    ensure_static_site_conf: it tests presence, not content, so an app
+    update shipping revised limits will NOT refresh an overlay already in
+    the container. An app update recreates the container anyway, which
+    drops the overlay entirely and lets provision_post_install install the
+    new version on the very next start.
+
+    Returns True if the overlay is present or was successfully restored.
+    Best-effort like install_uploads_ini: never raises, so it can never turn
+    a healthy start into a failed one.
+    """
+    log = log_func or _noop_log
+    try:
+        present = _exec_sh(
+            f"test -e {UPLOADS_INI_PATH}", docker_bin=docker_bin)
+        if present.returncode == 0:
+            return True
+
+        # Same rc=1 ambiguity ensure_static_site_conf splits on: `test -e`
+        # reports absence with an EMPTY stderr, while the docker CLI reports
+        # a dead daemon or a stopped container with a message ON stderr.
+        # Without the split, a stopped container claims a recreate happened
+        # and runs a copy that cannot land.
+        if present.stderr.strip():
+            log("WARNING: could not check PHP limits ini: "
+                f"{present.stderr.strip()[:200]}")
+            return False
+
+        log("PHP limits ini missing (container recreated?) — reinstalling "
+            "so large moss generations can still be uploaded")
+        return install_uploads_ini(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
+        )
+    except Exception as e:  # docker missing, daemon hang, timeout
+        # Spans the reinstall as well as the probe: _docker_cp and _exec_sh
+        # raise TimeoutExpired/OSError rather than returning a non-zero rc,
+        # and this function promises callers it never raises.
+        log(f"WARNING: could not ensure PHP limits ini: {e}")
+        return False
 
 
 def ensure_static_site_conf(
@@ -833,10 +973,14 @@ def provision_post_install(
     install_multisite_domain_map(
         plugins_dir=plugins_dir, docker_bin=docker_bin, log_func=log)
     # Runtime-inject the Apache static-first conf so moss generations shadow
-    # WordPress. Only when a conf dir is supplied — callers that predate the
-    # moss integration (and don't pass one) keep the pre-moss behavior.
+    # WordPress, and the PHP limits overlay so uploading one doesn't exhaust
+    # the image's memory_limit. Only when a conf dir is supplied — callers
+    # that predate the moss integration (and don't pass one) keep the
+    # pre-moss behavior. Both files live in that same directory.
     if conf_dir:
         install_static_site_conf(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log)
+        install_uploads_ini(
             conf_dir=conf_dir, docker_bin=docker_bin, log_func=log)
     install_onionpress_theme(
         themes_dir=themes_dir, plugins_dir=plugins_dir,

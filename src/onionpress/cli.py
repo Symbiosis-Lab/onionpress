@@ -760,6 +760,15 @@ def main(argv: list[str] = None) -> int:
         "--apache-conf-dir", required=True,
         help="Source directory containing onionpress-static-site.conf")
 
+    p_eui = sub.add_parser(
+        "ensure-uploads-ini",
+        help="Restore the PHP limits overlay if a container recreate "
+             "dropped it (cheap no-op when already present)",
+    )
+    p_eui.add_argument(
+        "--conf-dir", required=True,
+        help="Source directory containing onionpress-uploads.ini")
+
     p_scrub = sub.add_parser(
         "scrub",
         help="Full lifecycle test: backup → uninstall → install → restore → verify",
@@ -840,6 +849,16 @@ def main(argv: list[str] = None) -> int:
         # hiccup must not turn a healthy `start` into a reported failure.
         multisite.ensure_static_site_conf(
             conf_dir=args.apache_conf_dir,
+            log_func=print,
+        )
+        return 0
+    elif args.command == "ensure-uploads-ini":
+        from . import multisite
+        # Deliberately always 0, for the same reason as
+        # ensure-static-site-conf above: this runs on the launcher's fast
+        # already-running path.
+        multisite.ensure_uploads_ini(
+            conf_dir=args.conf_dir,
             log_func=print,
         )
         return 0
