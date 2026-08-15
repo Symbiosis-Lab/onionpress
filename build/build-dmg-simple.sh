@@ -586,8 +586,47 @@ codesign -f -s - "$MENUBAR_APP_DIR/Contents/Frameworks/Python.framework" 2>/dev/
 # Sign MenubarApp executables and bundle
 codesign -f -s - "$MENUBAR_APP_DIR/Contents/MacOS/python" 2>/dev/null || true
 codesign -f -s - "$MENUBAR_APP_DIR" 2>/dev/null || true
-# Sign the outer OnionPress.app bundle
-codesign -f -s - --deep "$APP_PATH"
+# Finish the inside-out pass: the helper scripts in Contents/MacOS/.
+#
+# The block above walks MenubarApp inside-out but stops there, leaving these
+# for the outer --deep to pick up — and --deep is exactly what cannot do it.
+# On a freshly assembled bundle it aborts with "Operation not permitted /
+# In subcomponent: .../Contents/MacOS/onionpress", while signing that same
+# file on its own succeeds rc=0 (macOS 15, 2026-08-15, four consecutive cold
+# builds). These are shell scripts, so the signature has to live in an
+# extended attribute rather than a Mach-O load command.
+#
+# Scripts ONLY. Signing a Mach-O here is not just redundant (--deep embeds
+# those itself) but actively breaks the build: MacOS/ holds the bundle's
+# main executable, so pointing codesign at it makes codesign resolve the
+# enclosing BUNDLE and sign all of it early, which then dies on whichever
+# sibling script is still unsigned ("code object is not signed at all /
+# In subcomponent: .../torcurl").
+for helper in "$APP_PATH/Contents/MacOS"/*; do
+    [ -f "$helper" ] || continue
+    file -b "$helper" | grep -q "Mach-O" && continue
+    codesign -f -s - "$helper"
+done
+# Sign the outer OnionPress.app bundle, with backoff.
+#
+# This fails with a bare "Operation not permitted" when run immediately
+# after the bundle is written, and the identical command succeeds on a
+# bundle that has been sitting for a minute (macOS 15, 2026-08-15 — every
+# cold build hit it, every by-hand re-run right afterwards signed rc=0).
+# Something still has the freshly-written tree open — Spotlight indexing
+# ~700 MB of new files is the likeliest candidate. We have not pinned down
+# which process, so this waits rather than claiming to cure it; the error
+# is printed on every attempt so a real signing fault is not mistaken for
+# the race and silently retried to death.
+_signed=""
+for _delay in 0 5 15 30; do
+    [ "$_delay" -gt 0 ] && { echo "  codesign failed — waiting ${_delay}s for writes to settle" >&2; sleep "$_delay"; }
+    if codesign -f -s - --deep "$APP_PATH"; then
+        _signed=yes
+        break
+    fi
+done
+[ -n "$_signed" ] || { echo "ERROR: could not sign $APP_PATH" >&2; exit 1; }
 echo "Application bundle signed"
 
 # Clean up old builds
