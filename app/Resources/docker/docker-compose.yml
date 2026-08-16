@@ -1,6 +1,6 @@
 services:
   tor:
-    image: ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545
+    image: ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:cdb6c65a9ac1e4bd34d11375ba39b93a1b561f7f04678fe528ec8a30d38a45c4
     container_name: onionpress-tor
     logging:
       driver: json-file
@@ -132,7 +132,7 @@ services:
     restart: unless-stopped
 
   onionheaven:
-    image: ${ONIONHEAVEN_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:5e4d3ad3948c7de0a69326701e902b2c415020de9c6948f89c6e56a070ecf545}
+    image: ${ONIONHEAVEN_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest@sha256:cdb6c65a9ac1e4bd34d11375ba39b93a1b561f7f04678fe528ec8a30d38a45c4}
     container_name: onionheaven
     logging:
       driver: json-file
