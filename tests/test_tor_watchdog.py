@@ -51,9 +51,34 @@ def _serving_state():
     return s
 
 
+def _probe_ok(_addr):
+    return {"ok": True, "responded": True, "code": "200", "stage": "",
+            "takeover": False, "ms": 8542}
+
+
+def _probe_timeout(_addr):
+    return {"ok": False, "responded": False, "code": "timeout",
+            "stage": "rendezvous", "takeover": False, "ms": 45000}
+
+
 class TestIsServing(unittest.TestCase):
-    def test_healthy_stack_is_serving(self):
-        self.assertTrue(tw.is_serving(_serving_state(), circuit_established=True))
+    def test_healthy_stack_with_no_probe_evidence_yet_is_serving(self):
+        # Tri-state: e2e_ok=None never blocks serving before evidence exists.
+        s = _serving_state()
+        self.assertIsNone(s.e2e_ok)
+        self.assertTrue(tw.is_serving(s, circuit_established=True))
+
+    def test_probe_confirmed_stack_is_serving(self):
+        s = _serving_state()
+        s.e2e_ok = True
+        self.assertTrue(tw.is_serving(s, circuit_established=True))
+
+    def test_local_green_with_failed_probe_is_not_serving(self):
+        # THE incident line: all four local signals green, onion dead.
+        s = _serving_state()
+        s.e2e_ok = False
+        self.assertTrue(tw.local_signals_green(s, circuit_established=True))
+        self.assertFalse(tw.is_serving(s, circuit_established=True))
 
     def test_bootstrapped_but_no_circuits_is_not_serving(self):
         # The exact post-sleep shape: Tor still says 100%, nobody can reach us.
@@ -76,6 +101,230 @@ class TestIsServing(unittest.TestCase):
         s.bootstrapped = True
         s.services = []
         self.assertTrue(tw.is_serving(s, circuit_established=True))
+
+
+class TestProbeScheduling(unittest.TestCase):
+    """maybe_e2e_probe: gating, cadence, and the asymmetric declare rules
+    (3 consecutive failures => down, 1 success => up)."""
+
+    def _run(self, state, now, fetch=_probe_ok, circuits=True):
+        return tw.maybe_e2e_probe(FakeSock(), state, circuits, now=now, fetch=fetch)
+
+    def test_first_probe_runs_immediately_once_gates_pass(self):
+        s = _serving_state()
+        self.assertTrue(self._run(s, 1000))
+        self.assertIs(s.e2e_ok, True)
+        self.assertEqual(s.e2e_code, "200")
+        self.assertTrue(s.e2e_confirmed_since_restart)
+
+    def test_probes_the_wordpress_service_address(self):
+        s = _serving_state()
+        seen = []
+
+        def fetch(addr):
+            seen.append(addr)
+            return _probe_ok(addr)
+
+        self._run(s, 1000, fetch=fetch)
+        self.assertEqual(seen, ["abc.onion"])
+
+    def test_override_address_wins_for_the_live_drill(self):
+        s = _serving_state()
+        seen = []
+
+        def fetch(addr):
+            seen.append(addr)
+            return _probe_ok(addr)
+
+        os.environ["E2E_PROBE_ADDRESS_OVERRIDE"] = "fakeaddressfordrill"
+        try:
+            self._run(s, 1000, fetch=fetch)
+        finally:
+            del os.environ["E2E_PROBE_ADDRESS_OVERRIDE"]
+        self.assertEqual(seen, ["fakeaddressfordrill.onion"])
+
+    def test_gated_off_while_sleeping_inactive_or_locally_red(self):
+        s = _serving_state()
+        s.sleeping = True
+        self.assertFalse(self._run(s, 1000))
+        s = _serving_state()
+        s.services_active = False
+        self.assertFalse(self._run(s, 1000))
+        s = _serving_state()
+        self.assertFalse(self._run(s, 1000, circuits=False))
+        s = tw.WatchdogState()  # SOCKS-only container: nothing to self-fetch
+        s.bootstrapped = True
+        self.assertFalse(self._run(s, 1000))
+
+    def test_ok_cadence_between_successful_probes(self):
+        s = _serving_state()
+        self._run(s, 1000)
+        self.assertFalse(self._run(s, 1000 + tw.E2E_PROBE_INTERVAL_OK - 1))
+        self.assertTrue(self._run(s, 1000 + tw.E2E_PROBE_INTERVAL_OK))
+
+    def test_failures_switch_to_the_bad_cadence(self):
+        s = _serving_state()
+        self._run(s, 1000, fetch=_probe_timeout)
+        self.assertEqual(s.e2e_fail_streak, 1)
+        self.assertFalse(self._run(s, 1000 + tw.E2E_PROBE_INTERVAL_BAD - 1,
+                                   fetch=_probe_timeout))
+        self.assertTrue(self._run(s, 1000 + tw.E2E_PROBE_INTERVAL_BAD,
+                                  fetch=_probe_timeout))
+
+    def test_three_consecutive_failures_declare_down(self):
+        s = _serving_state()
+        t = 1000
+        for i in range(tw.E2E_FAIL_THRESHOLD):
+            self.assertIsNot(s.e2e_ok, False)  # not down until the third
+            self._run(s, t, fetch=_probe_timeout)
+            t += tw.E2E_PROBE_INTERVAL_BAD
+        self.assertIs(s.e2e_ok, False)
+        self.assertFalse(tw.is_serving(s, circuit_established=True))
+
+    def test_one_success_declares_up_again(self):
+        s = _serving_state()
+        s.e2e_ok = False
+        s.e2e_fail_streak = tw.E2E_FAIL_THRESHOLD
+        self._run(s, 1000)
+        self.assertIs(s.e2e_ok, True)
+        self.assertEqual(s.e2e_fail_streak, 0)
+
+    def test_a_lone_failure_does_not_flip_a_serving_verdict(self):
+        # Anti-flap: one slow probe must not take a green stack to red.
+        s = _serving_state()
+        self._run(s, 1000)
+        self._run(s, 2000, fetch=_probe_timeout)
+        self.assertIs(s.e2e_ok, True)
+        self.assertEqual(s.e2e_fail_streak, 1)
+
+
+class TestServingLedger(unittest.TestCase):
+    """update_serving_ledger — the 11-restart bug's fix. A local-green verdict
+    without probe confirmation may clear NOTHING."""
+
+    def _mid_outage(self):
+        s = _serving_state()
+        s.not_serving_since = 800
+        s.tor_restarts = [900, 950]
+        s.restarts_this_outage = 2
+        s.degraded = True
+        s.degraded_reason = "x"
+        s.escalate_to_host = True
+        s.handoff_reason = "x"
+        return s
+
+    def test_unconfirmed_local_green_clears_nothing(self):
+        # The exact incident mechanic: post-restart local green wiped the
+        # ledger 11 times. e2e_ok=None (fresh process, no evidence) means
+        # serving computes True — and still nothing may be cleared.
+        s = self._mid_outage()
+        s.e2e_ok = None
+        self.assertTrue(tw.is_serving(s, circuit_established=True))
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=1000)
+        self.assertEqual(s.tor_restarts, [900, 950])
+        self.assertEqual(s.restarts_this_outage, 2)
+        self.assertEqual(s.not_serving_since, 800)
+        self.assertTrue(s.degraded)
+        self.assertTrue(s.escalate_to_host)
+
+    def test_probe_confirmed_serving_clears_the_whole_ledger(self):
+        s = self._mid_outage()
+        s.e2e_ok = True
+        s.e2e_confirmed_since_restart = True
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=1000)
+        self.assertEqual(s.tor_restarts, [])
+        self.assertEqual(s.restarts_this_outage, 0)
+        self.assertEqual(s.not_serving_since, 0)
+        self.assertFalse(s.degraded)
+        self.assertFalse(s.escalate_to_host)
+        self.assertEqual(s.handoff_reason, "")
+
+    def test_confirmation_must_postdate_the_last_restart(self):
+        # e2e_ok can still read True from before the restart action; the
+        # ledger clear requires a success observed SINCE it.
+        s = self._mid_outage()
+        s.e2e_ok = True
+        s.e2e_confirmed_since_restart = False
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=1000)
+        self.assertEqual(s.tor_restarts, [900, 950])
+        self.assertEqual(s.not_serving_since, 800)
+
+    def test_socks_only_container_keeps_the_trust_based_clear(self):
+        # No services => nothing to fetch => circuits are all the evidence
+        # there is. The old behavior stays for that container class.
+        s = tw.WatchdogState()
+        s.bootstrapped = True
+        s.not_serving_since = 800
+        s.tor_restarts = [900]
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=1000)
+        self.assertEqual(s.tor_restarts, [])
+        self.assertEqual(s.not_serving_since, 0)
+
+    def test_not_serving_stamps_the_outage_start_once(self):
+        s = _serving_state()
+        s.e2e_ok = False
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=1000)
+        self.assertEqual(s.not_serving_since, 1000)
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=2000)
+        self.assertEqual(s.not_serving_since, 1000)
+
+
+class TestPerOutageAccounting(unittest.TestCase):
+    """The incident's second counting bug: restarts spaced ~45min apart slid
+    past the 3600s window for 4.5 hours. Restarts are now also counted per
+    outage, and that counter survives the restart it counts."""
+
+    def test_do_halt_counts_the_restart_and_resets_confirmation(self):
+        s = _serving_state()
+        s.e2e_confirmed_since_restart = True
+        tw.do_halt(FakeSock(), s, "test", now=1000)
+        self.assertEqual(s.restarts_this_outage, 1)
+        self.assertEqual(s.tor_restarts, [1000])
+        self.assertFalse(s.e2e_confirmed_since_restart)
+
+    def test_do_restart_pt_also_resets_confirmation(self):
+        s = _serving_state()
+        s.e2e_confirmed_since_restart = True
+        tw.do_restart_pt(FakeSock(), s, "test", kill=lambda p, sig: None,
+                         pids=[1], now=1000)
+        self.assertFalse(s.e2e_confirmed_since_restart)
+
+    def test_three_per_outage_restarts_degrade_even_outside_the_window(self):
+        # Stamps an hour+ apart never accumulate 3 in the sliding window —
+        # exactly how the incident ran 11 restarts. The per-outage counter
+        # (persisted across the restarts it counts) must catch it.
+        s = _serving_state()
+        s.e2e_ok = False
+        s.not_serving_since = 1_000_000
+        s.restarts_this_outage = 3
+        s.tor_restarts = [1_020_000]  # only one visible to the window
+        self.assertEqual(
+            tw.next_escalation(s, 1_021_000, has_transport=True), "degraded")
+
+    def test_mid_outage_state_survives_the_restart(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "watchdog-state.json")
+            before = _serving_state()
+            before.e2e_ok = False
+            before.not_serving_since = 800
+            before.restarts_this_outage = 2
+            before.tor_restarts = [990]
+            tw.write_state_file(before, False, path=path, now=1000)
+
+            after = tw.WatchdogState()
+            tw.load_restart_history(after, path=path, now=1000)
+            self.assertEqual(after.not_serving_since, 800)
+            self.assertEqual(after.restarts_this_outage, 2)
+            self.assertEqual(after.tor_restarts, [990])
+
+    def test_a_serving_state_restores_no_outage(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "watchdog-state.json")
+            tw.write_state_file(_serving_state(), True, path=path, now=1000)
+            after = tw.WatchdogState()
+            tw.load_restart_history(after, path=path, now=1000)
+            self.assertEqual(after.not_serving_since, 0)
+            self.assertEqual(after.restarts_this_outage, 0)
 
 
 class TestLadder(unittest.TestCase):
@@ -317,6 +566,45 @@ class TestStateFile(unittest.TestCase):
 
     def test_an_unwritable_path_is_never_fatal(self):
         tw.write_state_file(_serving_state(), True, path="/proc/nope/state.json")
+
+    def test_publishes_the_e2e_evidence_and_handoff_fields(self):
+        # §3.3 additions — what the host-side supervisor (step 3) will read.
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "watchdog-state.json")
+            s = _serving_state()
+            s.e2e_ok = False
+            s.e2e_code = "timeout"
+            s.e2e_verdict = "network"
+            s.e2e_checked_at = 1200
+            s.e2e_fail_streak = 3
+            s.not_serving_since = 900
+            s.restarts_this_outage = 2
+            s.escalate_to_host = True
+            s.handoff_reason = "3 restarts this outage changed nothing"
+            tw.write_state_file(s, circuit_established=True, path=path, now=1234)
+            with open(path) as f:
+                payload = json.load(f)
+
+        self.assertIs(payload["e2e_ok"], False)
+        self.assertEqual(payload["e2e_code"], "timeout")
+        self.assertEqual(payload["e2e_verdict"], "network")
+        self.assertEqual(payload["e2e_checked_at"], 1200)
+        self.assertEqual(payload["e2e_fail_streak"], 3)
+        self.assertEqual(payload["restarts_this_outage"], 2)
+        self.assertTrue(payload["escalate_to_host"])
+        self.assertEqual(payload["handoff_reason"],
+                         "3 restarts this outage changed nothing")
+        # and serving now carries the e2e verdict: local green + e2e False
+        self.assertFalse(payload["serving"])
+
+    def test_e2e_ok_is_null_until_the_first_probe(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "watchdog-state.json")
+            tw.write_state_file(_serving_state(), True, path=path, now=1234)
+            with open(path) as f:
+                payload = json.load(f)
+        self.assertIsNone(payload["e2e_ok"])
+        self.assertIsNone(payload["e2e_checked_at"])
 
 
 class FakeSocks5Server:

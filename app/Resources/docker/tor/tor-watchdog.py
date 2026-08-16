@@ -463,6 +463,29 @@ class WatchdogState:
         self.degraded_reason = ""
         self.last_wake_started = 0   # wake debounce
         self.last_state_write = 0
+        # --- end-to-end probe (the measured serving input, 2026-08-16) ---
+        self.e2e_ok = None           # tri-state: None until the first probe completes
+        self.e2e_code = ""
+        self.e2e_last_ms = 0
+        self.e2e_verdict = ""        # "", "network", "descriptor", "intro-wedge", "takeover"
+        self.e2e_checked_at = 0
+        self.e2e_fail_streak = 0
+        self.last_e2e_probe = 0
+        self.last_probe_takeover = False
+        # ≥1 e2e_ok=True observed since the last restart action — the only
+        # evidence that may clear the restart ledger.
+        self.e2e_confirmed_since_restart = False
+        self.awaiting_e2e_logged = False
+        # HSFETCH verdict plumbing (answered async via HS_DESC events)
+        self.hsfetch_pending = ""    # address id awaiting RECEIVED/FAILED
+        self.hsfetch_received = False
+        self.hsfetch_failed_reason = ""
+        # per-outage accounting + host handoff
+        self.restarts_this_outage = 0
+        self.reclaim_republished = False
+        self.hs_rebuilt_this_outage = False
+        self.escalate_to_host = False
+        self.handoff_reason = ""
 
 
 # ---------------------------------------------------------------------------
@@ -684,12 +707,13 @@ def do_dormant_cycle(cmd_sock, state, reason):
 # ---------------------------------------------------------------------------
 # Escalation ladder
 # ---------------------------------------------------------------------------
-def is_serving(state, circuit_established):
-    """Is the site actually reachable-in-principle right now?
+def local_signals_green(state, circuit_established):
+    """The four in-process signals — Tor's own belief, nothing end-to-end.
 
-    Not "is Tor alive" — a Tor that is bootstrapped, has no circuits and has
-    published no descriptor is alive and useless. This is the only health
-    question with a reader on the other end of it.
+    bootstrapped + circuit-established + services attached + descriptor
+    upload landed. On 2026-08-16 all four held green for ~9 hours while the
+    onion was end-to-end dead, so this is deliberately NOT the serving
+    verdict anymore — it gates the probe and feeds is_serving.
     """
     if not state.bootstrapped or not circuit_established:
         return False
@@ -702,6 +726,138 @@ def is_serving(state, circuit_established):
     if state.last_recovery_time > 0 and not state.hs_desc_uploaded_since_recovery:
         return False
     return True
+
+
+def is_serving(state, circuit_established):
+    """Is the site actually reachable-in-principle right now?
+
+    Not "is Tor alive" — a Tor that is bootstrapped, has no circuits and has
+    published no descriptor is alive and useless. And not "does Tor believe
+    it's fine" either: the serving verdict is local signals AND the measured
+    end-to-end result. e2e_ok is tri-state — None (no completed probe yet)
+    never blocks serving before evidence exists; False (E2E_FAIL_THRESHOLD
+    consecutive failed self-fetches) does.
+    """
+    if not local_signals_green(state, circuit_established):
+        return False
+    return state.e2e_ok is not False
+
+
+def e2e_probe_address(state):
+    """The address the end-to-end probe fetches, with the .onion suffix.
+
+    E2E_PROBE_ADDRESS_OVERRIDE wins (read per call, so the live drill can
+    point the probe at a nonexistent-but-valid address while the stack stays
+    genuinely healthy — reproducing the incident's signal pattern exactly).
+    Otherwise the wordpress service — the one with readers — else the first
+    service that has an address at all.
+    """
+    override = os.environ.get("E2E_PROBE_ADDRESS_OVERRIDE", "").strip()
+    if override:
+        return override if override.endswith(".onion") else override + ".onion"
+    fallback = ""
+    for svc in state.services:
+        if not svc.get("service_id"):
+            continue
+        if svc.get("service_name") == "wordpress":
+            return svc["service_id"] + ".onion"
+        fallback = fallback or svc["service_id"] + ".onion"
+    return fallback
+
+
+def maybe_e2e_probe(cmd_sock, state, circuits_up, now=None, fetch=None):
+    """Run the end-to-end self-fetch when due. Returns True if a probe ran.
+
+    Gates: services discovered and attached, not sleeping, local signals
+    green — when they are already red the existing ladder is running and the
+    probe adds nothing but load. Declare rules are asymmetric on purpose:
+    E2E_FAIL_THRESHOLD consecutive failures spanning minutes to declare
+    down, one verified success to declare up — a 200 through a real
+    rendezvous is conclusive.
+
+    Blocks the pass for up to E2E_PROBE_TIMEOUT (plus the verdict fetches
+    when down) — same order as the wake handler's existing 120s wait.
+    """
+    now = now or time.time()
+    if not state.services or not state.services_active or state.sleeping:
+        return False
+    if not local_signals_green(state, circuits_up):
+        return False
+    bad = state.e2e_ok is False or state.e2e_fail_streak > 0
+    interval = E2E_PROBE_INTERVAL_BAD if bad else E2E_PROBE_INTERVAL_OK
+    if state.last_e2e_probe and now - state.last_e2e_probe < interval:
+        return False
+    address = e2e_probe_address(state)
+    if not address:
+        return False
+    state.last_e2e_probe = now
+    fetch = fetch or socks5h_fetch
+    res = fetch(address)
+    state.e2e_checked_at = now
+    state.e2e_code = res.get("code", "")
+    state.e2e_last_ms = res.get("ms", 0)
+    if res.get("ok"):
+        state.e2e_ok = True
+        state.e2e_fail_streak = 0
+        state.e2e_confirmed_since_restart = True
+        state.e2e_verdict = ""
+        state.last_probe_takeover = False
+        log(f"e2e-probe ok=1 code={res.get('code')} ms={res.get('ms')}")
+    else:
+        state.e2e_fail_streak += 1
+        state.last_probe_takeover = (bool(res.get("takeover"))
+                                     or res.get("code") == "302")
+        log(f"e2e-probe ok=0 stage={res.get('stage') or 'response'} "
+            f"code={res.get('code')} "
+            f"streak={state.e2e_fail_streak}/{E2E_FAIL_THRESHOLD}")
+        if state.e2e_fail_streak >= E2E_FAIL_THRESHOLD:
+            state.e2e_ok = False
+    return True
+
+
+def update_serving_ledger(state, serving, now):
+    """What a serving verdict may clear — the 11-restart bug's fix.
+
+    During the incident every post-restart false local-green wiped
+    tor_restarts, so DEGRADED took 9 hours to latch instead of 3 restarts.
+    The ledger now clears only on *probe-confirmed* serving: at least one
+    e2e_ok=True observed since the last restart action. Local green alone —
+    including the tri-state serving=True before the first probe — logs and
+    clears nothing. Containers with no services have no probe and keep the
+    trust-based clear: circuits are all the evidence that exists there.
+    """
+    if serving:
+        confirmed = state.e2e_confirmed_since_restart or not state.services
+        if not confirmed:
+            if not state.awaiting_e2e_logged:
+                log("locally green, awaiting end-to-end confirmation — "
+                    "restart ledger kept until a probe proves it")
+                state.awaiting_e2e_logged = True
+            return
+        if state.not_serving_since:
+            down_for = int(now - state.not_serving_since)
+            if state.services:
+                secs = state.e2e_last_ms / 1000.0
+                log(f"serving CONFIRMED end-to-end ({state.e2e_code} in "
+                    f"{secs:.1f}s) after {down_for}s down")
+            else:
+                log(f"Serving again after {down_for}s")
+        state.not_serving_since = 0
+        # A recovered stack is not a degraded one. Clearing here (rather than
+        # never) is what lets the ladder work again after the network returns.
+        state.degraded = False
+        state.degraded_reason = ""
+        state.tor_restarts = []
+        state.restarts_this_outage = 0
+        state.escalate_to_host = False
+        state.handoff_reason = ""
+        state.reclaim_republished = False
+        state.hs_rebuilt_this_outage = False
+        state.awaiting_e2e_logged = False
+    else:
+        state.awaiting_e2e_logged = False
+        if not state.not_serving_since:
+            state.not_serving_since = now
 
 
 def next_escalation(state, now, has_transport):
@@ -718,9 +874,13 @@ def next_escalation(state, now, has_transport):
     if state.degraded:
         return None  # stopped climbing on purpose; the state file says so
 
-    # Enough restarts that changed nothing → stop.
+    # Enough restarts that changed nothing → stop. Two counters on purpose:
+    # the sliding window caps total churn, and the per-outage counter (which
+    # survives the restarts it counts) catches the incident's shape — spaced
+    # restarts that individually slid out of the window for 4.5 hours.
     recent = [t for t in state.tor_restarts if now - t < DEGRADED_WINDOW]
-    if len(recent) >= DEGRADED_AFTER_RESTARTS:
+    if (len(recent) >= DEGRADED_AFTER_RESTARTS
+            or state.restarts_this_outage >= DEGRADED_AFTER_RESTARTS):
         return "degraded"
 
     if (down_for >= TOR_RESTART_AFTER
@@ -786,7 +946,7 @@ def _pt_pids(proc_root="/proc"):
     return pids
 
 
-def do_restart_pt(cmd_sock, state, reason, kill=None, pids=None):
+def do_restart_pt(cmd_sock, state, reason, kill=None, pids=None, now=None):
     """Rung 2: kill the wedged transport and make Tor launch a fresh one.
 
     This is the rung that was missing, and it is the one that matters: a
@@ -798,8 +958,11 @@ def do_restart_pt(cmd_sock, state, reason, kill=None, pids=None):
     Nothing here touches keys. The onion address is whatever ADD_ONION is given
     from disk, and this rung sends no ADD_ONION at all.
     """
-    now = time.time()
+    now = now or time.time()
     kill = kill or os.kill
+    # A restart action voids prior end-to-end confirmation: whatever comes
+    # up next must prove itself again before the ledger may clear.
+    state.e2e_confirmed_since_restart = False
     found = _pt_pids() if pids is None else pids
     if not found:
         log(f"Escalating: {reason} — no transport process found to restart")
@@ -822,7 +985,7 @@ def do_restart_pt(cmd_sock, state, reason, kill=None, pids=None):
     return True
 
 
-def do_halt(cmd_sock, state, reason):
+def do_halt(cmd_sock, state, reason, now=None):
     """Rung 3: tell Tor to shut down. Docker's restart policy brings it back.
 
     Heavier than rung 2 and strictly more thorough: the restart re-execs the
@@ -833,7 +996,7 @@ def do_halt(cmd_sock, state, reason):
     restart — the keys are on the mounted volume, and the entrypoint hands them
     back to `discover_services` on the way up. Nothing here writes a key.
     """
-    now = time.time()
+    now = now or time.time()
     if now - state.last_halt < HALT_COOLDOWN:
         return
 
@@ -841,6 +1004,12 @@ def do_halt(cmd_sock, state, reason):
     send_cmd(cmd_sock, "SIGNAL HALT")
     state.last_halt = now
     state.tor_restarts.append(now)
+    state.restarts_this_outage += 1
+    state.e2e_confirmed_since_restart = False
+    # Persist the stamp on this very pass — the container dies with us, and
+    # a stamp that only lived in memory is how the counter used to reset on
+    # exactly the event it was counting.
+    state.last_state_write = 0
 
 
 def do_degrade(state, reason):
@@ -859,9 +1028,10 @@ def do_degrade(state, reason):
     log(f"DEGRADED: {reason} — no longer escalating; will recover if the network returns")
 
 
-def write_state_file(state, circuit_established, path=STATE_FILE, now=None):
+def write_state_file(state, circuit_established, path=None, now=None):
     """Publish what the ladder knows. Atomic; failure here is never fatal."""
     now = now or time.time()
+    path = path or STATE_FILE
     payload = {
         "serving": is_serving(state, circuit_established),
         "bootstrapped": state.bootstrapped,
@@ -876,6 +1046,15 @@ def write_state_file(state, circuit_established, path=STATE_FILE, now=None):
         "degraded_reason": state.degraded_reason,
         "tor_restarts_recent": len([t for t in state.tor_restarts if now - t < DEGRADED_WINDOW]),
         "updated_at": int(now),
+        # --- end-to-end evidence + handoff (§3.3) ---
+        "e2e_ok": state.e2e_ok,
+        "e2e_code": state.e2e_code,
+        "e2e_verdict": state.e2e_verdict,
+        "e2e_checked_at": int(state.e2e_checked_at) if state.e2e_checked_at else None,
+        "e2e_fail_streak": state.e2e_fail_streak,
+        "restarts_this_outage": state.restarts_this_outage,
+        "escalate_to_host": state.escalate_to_host,
+        "handoff_reason": state.handoff_reason,
     }
     payload["tor_restart_stamps"] = [
         int(t) for t in state.tor_restarts if now - t < DEGRADED_WINDOW
@@ -890,7 +1069,7 @@ def write_state_file(state, circuit_established, path=STATE_FILE, now=None):
         log(f"Could not write state file: {e}")
 
 
-def load_restart_history(state, path=STATE_FILE, now=None):
+def load_restart_history(state, path=None, now=None):
     """Recover the restart count from the last run.
 
     Rung 3 is `SIGNAL HALT`, which ends the container — and takes this process
@@ -899,12 +1078,20 @@ def load_restart_history(state, path=STATE_FILE, now=None):
     Tor forever, every 15 minutes, against a network that is simply gone.
     The state file is on the shared volume, so it outlives the restart.
 
-    The `degraded` FLAG is deliberately not restored — only the stamps. Coming
-    back up is a fresh chance to serve; if the situation is still hopeless the
-    count says so again within one pass, and if it isn't, we are already
-    working.
+    Restored: the windowed stamps, and — when the previous instance died
+    mid-outage — the outage start and its per-outage restart count. The
+    sliding window alone missed the incident (restarts ~45min apart never
+    accumulated 3 in one hour); the per-outage counter only works if it
+    survives the restarts it counts.
+
+    The `degraded` FLAG and `escalate_to_host` are deliberately not restored.
+    Coming back up is a fresh chance to serve; if the situation is still
+    hopeless the counts say so again within one pass — the designed
+    yield-back to a host that just restarted us — and if it isn't, we are
+    already working.
     """
     now = now or time.time()
+    path = path or STATE_FILE
     try:
         with open(path) as f:
             payload = json.load(f)
@@ -915,6 +1102,15 @@ def load_restart_history(state, path=STATE_FILE, now=None):
     if state.tor_restarts:
         log(f"Resuming with {len(state.tor_restarts)} Tor restart(s) "
             f"in the last {DEGRADED_WINDOW // 60}min")
+    not_serving_since = payload.get("not_serving_since") or 0
+    if not_serving_since and not_serving_since <= now:
+        state.not_serving_since = not_serving_since
+        try:
+            state.restarts_this_outage = int(payload.get("restarts_this_outage") or 0)
+        except (TypeError, ValueError):
+            state.restarts_this_outage = 0
+        log(f"Resuming mid-outage: not serving since {int(now - not_serving_since)}s "
+            f"ago, {state.restarts_this_outage} restart(s) this outage")
 
 
 # ---------------------------------------------------------------------------
@@ -1033,29 +1229,21 @@ def check_stalls(cmd_sock, state):
     if state.bootstrapped and "circuit-established=0" in resp:
         do_dropguards(cmd_sock, state, "circuit-established=0 (circuits lost)")
 
+    # End-to-end self-fetch — the measured serving input. Runs on its own
+    # cadence inside; may block this pass for up to the probe timeout.
+    maybe_e2e_probe(cmd_sock, state, circuits_up, now=now)
+
     # Periodic heartbeat log (every 5 minutes)
     if now - state.last_heartbeat_log > 300:
         log(f"alive — bootstrapped={state.bootstrapped}, "
             f"circuit-established={'1' if circuits_up else '0'}, "
             f"services_active={state.services_active}, "
+            f"e2e_ok={state.e2e_ok}, "
             f"serving={is_serving(state, circuits_up)}")
         state.last_heartbeat_log = now
 
     serving = is_serving(state, circuits_up)
-    if serving:
-        if state.not_serving_since:
-            down_for = int(now - state.not_serving_since)
-            log(f"Serving again after {down_for}s")
-        state.not_serving_since = 0
-        # A recovered stack is not a degraded one. Clearing here (rather than
-        # never) is what lets the ladder work again after the network returns —
-        # the reason we stop climbing is that climbing is useless, not that the
-        # stack is written off.
-        state.degraded = False
-        state.degraded_reason = ""
-        state.tor_restarts = []
-    elif not state.not_serving_since:
-        state.not_serving_since = now
+    update_serving_ledger(state, serving, now)
 
     # Bootstrap stall
     if (not state.bootstrapped
