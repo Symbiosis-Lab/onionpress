@@ -87,35 +87,37 @@ branches: frozen export snapshots cut from the upstream base for review, fed
   `plugins/onionpress/` references (`onionpress-moss-receiver` → new name) and the
   `stack-manifest.json` release pin. Wire protocol is unchanged — name-level only.
 
-## Entrance point: one umbrella issue
+## Outreach: the reader-friendly path (designed from Brewster's chair)
 
-The review surface is deliberately split (4 PRs + 3 proposal issues), so the
-**entrance point is a single umbrella tracking issue on
-`brewsterkahle/onionpress`**: "Static-site publishing for OnionPress —
-working demo + PR series". It is the one link sent to Brewster and contains,
-in order:
+Sequence, in the order he experiences it (drafts in `docs/proposals/`; none
+posted without sign-off):
 
-1. **The demo recording at the top** — moss publishing a site to a live
-   `.onion` in one click. Attach the video to the issue directly (GitHub
-   embeds mp4/mov ≤10 MB inline); if larger, upload it as an asset on a
-   `Symbiosis-Lab/onionpress` release (public, stable links) and embed a
-   GIF teaser + link. NEVER link into the moss repo — it is private and
-   the link would 404 for upstream.
-2. The 4 PRs, linked smallest-first with one-line summaries. PR 1 (bug
-   fixes) is the low-effort on-ramp; PRs 3+4 are the centerpiece the demo
-   showcases.
-3. The 3 forward-proposal issues below.
+1. **Personal note first, not GitHub** — ~3 sentences + the demo video + ONE
+   link (the umbrella issue). Offer a call/live demo. GitHub notifications
+   are the artifact trail, not the knock on the door.
+2. **Umbrella issue** = the single entrance point:
+   "Static-site publishing for OnionPress — working demo + PR series".
+   Contents in order: the demo recording at the top (≤10 MB attaches inline;
+   else a Symbiosis-Lab/onionpress release asset + GIF teaser; NEVER a
+   moss-repo link — private, 404s for him), a **"try it yourself in ~5
+   minutes"** section (fork release + `./test-receiver.sh` +
+   `docs/static-publish-protocol.md`), the 4-PR table smallest-first, a
+   **"what we deliberately did NOT send"** section (self-filtering is the
+   trust signal), and a short "where we'd like to go together" paragraph.
+3. **PR 1 opens with the umbrella** — the tiny, obviously-correct on-ramp
+   that builds the working relationship. PRs 2–4 same-day-numbered ("part N
+   of 4, independently reviewable") or after first response — judgment call
+   at posting time. Every PR body: problem → change → why generic to any
+   SSG → how tested; each links the umbrella.
+4. **The 3 collaboration proposals stay a paragraph in the umbrella.** Open
+   as individual issues only when he engages with that thread (4 PRs + 3
+   RFC issues on day one reads as homework). Reserve drafts:
+   `docs/proposals/{decouple-serving-core,dns-domains,wayback-behind-gfw}.md`;
+   umbrella draft: `docs/proposals/umbrella-issue.md`.
 
-Every PR and proposal issue links back to the umbrella, so any entry point
-leads to the whole story.
-
-## Forward proposals to Brewster (separate from the PRs)
-
-Three collaboration topics to propose as **individual issues on
-`brewsterkahle/onionpress`** (Issues are enabled there; Discussions are not),
-opened alongside the first PR wave and cross-linked with it. Proposals never
-ride inside a PR — PRs stay auditable code changes; the issues carry the
-architecture conversation and can cite the PRs as working evidence.
+Legitimacy is carried by shape, not assertion: a small first PR, honest PR
+bodies, the explicit not-sent list, and one sentence noting we extended
+OnionPress's own mechanisms rather than building parallel ones.
 
 1. **Decouple OnionPress from WordPress** so the serving core (tor + static
    receiver + Apache/current-symlink) is a light target for any SSG to
