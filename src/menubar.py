@@ -453,7 +453,7 @@ class OnionPressApp(rumps.App):
         self._reachability_stats = ReachabilityStats()
         self._last_probe_code = ""
         self._last_probe_ms = 0
-        self._last_reachability = (None, None)  # moss#917: (reachable, http_code)
+        self._last_reachability = (None, None)  # tri-state (reachable, http_code); None = never checked
         self._last_snapshot_ts = time.time()
         self._snapshot_interval_seconds = 12 * 3600
 
@@ -1333,7 +1333,7 @@ class OnionPressApp(rumps.App):
         self._tor_internally_ready = False
         self._last_probe_code = ""
         self._last_probe_ms = 0
-        # moss#917: external reachability, tri-state, read by
+        # External reachability is tri-state, read by
         # write_status_to_volume() from a DIFFERENT thread than this one.
         # Stored as a single (reachable, http_code) tuple — one attribute,
         # one store/load — rather than two separate attributes, so a
@@ -1697,7 +1697,7 @@ class OnionPressApp(rumps.App):
                     if self.is_ready:
                         self.log("Going offline — no internet connection")
                     self.is_ready = False
-                    # moss#917: check_tor_reachability() isn't called on this
+                    # check_tor_reachability() isn't called on this
                     # path, so the reachability tuple would otherwise keep
                     # whatever it was before the internet dropped — reporting
                     # a stale "reachable" verdict while genuinely offline.
@@ -2012,7 +2012,7 @@ class OnionPressApp(rumps.App):
                 if not self.onion_address or self.onion_address in ["Starting...", "Generating address..."]:
                     self.onion_address = "Not running"
                 self.is_ready = False
-                # moss#917: containers aren't all up, so nothing will call
+                # Containers aren't all up, so nothing will call
                 # check_tor_reachability() again until they are — clear the
                 # last verdict rather than let a stale "reachable: true"
                 # from before the stop keep being reported.
@@ -2841,7 +2841,8 @@ class OnionPressApp(rumps.App):
         real administrator and stores the token as a WordPress transient,
         2-min TTL) and points the URL at /wp-login.php rather than at
         base_url directly. base_url may be served by the static-first
-        Apache config (moss pre-rendered HTML ahead of WordPress), where
+        Apache config (a pre-rendered static generation ahead of
+        WordPress), where
         PHP never runs and a token appended there is never read by
         anything; wp-login.php always executes PHP, so the auto-login
         mu-plugin's `init` hook runs and redirects back to base_url once
@@ -4811,8 +4812,9 @@ License: AGPL v3"""
             if self.is_ready:
                 bootstrap_pct = 100
 
-            # moss#917: surface the same tri-state reachability the linux
-            # service writes — None until Check 5 has actually run. Read as
+            # Surface the same tri-state reachability the linux service
+            # writes — None until Check 5 has actually run; only an
+            # explicit False means confirmed unreachable. Read as
             # one tuple (see check_tor_reachability) so a concurrent update
             # from the status-loop thread can't be observed half-applied.
             onion_reachable, onion_http_code = getattr(self, '_last_reachability', (None, None))

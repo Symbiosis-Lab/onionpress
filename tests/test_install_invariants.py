@@ -1264,8 +1264,8 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
         )
         self._assert_has(
             r'for\s+port\s+in\s+8080\s+18080\s+28080\s+38080\s+48080',
-            "Probe must walk the same port ladder as moss's RECEIVER_PORTS "
-            "and test-receiver.sh (receiver-contract.md).",
+            "Probe must walk the same port ladder as the publisher's "
+            "RECEIVER_PORTS and test-receiver.sh (docs/static-publish-protocol.md).",
         )
         self._assert_has(
             r'/wp-json/onionpress/v1/status',
@@ -1313,7 +1313,7 @@ class TestAutoLoginSurvivesStaticFirst(unittest.TestCase):
     """Guard against the auto-login token being minted for a URL that can
     never read it.
 
-    Incident: WordPress is served static-first (moss pre-rendered HTML
+    Incident: WordPress is served static-first (pre-rendered HTML
     ahead of PHP). open_local_site() appended ?op_login=TOKEN straight to
     the local URL; on the static homepage PHP never runs, so nothing ever
     reads $_GET['op_login'] and the "auto-login" link just dumped the user
@@ -1428,35 +1428,47 @@ class TestWordPressAdminMenuItem(unittest.TestCase):
         )
 
 
-class TestGenerationUploadMemoryLimit(unittest.TestCase):
-    """POST /wp-json/onionpress/v1/generation reads the whole moss generation
-    tar into memory via $request->get_body() before our route callback ever
-    runs (app/Resources/plugins/onionpress-moss-receiver.php). WordPress's
-    REST server buffers that body internally too, so the request needs
-    roughly 2-3x the generation's size in PHP memory. Default memory_limit
-    is 128M; a real ~65MB site generation blew through it with "Allowed
-    memory size ... exhausted" inside WP core's class-wp-rest-server.php —
-    the plugin's own code never even got a chance to run. This is unrelated
-    to upload_max_filesize/post_max_size, which only bound multipart
-    ($_FILES) uploads that PHP streams to a temp file rather than buffering.
+class TestGenerationUploadCarrier(unittest.TestCase):
+    """POST /wp-json/onionpress/v1/generation is multipart-only as of
+    receiver_version 2.0. The removed raw-body carrier forced WordPress's
+    REST server to buffer the whole tar into a PHP string before the route
+    callback ever ran — a ~65MB site needed a 512M memory_limit raise just
+    to reach the plugin's own code. Multipart streams to upload_tmp_dir at
+    constant memory, so that raise was deleted with the carrier. These
+    invariants keep both halves from silently regressing.
     """
 
-    def test_uploads_ini_raises_memory_limit(self):
+    def test_uploads_ini_does_not_resurrect_memory_limit(self):
         ini = _read("app/Resources/docker/wordpress/onionpress-uploads.ini")
-        match = re.search(r"^memory_limit\s*=\s*(\d+)([GM])$", ini, re.MULTILINE)
-        self.assertIsNotNone(
-            match,
-            "onionpress-uploads.ini must set memory_limit — the moss "
-            "generation-upload endpoint buffers the whole request body in "
-            "PHP memory and the 128M default is nowhere near enough.",
+        self.assertIsNone(
+            re.search(r"^memory_limit\s*=", ini, re.MULTILINE),
+            "onionpress-uploads.ini sets memory_limit again — that raise "
+            "existed solely for the raw-body upload carrier removed at "
+            "receiver_version 2.0. If it is back, either the raw carrier "
+            "crept back into onionpress-static-receiver.php (fix that "
+            "instead) or a new buffering path needs its own justification "
+            "here.",
         )
-        value, unit = int(match.group(1)), match.group(2)
-        megabytes = value * 1024 if unit == "G" else value
-        self.assertGreaterEqual(
-            megabytes, 512,
-            "memory_limit must be at least 512M — a ~65MB generation "
-            "already needs that much headroom once WP's REST server and "
-            "our own get_body() copy are both counted.",
+
+    def test_uploads_ini_still_bounds_multipart(self):
+        # Multipart still needs the size ceilings even with no memory raise:
+        # upload_max_filesize/post_max_size are what bound the streamed part.
+        ini = _read("app/Resources/docker/wordpress/onionpress-uploads.ini")
+        for key in ("upload_max_filesize", "post_max_size"):
+            self.assertRegex(
+                ini, r"(?m)^%s\s*=\s*\d+[GM]$" % key,
+                "onionpress-uploads.ini must keep %s — it is the bound on "
+                "the multipart part that replaced the raw body." % key,
+            )
+
+    def test_receiver_has_no_raw_body_branch(self):
+        php = _read("app/Resources/plugins/onionpress-static-receiver.php")
+        self.assertNotIn(
+            "get_body()", php,
+            "onionpress-static-receiver.php reads get_body() again — the "
+            "raw-body carrier was removed at receiver_version 2.0 because "
+            "WP buffers it into PHP memory before the route can reject it. "
+            "Uploads must stay multipart-only (get_file_params).",
         )
 
 

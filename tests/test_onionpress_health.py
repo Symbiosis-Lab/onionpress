@@ -47,10 +47,10 @@ class TestHealthResult(unittest.TestCase):
         self.assertEqual(hr.errors, [])
 
     def test_unknown_reachability_defaults_to_none_not_false(self):
-        # moss#917: a HealthResult that never ran Check 5 must be
-        # distinguishable from one that ran it and got a negative answer —
-        # status.json (and moss's onion_reachable) treats None as "unknown",
-        # never as "confirmed unreachable".
+        # Reachability is tri-state: a HealthResult that never ran Check 5
+        # must be distinguishable from one that ran it and got a negative
+        # answer — status.json (and any consumer of onion_reachable) treats
+        # None as "unknown", never as "confirmed unreachable".
         hr = HealthResult()
         self.assertIsNone(hr.tor_externally_reachable)
         self.assertIsNone(hr.external_http_code)
@@ -397,7 +397,7 @@ class TestFullCheck(unittest.TestCase):
         hr = hc.full_check()
         self.assertFalse(hr.ready)
         self.assertFalse(hr.tor_internally_ready)
-        # moss#917: Check 5 never ran (gated on tor_internally_ready) — the
+        # Check 5 never ran (gated on tor_internally_ready) — the
         # regression this guards is write_status() reading this as a
         # confirmed-unreachable `false` instead of "never asked".
         self.assertIsNone(hr.tor_externally_reachable)

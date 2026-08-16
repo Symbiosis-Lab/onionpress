@@ -385,8 +385,8 @@ class TestEnsureStaticSiteConf(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_reports_failure_when_the_repair_fails(self):
-        # A failed reinstall must not be laundered into a success — moss
-        # would go on publishing to a site the onion never serves.
+        # A failed reinstall must not be laundered into a success — the
+        # publisher would go on publishing to a site the onion never serves.
         with mock.patch.object(multisite, "_exec_sh",
                                return_value=_err(stderr="")), \
              mock.patch.object(multisite, "install_static_site_conf",
@@ -400,8 +400,8 @@ class TestEnsureStaticSiteConf(unittest.TestCase):
 class TestUploadsIniOverlayPath(unittest.TestCase):
     """The overlay's filename is the whole mechanism, so pin it. Unlike the
     static-site conf, the WordPress image already ships an
-    onionpress-uploads.ini — present, but without the memory_limit the moss
-    generation upload needs. We override it rather than overwrite it, which
+    onionpress-uploads.ini — present, but without the memory_limit a
+    static-generation upload needs. We override it rather than overwrite it, which
     only works because PHP reads conf.d alphabetically and takes the last
     value it sees.
     """
@@ -602,7 +602,7 @@ class TestEnsureUploadsIni(unittest.TestCase):
 
     def test_reports_failure_when_the_repair_fails(self):
         # A failed reinstall must not be laundered into a success — the next
-        # moss publish would die on a PHP fatal-error page with nothing in
+        # publish would die on a PHP fatal-error page with nothing in
         # the log to say the repair had been attempted and lost.
         with mock.patch.object(multisite, "_exec_sh",
                                return_value=_err(stderr="")), \
@@ -616,7 +616,7 @@ class TestEnsureUploadsIni(unittest.TestCase):
 
 class TestProvisionInjectsStaticConf(unittest.TestCase):
     """provision_post_install only injects the runtime confs when a conf_dir
-    is supplied — pre-moss callers that omit it keep the old behavior. Both
+    is supplied — earlier callers that omit it keep the old behavior. Both
     the static-site conf and the PHP limits overlay come from that one
     directory and share the guard.
     """
@@ -674,7 +674,7 @@ class TestMuPluginsList(unittest.TestCase):
             "onionpress-wayback-archive.php",
             "onionpress-onboarding.php",
             "onionpress-avatar.php",
-            "onionpress-moss-receiver.php",
+            "onionpress-static-receiver.php",
         }
         missing = critical - set(multisite.MU_PLUGINS)
         self.assertFalse(
