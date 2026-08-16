@@ -766,6 +766,54 @@ class TestRestartHistorySurvivesTheRestart(unittest.TestCase):
         self.assertEqual(after.tor_restarts, [])
 
 
+class TestStateFilePath(unittest.TestCase):
+    """Two containers run this watchdog off one shared volume.
+
+    `onionpress-tor` and `onionheaven` both mount the onionpress-data
+    volume at /var/lib/onionpress (docker-compose.yml:24 and :159) and
+    both run tor-watchdog.py — so a single fixed filename means the hub's
+    SOCKS-only daemon overwrites the site daemon's verdict every ~15s.
+    Verified live 2026-08-16: the file on disk carried the hub's
+    services_active=False while the site's onion was serving. Readers
+    (moss's receiver, the host supervisor) must get the SITE daemon.
+    """
+
+    def test_site_daemon_keeps_the_canonical_path(self):
+        self.assertEqual(tw.state_file_path({}),
+                         "/var/lib/onionpress/watchdog-state.json")
+
+    def test_onionheaven_hub_writes_its_own_file(self):
+        self.assertEqual(
+            tw.state_file_path({"ONIONHEAVEN": "1",
+                                "CONTAINER_NAME": "onionheaven"}),
+            "/var/lib/onionpress/watchdog-state-onionheaven.json")
+
+    def test_socks_only_container_writes_its_own_file(self):
+        # NO_ONION_SERVICE alone is enough: such a daemon has no onion to
+        # report on, so its verdict must never masquerade as the site's.
+        path = tw.state_file_path({"NO_ONION_SERVICE": "1",
+                                   "CONTAINER_NAME": "onionheaven-takeover-4"})
+        self.assertEqual(
+            path,
+            "/var/lib/onionpress/watchdog-state-onionheaven-takeover-4.json")
+
+    def test_role_name_falls_back_when_container_name_is_absent(self):
+        path = tw.state_file_path({"ONIONHEAVEN": "1"})
+        self.assertTrue(path.startswith(
+            "/var/lib/onionpress/watchdog-state-"))
+        self.assertTrue(path.endswith(".json"))
+        self.assertNotEqual(path, "/var/lib/onionpress/watchdog-state.json")
+
+    def test_role_name_cannot_escape_the_directory(self):
+        path = tw.state_file_path({"ONIONHEAVEN": "1",
+                                   "CONTAINER_NAME": "../../etc/evil"})
+        self.assertTrue(path.startswith("/var/lib/onionpress/watchdog-state-"))
+        self.assertNotIn("/", path[len("/var/lib/onionpress/"):])
+
+    def test_module_constant_matches_the_resolver(self):
+        self.assertEqual(tw.STATE_FILE, tw.state_file_path(os.environ))
+
+
 class TestStateFile(unittest.TestCase):
     def test_publishes_a_serving_verdict_moss_can_read(self):
         with tempfile.TemporaryDirectory() as root:

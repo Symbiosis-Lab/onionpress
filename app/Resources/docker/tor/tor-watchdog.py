@@ -124,7 +124,31 @@ DEGRADED_WINDOW = 3600
 # Where the ladder publishes what it knows, for moss to read (the shared
 # volume the content address already lives on). Never sit silent: if we have
 # stopped trying, the file says so.
-STATE_FILE = "/var/lib/onionpress/watchdog-state.json"
+#
+# The path is role-scoped because this watchdog runs in more than one
+# container off ONE shared volume: `onionpress-tor` and `onionheaven` both
+# mount onionpress-data at /var/lib/onionpress (docker-compose.yml:24,
+# :159) and both run this file. With a single fixed name the hub's
+# SOCKS-only daemon — which has no onion service at all — overwrote the
+# site daemon's verdict every ~15s (observed live 2026-08-16: the file on
+# disk carried the hub's services_active=False while the site's onion was
+# serving fine). Readers want the SITE daemon, so the site daemon keeps the
+# canonical name and every other role gets its own file.
+STATE_DIR = "/var/lib/onionpress"
+
+
+def state_file_path(env=None):
+    """Canonical path for the site daemon; a role-suffixed one otherwise."""
+    env = os.environ if env is None else env
+    if env.get("ONIONHEAVEN") == "1" or env.get("NO_ONION_SERVICE") == "1":
+        role = env.get("CONTAINER_NAME") or socket.gethostname() or "socks-only"
+        safe = "".join(c if (c.isalnum() or c in "_-") else "-" for c in role)
+        role = safe.strip("-") or "socks-only"
+        return os.path.join(STATE_DIR, f"watchdog-state-{role}.json")
+    return os.path.join(STATE_DIR, "watchdog-state.json")
+
+
+STATE_FILE = state_file_path()
 
 # Managed pluggable transports we know how to restart. Tor launches these as
 # child processes and does NOT relaunch one that dies or wedges.
