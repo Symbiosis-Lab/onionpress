@@ -484,11 +484,27 @@ class HealthChecker:
                 return True
         return False
 
-    def tor_container_unhealthy(self) -> bool:
+    def tor_container_unhealthy(self, e2e_down: Optional[bool] = None) -> bool:
         """Check Tor container logs for signs of sickness.
 
         Returns True if restart is likely to help.
+
+        ``e2e_down`` is the watchdog's *measured* end-to-end verdict when
+        fresh evidence exists (True = probe-confirmed dead, False =
+        probe-confirmed serving, None = no evidence). A measured verdict
+        outranks the log heuristics below: during the 2026-08-16 incident
+        "Bootstrapped 100%" sat in the last 50 log lines for the entire
+        nine-hour outage, so the bootstrapped ⇒ healthy short-circuit made
+        this gate sit out exactly the failure it exists for.
         """
+        if e2e_down is True:
+            self._log("Tor end-to-end probe says dead — overriding log "
+                      "heuristics")
+            return True
+        if e2e_down is False:
+            # Probe-confirmed serving: restarting would be pure harm.
+            return False
+
         self._log("Checking Tor container health...")
         result = self.docker.run(
             ["logs", "--tail", "50", "onionpress-tor"],

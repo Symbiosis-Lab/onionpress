@@ -76,6 +76,7 @@ OPTIONS = {
                  'onionpress.ui_helpers', 'onionpress.settings_ui',
                  'onionpress.browser', 'onionpress.log_rotation',
                  'onionpress.log_capture',
+                 'onionpress.self_heal',
                  'onionpress.analytics_sharing', 'onionpress.power',
                  'onionpress.onion_proxy', 'onionpress.onion_auth',
                  'onionpress.onionheaven', 'onionpress.updater',

@@ -375,6 +375,37 @@ class TestTorContainerUnhealthy(unittest.TestCase):
         hc = HealthChecker(docker)
         self.assertTrue(hc.tor_container_unhealthy())
 
+    def test_e2e_down_overrides_bootstrapped_heuristic(self):
+        # 2026-08-16: "Bootstrapped 100%" sat in the last 50 log lines for
+        # the entire nine-hour outage, so the bootstrapped ⇒ healthy
+        # short-circuit made this gate sit out exactly the failure it
+        # exists for. A measured end-to-end verdict outranks log grep.
+        docker = mock.Mock()
+        docker.run.return_value = _ok("Bootstrapped 100% (done): Done")
+        hc = HealthChecker(docker)
+        self.assertTrue(hc.tor_container_unhealthy(e2e_down=True))
+
+    def test_e2e_down_needs_no_log_read(self):
+        docker = mock.Mock()
+        hc = HealthChecker(docker)
+        self.assertTrue(hc.tor_container_unhealthy(e2e_down=True))
+        docker.run.assert_not_called()
+
+    def test_e2e_serving_blocks_restart_even_with_sick_patterns(self):
+        # Probe-confirmed serving: a restart would be pure harm, whatever
+        # scary lines the log tail happens to contain.
+        docker = mock.Mock()
+        docker.run.return_value = _ok(next(iter(SICK_PATTERNS)))
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.tor_container_unhealthy(e2e_down=False))
+        docker.run.assert_not_called()
+
+    def test_no_e2e_evidence_keeps_log_heuristic(self):
+        docker = mock.Mock()
+        docker.run.return_value = _ok("Bootstrapped 100% (done): Done")
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.tor_container_unhealthy(e2e_down=None))
+
 
 class TestFullCheck(unittest.TestCase):
     def test_all_healthy(self):
