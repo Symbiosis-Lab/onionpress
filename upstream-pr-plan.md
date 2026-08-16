@@ -137,9 +137,11 @@ posting, so they get the same review as code.
 
 | Item | State |
 |---|---|
-| Phase 0 hygiene/rename/hardening (branch `upstream-prep`) | in progress, 2026-08-16 |
-| `upstream/fixes` | not started |
-| `upstream/tor-bridges` | not started |
-| `upstream/static-first-serving` | not started |
-| `upstream/static-publish` | not started |
-| moss plugin rename follow-up | not started |
+| Phase 0 hygiene/rename/hardening | done, merged to main, pushed (2026-08-16) |
+| Outreach drafts (umbrella + 3 proposals) | drafted in `docs/proposals/`, not posted |
+| `upstream/fixes` (PR1, 5 commits) | built, verified, pushed |
+| `upstream/tor-bridges` (PR2, 5 commits) | built, verified, pushed |
+| `upstream/static-first-serving` (PR3, 2 commits) | built, verified, pushed |
+| `upstream/static-publish` (PR4, stacks on PR3) | not started |
+| moss plugin rename follow-up | done, committed in moss repo |
+| Opening PRs/issues on brewsterkahle/onionpress | not started — needs user sign-off before posting |
