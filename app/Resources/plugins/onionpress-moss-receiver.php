@@ -372,12 +372,22 @@ function onionpress_moss_extract_tar( $tar_path, $dest_dir ) {
         while ( $remaining > 0 ) {
             $chunk = fread( $fh, $remaining > 524288 ? 524288 : $remaining );
             if ( $chunk === '' || $chunk === false ) {
-                break;
+                fclose( $out );
+                fclose( $fh );
+                return array( false, 'truncated file data in ' . $rel );
             }
-            fwrite( $out, $chunk );
-            $remaining -= strlen( $chunk );
+            $written = fwrite( $out, $chunk );
+            if ( $written === false || $written !== strlen( $chunk ) ) {
+                fclose( $out );
+                fclose( $fh );
+                return array( false, 'short write extracting ' . $rel );
+            }
+            $remaining -= $written;
         }
-        fclose( $out );
+        if ( ! fclose( $out ) ) {
+            fclose( $fh );
+            return array( false, 'short write extracting ' . $rel );
+        }
         // Consume padding to the next 512-byte boundary.
         $pad = $data_padded - $size;
         if ( $pad > 0 ) {
