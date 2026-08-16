@@ -372,12 +372,22 @@ function onionpress_moss_extract_tar( $tar_path, $dest_dir ) {
         while ( $remaining > 0 ) {
             $chunk = fread( $fh, $remaining > 524288 ? 524288 : $remaining );
             if ( $chunk === '' || $chunk === false ) {
-                break;
+                fclose( $out );
+                fclose( $fh );
+                return array( false, 'truncated file data in ' . $rel );
             }
-            fwrite( $out, $chunk );
-            $remaining -= strlen( $chunk );
+            $written = fwrite( $out, $chunk );
+            if ( $written === false || $written !== strlen( $chunk ) ) {
+                fclose( $out );
+                fclose( $fh );
+                return array( false, 'short write extracting ' . $rel );
+            }
+            $remaining -= $written;
         }
-        fclose( $out );
+        if ( ! fclose( $out ) ) {
+            fclose( $fh );
+            return array( false, 'short write extracting ' . $rel );
+        }
         // Consume padding to the next 512-byte boundary.
         $pad = $data_padded - $size;
         if ( $pad > 0 ) {
@@ -397,18 +407,87 @@ function onionpress_moss_route_status() {
     return new WP_REST_Response( array(
         'onion_address'      => onionpress_moss_onion_address(),
         'current_generation' => onionpress_moss_current_generation(),
-        'receiver_version'   => '1.1',
+        'receiver_version'   => '1.2',
         'onion_reachable'    => $reachability['reachable'],
         'onion_http_code'    => $reachability['http_code'],
     ), 200 );
 }
 
 /**
- * POST /generation?id=<id> — accept a raw tar of one moss generation.
+ * Map a PHP upload error code to a message naming the likely ini key.
+ * rfc1867.c cancels an oversize part mid-write and reports
+ * UPLOAD_ERR_INI_SIZE rather than failing the request outright, so this
+ * check must run before is_uploaded_file() -- otherwise a truncated tar
+ * is silently accepted as if it were complete.
+ */
+function onionpress_moss_upload_error_message( $code ) {
+    switch ( $code ) {
+        case UPLOAD_ERR_INI_SIZE:
+            return array( 'upload exceeds upload_max_filesize', 413 );
+        case UPLOAD_ERR_FORM_SIZE:
+            return array( 'upload exceeds the form-declared MAX_FILE_SIZE', 413 );
+        case UPLOAD_ERR_PARTIAL:
+            return array( 'upload was only partially received', 400 );
+        case UPLOAD_ERR_NO_FILE:
+            return array( 'no file part received', 400 );
+        case UPLOAD_ERR_NO_TMP_DIR:
+            return array( 'server has no upload_tmp_dir', 500 );
+        case UPLOAD_ERR_CANT_WRITE:
+            return array( 'server failed to write the upload to disk', 500 );
+        case UPLOAD_ERR_EXTENSION:
+            return array( 'a PHP extension aborted the upload', 500 );
+        default:
+            return array( 'unknown upload error (code ' . $code . ')', 400 );
+    }
+}
+
+/**
+ * Move an uploaded file part to $dest, streaming rather than buffering it
+ * into a PHP string when move_uploaded_file() cannot (cross-device tmp).
  *
- * The body is written to <id>.tar, extracted into <id>.tmp/, then atomically
- * renamed to <id>/. WordPress has already consumed php://input into the
- * request body, so we read it back via $request->get_body().
+ * @return array{0:bool,1:?string} [ok, error message]
+ */
+function onionpress_moss_save_uploaded_part( $tmp_name, $dest ) {
+    if ( @move_uploaded_file( $tmp_name, $dest ) ) {
+        return array( true, null );
+    }
+
+    $in = @fopen( $tmp_name, 'rb' );
+    if ( ! $in ) {
+        return array( false, 'cannot open uploaded part' );
+    }
+    $out = @fopen( $dest, 'wb' );
+    if ( ! $out ) {
+        fclose( $in );
+        return array( false, 'cannot write upload' );
+    }
+    $copied = @stream_copy_to_stream( $in, $out );
+    $closed_in  = fclose( $in );
+    $closed_out = fclose( $out );
+    if ( $copied === false || ! $closed_in || ! $closed_out ) {
+        @unlink( $dest );
+        return array( false, 'cannot write upload' );
+    }
+    return array( true, null );
+}
+
+/**
+ * POST /generation?id=<id> — accept a tar of one moss generation.
+ *
+ * Preferred carrier (receiver_version >= 1.2) is a multipart/form-data
+ * upload with the tar in a part named `tar`: PHP's rfc1867.c streams that
+ * straight to upload_tmp_dir and get_raw_data() never buffers it into a
+ * PHP string. The raw-body path below is kept for older moss clients that
+ * still POST `Content-Type: application/x-tar` directly -- WordPress's
+ * REST server calls set_body(get_raw_data()) *before* our permission
+ * callback runs, so by the time we could reject an oversize raw body the
+ * memory has already been spent. See app/Resources/docker/wordpress/
+ * onionpress-uploads.ini for the memory_limit that exists solely to give
+ * that legacy path headroom -- do not remove either until the raw-body
+ * branch itself is removed.
+ *
+ * Either way, the body/part is written to <id>.tar, extracted into
+ * <id>.tmp/, then atomically renamed to <id>/.
  */
 function onionpress_moss_route_generation( $request ) {
     $id = $request->get_param( 'id' );
@@ -425,13 +504,38 @@ function onionpress_moss_route_generation( $request ) {
     $tmp_dir   = ONIONPRESS_MOSS_GENERATIONS . '/' . $id . '.tmp';
     $final_dir = ONIONPRESS_MOSS_GENERATIONS . '/' . $id;
 
-    // Write the uploaded tar to disk.
-    $body = $request->get_body();
-    if ( $body === '' || $body === null ) {
-        return onionpress_moss_error( 'empty request body', 400 );
-    }
-    if ( @file_put_contents( $tar_path, $body ) === false ) {
-        return onionpress_moss_error( 'cannot write upload', 500 );
+    $files = $request->get_file_params();
+    if ( isset( $files['tar'] ) ) {
+        $f = $files['tar'];
+
+        // Check the upload error first and explicitly -- see the docblock
+        // above onionpress_moss_upload_error_message().
+        if ( ! isset( $f['error'] ) || $f['error'] !== UPLOAD_ERR_OK ) {
+            list( $msg, $status ) = onionpress_moss_upload_error_message(
+                isset( $f['error'] ) ? $f['error'] : -1 );
+            return onionpress_moss_error( $msg, $status );
+        }
+        if ( empty( $f['tmp_name'] ) || ! is_uploaded_file( $f['tmp_name'] ) ) {
+            return onionpress_moss_error( 'upload did not arrive via HTTP POST', 400 );
+        }
+
+        list( $ok, $err ) = onionpress_moss_save_uploaded_part( $f['tmp_name'], $tar_path );
+        if ( ! $ok ) {
+            return onionpress_moss_error( $err, 500 );
+        }
+    } else {
+        // Legacy raw-body path. WordPress has already consumed php://input
+        // into the request body, so we read it back via get_body(); by
+        // this point a too-large body has already either been rejected by
+        // post_max_size (empty body here) or has already cost the memory
+        // that onionpress-uploads.ini's memory_limit exists to cover.
+        $body = $request->get_body();
+        if ( $body === '' || $body === null ) {
+            return onionpress_moss_error( 'empty request body', 400 );
+        }
+        if ( @file_put_contents( $tar_path, $body ) === false ) {
+            return onionpress_moss_error( 'cannot write upload', 500 );
+        }
     }
 
     // Fresh extraction target.
