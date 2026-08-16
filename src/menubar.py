@@ -2791,12 +2791,45 @@ class OnionPressApp(rumps.App):
             self.log(f"Self-heal cycle error: {e}")
 
     def _self_heal_tunnel(self):
-        """Fork-only tunnel triage provider; None = rung silently skipped."""
-        return None
+        """Fork-only tunnel triage provider; None = rung silently skipped.
+
+        Activated only by the TUNNEL_LAUNCHD_LABEL / TUNNEL_PROXY_ADDR
+        config keys (design §3.4). Guarded import so a build without the
+        fork module (the upstream shape) simply loses the rung.
+        """
+        if getattr(self, "_self_heal_tunnel_loaded", False):
+            return self._self_heal_tunnel_obj
+        self._self_heal_tunnel_loaded = True
+        self._self_heal_tunnel_obj = None
+        try:
+            from onionpress import tunnel_fork
+            self._self_heal_tunnel_obj = tunnel_fork.TunnelTriage.from_config(
+                os.path.join(self.app_support, "config"), self._docker,
+                log_func=self.log)
+            if self._self_heal_tunnel_obj is not None:
+                self.log("Self-heal: tunnel triage rung active "
+                         f"({self._self_heal_tunnel_obj.label})")
+        except ImportError:
+            pass
+        except Exception as e:
+            self.log(f"Self-heal: tunnel module unavailable: {e}")
+        return self._self_heal_tunnel_obj
 
     def _self_heal_kick_tunnel(self):
-        """Execute a decided tunnel kick (fork-only; no-op upstream)."""
-        return None
+        """Execute a decided tunnel kick, then re-probe after settling."""
+        tunnel = self._self_heal_tunnel()
+        if tunnel is None:
+            return
+        try:
+            from onionpress.tunnel_fork import KICK_SETTLE_SECONDS
+            if not tunnel.kick():
+                return
+            time.sleep(KICK_SETTLE_SECONDS)
+            ok = tunnel.probe_container_leg()
+            self.log("SELF-HEAL: tunnel kicked; container leg now "
+                     + ("OK" if ok else "still dead"))
+        except Exception as e:
+            self.log(f"SELF-HEAL: tunnel kick failed: {e}")
 
     def _self_heal_restart(self):
         """Unattended `launcher restart` (H2) — the proven fix.
