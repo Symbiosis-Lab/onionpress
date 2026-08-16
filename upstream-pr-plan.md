@@ -87,6 +87,41 @@ branches: frozen export snapshots cut from the upstream base for review, fed
   `plugins/onionpress/` references (`onionpress-moss-receiver` → new name) and the
   `stack-manifest.json` release pin. Wire protocol is unchanged — name-level only.
 
+### Ongoing development flow (the wave model)
+
+Converged 2026-08-16 across the hel and Mac sessions; the moss-side counterpart
+lives in moss's `.claude/CLAUDE.md` ("Multi-agent development flow").
+
+- **Develop on fork `main`, always.** Nobody develops on `upstream/*`. When work
+  is ready to go upstream, freeze a snapshot SHA of main and transplant the
+  upstreamable deltas onto export branches cut from the upstream base — that is
+  a *wave*. Anything landing on main after the freeze is the next wave, never
+  scope creep on open PRs.
+- **Commit purity on main: every commit is wholly upstreamable or wholly
+  fork-only, never mixed.** Mixed commits (`b50483dc`, the updater repoint
+  inside `cli.py`) cost ~10x at extraction time what splitting costs at write
+  time. Fork-only mechanisms go in dedicated files where possible, and register
+  themselves in this file's never-upstream list in the same commit.
+- **While a PR is open, review fixes land on the frozen export branch** and are
+  cherry-picked back to main — never merge main into an open export branch.
+- **After upstream merges a PR, back-merge upstream main into fork main.** Each
+  merged PR shrinks the fork↔upstream delta; the end state is fork main =
+  upstream + the never-upstream set.
+- **Version-gated contracts have one owner.** `receiver_version`, image digest
+  pins: exactly one branch may bump the next value at a time; say so here or in
+  the fabric before bumping. (The 1.3-vs-2.0 receiver fork cost a full
+  coordination cycle.)
+- **Renames of contract-bearing files are sequenced, not just announced:**
+  fork main → consumers (moss plugin) → upstream export. Proven with the
+  receiver rename this wave.
+- **Push branches at the first coherent commit** and after each green commit —
+  an unpushed branch is invisible to every peer and can't be in anyone's
+  snapshot. Subagents doing multi-file work commit WIP early; before redoing a
+  "dead" agent's work, verify its worktree (PR3's agent died *after*
+  committing — relaunching blindly would have clobbered finished work).
+- **Never use FETCH_HEAD in this repo** — concurrent fetches from parallel
+  agents clobber it silently. Resolve explicit SHAs once and pass those.
+
 ## Outreach: the reader-friendly path (designed from Brewster's chair)
 
 Sequence, in the order he experiences it (drafts in `docs/proposals/`; none
@@ -142,6 +177,6 @@ posting, so they get the same review as code.
 | `upstream/fixes` (PR1, 5 commits) | built, verified, pushed |
 | `upstream/tor-bridges` (PR2, 5 commits) | built, verified, pushed |
 | `upstream/static-first-serving` (PR3, 2 commits) | built, verified, pushed |
-| `upstream/static-publish` (PR4, stacks on PR3) | not started |
+| `upstream/static-publish` (PR4, 4 commits, stacks on PR3) | built, verified, pushed |
 | moss plugin rename follow-up | done, committed in moss repo |
 | Opening PRs/issues on brewsterkahle/onionpress | not started — needs user sign-off before posting |
