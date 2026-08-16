@@ -68,6 +68,15 @@ branches and PRs move.
   repointed — no revert needed there.
 - Mixed commit needing a split: b50483dc (build-dmg script vs fork workflows).
 
+## Branch topology
+
+**Fork `main` is the integration branch** — the single most-up-to-date truth.
+Everything converges there: feature branches, this wave's `upstream-prep`
+hygiene/hardening work, and (after each upstream PR merges) a back-merge of
+upstream main. The `upstream/*` branches are the opposite of integration
+branches: frozen export snapshots cut from the upstream base for review, fed
+*from* main's content, never merged *into* from main while their PR is open.
+
 ## Working rules
 
 - All fork work happens in worktrees under `.worktrees/`; never commit on the root

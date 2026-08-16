@@ -95,10 +95,12 @@ printf 'body{color:#0a0}' > "$WORK/fixture/assets/site.css"
 TAR="$WORK/gen.tar"
 ( cd "$WORK/fixture" && tar -cf "$TAR" -C . . )
 
-GENID="moss-$(date +%s)"
+# Multipart carrier, exactly as the contract mandates (receiver_version 2.0
+# dropped the raw application/x-tar body). No manual Content-Type: curl
+# generates the multipart boundary itself.
+GENID="gen-$(date +%s)"
 gen_resp="$(curl -s --max-time 30 -X POST \
-  -H 'Content-Type: application/x-tar' \
-  --data-binary "@${TAR}" \
+  -F "tar=@${TAR}" \
   "${API}/generation?id=${GENID}")"
 info "generation: ${gen_resp}"
 if json_has_true "$gen_resp" ok; then

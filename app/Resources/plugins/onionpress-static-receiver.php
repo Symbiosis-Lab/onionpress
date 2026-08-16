@@ -32,19 +32,66 @@ define( 'ONIONPRESS_STATIC_GENERATIONS', '/var/www/html/site-generations' );
 define( 'ONIONPRESS_STATIC_KEEP',        3 );
 
 /**
- * Localhost trust, shared by every route.
+ * The default gateway of this container's network namespace, or null when it
+ * cannot be determined. Cached for the request lifetime.
  *
- * The receiver is only ever driven by the moss app on the same machine,
- * reaching Apache over the host's loopback port map. It must never be
- * reachable by a public onion visitor. Two independent checks:
+ * Traffic that enters through Docker's host port map is NATed, so inside the
+ * container its source address is the bridge gateway — never 127.0.0.1. This
+ * is the one address that means "came in through the published port" rather
+ * than "came from some other container on the bridge".
+ */
+function onionpress_static_gateway_ip() {
+    static $gateway = false; // false = not computed yet; null = unknown
+    if ( $gateway !== false ) {
+        return $gateway;
+    }
+    $gateway = null;
+    $route = @file_get_contents( '/proc/net/route' );
+    if ( is_string( $route ) ) {
+        foreach ( explode( "\n", $route ) as $line ) {
+            $cols = preg_split( '/\s+/', trim( $line ) );
+            // Destination 00000000 is the default route; column 2 is the
+            // gateway as little-endian hex.
+            if ( count( $cols ) >= 3 && $cols[1] === '00000000' ) {
+                $ip = long2ip( (int) hexdec( implode( '', array_reverse(
+                    str_split( $cols[2], 2 ) ) ) ) );
+                if ( $ip !== false && $ip !== '0.0.0.0' ) {
+                    $gateway = $ip;
+                }
+                break;
+            }
+        }
+    }
+    return $gateway;
+}
+
+/**
+ * Localhost trust, shared by every route: allow only requests that provably
+ * arrived through the host's port map, deny everything else.
+ *
+ * The receiver is driven by a publisher on the same machine, reaching Apache
+ * over the host's loopback port map. It must never be reachable by a public
+ * onion visitor. This is a positive allowlist, not a denylist:
  *
  *   1. Any `X-Forwarded-*` header means the request was relayed by a proxy.
- *      The onion serving path (tor -> apache) sets none, so their presence
- *      is a spoof or a misconfiguration — deny.
- *   2. If REMOTE_ADDR is the tor or onionheaven container, the request
- *      arrived over the onion service rather than the local port map — deny.
+ *      Neither the onion serving path (tor -> apache) nor the host port map
+ *      sets one, so their presence is a spoof or misconfiguration — deny.
+ *   2. REMOTE_ADDR must be loopback (php-served directly) or this
+ *      container's default gateway. A bare `REMOTE_ADDR === '127.0.0.1'`
+ *      check does not work under Docker: the host port publish NATs the
+ *      connection, so a request from the host's loopback arrives with the
+ *      bridge gateway as its source. Conversely the tor and onionheaven
+ *      containers reach Apache by their own bridge addresses, which are
+ *      never the gateway — so onion-side traffic is denied without having
+ *      to enumerate container names.
  *
- * Precedent: onionpress-auto-login.php treats the local machine as trusted.
+ * The gateway cannot distinguish host-loopback from LAN clients when the
+ * port map is bound to 0.0.0.0 — NAT erases that. The compose file binds
+ * the publish to 127.0.0.1 by default (ONIONPRESS_BIND_HOST); overriding
+ * that to a public interface deliberately widens who can publish.
+ *
+ * Fails closed: no REMOTE_ADDR, or an undeterminable gateway on a
+ * non-loopback source, means deny.
  *
  * @return bool True when the request may proceed.
  */
@@ -56,21 +103,16 @@ function onionpress_static_is_local_request() {
         }
     }
 
-    // 2. Reject requests whose source is the tor / onionheaven container.
+    // 2. Positive source check: loopback, or the NAT gateway.
     $remote = isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '';
     if ( $remote === '' ) {
         return false;
     }
-    foreach ( array( 'onionpress-tor', 'onionheaven' ) as $host ) {
-        $ip = gethostbyname( $host );
-        // gethostbyname() returns its input unchanged when resolution fails;
-        // only a real, differing result is a container IP worth matching.
-        if ( $ip !== $host && $remote === $ip ) {
-            return false;
-        }
+    if ( $remote === '::1' || strpos( $remote, '127.' ) === 0 ) {
+        return true;
     }
-
-    return true;
+    $gateway = onionpress_static_gateway_ip();
+    return $gateway !== null && $remote === $gateway;
 }
 
 /**
@@ -407,7 +449,7 @@ function onionpress_static_route_status() {
     return new WP_REST_Response( array(
         'onion_address'      => onionpress_static_onion_address(),
         'current_generation' => onionpress_static_current_generation(),
-        'receiver_version'   => '1.2',
+        'receiver_version'   => '2.0',
         'onion_reachable'    => $reachability['reachable'],
         'onion_http_code'    => $reachability['http_code'],
     ), 200 );
@@ -472,22 +514,19 @@ function onionpress_static_save_uploaded_part( $tmp_name, $dest ) {
 }
 
 /**
- * POST /generation?id=<id> — accept a tar of one moss generation.
+ * POST /generation?id=<id> — accept a tar of one site generation.
  *
- * Preferred carrier (receiver_version >= 1.2) is a multipart/form-data
- * upload with the tar in a part named `tar`: PHP's rfc1867.c streams that
- * straight to upload_tmp_dir and get_raw_data() never buffers it into a
- * PHP string. The raw-body path below is kept for older moss clients that
- * still POST `Content-Type: application/x-tar` directly -- WordPress's
- * REST server calls set_body(get_raw_data()) *before* our permission
- * callback runs, so by the time we could reject an oversize raw body the
- * memory has already been spent. See app/Resources/docker/wordpress/
- * onionpress-uploads.ini for the memory_limit that exists solely to give
- * that legacy path headroom -- do not remove either until the raw-body
- * branch itself is removed.
+ * The only carrier is a multipart/form-data upload with the tar in a part
+ * named `tar`: PHP's rfc1867.c streams that straight to upload_tmp_dir, so
+ * a large site never transits PHP memory. A raw `application/x-tar` body
+ * is NOT accepted (removed at receiver_version 2.0): WordPress's REST
+ * server buffers a raw body into a PHP string *before* the permission
+ * callback runs, so an oversize upload spent its memory before the route
+ * could reject it — the multipart carrier is what makes the upload safe,
+ * not just faster.
  *
- * Either way, the body/part is written to <id>.tar, extracted into
- * <id>.tmp/, then atomically renamed to <id>/.
+ * The part is written to <id>.tar, extracted into <id>.tmp/, then
+ * atomically renamed to <id>/.
  */
 function onionpress_static_route_generation( $request ) {
     $id = $request->get_param( 'id' );
@@ -505,37 +544,27 @@ function onionpress_static_route_generation( $request ) {
     $final_dir = ONIONPRESS_STATIC_GENERATIONS . '/' . $id;
 
     $files = $request->get_file_params();
-    if ( isset( $files['tar'] ) ) {
-        $f = $files['tar'];
+    if ( ! isset( $files['tar'] ) ) {
+        return onionpress_static_error(
+            'expected a multipart/form-data upload with the tar in a part named "tar"',
+            400 );
+    }
+    $f = $files['tar'];
 
-        // Check the upload error first and explicitly -- see the docblock
-        // above onionpress_static_upload_error_message().
-        if ( ! isset( $f['error'] ) || $f['error'] !== UPLOAD_ERR_OK ) {
-            list( $msg, $status ) = onionpress_static_upload_error_message(
-                isset( $f['error'] ) ? $f['error'] : -1 );
-            return onionpress_static_error( $msg, $status );
-        }
-        if ( empty( $f['tmp_name'] ) || ! is_uploaded_file( $f['tmp_name'] ) ) {
-            return onionpress_static_error( 'upload did not arrive via HTTP POST', 400 );
-        }
+    // Check the upload error first and explicitly -- see the docblock
+    // above onionpress_static_upload_error_message().
+    if ( ! isset( $f['error'] ) || $f['error'] !== UPLOAD_ERR_OK ) {
+        list( $msg, $status ) = onionpress_static_upload_error_message(
+            isset( $f['error'] ) ? $f['error'] : -1 );
+        return onionpress_static_error( $msg, $status );
+    }
+    if ( empty( $f['tmp_name'] ) || ! is_uploaded_file( $f['tmp_name'] ) ) {
+        return onionpress_static_error( 'upload did not arrive via HTTP POST', 400 );
+    }
 
-        list( $ok, $err ) = onionpress_static_save_uploaded_part( $f['tmp_name'], $tar_path );
-        if ( ! $ok ) {
-            return onionpress_static_error( $err, 500 );
-        }
-    } else {
-        // Legacy raw-body path. WordPress has already consumed php://input
-        // into the request body, so we read it back via get_body(); by
-        // this point a too-large body has already either been rejected by
-        // post_max_size (empty body here) or has already cost the memory
-        // that onionpress-uploads.ini's memory_limit exists to cover.
-        $body = $request->get_body();
-        if ( $body === '' || $body === null ) {
-            return onionpress_static_error( 'empty request body', 400 );
-        }
-        if ( @file_put_contents( $tar_path, $body ) === false ) {
-            return onionpress_static_error( 'cannot write upload', 500 );
-        }
+    list( $ok, $err ) = onionpress_static_save_uploaded_part( $f['tmp_name'], $tar_path );
+    if ( ! $ok ) {
+        return onionpress_static_error( $err, 500 );
     }
 
     // Fresh extraction target.
