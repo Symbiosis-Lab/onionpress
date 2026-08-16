@@ -23,3 +23,22 @@ jobs:
 
       - name: Run all tests
         run: python -m unittest discover tests -p "test_*.py" -v
+
+  php-tests:
+    name: PHP receiver tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The receiver's pure helpers are plain PHP functions with no
+      # WordPress dependency, so they run standalone (each script defines
+      # ABSPATH and stubs add_action, then requires the plugin). They had
+      # no CI job at all, which is how the v1.2 upload guards and now the
+      # v1.3 status-source selection could only be checked by hand.
+      - name: Run receiver unit tests
+        run: |
+          set -e
+          for t in tests/test-moss-receiver-*.php; do
+            echo "== $t"
+            php "$t"
+          done
