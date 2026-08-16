@@ -11,8 +11,16 @@ name: Build DMG
 #     v2.4.107-moss.5-ci.3 are iteration builds: artifact only, no release.
 #   - workflow_dispatch         — build + artifact, no release.
 #
-# moss reaches the DMG by exact pinned URL, never by "latest", so the
-# release is created as prerelease and never marked latest.
+# The release stream has TWO consumers, and only marking releases "latest"
+# serves both. moss reaches the DMG by exact pinned URL from
+# plugins/onionpress/stack-manifest.json, so it does not care — but the app's
+# own updater (src/onionpress/updater.py) resolves
+# api.github.com/repos/Symbiosis-Lab/onionpress/releases/latest, which SKIPS
+# prereleases. Publishing these as prereleases therefore froze "Check for
+# Updates" on v2.4.107-moss.2 (2026-07-27) while six newer builds shipped
+# behind it, and moss re-pins only on a first install — so a stranded install
+# had no route forward at all. Do not re-add --prerelease to the final-tag
+# release below. The "-ci." iteration tags already publish nothing.
 
 on:
   workflow_dispatch:
@@ -83,11 +91,10 @@ jobs:
             echo "- workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo "- onionpress.dmg sha256: \`${{ steps.sha.outputs.sha256 }}\`"
             echo
-            echo "Pinned by moss plugins/onionpress/stack-manifest.json — reached"
-            echo "by exact URL, never via latest."
+            echo "Pinned by moss plugins/onionpress/stack-manifest.json (exact URL),"
+            echo "and reachable as \`latest\` by the app's own updater."
           } > release-notes.md
           gh release create "$GITHUB_REF_NAME" build/onionpress.dmg \
-            --prerelease \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md
 
