@@ -46,6 +46,48 @@ CONNECT_RETRY_DELAY = 5
 HS_BASE_DIR = "/var/lib/tor/hidden_service"
 
 # ---------------------------------------------------------------------------
+# End-to-end reachability probe
+# ---------------------------------------------------------------------------
+# The 2026-08-16 incident: the onion was end-to-end dead for ~9 hours while
+# every local signal read green — bootstrapped=100%, circuit-established=1,
+# ADD_ONION accepted, HS_DESC UPLOADED delivered — because none of those is a
+# fetch. The probe below is the missing measurement: a real Tor-routed
+# self-fetch of our own onion through the local SOCKS port. C Tor has no
+# self-shortcut (client and service subsystems are disjoint; the rendezvous
+# point is always a remote relay), so a SOCKS self-fetch is a genuine full
+# rendezvous. Everything is env-tunable so tests and the live drill
+# (E2E_PROBE_ADDRESS_OVERRIDE pointed at a nonexistent address) can shrink
+# the timings without patching code.
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+
+
+E2E_PROBE_INTERVAL_OK = _env_int("E2E_PROBE_INTERVAL_OK", 180)
+E2E_PROBE_INTERVAL_BAD = _env_int("E2E_PROBE_INTERVAL_BAD", 60)
+# Cold rendezvous through obfs4+Veee measured 8-16s; 30s timeouts were the
+# incident's failure signature, so 45 avoids flapping on slow-but-alive.
+E2E_PROBE_TIMEOUT = _env_int("E2E_PROBE_TIMEOUT", 45)
+E2E_FAIL_THRESHOLD = _env_int("E2E_FAIL_THRESHOLD", 3)
+
+SOCKS_HOST = "127.0.0.1"
+SOCKS_PORT = 9050
+
+# Control onions for the failure-attribution fetch: if our tor cannot reach
+# ANY onion, the transport path is dead and HS-layer rungs are pointless.
+# Primary is the OnionHeaven hub (same default as health.py); fallback is
+# DuckDuckGo's v3 onion, which outlives our own infrastructure.
+CONTROL_ONIONS = (
+    os.environ.get("E2E_CONTROL_ONION")
+    or "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",
+    "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
+)
+
+# ---------------------------------------------------------------------------
 # The escalation ladder
 # ---------------------------------------------------------------------------
 # Everything above recovers Tor *within* its current process. That is not
@@ -467,6 +509,119 @@ def discover_onion_addresses():
     except OSError:
         pass
     return list(addresses)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end self-fetch (SOCKS5h, pure stdlib)
+# ---------------------------------------------------------------------------
+def _recv_exact(s, n):
+    """Read exactly n bytes or as many as arrive before EOF."""
+    buf = b""
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def socks5h_fetch(host, socks_host=SOCKS_HOST, socks_port=SOCKS_PORT,
+                  timeout=None, port=80):
+    """GET http://<host>/ through the local SOCKS5 proxy, hostname mode.
+
+    Pure stdlib — the watchdog's no-external-deps rule. The hostname goes to
+    the proxy verbatim (SOCKS5h): tor resolves .onion, we never touch DNS.
+    For an onion destination, the wait for the CONNECT reply IS the
+    rendezvous — tor answers only once the full client-side circuit is up.
+
+    Returns a dict:
+      ok        True only for a 200/301 without the takeover marker
+      responded an HTTP status line arrived (transport + HS path both work)
+      code      "200", "302", ... or "timeout"/"refused"/"socks-<n>"/"error:..."
+      stage     where it failed: connect / socks-handshake / rendezvous / http,
+                "" once a response was parsed
+      takeover  X-OnionHeaven-Takeover: 1 header seen
+      ms        elapsed milliseconds
+    """
+    timeout = E2E_PROBE_TIMEOUT if timeout is None else timeout
+    start = time.time()
+    res = {"ok": False, "responded": False, "code": "", "stage": "",
+           "takeover": False, "ms": 0}
+    stage = "connect"
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((socks_host, socks_port))
+
+        stage = "socks-handshake"
+        s.sendall(b"\x05\x01\x00")  # SOCKS5, one method: no auth
+        reply = _recv_exact(s, 2)
+        if reply != b"\x05\x00":
+            res.update(stage=stage, code="handshake")
+            return res
+
+        stage = "rendezvous"
+        hostb = host.encode("idna") if not host.isascii() else host.encode()
+        s.sendall(b"\x05\x01\x00\x03" + bytes([len(hostb)]) + hostb
+                  + port.to_bytes(2, "big"))
+        reply = _recv_exact(s, 4)
+        if len(reply) < 4:
+            res.update(stage=stage, code="eof")
+            return res
+        if reply[1] != 0:
+            res.update(stage=stage, code=f"socks-{reply[1]}")
+            return res
+        atyp = reply[3]
+        if atyp == 1:
+            _recv_exact(s, 4 + 2)
+        elif atyp == 3:
+            alen = _recv_exact(s, 1)
+            _recv_exact(s, (alen[0] if alen else 0) + 2)
+        elif atyp == 4:
+            _recv_exact(s, 16 + 2)
+
+        stage = "http"
+        s.sendall(f"GET / HTTP/1.0\r\nHost: {host}\r\n"
+                  f"User-Agent: OnionPress-Watchdog\r\n\r\n".encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf and len(buf) < 65536:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        text = buf.decode("utf-8", errors="replace")
+        lines = text.split("\r\n")
+        parts = lines[0].split(None, 2) if lines else []
+        if len(parts) < 2 or not parts[0].startswith("HTTP/"):
+            res.update(stage=stage, code="badresponse")
+            return res
+        code = parts[1]
+        takeover = False
+        for line in lines[1:]:
+            if not line:
+                break  # end of headers
+            name, _, value = line.partition(":")
+            if (name.strip().lower() == "x-onionheaven-takeover"
+                    and value.strip() == "1"):
+                takeover = True
+        res.update(responded=True, code=code, takeover=takeover, stage="",
+                   ok=(code in ("200", "301") and not takeover))
+        return res
+    except socket.timeout:
+        res.update(stage=stage, code="timeout")
+        return res
+    except ConnectionRefusedError:
+        res.update(stage=stage, code="refused")
+        return res
+    except OSError as e:
+        res.update(stage=stage, code=f"error:{e.__class__.__name__}")
+        return res
+    finally:
+        res["ms"] = int((time.time() - start) * 1000)
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 def do_dropguards(cmd_sock, state, reason):

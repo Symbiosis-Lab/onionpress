@@ -10,8 +10,11 @@ never restarted. The ladder now hangs off SERVING instead.
 import importlib.util
 import json
 import os
+import socket
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 _WATCHDOG = os.path.join(
@@ -314,6 +317,177 @@ class TestStateFile(unittest.TestCase):
 
     def test_an_unwritable_path_is_never_fatal(self):
         tw.write_state_file(_serving_state(), True, path="/proc/nope/state.json")
+
+
+class FakeSocks5Server:
+    """In-process SOCKS5 server with scripted behavior, one connection at a time.
+
+    Modes: "ok" (handshake, then send http_response), "hang" (accept the
+    CONNECT and never reply — the rendezvous-timeout shape), "unreachable"
+    (SOCKS reply 0x04 host unreachable — what tor sends when it cannot
+    build the circuit).
+    """
+
+    def __init__(self, mode="ok",
+                 http_response=b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\nhello"):
+        self.mode = mode
+        self.http_response = http_response
+        self.requested_host = None
+        self.request = b""
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(1)
+        self.port = self.listener.getsockname()[1]
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _read_exact(self, conn, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                return buf
+            buf += chunk
+        return buf
+
+    def _serve(self):
+        conn = None
+        try:
+            conn, _ = self.listener.accept()
+            conn.settimeout(5)
+            greeting = self._read_exact(conn, 2)
+            if len(greeting) < 2:
+                return
+            self._read_exact(conn, greeting[1])  # auth methods offered
+            conn.sendall(b"\x05\x00")            # no-auth accepted
+            self._read_exact(conn, 4)            # VER CMD RSV ATYP (domain expected)
+            alen = self._read_exact(conn, 1)[0]
+            self.requested_host = self._read_exact(conn, alen).decode()
+            self._read_exact(conn, 2)            # destination port
+            if self.mode == "hang":
+                time.sleep(3)
+                return
+            if self.mode == "unreachable":
+                conn.sendall(b"\x05\x04\x00\x01" + b"\x00" * 6)
+                return
+            conn.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
+            self.request = conn.recv(65536)
+            conn.sendall(self.http_response)
+        except OSError:
+            pass
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    def close(self):
+        try:
+            self.listener.close()
+        except OSError:
+            pass
+
+
+class TestSocks5hProbe(unittest.TestCase):
+    """socks5h_fetch is the measurement the 2026-08-16 incident proved missing:
+    a genuine Tor-routed self-fetch, pure stdlib, hostname-mode CONNECT."""
+
+    def _fetch(self, srv, **kw):
+        kw.setdefault("timeout", 2)
+        return tw.socks5h_fetch("selftest.onion", socks_host="127.0.0.1",
+                                socks_port=srv.port, **kw)
+
+    def test_a_200_response_is_ok_and_hostname_goes_to_the_proxy(self):
+        srv = FakeSocks5Server()
+        try:
+            res = self._fetch(srv)
+        finally:
+            srv.close()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["code"], "200")
+        self.assertTrue(res["responded"])
+        self.assertFalse(res["takeover"])
+        # hostname-mode: the proxy resolves, never us — .onion has no DNS
+        self.assertEqual(srv.requested_host, "selftest.onion")
+        self.assertIn(b"GET / HTTP/1.0", srv.request)
+
+    def test_301_counts_as_ok_like_the_host_side_probe(self):
+        srv = FakeSocks5Server(
+            http_response=b"HTTP/1.0 301 Moved Permanently\r\nLocation: x\r\n\r\n")
+        try:
+            res = self._fetch(srv)
+        finally:
+            srv.close()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["code"], "301")
+
+    def test_a_302_is_a_response_but_not_serving(self):
+        # 302 is the OnionHeaven takeover redirector's shape (health.py parity).
+        srv = FakeSocks5Server(
+            http_response=b"HTTP/1.0 302 Found\r\nLocation: elsewhere\r\n\r\n")
+        try:
+            res = self._fetch(srv)
+        finally:
+            srv.close()
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], "302")
+        self.assertTrue(res["responded"])
+
+    def test_the_takeover_header_marks_takeover_regardless_of_status(self):
+        srv = FakeSocks5Server(
+            http_response=b"HTTP/1.0 200 OK\r\nX-OnionHeaven-Takeover: 1\r\n\r\nwayback")
+        try:
+            res = self._fetch(srv)
+        finally:
+            srv.close()
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["takeover"])
+        self.assertEqual(res["code"], "200")
+
+    def test_connection_refused_fails_at_the_connect_stage(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        res = tw.socks5h_fetch("x.onion", socks_host="127.0.0.1",
+                               socks_port=port, timeout=2)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["responded"])
+        self.assertEqual(res["stage"], "connect")
+        self.assertEqual(res["code"], "refused")
+
+    def test_a_rendezvous_that_never_completes_times_out(self):
+        # The incident's signature: the CONNECT is accepted, the reply never
+        # comes (rc=28 on the host side). Stage must say rendezvous, not http.
+        srv = FakeSocks5Server(mode="hang")
+        try:
+            res = self._fetch(srv, timeout=0.3)
+        finally:
+            srv.close()
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["stage"], "rendezvous")
+        self.assertEqual(res["code"], "timeout")
+
+    def test_a_socks_error_reply_reports_its_code(self):
+        srv = FakeSocks5Server(mode="unreachable")
+        try:
+            res = self._fetch(srv)
+        finally:
+            srv.close()
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["stage"], "rendezvous")
+        self.assertEqual(res["code"], "socks-4")
+
+    def test_probe_records_elapsed_ms(self):
+        srv = FakeSocks5Server()
+        try:
+            res = self._fetch(srv)
+        finally:
+            srv.close()
+        self.assertIsInstance(res["ms"], int)
+        self.assertGreaterEqual(res["ms"], 0)
 
 
 class TestConfiguredTransports(unittest.TestCase):
