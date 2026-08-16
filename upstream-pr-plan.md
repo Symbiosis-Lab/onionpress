@@ -87,6 +87,28 @@ branches: frozen export snapshots cut from the upstream base for review, fed
   `plugins/onionpress/` references (`onionpress-moss-receiver` → new name) and the
   `stack-manifest.json` release pin. Wire protocol is unchanged — name-level only.
 
+## Entrance point: one umbrella issue
+
+The review surface is deliberately split (4 PRs + 3 proposal issues), so the
+**entrance point is a single umbrella tracking issue on
+`brewsterkahle/onionpress`**: "Static-site publishing for OnionPress —
+working demo + PR series". It is the one link sent to Brewster and contains,
+in order:
+
+1. **The demo recording at the top** — moss publishing a site to a live
+   `.onion` in one click. Attach the video to the issue directly (GitHub
+   embeds mp4/mov ≤10 MB inline); if larger, upload it as an asset on a
+   `Symbiosis-Lab/onionpress` release (public, stable links) and embed a
+   GIF teaser + link. NEVER link into the moss repo — it is private and
+   the link would 404 for upstream.
+2. The 4 PRs, linked smallest-first with one-line summaries. PR 1 (bug
+   fixes) is the low-effort on-ramp; PRs 3+4 are the centerpiece the demo
+   showcases.
+3. The 3 forward-proposal issues below.
+
+Every PR and proposal issue links back to the umbrella, so any entry point
+leads to the whole story.
+
 ## Forward proposals to Brewster (separate from the PRs)
 
 Three collaboration topics to propose as **individual issues on
