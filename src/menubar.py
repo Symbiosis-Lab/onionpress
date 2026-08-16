@@ -277,8 +277,12 @@ class OnionPressApp(rumps.App):
         except (OSError, ValueError):
             pass  # corrupt or unreadable — proceed to normal detection
 
-        # Detect port offset for multi-user support
-        _port_config = op_config.detect_port_offset()
+        # Detect port offset for multi-user support. resolve_port_offset()
+        # reads our own running container's published port first (if a
+        # stack is already up) and only allocates via bind-probing when
+        # nothing is running yet — see its docstring for why the bind
+        # probe alone can't answer "what port is our own stack on".
+        _port_config = op_config.resolve_port_offset()
         self.wp_port = _port_config.wp_port
         self.socks_port = _port_config.socks_port
         self.proxy_port = _port_config.proxy_port
@@ -2749,6 +2753,32 @@ class OnionPressApp(rumps.App):
         thread = threading.Thread(target=generator, daemon=True)
         thread.start()
 
+    def _resync_ports(self):
+        """Re-read our own container's published port after start/restart.
+
+        __init__ resolves the offset once; a stop/start can bring the
+        stack up on a different offset than that snapshot (e.g. another
+        process — the `onionpress` CLI, a stale env var — raced us and
+        picked its own). Comparing against what Docker actually published
+        keeps self.wp_port (and everything derived from it: local_url,
+        onion_proxy globals, ONIONPRESS_*_PORT env vars) truthful instead
+        of silently mis-addressed for the rest of the session.
+        """
+        running_port = launcher_ops.get_running_wp_port()
+        if running_port is None or running_port == self.wp_port:
+            return
+        offset = running_port - 8080
+        self.log(f"Port resync: was {self.wp_port}, running stack is on {running_port}")
+        self.wp_port = running_port
+        self.socks_port = 9050 + offset
+        self.proxy_port = 9077 + offset
+        os.environ["ONIONPRESS_PORT_OFFSET"] = str(offset)
+        os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
+        os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
+        os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
+        onion_proxy.PROXY_PORT = self.proxy_port
+        onion_proxy.PHP_PROXY_PORT = self.wp_port
+
     @property
     def local_url(self):
         """The local URL for accessing WordPress."""
@@ -3036,6 +3066,7 @@ class OnionPressApp(rumps.App):
             # Start the service normally
             self.update_splash_status("Starting your site...")
             subprocess.run([self.launcher_script, "start"])
+            self._resync_ports()
 
             # Poll until WordPress is responding (replaces fixed sleep)
             self.update_splash_status("Starting your site...")
@@ -3711,6 +3742,7 @@ class OnionPressApp(rumps.App):
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
+            self._resync_ports()
 
             # Poll until WordPress is responding (replaces fixed sleep)
             max_wait = 60

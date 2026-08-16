@@ -57,7 +57,7 @@ try:
     from onionpress.docker import Docker
     from onionpress.platform import resolve_paths, OS, detect_os
     from onionpress.config import (
-        ensure_config, ensure_secrets, read_value, detect_port_offset,
+        ensure_config, ensure_secrets, read_value, resolve_port_offset,
     )
     from onionpress import launcher_ops, system_metrics
     from onionpress.power import SystemdInhibitor
@@ -109,7 +109,7 @@ def _make_manager(docker: Docker) -> ContainerManager:
     # resolve_paths() leaves docker_dir="" when there's no app bundle.
     # On Linux the docker configs live under INSTALL_DIR.
     paths = dataclasses.replace(paths, docker_dir=DOCKER_DIR)
-    port_cfg = detect_port_offset()
+    port_cfg = resolve_port_offset()
     return ContainerManager(docker, paths, port_cfg, log_func=log)
 
 
