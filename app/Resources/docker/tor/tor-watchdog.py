@@ -812,7 +812,100 @@ def maybe_e2e_probe(cmd_sock, state, circuits_up, now=None, fetch=None):
             f"streak={state.e2e_fail_streak}/{E2E_FAIL_THRESHOLD}")
         if state.e2e_fail_streak >= E2E_FAIL_THRESHOLD:
             state.e2e_ok = False
+            classify_down(cmd_sock, state, fetch=fetch)
     return True
+
+
+def rebuild_services(cmd_sock, state, trigger, now=None):
+    """DEL+ADD every service: fresh intro circuits + descriptor republish.
+
+    The cheapest service-side rebuild, one rung below a tor restart — the
+    accepted remediation for the tor#19522/#8864 class where C Tor holds
+    'established' intro circuits nothing can traverse (SIGHUP provably
+    moves them across a reload; DEL_ONION+ADD_ONION destroys them). The
+    NEWNYM afterwards busts our own client-side descriptor cache so the
+    next probe fetches the fresh descriptor instead of rendezvousing on
+    the stale one — the 2026-08-14 reclaim lesson. Returns the number of
+    services attached afterwards; re-arms the publish monitor on success.
+    """
+    now = now or time.time()
+    del_all_services(cmd_sock, state.services)
+    added, collisions = add_all_services(cmd_sock, state.services)
+    count = added + collisions
+    if count > 0:
+        state.services_active = True
+        state.last_recovery_time = now
+        state.last_recovery_trigger = trigger
+        state.hs_desc_uploaded_since_recovery = False
+        state.hs_desc_upload_started_since_recovery = False
+        state.hs_desc_upload_failed_since_recovery = False
+        state.hs_desc_last_failed_reason = ""
+    resp = send_cmd(cmd_sock, "SIGNAL NEWNYM")
+    if "250" in resp:
+        log("Sent SIGNAL NEWNYM — dropping the pre-republish descriptor "
+            "from the client cache")
+    # Whatever HSFETCH judged is about a descriptor that no longer exists.
+    state.hsfetch_pending = ""
+    state.hsfetch_received = False
+    state.hsfetch_failed_reason = ""
+    return count
+
+
+_VERDICT_DETAIL = {
+    "network": "control-onion fetch failed — transport path dead, HS rungs pointless",
+    "descriptor": "descriptor not fetchable from the DHT",
+    "intro-wedge": "descriptor fetchable but rendezvous fails — dead intro circuits",
+    "takeover": "response carries the takeover marker — hub is serving our address",
+}
+
+
+def classify_down(cmd_sock, state, fetch=None):
+    """Attribute a confirmed end-to-end failure (§3.1's verdict taxonomy).
+
+    Ordered discriminators. A response carrying the takeover marker means
+    the network path works and someone (our hub) answers for our address —
+    restarting would fight the reclaim. A dead control onion means OUR tor
+    reaches no onion at all: transport/tunnel death, where HS-layer rungs
+    are pointless. Otherwise HSFETCH our own address — answered
+    asynchronously via HS_DESC events between passes — splits
+    descriptor-not-in-the-DHT from the tor#19522/#8864 intro-wedge class
+    (descriptor uploads fine, its intro points are dead).
+
+    Returns the verdict; "" while HSFETCH evidence is still in flight.
+    Called at the declare-down transition and then once per bad-interval
+    pass, so a verdict can refine or flip as the outage evolves.
+    """
+    fetch = fetch or socks5h_fetch
+    verdict = ""
+    if state.last_probe_takeover:
+        verdict = "takeover"
+    else:
+        control_ok = False
+        for ctrl in CONTROL_ONIONS:
+            if fetch(ctrl).get("responded"):
+                control_ok = True
+                break
+        if not control_ok:
+            verdict = "network"
+        elif state.hsfetch_failed_reason:
+            verdict = "descriptor"
+        elif state.hsfetch_received:
+            verdict = "intro-wedge"
+        elif not state.hsfetch_pending:
+            addr_id = e2e_probe_address(state).replace(".onion", "")
+            if addr_id:
+                state.hsfetch_pending = addr_id
+                state.hsfetch_received = False
+                state.hsfetch_failed_reason = ""
+                send_cmd(cmd_sock, f"HSFETCH {addr_id}")
+    if verdict and verdict != state.e2e_verdict:
+        detail = _VERDICT_DETAIL.get(verdict, "")
+        if verdict == "descriptor" and state.hsfetch_failed_reason:
+            detail += f" (HSFETCH reason={state.hsfetch_failed_reason})"
+        log(f"verdict={verdict} ({detail})")
+    if verdict:
+        state.e2e_verdict = verdict
+    return verdict
 
 
 def update_serving_ledger(state, serving, now):
@@ -863,9 +956,16 @@ def update_serving_ledger(state, serving, now):
 def next_escalation(state, now, has_transport):
     """Which rung is due, or None. Pure — the whole ladder in one place.
 
-    Returns one of: None, "restart-pt", "restart-tor", "degraded".
-    DROPGUARDS is not here: it is event-driven (see `process_event`) and fires
-    long before this does.
+    Returns one of: None, "reclaim", "rebuild-hs", "restart-pt",
+    "restart-tor", "degraded". DROPGUARDS is not here: it is event-driven
+    (see `process_event`) and fires long before this does.
+
+    The e2e verdict directs the ladder (§3.2): takeover means our hub is
+    serving our readers — restarting fights the reclaim, so the only action
+    is one republish to race the takeover descriptor, then patience;
+    descriptor/intro-wedge get the cheap DEL+ADD rebuild before any
+    restart; network skips the rebuild because no HS-layer action can fix
+    a dead transport.
     """
     if state.not_serving_since <= 0:
         return None
@@ -873,6 +973,11 @@ def next_escalation(state, now, has_transport):
 
     if state.degraded:
         return None  # stopped climbing on purpose; the state file says so
+
+    if state.e2e_verdict == "takeover":
+        if state.services and not state.reclaim_republished:
+            return "reclaim"
+        return None
 
     # Enough restarts that changed nothing → stop. Two counters on purpose:
     # the sliding window caps total churn, and the per-outage counter (which
@@ -882,6 +987,11 @@ def next_escalation(state, now, has_transport):
     if (len(recent) >= DEGRADED_AFTER_RESTARTS
             or state.restarts_this_outage >= DEGRADED_AFTER_RESTARTS):
         return "degraded"
+
+    if (state.e2e_verdict in ("descriptor", "intro-wedge")
+            and state.services
+            and not state.hs_rebuilt_this_outage):
+        return "rebuild-hs"
 
     if (down_for >= TOR_RESTART_AFTER
             and now - _last_or_zero(state.tor_restarts) >= TOR_RESTART_COOLDOWN):
@@ -1013,19 +1123,26 @@ def do_halt(cmd_sock, state, reason, now=None):
 
 
 def do_degrade(state, reason):
-    """Rung 4: stop climbing, and say so where moss can read it.
+    """Rung 4: stop climbing and hand the outage to the actor above us.
 
     Restarting into a network that is simply gone is worse than waiting: it
     burns the user's battery and guarantees we are mid-bootstrap, rather than
-    connected, at the moment the network comes back. But going quiet is not an
-    option either — moss has to be able to answer "is my site live", so the
-    honest answer gets written down.
+    connected, at the moment the network comes back. But this is no longer a
+    dead end — the incident's fix lives host-side (`launcher restart`
+    recreates containers, networks, and the tunnel binding; 22 seconds
+    against our 9 hours), so the state file now carries an explicit
+    escalation request for the host supervisor. We stay quiescent until
+    either a probe-confirmed serving clears the ledger or a fresh container
+    start gives the situation a new chance.
     """
     if state.degraded:
         return
     state.degraded = True
     state.degraded_reason = reason
-    log(f"DEGRADED: {reason} — no longer escalating; will recover if the network returns")
+    state.escalate_to_host = True
+    state.handoff_reason = reason
+    log(f"HANDOFF: {reason} — no longer escalating; requesting host "
+        f"escalation (verdict={state.e2e_verdict or 'undetermined'})")
 
 
 def write_state_file(state, circuit_established, path=None, now=None):
@@ -1192,10 +1309,31 @@ def process_event(line, cmd_sock, state):
     if "HS_DESC UPLOAD " in line:
         state.hs_desc_upload_started_since_recovery = True
         return
+    if "HS_DESC RECEIVED " in line:
+        # Fetch success. Only meaningful for the verdict HSFETCH we issued:
+        # event format is `650 HS_DESC RECEIVED <Address> <AuthType> <HsDir> ...`.
+        parts = line.split()
+        addr = parts[3] if len(parts) > 3 else ""
+        if state.hsfetch_pending and addr == state.hsfetch_pending:
+            state.hsfetch_received = True
+            state.hsfetch_pending = ""
+        return
     if "HS_DESC FAILED " in line:
-        state.hs_desc_upload_failed_since_recovery = True
+        # FAILED covers both upload failures and fetch failures; the address
+        # token tells them apart. An answer to OUR pending verdict HSFETCH is
+        # fetch evidence, not an upload failure.
+        parts = line.split()
+        addr = parts[3] if len(parts) > 3 else ""
+        reason = ""
         if "REASON=" in line:
-            state.hs_desc_last_failed_reason = line.split("REASON=", 1)[1].split()[0]
+            reason = line.split("REASON=", 1)[1].split()[0]
+        if state.hsfetch_pending and addr == state.hsfetch_pending:
+            state.hsfetch_failed_reason = reason or "UNKNOWN"
+            state.hsfetch_pending = ""
+            return
+        state.hs_desc_upload_failed_since_recovery = True
+        if reason:
+            state.hs_desc_last_failed_reason = reason
         return
 
 
@@ -1278,20 +1416,13 @@ def check_stalls(cmd_sock, state):
             log(f"HS_DESC stall after recovery ({fields}) — UPLOAD in flight, leaving alone")
         elif state.services:
             log(f"HS_DESC stall after recovery ({fields}) — DEL+ADD to force republish")
-            del_all_services(cmd_sock, state.services)
-            added, _ = add_all_services(cmd_sock, state.services)
-            if added > 0:
-                state.services_active = True
-                # Re-arm rather than disarm. Disarming is how the old code went
-                # quiet: it did exactly one DEL+ADD per recovery and then
-                # stopped watching, so a descriptor that never landed looked
-                # identical to one that did. Staying armed is also what keeps
-                # `is_serving` false, which is what lets the ladder climb.
-                state.last_recovery_time = now
-                state.last_recovery_trigger = "hs-desc-stall"
-                state.hs_desc_upload_started_since_recovery = False
-                state.hs_desc_upload_failed_since_recovery = False
-                state.hs_desc_last_failed_reason = ""
+            # Re-arm rather than disarm (rebuild_services re-arms on success).
+            # Disarming is how the old code went quiet: it did exactly one
+            # DEL+ADD per recovery and then stopped watching, so a descriptor
+            # that never landed looked identical to one that did. Staying
+            # armed is also what keeps `is_serving` false, which is what lets
+            # the ladder climb.
+            if rebuild_services(cmd_sock, state, "hs-desc-stall", now=now) > 0:
                 rearmed = True
         else:
             # SOCKS-only container (no services). Fall back to HSFETCH to
@@ -1335,19 +1466,36 @@ def check_stalls(cmd_sock, state):
     rung = next_escalation(state, now, has_transport=bool(transports))
     if rung:
         down_for = int(now - state.not_serving_since)
-        if rung == "restart-pt":
+        if rung == "reclaim":
+            log("verdict=takeover — hub is serving our address; republishing "
+                "once to race the takeover descriptor, no restarts "
+                "(the heartbeat reclaim is the cure)")
+            rebuild_services(cmd_sock, state, "takeover-reclaim", now=now)
+            state.reclaim_republished = True
+        elif rung == "rebuild-hs":
+            log(f"verdict={state.e2e_verdict} — not serving for {down_for}s; "
+                f"DEL+ADD rebuild for fresh intro circuits + republish")
+            rebuild_services(cmd_sock, state, f"verdict-{state.e2e_verdict}",
+                             now=now)
+            state.hs_rebuilt_this_outage = True
+        elif rung == "restart-pt":
             do_restart_pt(cmd_sock, state,
                           f"not serving for {down_for}s — restarting "
-                          f"{'/'.join(transports)}")
+                          f"{'/'.join(transports)}", now=now)
         elif rung == "restart-tor":
             do_halt(cmd_sock, state,
                     f"not serving for {down_for}s and a transport restart "
-                    f"did not help")
+                    f"did not help", now=now)
         elif rung == "degraded":
+            recent = len([t for t in state.tor_restarts
+                          if now - t < DEGRADED_WINDOW])
             do_degrade(state,
-                       f"not serving for {down_for}s after "
-                       f"{DEGRADED_AFTER_RESTARTS} Tor restarts — the network "
-                       f"itself looks unreachable")
+                       f"{max(recent, state.restarts_this_outage)} Tor "
+                       f"restarts this outage changed nothing "
+                       f"(not serving for {down_for}s)")
+        # Any rung action must reach disk on this very pass — for HALT the
+        # container is about to die, and for the handoff the host reads it.
+        state.last_state_write = 0
 
     # Publish what we know, whether or not we acted. moss has to be able to
     # answer "is my site live" at any moment, not only after a failure.
@@ -1485,11 +1633,14 @@ def run():
                     n, collisions = add_all_services(cmd_sock, state.services)
                     if collisions > 0:
                         # Services were re-added during sleep (race condition).
-                        # DEL then ADD to force fresh descriptor publication.
+                        # DEL then ADD to force fresh descriptor publication
+                        # (rebuild_services also NEWNYMs so our own client
+                        # cache drops the pre-republish descriptor).
                         log(f"Collision on wake — DEL+ADD to force fresh descriptors")
-                        del_all_services(cmd_sock, state.services)
-                        n, collisions = add_all_services(cmd_sock, state.services)
-                    state.services_active = (n + collisions) > 0
+                        state.services_active = (
+                            rebuild_services(cmd_sock, state, "wake") > 0)
+                    else:
+                        state.services_active = n > 0
 
             # Read events
             try:

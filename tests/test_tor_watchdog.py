@@ -327,6 +327,229 @@ class TestPerOutageAccounting(unittest.TestCase):
             self.assertEqual(after.restarts_this_outage, 0)
 
 
+def _probe_302(_addr):
+    return {"ok": False, "responded": True, "code": "302", "stage": "",
+            "takeover": False, "ms": 900}
+
+
+def _probe_responds(_addr):
+    return {"ok": True, "responded": True, "code": "200", "stage": "",
+            "takeover": False, "ms": 2000}
+
+
+class TestVerdictTaxonomy(unittest.TestCase):
+    """classify_down — §3.1's failure attribution. Wrong attribution is wasted
+    rungs: HS rebuilds against a dead tunnel, restarts against a takeover."""
+
+    def _down_state(self):
+        s = _serving_state()
+        s.e2e_ok = False
+        s.e2e_fail_streak = tw.E2E_FAIL_THRESHOLD
+        return s
+
+    def test_takeover_marker_wins_without_touching_the_network(self):
+        s = self._down_state()
+        s.last_probe_takeover = True
+        calls = []
+
+        def fetch(addr):
+            calls.append(addr)
+            return _probe_responds(addr)
+
+        v = tw.classify_down(FakeSock(), s, fetch=fetch)
+        self.assertEqual(v, "takeover")
+        self.assertEqual(s.e2e_verdict, "takeover")
+        self.assertEqual(calls, [])  # no control fetch needed — we HAVE a response
+
+    def test_no_reachable_control_onion_means_network(self):
+        s = self._down_state()
+        calls = []
+
+        def fetch(addr):
+            calls.append(addr)
+            return _probe_timeout(addr)
+
+        v = tw.classify_down(FakeSock(), s, fetch=fetch)
+        self.assertEqual(v, "network")
+        # both the hub and the fallback were given their chance
+        self.assertEqual(len(calls), len(tw.CONTROL_ONIONS))
+
+    def test_the_fallback_control_onion_can_save_the_attribution(self):
+        # Hub down must not read as 'our transport is dead'.
+        s = self._down_state()
+        responses = [_probe_timeout, _probe_responds]
+
+        def fetch(addr):
+            return responses.pop(0)(addr)
+
+        sock = FakeSock()
+        v = tw.classify_down(sock, s, fetch=fetch)
+        self.assertEqual(v, "")  # control OK -> HSFETCH now in flight
+        self.assertEqual(s.hsfetch_pending, "abc")
+        self.assertTrue(any(c == "HSFETCH abc" for c in sock.sent))
+
+    def test_control_ok_and_hsfetch_failed_means_descriptor(self):
+        s = self._down_state()
+        s.hsfetch_failed_reason = "NOT_FOUND"
+        v = tw.classify_down(FakeSock(), s, fetch=_probe_responds)
+        self.assertEqual(v, "descriptor")
+
+    def test_control_ok_and_hsfetch_received_means_intro_wedge(self):
+        # The tor#19522/#8864 class: descriptor fine, intro circuits dead.
+        s = self._down_state()
+        s.hsfetch_received = True
+        v = tw.classify_down(FakeSock(), s, fetch=_probe_responds)
+        self.assertEqual(v, "intro-wedge")
+
+    def test_hsfetch_is_not_reissued_while_pending(self):
+        s = self._down_state()
+        s.hsfetch_pending = "abc"
+        sock = FakeSock()
+        v = tw.classify_down(sock, s, fetch=_probe_responds)
+        self.assertEqual(v, "")
+        self.assertFalse(any("HSFETCH" in c for c in sock.sent))
+
+    def test_probe_down_transition_triggers_classification(self):
+        # maybe_e2e_probe wires the classifier in at the declare-down moment.
+        s = _serving_state()
+        t = 1000
+        for _ in range(tw.E2E_FAIL_THRESHOLD):
+            tw.maybe_e2e_probe(FakeSock(), s, True, now=t, fetch=_probe_timeout)
+            t += tw.E2E_PROBE_INTERVAL_BAD
+        self.assertIs(s.e2e_ok, False)
+        self.assertEqual(s.e2e_verdict, "network")  # control fetch failed too
+
+    def test_takeover_from_302_shape(self):
+        s = _serving_state()
+        t = 1000
+        for _ in range(tw.E2E_FAIL_THRESHOLD):
+            tw.maybe_e2e_probe(FakeSock(), s, True, now=t, fetch=_probe_302)
+            t += tw.E2E_PROBE_INTERVAL_BAD
+        self.assertEqual(s.e2e_verdict, "takeover")
+
+
+class TestHsDescFetchEvents(unittest.TestCase):
+    """HSFETCH answers arrive as async HS_DESC events; the parser must split
+    fetch results for OUR pending query from upload failures."""
+
+    def test_received_for_the_pending_fetch(self):
+        s = tw.WatchdogState()
+        s.hsfetch_pending = "abc"
+        tw.process_event("650 HS_DESC RECEIVED abc NO_AUTH $D1 descid",
+                         FakeSock(), s)
+        self.assertTrue(s.hsfetch_received)
+        self.assertEqual(s.hsfetch_pending, "")
+
+    def test_failed_for_the_pending_fetch_records_the_reason(self):
+        s = tw.WatchdogState()
+        s.hsfetch_pending = "abc"
+        tw.process_event("650 HS_DESC FAILED abc NO_AUTH $D1 REASON=NOT_FOUND",
+                         FakeSock(), s)
+        self.assertEqual(s.hsfetch_failed_reason, "NOT_FOUND")
+        self.assertEqual(s.hsfetch_pending, "")
+        # and it is NOT misread as a descriptor-upload failure
+        self.assertFalse(s.hs_desc_upload_failed_since_recovery)
+
+    def test_failed_for_another_address_still_counts_as_upload_failure(self):
+        s = tw.WatchdogState()
+        s.hsfetch_pending = "abc"
+        tw.process_event("650 HS_DESC FAILED other NO_AUTH $D1 REASON=UPLOAD_REJECTED",
+                         FakeSock(), s)
+        self.assertTrue(s.hs_desc_upload_failed_since_recovery)
+        self.assertEqual(s.hs_desc_last_failed_reason, "UPLOAD_REJECTED")
+        self.assertEqual(s.hsfetch_pending, "abc")  # still waiting for ours
+
+    def test_received_for_another_address_is_ignored(self):
+        s = tw.WatchdogState()
+        s.hsfetch_pending = "abc"
+        tw.process_event("650 HS_DESC RECEIVED other NO_AUTH $D1 descid",
+                         FakeSock(), s)
+        self.assertFalse(s.hsfetch_received)
+        self.assertEqual(s.hsfetch_pending, "abc")
+
+
+class TestVerdictDirectedRungs(unittest.TestCase):
+    """§3.2: the verdict chooses the rung. takeover => republish once, never
+    restart; descriptor/intro-wedge => DEL+ADD rebuild before the heavy
+    rungs; network => skip the rebuild, it cannot help."""
+
+    def _down(self, verdict, seconds=None, **kw):
+        s = _serving_state()
+        s.e2e_ok = False
+        s.e2e_verdict = verdict
+        s.not_serving_since = 1_000_000
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s, 1_000_000 + (seconds if seconds is not None else tw.TOR_RESTART_AFTER)
+
+    def test_takeover_republishes_once_and_never_restarts(self):
+        s, now = self._down("takeover")
+        self.assertEqual(tw.next_escalation(s, now, has_transport=True), "reclaim")
+        s.reclaim_republished = True
+        # even hours later: reclaim is the heartbeat's job, not a restart's
+        self.assertIsNone(tw.next_escalation(s, now + 99_999, has_transport=True))
+
+    def test_descriptor_verdict_rebuilds_before_the_transport_rung(self):
+        s, now = self._down("descriptor", seconds=tw.PT_RESTART_AFTER)
+        self.assertEqual(tw.next_escalation(s, now, has_transport=True), "rebuild-hs")
+
+    def test_intro_wedge_verdict_also_rebuilds_first(self):
+        s, now = self._down("intro-wedge", seconds=10)
+        self.assertEqual(tw.next_escalation(s, now, has_transport=True), "rebuild-hs")
+
+    def test_rebuild_happens_once_then_the_ladder_continues(self):
+        s, now = self._down("intro-wedge", hs_rebuilt_this_outage=True)
+        self.assertEqual(tw.next_escalation(s, now, has_transport=True), "restart-tor")
+
+    def test_network_verdict_skips_the_pointless_rebuild(self):
+        s, now = self._down("network", seconds=tw.PT_RESTART_AFTER)
+        self.assertEqual(tw.next_escalation(s, now, has_transport=True), "restart-pt")
+
+    def test_takeover_still_yields_to_degraded_never(self):
+        # A takeover is the hub covering our readers; handing off to the host
+        # for a restart would fight the reclaim.
+        s, now = self._down("takeover", restarts_this_outage=3)
+        self.assertEqual(tw.next_escalation(s, now, has_transport=True), "reclaim")
+
+    def test_rebuild_services_del_add_newnym_in_order_and_rearms(self):
+        sock = FakeSock()
+        s = _serving_state()
+        s.hsfetch_received = True
+        s.hsfetch_pending = "abc"
+        count = tw.rebuild_services(sock, s, "verdict-intro-wedge", now=5000)
+        self.assertEqual(count, 1)
+        joined = "\n".join(sock.sent)
+        self.assertLess(joined.index("DEL_ONION"), joined.index("ADD_ONION"))
+        self.assertLess(joined.index("ADD_ONION"), joined.index("SIGNAL NEWNYM"))
+        # publish monitor re-armed for the new window
+        self.assertEqual(s.last_recovery_time, 5000)
+        self.assertEqual(s.last_recovery_trigger, "verdict-intro-wedge")
+        self.assertFalse(s.hs_desc_uploaded_since_recovery)
+        # stale HSFETCH evidence dropped — the descriptor it judged is gone
+        self.assertFalse(s.hsfetch_received)
+        self.assertEqual(s.hsfetch_pending, "")
+
+
+class TestHandoff(unittest.TestCase):
+    """Rung 4 is no longer a dead end: it writes the escalation request the
+    host supervisor (step 3) acts on, then goes quiescent."""
+
+    def test_do_degrade_requests_host_escalation(self):
+        s = _serving_state()
+        s.e2e_verdict = "network"
+        tw.do_degrade(s, "3 restarts this outage changed nothing")
+        self.assertTrue(s.degraded)
+        self.assertTrue(s.escalate_to_host)
+        self.assertEqual(s.handoff_reason, "3 restarts this outage changed nothing")
+
+    def test_degraded_means_quiescent_until_evidence(self):
+        s = _serving_state()
+        s.e2e_ok = False
+        s.not_serving_since = 1000
+        tw.do_degrade(s, "x")
+        self.assertIsNone(tw.next_escalation(s, 999_999, has_transport=True))
+
+
 class TestLadder(unittest.TestCase):
     """`next_escalation` is the whole ladder, and it is pure."""
 
@@ -792,6 +1015,120 @@ class TestConfiguredTransports(unittest.TestCase):
 
     def test_no_torrc_is_not_an_error(self):
         self.assertEqual(tw.configured_transports("/nonexistent/torrc"), [])
+
+
+class TestTheIncidentRegression(unittest.TestCase):
+    """2026-08-16: end-to-end dead ~9 hours, serving=True through 11 restarts,
+    fixed in 22 seconds by a launcher restart nothing ever requested. This is
+    that day replayed against the new code — if any step regresses, the
+    watchdog is lying to the reader again."""
+
+    def test_the_incident_replayed(self):
+        s = _serving_state()
+        sock = FakeSock()
+
+        # Phase 1 — all four local signals green, the probe fails through the
+        # dead tunnel: serving flips False and the verdict says network,
+        # because the control onion is unreachable too.
+        t = 1_000_000
+        for _ in range(tw.E2E_FAIL_THRESHOLD):
+            self.assertTrue(tw.maybe_e2e_probe(sock, s, True, now=t,
+                                               fetch=_probe_timeout))
+            tw.update_serving_ledger(s, tw.is_serving(s, True), now=t)
+            t += tw.E2E_PROBE_INTERVAL_BAD
+        self.assertTrue(tw.local_signals_green(s, True))
+        self.assertIs(s.e2e_ok, False)
+        self.assertFalse(tw.is_serving(s, True))
+        self.assertEqual(s.e2e_verdict, "network")
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=t)
+        outage = s.not_serving_since
+        self.assertGreater(outage, 0)
+
+        # Phase 2 — the ladder climbs to a Tor restart three times. Between
+        # restarts the local signals come back green (the false green that
+        # wiped the old ledger 11 times); with e2e unconfirmed it clears
+        # nothing, and the per-outage count survives.
+        for i in range(3):
+            now = outage + tw.TOR_RESTART_AFTER + i * tw.TOR_RESTART_COOLDOWN
+            # network verdict: no rebuild-hs offered, straight up the ladder
+            self.assertEqual(tw.next_escalation(s, now, has_transport=False),
+                             "restart-tor")
+            tw.do_halt(sock, s, "not serving", now=now)
+            self.assertEqual(s.restarts_this_outage, i + 1)
+            # ...container restarts; fresh probe evidence not in yet:
+            s.e2e_ok = None
+            tw.update_serving_ledger(s, tw.is_serving(s, True), now=now + 300)
+            self.assertEqual(s.not_serving_since, outage)   # outage not closed
+            self.assertEqual(len(s.tor_restarts), i + 1)    # ledger intact
+            s.e2e_ok = False  # the probe re-confirms down
+
+        # Phase 3 — the third useless restart hands off to the host instead
+        # of climbing forever.
+        now += tw.TOR_RESTART_COOLDOWN
+        self.assertEqual(tw.next_escalation(s, now, has_transport=False),
+                         "degraded")
+        tw.do_degrade(s, "3 restarts this outage changed nothing")
+        self.assertTrue(s.escalate_to_host)
+        self.assertIsNone(tw.next_escalation(s, now + 99_999,
+                                             has_transport=True))  # quiescent
+
+        # Phase 4 — the handoff is on disk for the host supervisor.
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "watchdog-state.json")
+            tw.write_state_file(s, True, path=path, now=now)
+            with open(path) as f:
+                payload = json.load(f)
+        self.assertFalse(payload["serving"])
+        self.assertTrue(payload["escalate_to_host"])
+        self.assertEqual(payload["restarts_this_outage"], 3)
+        self.assertEqual(payload["e2e_verdict"], "network")
+
+        # Phase 5 — the host fixes the tunnel; one confirmed probe clears
+        # the whole ledger and ends the quiescence.
+        self.assertTrue(tw.maybe_e2e_probe(sock, s, True,
+                                           now=now + tw.E2E_PROBE_INTERVAL_BAD,
+                                           fetch=_probe_ok))
+        tw.update_serving_ledger(s, tw.is_serving(s, True), now=now + 400)
+        self.assertTrue(tw.is_serving(s, True))
+        self.assertEqual(s.not_serving_since, 0)
+        self.assertEqual(s.tor_restarts, [])
+        self.assertEqual(s.restarts_this_outage, 0)
+        self.assertFalse(s.degraded)
+        self.assertFalse(s.escalate_to_host)
+
+
+class TestCheckStallsIntegration(unittest.TestCase):
+    """One real check_stalls pass with the e2e verdict wired in: local
+    signals green over the control socket, probe already declared down."""
+
+    def test_a_pass_with_failed_probe_climbs_and_persists(self):
+        answers = {
+            "GETINFO status/circuit-established":
+                "250-status/circuit-established=1\r\n250 OK",
+        }
+        sock = FakeSock(answers)
+        s = _serving_state()
+        s.e2e_ok = False
+        s.e2e_verdict = "network"
+        s.last_e2e_probe = time.time()  # not due — no real fetch in a unit test
+        s.not_serving_since = time.time() - tw.TOR_RESTART_AFTER - 5
+
+        with tempfile.TemporaryDirectory() as root:
+            real_state_file = tw.STATE_FILE
+            tw.STATE_FILE = os.path.join(root, "watchdog-state.json")
+            try:
+                tw.check_stalls(sock, s)
+                with open(tw.STATE_FILE) as f:
+                    payload = json.load(f)
+            finally:
+                tw.STATE_FILE = real_state_file
+
+        self.assertIn("SIGNAL HALT", sock.sent)
+        self.assertEqual(s.restarts_this_outage, 1)
+        self.assertFalse(payload["serving"])
+        self.assertEqual(payload["restarts_this_outage"], 1)
+        self.assertEqual(payload["tor_restart_stamps"],
+                         [int(s.tor_restarts[0])])
 
 
 if __name__ == "__main__":
