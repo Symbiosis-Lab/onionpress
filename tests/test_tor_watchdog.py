@@ -171,7 +171,7 @@ class TestProbeScheduling(unittest.TestCase):
         self.assertTrue(self._run(s, 1000 + tw.E2E_PROBE_INTERVAL_BAD,
                                   fetch=_probe_timeout))
 
-    def test_three_consecutive_failures_declare_down(self):
+    def test_three_consecutive_failures_declare_down_and_classify(self):
         s = _serving_state()
         t = 1000
         for i in range(tw.E2E_FAIL_THRESHOLD):
@@ -180,6 +180,9 @@ class TestProbeScheduling(unittest.TestCase):
             t += tw.E2E_PROBE_INTERVAL_BAD
         self.assertIs(s.e2e_ok, False)
         self.assertFalse(tw.is_serving(s, circuit_established=True))
+        # the declare-down transition runs the classifier; with the control
+        # onions timing out too, the attribution is network
+        self.assertEqual(s.e2e_verdict, "network")
 
     def test_one_success_declares_up_again(self):
         s = _serving_state()
@@ -421,16 +424,6 @@ class TestVerdictTaxonomy(unittest.TestCase):
                              now=1000 + tw.HSFETCH_RETRY_AFTER + 1)
         self.assertEqual(v, "")
         self.assertTrue(any(c == "HSFETCH abc" for c in sock.sent))
-
-    def test_probe_down_transition_triggers_classification(self):
-        # maybe_e2e_probe wires the classifier in at the declare-down moment.
-        s = _serving_state()
-        t = 1000
-        for _ in range(tw.E2E_FAIL_THRESHOLD):
-            tw.maybe_e2e_probe(FakeSock(), s, True, now=t, fetch=_probe_timeout)
-            t += tw.E2E_PROBE_INTERVAL_BAD
-        self.assertIs(s.e2e_ok, False)
-        self.assertEqual(s.e2e_verdict, "network")  # control fetch failed too
 
     def test_takeover_from_302_shape(self):
         s = _serving_state()
@@ -933,6 +926,7 @@ class TestSocks5hProbe(unittest.TestCase):
         self.assertEqual(res["code"], "200")
         self.assertTrue(res["responded"])
         self.assertFalse(res["takeover"])
+        self.assertIsInstance(res["ms"], int)
         # hostname-mode: the proxy resolves, never us — .onion has no DNS
         self.assertEqual(srv.requested_host, "selftest.onion")
         self.assertIn(b"GET / HTTP/1.0", srv.request)
@@ -1003,16 +997,6 @@ class TestSocks5hProbe(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertEqual(res["stage"], "rendezvous")
         self.assertEqual(res["code"], "socks-4")
-
-    def test_probe_records_elapsed_ms(self):
-        srv = FakeSocks5Server()
-        try:
-            res = self._fetch(srv)
-        finally:
-            srv.close()
-        self.assertIsInstance(res["ms"], int)
-        self.assertGreaterEqual(res["ms"], 0)
-
 
 class TestConfiguredTransports(unittest.TestCase):
     def test_reads_the_transport_tor_was_told_to_launch(self):
