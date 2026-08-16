@@ -1264,8 +1264,8 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
         )
         self._assert_has(
             r'for\s+port\s+in\s+8080\s+18080\s+28080\s+38080\s+48080',
-            "Probe must walk the same port ladder as moss's RECEIVER_PORTS "
-            "and test-receiver.sh (receiver-contract.md).",
+            "Probe must walk the same port ladder as the publisher's "
+            "RECEIVER_PORTS and test-receiver.sh (docs/static-publish-protocol.md).",
         )
         self._assert_has(
             r'/wp-json/onionpress/v1/status',
@@ -1313,7 +1313,7 @@ class TestAutoLoginSurvivesStaticFirst(unittest.TestCase):
     """Guard against the auto-login token being minted for a URL that can
     never read it.
 
-    Incident: WordPress is served static-first (moss pre-rendered HTML
+    Incident: WordPress is served static-first (pre-rendered HTML
     ahead of PHP). open_local_site() appended ?op_login=TOKEN straight to
     the local URL; on the static homepage PHP never runs, so nothing ever
     reads $_GET['op_login'] and the "auto-login" link just dumped the user

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# test-receiver.sh — end-to-end smoke test for the OnionPress moss receiver.
+# test-receiver.sh — end-to-end smoke test for the OnionPress static receiver.
 #
-# Exercises the v1 wire contract (receiver-contract.md) exactly as the moss
-# plugin does: probe GET /status, tar a fixture with `tar -cf x -C dir .`,
+# Exercises the wire contract (docs/static-publish-protocol.md) exactly as a publisher
+# client does: probe GET /status, tar a fixture with `tar -cf x -C dir .`,
 # POST /generation, POST /commit, then confirm the static file is served at
 # the site root ahead of WordPress.
 #
@@ -21,8 +21,8 @@
 set -u
 
 # Candidate ports: OnionPress offsets each additional macOS user by +10000
-# (see the multi-user notes in CLAUDE.md). Port discovery mirrors the moss
-# plugin: first port whose /status returns a body containing receiver_version
+# (see the multi-user notes in CLAUDE.md). Port discovery mirrors publisher
+# clients: first port whose /status returns a body containing receiver_version
 # wins.
 CANDIDATE_PORTS=(8080 18080 28080 38080 48080)
 
@@ -89,7 +89,7 @@ printf '<!doctype html><title>e2e</title><h1>%s</h1>' "$MARKER" > "$WORK/fixture
 printf '<!doctype html><p>%s about</p>' "$MARKER"           > "$WORK/fixture/about.html"
 printf 'body{color:#0a0}' > "$WORK/fixture/assets/site.css"
 
-# Exactly the command the moss plugin uses (receiver.ts): the leading "."
+# Exactly the command a publisher client uses: the leading "."
 # emits a `.` self-entry that PharData cannot extract — the receiver's own
 # streaming tar reader must handle it.
 TAR="$WORK/gen.tar"

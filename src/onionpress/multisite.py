@@ -316,12 +316,12 @@ def install_static_site_conf(
     container at provision time (the runtime equivalent of the Dockerfile
     COPY + a2enconf we removed).
 
-    Why runtime, not baked-in: docker-compose.yml pulls the WordPress image
-    by digest (`ghcr.io/brewsterkahle/onionpress-wordpress@sha256:…`) — it
-    is never built from our Dockerfile locally. Baking onionpress-static-
-    site.conf into that image would force us to rebuild + host a fork image.
-    Copying it in the same way the mu-plugins are (docker cp into the live
-    container) reuses Brewster's published image unchanged. Mind the
+    Why runtime, not baked-in: docker-compose.yml pulls the published
+    WordPress image by digest — it is never built locally. Baking
+    onionpress-static-site.conf into that image would force us to rebuild
+    + host a fork image. Copying it in the same way the mu-plugins are
+    (docker cp into the live container) reuses the published image
+    unchanged. Mind the
     asymmetry with the mu-plugins, though: those land in /var/www/html,
     which is a Docker volume and so persists, whereas /etc/apache2 is
     container rootfs. This conf survives a restart but NOT a container
@@ -338,7 +338,7 @@ def install_static_site_conf(
     src = os.path.join(conf_dir, "onionpress-static-site.conf")
     if not os.path.isfile(src):
         log(f"WARNING: static-site Apache conf not found at {src} — "
-            "moss static serving not enabled")
+            "static-site serving not enabled")
         return False
 
     cp = _docker_cp(
@@ -379,7 +379,7 @@ def install_static_site_conf(
         return False
 
     log("Static-first Apache conf installed "
-        "(moss generations served ahead of WordPress)")
+        "(static generations served ahead of WordPress)")
     return True
 
 
@@ -400,7 +400,7 @@ def install_uploads_ini(
     Why an overlay under a different name rather than overwriting: unlike
     onionpress-static-site.conf, the image ALREADY ships
     /usr/local/etc/php/conf.d/onionpress-uploads.ini — present, but without
-    the memory_limit moss's generation upload needs. PHP reads conf.d in
+    the memory_limit a static-generation upload needs. PHP reads conf.d in
     alphabetical order, last value wins, so copying our version to
     zz-onionpress-uploads.ini overrides the image's without touching it. The
     image's file stays pristine (an upstream revision of it is not silently
@@ -421,7 +421,7 @@ def install_uploads_ini(
     src = os.path.join(conf_dir, "onionpress-uploads.ini")
     if not os.path.isfile(src):
         log(f"WARNING: PHP limits ini not found at {src} — "
-            "large moss generations may exhaust PHP's memory_limit")
+            "large static generations may exhaust PHP's memory_limit")
         return False
 
     cp = _docker_cp(
@@ -450,7 +450,7 @@ def install_uploads_ini(
         return False
 
     log("PHP limits ini installed "
-        "(large moss generations can be uploaded)")
+        "(large static generations can be uploaded)")
     return True
 
 
@@ -470,7 +470,7 @@ def ensure_uploads_ini(
     receiver is already answering and never reaches provisioning.
 
     The failure that leaves behind is not silent, unlike the static-site
-    one — the next moss publish fails outright with a PHP fatal-error page
+    one — the next publish fails outright with a PHP fatal-error page
     where the receiver's JSON should be. It is, though, indefinite: nothing
     else on the start path would ever put the overlay back.
 
@@ -505,7 +505,7 @@ def ensure_uploads_ini(
             return False
 
         log("PHP limits ini missing (container recreated?) — reinstalling "
-            "so large moss generations can still be uploaded")
+            "so large static generations can still be uploaded")
         return install_uploads_ini(
             conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
         )
@@ -534,7 +534,7 @@ def ensure_static_site_conf(
     nothing to do") and so never reaches that provisioning.
 
     A recreate done behind the launcher's back therefore leaves the conf
-    missing indefinitely, and the failure is silent in the worst way: moss
+    missing indefinitely, and the failure is silent in the worst way:
     publishes keep succeeding, the receiver keeps reporting the correct
     current generation, and the onion just serves the WordPress theme
     instead of the published site.
@@ -579,7 +579,7 @@ def ensure_static_site_conf(
             return False
 
         log("Static-first Apache conf missing (container recreated?) — "
-            "reinstalling so moss generations are served ahead of WordPress")
+            "reinstalling so static generations are served ahead of WordPress")
         return install_static_site_conf(
             conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
         )
@@ -909,12 +909,13 @@ def apply_managed_defaults(
     docker_bin: str = "docker",
     log_func: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Settings that only make sense when an external app (moss) owns setup.
+    """Settings that only make sense when an external managing app owns setup.
 
     Opt-in, so a standalone OnionPress install keeps its current behaviour.
 
     1. Close the onboarding gate. onionpress-onboarding redirects EVERY admin
-       page to its wizard until `onionpress_onboarded` is set. When moss has
+       page to its wizard until `onionpress_onboarded` is set. When the
+       managing app has
        already installed and configured WordPress, that wizard is a dead end
        the user never asked for — and it blocks the settings page outright,
        so they cannot even reach the Archive.org fields.
@@ -972,11 +973,11 @@ def provision_post_install(
     ensure_multisite(docker_bin=docker_bin, log_func=log)
     install_multisite_domain_map(
         plugins_dir=plugins_dir, docker_bin=docker_bin, log_func=log)
-    # Runtime-inject the Apache static-first conf so moss generations shadow
-    # WordPress, and the PHP limits overlay so uploading one doesn't exhaust
-    # the image's memory_limit. Only when a conf dir is supplied — callers
-    # that predate the moss integration (and don't pass one) keep the
-    # pre-moss behavior. Both files live in that same directory.
+    # Runtime-inject the Apache static-first conf so static generations
+    # shadow WordPress, and the PHP limits overlay so uploading one doesn't
+    # exhaust the image's memory_limit. Only when a conf dir is supplied —
+    # callers that predate static-first serving (and don't pass one) keep
+    # the earlier behavior. Both files live in that same directory.
     if conf_dir:
         install_static_site_conf(
             conf_dir=conf_dir, docker_bin=docker_bin, log_func=log)

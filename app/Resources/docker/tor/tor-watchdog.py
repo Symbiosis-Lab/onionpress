@@ -79,9 +79,9 @@ TOR_RESTART_COOLDOWN = 900    # at most 4 process restarts an hour
 DEGRADED_AFTER_RESTARTS = 3
 DEGRADED_WINDOW = 3600
 
-# Where the ladder publishes what it knows, for moss to read (the shared
-# volume the content address already lives on). Never sit silent: if we have
-# stopped trying, the file says so.
+# Where the ladder publishes what it knows, for the launcher and any external
+# status consumer to read (the shared volume the content address already lives
+# on). Never sit silent: if we have stopped trying, the file says so.
 STATE_FILE = "/var/lib/onionpress/watchdog-state.json"
 
 # Managed pluggable transports we know how to restart. Tor launches these as
@@ -689,13 +689,13 @@ def do_halt(cmd_sock, state, reason):
 
 
 def do_degrade(state, reason):
-    """Rung 4: stop climbing, and say so where moss can read it.
+    """Rung 4: stop climbing, and say so where external consumers can read it.
 
     Restarting into a network that is simply gone is worse than waiting: it
     burns the user's battery and guarantees we are mid-bootstrap, rather than
     connected, at the moment the network comes back. But going quiet is not an
-    option either — moss has to be able to answer "is my site live", so the
-    honest answer gets written down.
+    option either — the launcher has to be able to answer "is my site live",
+    so the honest answer gets written down.
     """
     if state.degraded:
         return
@@ -1006,8 +1006,8 @@ def check_stalls(cmd_sock, state):
                        f"{DEGRADED_AFTER_RESTARTS} Tor restarts — the network "
                        f"itself looks unreachable")
 
-    # Publish what we know, whether or not we acted. moss has to be able to
-    # answer "is my site live" at any moment, not only after a failure.
+    # Publish what we know, whether or not we acted. The launcher has to be
+    # able to answer "is my site live" at any moment, not only after a failure.
     if now - state.last_state_write > 15:
         write_state_file(state, circuits_up, now=now)
         state.last_state_write = now

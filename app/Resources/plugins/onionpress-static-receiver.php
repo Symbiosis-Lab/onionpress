@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: OnionPress moss Receiver
- * Description: Loopback REST endpoints that let the moss editor publish a
- *              pre-rendered static site into OnionPress. moss uploads a tar
- *              of a generated site, the receiver extracts it under
+ * Plugin Name: OnionPress Static Receiver
+ * Description: Loopback REST endpoints that let a static-site publisher
+ *              deliver a pre-rendered site into OnionPress. The publisher
+ *              uploads a tar of a generated site, the receiver extracts it under
  *              /var/www/html/site-generations/<id>/, and an atomic symlink
  *              flip of /var/www/html/site/current makes it live. Apache then
  *              serves those files ahead of WordPress (see
@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Filesystem layout shared by the three endpoints.
  *
- *   GENERATIONS/<id>/   — one extracted moss generation (static files)
+ *   GENERATIONS/<id>/   — one extracted site generation (static files)
  *   SITE/current        — symlink to the live generation
  *
  * `current` lives next to (not inside) the generations dir so a generation
@@ -138,7 +138,8 @@ function onionpress_static_onion_address() {
 }
 
 /**
- * External reachability, as last observed by the health checker (moss#917).
+ * External reachability, as last observed by the health checker — a
+ * tri-state: null means not yet checked, never "confirmed unreachable".
  *
  * Read straight from status.json — the same file onion_address falls back
  * to — rather than re-probing here: the reachability check is a real
@@ -181,7 +182,8 @@ function onionpress_static_current_generation() {
 
 /**
  * A generation id is an opaque directory name. Reject anything that could
- * escape the generations dir. moss sends `moss-<unix_seconds>`.
+ * escape the generations dir. Publishers send an opaque id such as
+ * `gen-<unix_seconds>`.
  */
 function onionpress_static_valid_id( $id ) {
     return is_string( $id )
@@ -254,7 +256,8 @@ function onionpress_static_read_n( $fh, $size, $padded ) {
  *
  * Why not PharData: the contract's `tar -cf x.tar -C <gendir> .` emits a `.`
  * self-entry that PharData::extractTo cannot handle ("Cannot extract '.'"),
- * so it fails on every real moss upload. This reader also lets the traversal
+ * so it fails on every real publisher upload. This reader also lets the
+ * traversal
  * and link guards run inline, in one pass, failing closed on anything it does
  * not positively recognise as a regular file or directory.
  *
@@ -442,7 +445,7 @@ function onionpress_static_extract_tar( $tar_path, $dest_dir ) {
 }
 
 /**
- * GET /status — advertise the receiver so moss can find the right port.
+ * GET /status — advertise the receiver so a publisher can discover its port.
  */
 function onionpress_static_route_status() {
     $reachability = onionpress_static_reachability();
@@ -661,7 +664,7 @@ function onionpress_static_route_commit( $request ) {
 
     onionpress_static_gc_generations();
 
-    // A commit is moss's whole publish — it replaces the entire static
+    // A commit is the publisher's whole publish — it replaces the entire static
     // site in one atomic flip rather than creating/updating individual
     // WordPress posts, so the wayback archiver's post-level save_post
     // hook never fires for it. Re-archive home + feed the same way

@@ -428,7 +428,7 @@ if [ -x "$UNIVERSAL_PYTHON" ]; then
     "$UNIVERSAL_PYTHON" -m venv "$MENUBAR_BUILD_DIR/venv"
 elif [ "$RELEASE_BUILD" = "1" ]; then
     # Release builds may NOT fall through to the single-arch uv tier.
-    # v2.4.107-moss.4 shipped exactly that way: the build box lacked
+    # A release DMG once shipped exactly that way: the build box lacked
     # python.org Python, tier 2 kicked in, and an arm64-only MenubarApp
     # went out in a public release — on Intel it silently never appears.
     echo "ERROR: release build (ONIONPRESS_RELEASE=1) requires python.org" >&2
@@ -533,10 +533,10 @@ cd "$PROJECT_DIR"
 echo "Standalone MenubarApp built successfully"
 
 # Universal-arch gate: verify the ARTIFACT, not the inputs. Every Mach-O
-# in the assembled bundle must carry both x86_64 and arm64. v2.4.107-moss.4
-# shipped 57 arm64-only files (the whole py2app Python runtime) because the
-# Python fallback tier leaked into a release; the CLI/receiver were still
-# universal, so moss's capability probe passed and the breakage on Intel
+# in the assembled bundle must carry both x86_64 and arm64. A release DMG
+# once shipped 57 arm64-only files (the whole py2app Python runtime) because
+# the Python fallback tier leaked into a release; the CLI/receiver were still
+# universal, so external capability probes passed and the breakage on Intel
 # was silent. This gate catches any single-arch file regardless of cause.
 echo "Verifying every Mach-O in the bundle is universal (x86_64 + arm64)..."
 MACHO_CHECKED=0

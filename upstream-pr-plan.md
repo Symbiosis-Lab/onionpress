@@ -87,6 +87,28 @@ branches: frozen export snapshots cut from the upstream base for review, fed
   `plugins/onionpress/` references (`onionpress-moss-receiver` → new name) and the
   `stack-manifest.json` release pin. Wire protocol is unchanged — name-level only.
 
+## Forward proposals to Brewster (separate from the PRs)
+
+Three collaboration topics to propose as **individual issues on
+`brewsterkahle/onionpress`** (Issues are enabled there; Discussions are not),
+opened alongside the first PR wave and cross-linked with it. Proposals never
+ride inside a PR — PRs stay auditable code changes; the issues carry the
+architecture conversation and can cite the PRs as working evidence.
+
+1. **Decouple OnionPress from WordPress** so the serving core (tor + static
+   receiver + Apache/current-symlink) is a light target for any SSG to
+   integrate; WordPress becomes one optional publisher among many. PR 3/4
+   (static-first serving + receiver) are the natural evidence base.
+2. **DNS domain support when publishing via a static publisher** — the same
+   dual onion+clearnet story onionpress.org itself has, exposed through the
+   publish flow / naming CLI.
+3. **Making the Wayback fallback usable behind the GFW** — archive access
+   paths that survive when web.archive.org itself is blocked; builds on the
+   sweep-hardening work in PR 2.
+
+Draft the issue texts in the fork (`docs/proposals/…`, fork-only) before
+posting, so they get the same review as code.
+
 ## Status (update me)
 
 | Item | State |
