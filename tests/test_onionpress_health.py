@@ -1,7 +1,11 @@
-"""Tests for src/onionpress/health.py."""
+"""Tests for src/onionpress/health.py and the src/onionpress/self_heal.py
+host-side supervisor decision table (self-healing-design.md §3.2 Actor 2)."""
 
+import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -17,6 +21,13 @@ from onionpress.health import (
     POLL_READY_SECONDS, POLL_STARTING_SECONDS, POLL_OFFLINE_SECONDS,
     WEDGE_LOAD_WARN, WEDGE_LOAD_ALARM, WEDGE_FAILING_STREAK_ALARM,
     decode_curl_reason,
+)
+from onionpress import self_heal
+from onionpress.self_heal import (
+    SelfHealSupervisor, WatchdogView, parse_watchdog_state,
+    AGREE_CYCLES, WATCHDOG_STALE_SECONDS, SETTLE_SECONDS,
+    H2_SPACING_SECONDS, H2_JITTER_MAX_SECONDS, H2_BUDGET,
+    H2_BUDGET_WINDOW, H1_KICK_SPACING,
 )
 
 
@@ -677,6 +688,468 @@ class TestDecodeCurlReason(unittest.TestCase):
         # Pathological "rc=" with no number — treat as unknown rather
         # than crashing or returning a confusing "curl rc=".
         self.assertEqual(decode_curl_reason("000rc="), "unknown")
+
+
+# ---------------------------------------------------------------------------
+# Host-side self-healing supervisor (self-healing-design.md §3.2 Actor 2)
+# ---------------------------------------------------------------------------
+
+T0 = 1_700_000_000.0
+
+
+def _fresh_view(now=T0, **overrides):
+    """A readable, fresh watchdog-state view; overrides applied on top."""
+    fields = dict(
+        readable=True, updated_at=now - 5, stale=False, serving=False,
+        e2e_ok=False, e2e_verdict="network", escalate_to_host=False,
+        handoff_reason="", degraded=False, restarts_this_outage=0,
+        tor_restart_stamps=[],
+    )
+    fields.update(overrides)
+    return WatchdogView(**fields)
+
+
+def _yielded_view(now=T0, **overrides):
+    base = dict(
+        escalate_to_host=True, degraded=True,
+        handoff_reason="3 restarts this outage changed nothing",
+        restarts_this_outage=3,
+    )
+    base.update(overrides)
+    return _fresh_view(now, **base)
+
+
+class _FakeTunnel:
+    """Tunnel triage stub — no subprocess anywhere near the decision table."""
+
+    def __init__(self, host_ok=True, container_ok=True):
+        self.host_ok = host_ok
+        self.container_ok = container_ok
+        self.host_probes = 0
+        self.container_probes = 0
+
+    def probe_host_leg(self):
+        self.host_probes += 1
+        return self.host_ok
+
+    def probe_container_leg(self):
+        self.container_probes += 1
+        return self.container_ok
+
+
+class SelfHealBase(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="selfheal-test-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.now = T0
+        self.jitter = 0.0
+        self.logs = []
+
+    def make(self):
+        return SelfHealSupervisor(
+            self.dir, log_func=self.logs.append,
+            now_func=lambda: self.now, jitter_func=lambda: self.jitter,
+        )
+
+    def down(self, sup, *, streak=AGREE_CYCLES, code="000rc=28",
+             watchdog="yielded", **kw):
+        """Evaluate a confirmed-down cycle with sensible defaults."""
+        if watchdog == "yielded":
+            watchdog = _yielded_view(self.now)
+        elif watchdog == "fresh":
+            watchdog = _fresh_view(self.now)
+        return sup.evaluate(
+            reachable=False, unreachable_streak=streak, http_code=code,
+            watchdog=watchdog, **kw)
+
+
+class TestParseWatchdogState(unittest.TestCase):
+    def test_missing_text_is_unreadable(self):
+        v = parse_watchdog_state(None, T0)
+        self.assertFalse(v.readable)
+        self.assertTrue(v.stale)
+
+    def test_garbage_is_unreadable(self):
+        v = parse_watchdog_state("not json{", T0)
+        self.assertFalse(v.readable)
+
+    def test_fresh_state_parses(self):
+        payload = {
+            "updated_at": int(T0) - 10, "serving": False, "degraded": True,
+            "e2e_ok": False, "e2e_verdict": "network",
+            "escalate_to_host": True, "handoff_reason": "3 restarts",
+            "restarts_this_outage": 3,
+            "tor_restart_stamps": [int(T0) - 3000, int(T0) - 1200],
+        }
+        v = parse_watchdog_state(json.dumps(payload), T0)
+        self.assertTrue(v.readable)
+        self.assertFalse(v.stale)
+        self.assertTrue(v.escalate_to_host)
+        self.assertEqual(v.e2e_verdict, "network")
+        self.assertEqual(v.restarts_this_outage, 3)
+        self.assertEqual(v.tor_restart_stamps, [int(T0) - 3000, int(T0) - 1200])
+
+    def test_stale_state_flagged(self):
+        payload = {"updated_at": int(T0) - WATCHDOG_STALE_SECONDS - 1}
+        v = parse_watchdog_state(json.dumps(payload), T0)
+        self.assertTrue(v.readable)
+        self.assertTrue(v.stale)
+
+
+class TestAgreementGate(SelfHealBase):
+    def test_single_fail_cycle_never_acts(self):
+        sup = self.make()
+        d = self.down(sup, streak=1)
+        self.assertIsNone(d.action)
+
+    def test_two_fail_cycles_with_yielded_watchdog_acts(self):
+        sup = self.make()
+        d = self.down(sup, streak=2)
+        self.assertEqual(d.action, "restart_stack")
+        self.assertEqual(d.state, "host_restarting")
+
+    def test_reachable_none_is_not_agreement(self):
+        # Unknown is not evidence (moss#917 tri-state convention).
+        sup = self.make()
+        d = sup.evaluate(reachable=None, unreachable_streak=0,
+                         http_code=None, watchdog=_yielded_view(self.now))
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "ok")
+
+
+class TestWatchdogYieldGate(SelfHealBase):
+    def test_fresh_unyielded_watchdog_blocks_host(self):
+        sup = self.make()
+        d = self.down(sup, watchdog="fresh")
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "watchdog_recovering")
+        self.assertEqual(d.verdict, "network")
+
+    def test_escalate_flag_yields(self):
+        sup = self.make()
+        d = self.down(sup, watchdog=_yielded_view(self.now))
+        self.assertEqual(d.action, "restart_stack")
+
+    def test_stale_state_yields(self):
+        sup = self.make()
+        stale = _fresh_view(self.now, updated_at=self.now - 300, stale=True)
+        d = self.down(sup, watchdog=stale)
+        self.assertEqual(d.action, "restart_stack")
+
+    def test_unreadable_state_yields(self):
+        # Container gone / exec failed — the host is the only actor left.
+        sup = self.make()
+        d = self.down(sup, watchdog=None)
+        self.assertEqual(d.action, "restart_stack")
+
+
+class TestVetoes(SelfHealBase):
+    def test_takeover_never_restarts(self):
+        # Visitors are being served by the hub — healing is reclaim.
+        sup = self.make()
+        d = self.down(sup, code="takeover")
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "reclaiming")
+        self.assertEqual(d.verdict, "takeover")
+
+    def test_publish_in_flight_vetoes(self):
+        sup = self.make()
+        d = self.down(sup, publish_in_flight=True)
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "awaiting_host")
+
+    def test_stopping_vetoes(self):
+        sup = self.make()
+        d = self.down(sup, stopping=True)
+        self.assertIsNone(d.action)
+
+    def test_stack_not_running_vetoes(self):
+        sup = self.make()
+        d = self.down(sup, stack_running=False)
+        self.assertIsNone(d.action)
+
+
+class TestSettleWindow(SelfHealBase):
+    def test_watchdog_restart_opens_settle_window(self):
+        sup = self.make()
+        view = _yielded_view(self.now,
+                             tor_restart_stamps=[self.now - 100])
+        d = self.down(sup, watchdog=view)
+        self.assertIsNone(d.action)
+        self.assertEqual(d.next_eligible_at, self.now - 100 + SETTLE_SECONDS)
+
+    def test_own_restart_opens_settle_window(self):
+        sup = self.make()
+        sup.record_restart(verdict="network")
+        self.now += 60
+        d = self.down(sup)
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "host_restarting")
+
+    def test_settle_window_expiry_allows_action(self):
+        sup = self.make()
+        view = _yielded_view(self.now,
+                             tor_restart_stamps=[self.now - SETTLE_SECONDS - 1])
+        d = self.down(sup, watchdog=view)
+        self.assertEqual(d.action, "restart_stack")
+
+
+class TestBudgetSpacingJitter(SelfHealBase):
+    def test_spacing_plus_jitter_blocks_second_restart(self):
+        self.jitter = 300.0
+        sup = self.make()
+        sup.record_restart(verdict="network")
+        expected = self.now + H2_SPACING_SECONDS + 300.0
+        self.now += H2_SPACING_SECONDS + 200  # past spacing, inside jitter
+        d = self.down(sup)
+        self.assertIsNone(d.action)
+        self.assertEqual(d.next_eligible_at, expected)
+
+    def test_restart_allowed_after_spacing_and_jitter(self):
+        self.jitter = 300.0
+        sup = self.make()
+        sup.record_restart(verdict="network")
+        self.now += H2_SPACING_SECONDS + 301
+        d = self.down(sup)
+        self.assertEqual(d.action, "restart_stack")
+
+    def test_budget_two_per_six_hours_then_give_up(self):
+        sup = self.make()
+        sup.record_restart()
+        self.now += H2_SPACING_SECONDS + 1
+        sup.record_restart()
+        self.now += H2_SPACING_SECONDS + 1
+        d = self.down(sup)
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "given_up")
+        self.assertIsNotNone(d.notify)
+
+    def test_give_up_notification_is_one_shot(self):
+        sup = self.make()
+        sup.record_restart()
+        sup.record_restart()
+        self.now += SETTLE_SECONDS + 1
+        d1 = self.down(sup)
+        d2 = self.down(sup)
+        self.assertIsNotNone(d1.notify)
+        self.assertIsNone(d2.notify)
+        self.assertEqual(d2.state, "given_up")
+
+    def test_budget_survives_supervisor_reload(self):
+        # The watchdog's own persistence lesson: an app relaunch must not
+        # hand out a fresh budget mid-outage.
+        sup = self.make()
+        sup.record_restart()
+        sup.record_restart()
+        self.now += SETTLE_SECONDS + 1
+        self.down(sup)  # latches given_up
+        sup2 = self.make()
+        d = self.down(sup2)
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "given_up")
+
+    def test_stamps_outside_window_do_not_count(self):
+        sup = self.make()
+        sup.record_restart()
+        self.now += H2_BUDGET_WINDOW + 1
+        d = self.down(sup)
+        self.assertEqual(d.action, "restart_stack")
+
+    def test_default_jitter_within_bounds(self):
+        for _ in range(200):
+            j = self_heal._default_jitter()
+            self.assertGreaterEqual(j, 0)
+            self.assertLessEqual(j, H2_JITTER_MAX_SECONDS)
+
+
+class TestGiveUpAndRecovery(SelfHealBase):
+    def _exhaust(self, sup):
+        sup.record_restart()
+        sup.record_restart()
+        self.now += SETTLE_SECONDS + 1
+        return self.down(sup)
+
+    def test_given_up_is_quiescent(self):
+        sup = self.make()
+        self._exhaust(sup)
+        tunnel = _FakeTunnel(container_ok=False)
+        d = self.down(sup, tunnel=tunnel)
+        self.assertIsNone(d.action)
+        self.assertEqual(tunnel.host_probes, 0)  # no triage while given up
+
+    def test_confirmed_green_clears_given_up(self):
+        sup = self.make()
+        self._exhaust(sup)
+        d = sup.evaluate(reachable=True, unreachable_streak=0, http_code="200",
+                         watchdog=_fresh_view(self.now, e2e_ok=True,
+                                              serving=True, e2e_verdict=None))
+        self.assertEqual(d.state, "ok")
+        # A later outage may act again only within the still-rolling budget.
+        d = self.down(sup)
+        self.assertEqual(d.state, "given_up")  # stamps survived the green
+
+    def test_green_after_budget_window_allows_new_outage_healing(self):
+        sup = self.make()
+        self._exhaust(sup)
+        self.now += H2_BUDGET_WINDOW + 1
+        sup.evaluate(reachable=True, unreachable_streak=0, http_code="200",
+                     watchdog=None)
+        d = self.down(sup)
+        self.assertEqual(d.action, "restart_stack")
+
+
+class TestTunnelTriage(SelfHealBase):
+    def test_host_leg_dead_skips_all_restarts_and_notifies_once(self):
+        # Veee itself is down — nothing automated can fix a GUI VPN.
+        sup = self.make()
+        tunnel = _FakeTunnel(host_ok=False)
+        d1 = self.down(sup, tunnel=tunnel)
+        self.assertIsNone(d1.action)
+        self.assertEqual(d1.verdict, "tunnel-upstream-down")
+        self.assertIsNotNone(d1.notify)
+        d2 = self.down(sup, tunnel=tunnel)
+        self.assertIsNone(d2.notify)
+        self.assertEqual(tunnel.container_probes, 0)
+
+    def test_container_leg_dead_kicks_tunnel(self):
+        sup = self.make()
+        tunnel = _FakeTunnel(host_ok=True, container_ok=False)
+        d = self.down(sup, tunnel=tunnel)
+        self.assertEqual(d.action, "tunnel_kick")
+        self.assertEqual(d.state, "tunnel_kicked")
+
+    def test_kick_rate_limited_then_falls_through_to_restart(self):
+        sup = self.make()
+        tunnel = _FakeTunnel(host_ok=True, container_ok=False)
+        d = self.down(sup, tunnel=tunnel)
+        self.assertEqual(d.action, "tunnel_kick")
+        sup.record_kick()
+        # Settle window after the kick first…
+        self.now += SETTLE_SECONDS + 1
+        # …then, kick still inside its 30-min spacing → H2 instead.
+        self.assertLess(self.now - T0, H1_KICK_SPACING)
+        d = self.down(sup, tunnel=tunnel)
+        self.assertEqual(d.action, "restart_stack")
+
+    def test_kick_opens_settle_window(self):
+        sup = self.make()
+        sup.record_kick()
+        self.now += 60
+        d = self.down(sup, tunnel=_FakeTunnel(host_ok=True, container_ok=False))
+        self.assertIsNone(d.action)
+        self.assertEqual(d.state, "tunnel_kicked")
+
+    def test_healthy_tunnel_falls_through_to_restart(self):
+        sup = self.make()
+        tunnel = _FakeTunnel(host_ok=True, container_ok=True)
+        d = self.down(sup, tunnel=tunnel)
+        self.assertEqual(d.action, "restart_stack")
+
+    def test_no_tunnel_module_skips_rung_silently(self):
+        # Upstream shape: absent fork config = no tunnel object = no rung.
+        sup = self.make()
+        d = self.down(sup, tunnel=None)
+        self.assertEqual(d.action, "restart_stack")
+
+
+class TestHealingStatus(SelfHealBase):
+    def test_status_object_shape(self):
+        sup = self.make()
+        d = self.down(sup, watchdog="fresh")
+        h = sup.healing_status(d, _fresh_view(self.now))
+        for key in ("state", "verdict", "watchdog_rung", "host_attempts_6h",
+                    "last_action", "last_action_at", "next_eligible_at"):
+            self.assertIn(key, h)
+        self.assertEqual(h["state"], "watchdog_recovering")
+        self.assertEqual(h["host_attempts_6h"], 0)
+
+    def test_status_counts_recent_restarts(self):
+        sup = self.make()
+        sup.record_restart(verdict="network")
+        d = self.down(sup)
+        h = sup.healing_status(d, _yielded_view(self.now))
+        self.assertEqual(h["host_attempts_6h"], 1)
+        self.assertEqual(h["last_action"], "restart_stack")
+        self.assertEqual(h["watchdog_rung"], "degraded")
+
+    def test_ok_state_when_reachable(self):
+        sup = self.make()
+        d = sup.evaluate(reachable=True, unreachable_streak=0,
+                         http_code="200", watchdog=None)
+        h = sup.healing_status(d, None)
+        self.assertEqual(h["state"], "ok")
+
+
+class TestEvidenceHelpers(unittest.TestCase):
+    def test_read_watchdog_state_unreachable_container(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _fail()
+        v = self_heal.read_watchdog_state(docker, now=T0)
+        self.assertFalse(v.readable)
+
+    def test_read_watchdog_state_parses_payload(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok(json.dumps(
+            {"updated_at": int(T0) - 5, "escalate_to_host": True}))
+        v = self_heal.read_watchdog_state(docker, now=T0)
+        self.assertTrue(v.readable)
+        self.assertTrue(v.escalate_to_host)
+        self.assertFalse(v.stale)
+
+    def test_publish_in_flight_when_receiver_staging_active(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok(
+            "/var/www/html/site-generations/gen-abc.tar\n")
+        self.assertTrue(self_heal.publish_in_flight(docker))
+
+    def test_publish_idle_when_no_recent_staging(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("\n")
+        self.assertFalse(self_heal.publish_in_flight(docker))
+
+    def test_publish_check_fails_open_to_idle(self):
+        # An unreachable wordpress container must not deadlock healing —
+        # if we can't ask, there is no publish to protect.
+        docker = mock.Mock()
+        docker.exec.return_value = _fail()
+        self.assertFalse(self_heal.publish_in_flight(docker))
+
+
+class TestIncidentHostSide(SelfHealBase):
+    """2026-08-16 as the host would now live it: watchdog hands off after 3
+    restarts, host kicks the tunnel, then lands the launcher restart —
+    instead of observing rc=28 for nine hours."""
+
+    def test_handoff_to_restart_within_budget(self):
+        sup = self.make()
+        tunnel = _FakeTunnel(host_ok=True, container_ok=False)
+        view = _yielded_view(self.now,
+                             tor_restart_stamps=[self.now - 200],
+                             e2e_verdict="network")
+        # Watchdog's third restart just happened → settle window holds.
+        d = self.down(sup, watchdog=view)
+        self.assertIsNone(d.action)
+        # 15 min later: tunnel triage finds the container leg dead → kick.
+        self.now += SETTLE_SECONDS + 1
+        view = _yielded_view(self.now,
+                             tor_restart_stamps=[T0 - 200])
+        d = self.down(sup, watchdog=view, tunnel=tunnel)
+        self.assertEqual(d.action, "tunnel_kick")
+        sup.record_kick()
+        # Kick did not cure it; settle passes; kick spaced out → H2.
+        self.now += SETTLE_SECONDS + 1
+        d = self.down(sup, watchdog=view, tunnel=tunnel)
+        self.assertEqual(d.action, "restart_stack")
+        sup.record_restart(verdict="network")
+        # The restart fixes it (22 seconds in real life): green clears.
+        self.now += 120
+        d = sup.evaluate(reachable=True, unreachable_streak=0,
+                         http_code="200",
+                         watchdog=_fresh_view(self.now, e2e_ok=True,
+                                              serving=True, e2e_verdict=None))
+        self.assertEqual(d.state, "ok")
+        h = sup.healing_status(d, None)
+        self.assertEqual(h["host_attempts_6h"], 1)
 
 
 if __name__ == "__main__":
