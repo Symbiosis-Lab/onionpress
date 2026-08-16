@@ -1431,7 +1431,7 @@ class TestWordPressAdminMenuItem(unittest.TestCase):
 class TestGenerationUploadMemoryLimit(unittest.TestCase):
     """POST /wp-json/onionpress/v1/generation reads the whole moss generation
     tar into memory via $request->get_body() before our route callback ever
-    runs (app/Resources/plugins/onionpress-moss-receiver.php). WordPress's
+    runs (app/Resources/plugins/onionpress-static-receiver.php). WordPress's
     REST server buffers that body internally too, so the request needs
     roughly 2-3x the generation's size in PHP memory. Default memory_limit
     is 128M; a real ~65MB site generation blew through it with "Allowed

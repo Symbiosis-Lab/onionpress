@@ -11,10 +11,10 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$WP"; then
 fi
 
 echo "→ mu-plugin (receiver endpoints)"
-docker cp app/Resources/plugins/onionpress-moss-receiver.php \
-  "$WP":/var/www/html/wp-content/mu-plugins/onionpress-moss-receiver.php
+docker cp app/Resources/plugins/onionpress-static-receiver.php \
+  "$WP":/var/www/html/wp-content/mu-plugins/onionpress-static-receiver.php
 docker exec "$WP" chown www-data:www-data \
-  /var/www/html/wp-content/mu-plugins/onionpress-moss-receiver.php
+  /var/www/html/wp-content/mu-plugins/onionpress-static-receiver.php
 
 echo "→ Apache static-first conf"
 docker cp app/Resources/docker/wordpress/onionpress-static-site.conf \

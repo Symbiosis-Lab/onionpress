@@ -1,12 +1,12 @@
 <?php
 /**
- * test-moss-receiver-upload.php — unit coverage for the pure helpers added
- * to onionpress-moss-receiver.php for the v1.2 multipart carrier:
- * onionpress_moss_upload_error_message() (the UPLOAD_ERR_* mapping) and the
+ * test-static-receiver-upload.php — unit coverage for the pure helpers added
+ * to onionpress-static-receiver.php for the v1.2 multipart carrier:
+ * onionpress_static_upload_error_message() (the UPLOAD_ERR_* mapping) and the
  * extractor's short-read/short-write/fclose truncation guards.
  *
  * These two are plain functions with no WordPress dependency, so they run
- * standalone: `php tests/test-moss-receiver-upload.php`. No live stack, no
+ * standalone: `php tests/test-static-receiver-upload.php`. No live stack, no
  * WP stubs needed — ABSPATH is defined first so the plugin file's top-of-
  * file `exit` guard does not fire.
  *
@@ -19,7 +19,7 @@ define( 'ABSPATH', __DIR__ );
 // never invoked here, so a no-op is enough for the two pure functions this
 // script actually exercises.
 function add_action( $hook, $callback ) {}
-require __DIR__ . '/../app/Resources/plugins/onionpress-moss-receiver.php';
+require __DIR__ . '/../app/Resources/plugins/onionpress-static-receiver.php';
 
 $pass = 0;
 $fail = 0;
@@ -59,7 +59,7 @@ foreach ( $cases as $c ) {
     if ( $code === UPLOAD_ERR_OK ) {
         continue; // route callback never calls the mapper for UPLOAD_ERR_OK
     }
-    list( $msg, $status ) = onionpress_moss_upload_error_message( $code );
+    list( $msg, $status ) = onionpress_static_upload_error_message( $code );
     assert_eq( "upload error $code maps to HTTP $expected_status", $expected_status, $status );
     if ( is_string( $msg ) && $msg !== '' ) {
         ok( "upload error $code has a non-empty message" );
@@ -68,7 +68,7 @@ foreach ( $cases as $c ) {
     }
 }
 // INI_SIZE and FORM_SIZE must name the ini key they map to, per the spec.
-list( $ini_msg ) = onionpress_moss_upload_error_message( UPLOAD_ERR_INI_SIZE );
+list( $ini_msg ) = onionpress_static_upload_error_message( UPLOAD_ERR_INI_SIZE );
 if ( strpos( $ini_msg, 'upload_max_filesize' ) !== false ) {
     ok( 'UPLOAD_ERR_INI_SIZE message names upload_max_filesize' );
 } else {
@@ -107,7 +107,7 @@ function rrmdir( $dir ) {
 // 1. A well-formed tar extracts cleanly end-to-end (control case).
 list( $tar, $srcdir ) = make_tar_with_one_file( 'hello.txt', str_repeat( 'x', 10000 ) );
 $dest = sys_get_temp_dir() . '/onionpress-test-dest-' . uniqid( '', true );
-list( $ok_result, $err ) = onionpress_moss_extract_tar( $tar, $dest );
+list( $ok_result, $err ) = onionpress_static_extract_tar( $tar, $dest );
 if ( $ok_result && file_exists( $dest . '/hello.txt' )
     && filesize( $dest . '/hello.txt' ) === 10000 ) {
     ok( 'well-formed tar extracts completely' );
@@ -127,7 +127,7 @@ $full = file_get_contents( $tar );
 $truncated_tar = $tar . '.truncated';
 file_put_contents( $truncated_tar, substr( $full, 0, 512 + 100 ) ); // header + 100 bytes of the 20000
 $dest2 = sys_get_temp_dir() . '/onionpress-test-dest2-' . uniqid( '', true );
-list( $ok2, $err2 ) = onionpress_moss_extract_tar( $truncated_tar, $dest2 );
+list( $ok2, $err2 ) = onionpress_static_extract_tar( $truncated_tar, $dest2 );
 if ( $ok2 === false && is_string( $err2 ) && strpos( $err2, 'truncated' ) !== false ) {
     ok( 'truncated tar data is rejected, not silently accepted' );
 } else {

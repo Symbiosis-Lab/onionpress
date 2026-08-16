@@ -53,7 +53,7 @@ def _receiver_answering(port, timeout=1.0):
 
 
 class _StubReceiver(BaseHTTPRequestHandler):
-    """Minimal stand-in for the onionpress-moss-receiver mu-plugin."""
+    """Minimal stand-in for the onionpress-static-receiver mu-plugin."""
 
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path != STATUS_PATH:

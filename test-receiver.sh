@@ -8,7 +8,7 @@
 # the site root ahead of WordPress.
 #
 # PREREQUISITE: OnionPress must already be running locally with a provisioned
-# WordPress (the onionpress-moss-receiver mu-plugin installed). Start the app,
+# WordPress (the onionpress-static-receiver mu-plugin installed). Start the app,
 # wait for the site to come up, then run this script. It talks to the receiver
 # over the host loopback port map — no Tor required.
 #
