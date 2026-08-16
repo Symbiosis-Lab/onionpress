@@ -50,3 +50,6 @@ tests/onionheaven-stress-results/
 
 # Per-user Claude Code config (local permissions, hooks, etc.)
 .claude/
+
+# Stray build-host symlink guard (accidentally committed once from the fork-image workflow)
+target
