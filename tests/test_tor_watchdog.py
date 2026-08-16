@@ -404,10 +404,23 @@ class TestVerdictTaxonomy(unittest.TestCase):
     def test_hsfetch_is_not_reissued_while_pending(self):
         s = self._down_state()
         s.hsfetch_pending = "abc"
+        s.hsfetch_sent_at = 1000
         sock = FakeSock()
-        v = tw.classify_down(sock, s, fetch=_probe_responds)
+        v = tw.classify_down(sock, s, fetch=_probe_responds, now=1010)
         self.assertEqual(v, "")
         self.assertFalse(any("HSFETCH" in c for c in sock.sent))
+
+    def test_a_lost_hsfetch_answer_is_reissued_after_the_window(self):
+        # Control-connection churn can eat the HS_DESC answer; a pending
+        # query must not wedge the verdict at 'undetermined' forever.
+        s = self._down_state()
+        s.hsfetch_pending = "abc"
+        s.hsfetch_sent_at = 1000
+        sock = FakeSock()
+        v = tw.classify_down(sock, s, fetch=_probe_responds,
+                             now=1000 + tw.HSFETCH_RETRY_AFTER + 1)
+        self.assertEqual(v, "")
+        self.assertTrue(any(c == "HSFETCH abc" for c in sock.sent))
 
     def test_probe_down_transition_triggers_classification(self):
         # maybe_e2e_probe wires the classifier in at the declare-down moment.

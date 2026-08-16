@@ -478,6 +478,7 @@ class WatchdogState:
         self.awaiting_e2e_logged = False
         # HSFETCH verdict plumbing (answered async via HS_DESC events)
         self.hsfetch_pending = ""    # address id awaiting RECEIVED/FAILED
+        self.hsfetch_sent_at = 0
         self.hsfetch_received = False
         self.hsfetch_failed_reason = ""
         # per-outage accounting + host handoff
@@ -859,7 +860,13 @@ _VERDICT_DETAIL = {
 }
 
 
-def classify_down(cmd_sock, state, fetch=None):
+# A pending HSFETCH whose HS_DESC answer never arrived (control-connection
+# churn) is re-issued after this long, so the verdict cannot wedge at
+# "undetermined" forever.
+HSFETCH_RETRY_AFTER = 120
+
+
+def classify_down(cmd_sock, state, fetch=None, now=None):
     """Attribute a confirmed end-to-end failure (§3.1's verdict taxonomy).
 
     Ordered discriminators. A response carrying the takeover marker means
@@ -876,6 +883,7 @@ def classify_down(cmd_sock, state, fetch=None):
     pass, so a verdict can refine or flip as the outage evolves.
     """
     fetch = fetch or socks5h_fetch
+    now = now or time.time()
     verdict = ""
     if state.last_probe_takeover:
         verdict = "takeover"
@@ -891,10 +899,13 @@ def classify_down(cmd_sock, state, fetch=None):
             verdict = "descriptor"
         elif state.hsfetch_received:
             verdict = "intro-wedge"
-        elif not state.hsfetch_pending:
+        elif (not state.hsfetch_pending
+                or (state.hsfetch_sent_at
+                    and now - state.hsfetch_sent_at > HSFETCH_RETRY_AFTER)):
             addr_id = e2e_probe_address(state).replace(".onion", "")
             if addr_id:
                 state.hsfetch_pending = addr_id
+                state.hsfetch_sent_at = now
                 state.hsfetch_received = False
                 state.hsfetch_failed_reason = ""
                 send_cmd(cmd_sock, f"HSFETCH {addr_id}")
