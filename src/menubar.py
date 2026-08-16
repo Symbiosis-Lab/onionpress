@@ -57,6 +57,7 @@ from onionpress.ui_helpers import (
 )
 from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog
+from onionpress.log_capture import CaptureCursor
 from onionpress import analytics_sharing
 from onionpress import redact
 from onionpress.power import CaffeineManager
@@ -994,7 +995,7 @@ class OnionPressApp(rumps.App):
 
     def _launch_capture_worker(self, container_name, rotating_log,
                                 docker_bin, docker_env):
-        entry = {"thread": None, "proc": None, "last_ts": None}
+        entry = {"thread": None, "proc": None, "cursor": CaptureCursor()}
         self._container_log_processes[container_name] = entry
         worker = threading.Thread(
             target=self._capture_worker,
@@ -1016,13 +1017,15 @@ class OnionPressApp(rumps.App):
             entry = self._container_log_processes.get(container_name)
             if entry is None:  # supervisor asked us to stop
                 return
-            last_ts = entry.get("last_ts")
-            cmd = [docker_bin, "logs", "-f"]
-            if last_ts:
-                cmd += ["--since", last_ts]
-            else:
-                cmd += ["--tail", "100"]
-            cmd.append(container_name)
+            # Cursor keyed on docker's own --timestamps token: the old
+            # wall-clock --since at second granularity re-read the whole
+            # boundary second on every reattach (the doubled LAST RESORT
+            # blocks of 2026-08-16). See onionpress.log_capture.
+            cursor = entry.get("cursor")
+            if cursor is None:
+                cursor = entry["cursor"] = CaptureCursor()
+            cmd = ([docker_bin, "logs", "-f"]
+                   + cursor.attach_args() + [container_name])
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1035,10 +1038,9 @@ class OnionPressApp(rumps.App):
             entry["proc"] = proc
             try:
                 for line in proc.stdout:
-                    rotating_log.write(line)
-                    entry["last_ts"] = datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    )
+                    text = cursor.accept(line)
+                    if text is not None:
+                        rotating_log.write(text)
             except Exception:
                 pass
             try:
