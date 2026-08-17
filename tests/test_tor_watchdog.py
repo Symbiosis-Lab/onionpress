@@ -500,8 +500,32 @@ class TestVerdictDirectedRungs(unittest.TestCase):
         self.assertEqual(tw.next_escalation(s, now, has_transport=True), "rebuild-hs")
 
     def test_intro_wedge_verdict_also_rebuilds_first(self):
-        s, now = self._down("intro-wedge", seconds=10)
+        s, now = self._down("intro-wedge", seconds=tw.REBUILD_HS_AFTER)
         self.assertEqual(tw.next_escalation(s, now, has_transport=True), "rebuild-hs")
+
+    def test_no_destructive_rung_before_the_dwell_elapses(self):
+        """DEL+ADD throws away working intro circuits and forces a fresh
+        descriptor to propagate. Two flaps observed on the live node
+        (2026-08-17 06:17 and 06:36) recovered unassisted inside ~6 minutes,
+        so a rebuild fired on sight would have manufactured the gap it
+        exists to close — and then taken credit for the recovery."""
+        for verdict in ("descriptor", "intro-wedge"):
+            with self.subTest(verdict=verdict):
+                s, now = self._down(verdict, seconds=tw.REBUILD_HS_AFTER - 1)
+                self.assertIsNone(
+                    tw.next_escalation(s, now, has_transport=True),
+                    f"{verdict} rebuilt before the dwell elapsed",
+                )
+
+    def test_the_rebuild_dwell_still_precedes_a_process_restart(self):
+        """The dwell must not push the cheap rung past the expensive one."""
+        self.assertLess(tw.REBUILD_HS_AFTER, tw.TOR_RESTART_AFTER)
+
+    def test_reclaim_is_exempt_from_the_dwell(self):
+        """A republish destroys nothing, and the hub is serving our readers
+        meanwhile — there is nothing to wait for."""
+        s, now = self._down("takeover", seconds=0)
+        self.assertEqual(tw.next_escalation(s, now, has_transport=True), "reclaim")
 
     def test_rebuild_happens_once_then_the_ladder_continues(self):
         s, now = self._down("intro-wedge", hs_rebuilt_this_outage=True)

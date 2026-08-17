@@ -109,6 +109,21 @@ CONTROL_ONIONS = (
 # honest statement rather than an impatient one.
 PT_RESTART_AFTER = 180        # 120s circuit wait + 60s descriptor window
 PT_RESTART_COOLDOWN = 300
+# How long a confirmed-down outage must persist before the first DESTRUCTIVE
+# rung. DEL+ADD is cheap next to a restart, but it is not free: it throws away
+# working intro circuits and forces a fresh descriptor to propagate, so firing
+# it on an outage that was about to clear manufactures the very gap it is
+# meant to close — and then takes credit for the recovery.
+#
+# Sized against two observed flaps (2026-08-17 06:17 and 06:36 on the live
+# Mac node): both showed `000:rc=28` on both probe paths and both recovered
+# unassisted inside ~6 minutes. Detection alone already costs ~3.5 min
+# (E2E_FAIL_THRESHOLD probes at E2E_PROBE_INTERVAL_BAD with
+# E2E_PROBE_TIMEOUT each), plus up to E2E_PROBE_INTERVAL_OK before the first
+# failing probe runs, so this dwell puts the first DEL+ADD ~7-9 min after the
+# wedge — past both flaps, and still inside TOR_RESTART_AFTER so the cheap
+# rung keeps its place ahead of a process restart.
+REBUILD_HS_AFTER = _env_int("REBUILD_HS_AFTER", 180)
 # 4 more minutes: a fresh snowflake rendezvous plus a bootstrap through it ran
 # 1-3 min in the captured logs, so anything tighter restarts a transport that
 # was about to work.
@@ -1001,6 +1016,12 @@ def next_escalation(state, now, has_transport):
     descriptor/intro-wedge get the cheap DEL+ADD rebuild before any
     restart; network skips the rebuild because no HS-layer action can fix
     a dead transport.
+
+    Every destructive rung is also gated on how long the outage has lasted
+    (REBUILD_HS_AFTER, then PT_RESTART_AFTER, then TOR_RESTART_AFTER).
+    Real wedges persist; a good fraction of outages clear themselves within
+    minutes, and acting inside that window costs an outage rather than
+    saving one. `reclaim` is exempt because a republish destroys nothing.
     """
     if state.not_serving_since <= 0:
         return None
@@ -1025,7 +1046,8 @@ def next_escalation(state, now, has_transport):
 
     if (state.e2e_verdict in ("descriptor", "intro-wedge")
             and state.services
-            and not state.hs_rebuilt_this_outage):
+            and not state.hs_rebuilt_this_outage
+            and down_for >= REBUILD_HS_AFTER):
         return "rebuild-hs"
 
     if (down_for >= TOR_RESTART_AFTER
