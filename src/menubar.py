@@ -1506,11 +1506,15 @@ class OnionPressApp(rumps.App):
         self.log("Reopen signal received")
         if self.is_running and self.is_ready:
             if self.quiet_launch:
-                # moss re-runs `open -a OnionPress.app` on every stack
-                # bring-up, and macOS delivers that as this same reopen
-                # event — on the managed copy it must not pop a browser
-                # window. The menu bar icon's "Open in Tor Browser" is
-                # the deliberate open affordance there.
+                # A reopen arrives here from any source — a user
+                # double-click, or an `open -a` on the staged bundle by
+                # whatever is managing it — and on the managed copy none
+                # of them may pop a browser window. Deliberately written
+                # against the event rather than its sender: moss issued
+                # one on every bring-up when this guard was added, and
+                # the guard must keep holding if it stops. The menu bar
+                # icon's "Open in Tor Browser" is the open affordance
+                # here.
                 self.log("Service is ready — quiet launch, not opening browser")
                 return
             self.log("Service is ready — opening browser")
