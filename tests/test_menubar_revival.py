@@ -70,7 +70,10 @@ class TestEnsureMenubarRunning(unittest.TestCase):
         self.marker = os.path.join(self.tmp, "launched")
         self.pidfile = os.path.join(self.data_dir, "menubar.pid")
 
-        self.helper = _extract_function("ensure_menubar_running")
+        self.helper = "\n".join(
+            _extract_function(name)
+            for name in ("menubar_alive", "ensure_menubar_running")
+        )
 
         # A real MenubarApp on a developer's Mac matches the same pgrep as
         # our stub would, so the "nothing running" cases are not decidable.
@@ -78,10 +81,14 @@ class TestEnsureMenubarRunning(unittest.TestCase):
             self.skipTest("a real MenubarApp is running for this user")
 
     def _menubar_process_alive(self):
-        return subprocess.run(
-            ["pgrep", "-u", str(os.getuid()), "-f", MENUBAR_MATCH],
-            capture_output=True,
-        ).returncode == 0
+        # `ps`, not `pgrep`, for the reason the helper itself no longer uses
+        # pgrep: on macOS it can fail to see a live MenubarApp, and a skip
+        # guard that under-reports would let the "nothing running" cases run
+        # against a developer's real app.
+        procs = subprocess.run(
+            ["ps", "-x", "-o", "args="], capture_output=True, text=True,
+        ).stdout
+        return MENUBAR_MATCH in procs
 
     def _install_stub(self, body):
         os.makedirs(os.path.dirname(self.menubar_bin), exist_ok=True)
@@ -89,15 +96,32 @@ class TestEnsureMenubarRunning(unittest.TestCase):
             f.write(body)
         os.chmod(self.menubar_bin, 0o755)
 
-    def _run_helper(self):
+    def _blind_pgrep_dir(self):
+        """A directory holding a `pgrep` that never finds anything.
+
+        Stands in for macOS's real behaviour — see the docstring on
+        test_finds_a_live_app_that_pgrep_cannot_see.
+        """
+        d = os.path.join(self.tmp, "blind-bin")
+        os.makedirs(d, exist_ok=True)
+        stub = os.path.join(d, "pgrep")
+        with open(stub, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(stub, 0o755)
+        return d
+
+    def _run_helper(self, path_prefix=None):
         """Source the real helper with the launcher's globals defined.
 
-        Run from a FILE, not `bash -c`: the helper's own source contains the
-        pgrep matcher, so `bash -c` would put that string in the harness's
-        command line and the helper would match itself and no-op. Production
-        runs `bash /…/onionpress start`, whose command line carries no such
-        string, so a file keeps the test faithful as well as correct.
+        Run from a FILE, not `bash -c`: the matcher string would otherwise sit
+        in the harness's own command line, where the helper's process scan
+        would find it and no-op. Production runs `bash /…/onionpress start`,
+        whose command line carries no such string, so a file keeps the test
+        faithful as well as correct.
         """
+        env = dict(os.environ)
+        if path_prefix:
+            env["PATH"] = path_prefix + os.pathsep + env.get("PATH", "")
         script = textwrap.dedent(f"""\
             set -e
             RESOURCES_DIR={self.resources!r}
@@ -113,7 +137,8 @@ class TestEnsureMenubarRunning(unittest.TestCase):
         with open(runner, "w") as f:
             f.write(script)
         return subprocess.run(
-            ["bash", runner], capture_output=True, text=True, timeout=30
+            ["bash", runner], capture_output=True, text=True, timeout=30,
+            env=env,
         )
 
     def _wait_for_marker(self, timeout=10.0):
@@ -176,6 +201,81 @@ class TestEnsureMenubarRunning(unittest.TestCase):
         self.assertFalse(
             self._wait_for_marker(timeout=2.0),
             "a second MenubarApp was launched over a live one",
+        )
+
+    def test_finds_a_live_app_that_pgrep_cannot_see(self):
+        """Detection must not rest on pgrep, because on macOS pgrep lies.
+
+        Reproduced 2026-08-18 on macOS 26.5: with the MenubarApp running,
+        `ps -x -o args=` prints its full path while `pgrep -f` for that same
+        path, run at the same instant as the same uid, returns nothing. It
+        misses the app specifically when the launcher runs as a child of that
+        app — the one context this guard has to be right in, because the app
+        re-enters `onionpress start` on every launch.
+
+        What it cost: one moss recovery Start at 00:57:36 produced four
+        MenubarApps in fifteen seconds. The guard reported "not running" each
+        time, and — worse — went on to delete menubar.pid, which is what the
+        app's OWN single-instance check reads (menubar.py __init__), so each
+        new copy also sailed past that second line of defence. Three of the
+        four lost the race for the onion proxy port with `[Errno 48] Address
+        already in use` and the stack tore itself down 78 seconds later.
+
+        The stub pgrep here is blind on every platform, so this test asserts
+        the guarantee rather than the macOS symptom: a live app is found, and
+        its PID file survives, without pgrep contributing anything.
+        """
+        self._install_stub(f"#!/bin/sh\ntouch {self.marker!r}\nsleep 30\n")
+        self.addCleanup(self._kill_stubs)
+
+        alive = subprocess.Popen(
+            [self.menubar_bin],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(alive.wait)
+        self.addCleanup(alive.kill)
+        self.assertTrue(self._wait_for_marker(), "stub never started")
+        os.remove(self.marker)
+
+        # The app writes this itself, very early in __init__.
+        with open(self.pidfile, "w") as f:
+            f.write(f"{alive.pid}\n")
+
+        proc = self._run_helper(path_prefix=self._blind_pgrep_dir())
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(
+            self._wait_for_marker(timeout=2.0),
+            "a second MenubarApp was launched over a live one",
+        )
+        self.assertTrue(
+            os.path.exists(self.pidfile),
+            "the live app's menubar.pid was deleted, which is what lets the "
+            "next copy past menubar.py's own single-instance check",
+        )
+
+    def test_a_recycled_pid_is_not_mistaken_for_the_app(self):
+        """menubar.pid alone is not identity — PIDs get recycled.
+
+        A pid file left by a SIGKILLed app can name a PID the OS has since
+        handed to something else entirely. Trusting `kill -0` on its own
+        would then report the MenubarApp as alive forever and revival would
+        never happen — the exact stranding this helper exists to prevent.
+        """
+        self._install_stub(f"#!/bin/sh\ntouch {self.marker!r}\n")
+        # A live process that is emphatically not a MenubarApp.
+        impostor = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(impostor.wait)
+        self.addCleanup(impostor.kill)
+        with open(self.pidfile, "w") as f:
+            f.write(f"{impostor.pid}\n")
+
+        proc = self._run_helper()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(
+            self._wait_for_marker(),
+            "a recycled PID in menubar.pid suppressed a needed revival",
         )
 
     def test_clears_a_stale_pid_file_before_launching(self):
