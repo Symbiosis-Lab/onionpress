@@ -11,6 +11,9 @@
 - `upstream/*` branches are frozen cherry-pick branches based on upstream main
   (`94ce1a363`). **Never merge fork main into them**; later fork work is the next wave.
 
+## Open: bootstrap-percentage progress commit needs a joint cherry-pick, not a solo one
+- `2c166899` ("report Tor's bootstrap percentage while it bootstraps," on a peer's `feat/wayback-moss-coverage` branch, not yet on `main`) does not cherry-pick cleanly alone — investigated 2026-08-14/15. It conflicts in `app/MacOS/onionpress` around `retag_pinned_images()`, a function that itself doesn't exist yet on `main`: it's introduced by an earlier, also-unmerged commit on the same peer branch. Landing the progress-bar fix requires both commits together (or peer coordination on sequencing), not a standalone pick of `2c166899`. Until this lands, the wait-phase-freeze bug this commit was meant to fix is only partially addressed by tonight's `fix/onionpress-install-progress` work on the moss side.
+
 ## Naming Rules (IMPORTANT)
 - The project is called **OnionPress** (one word, capital O and P). Never "Onion.Press", "onion.press", or "onion-press".
 - Data directory: `~/.onionpress/` (not `~/.onion.press/`)
