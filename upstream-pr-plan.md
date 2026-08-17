@@ -25,6 +25,13 @@ branches and PRs move.
   reject paths, and dropping the legacy raw-body upload (+ its 512M `memory_limit`)
   once moss is confirmed multipart-only.
 
+- **Fork ownership (2026-08-17):** the fork moved from `Symbiosis-Lab/onionpress`
+  to **`guoliu/onionpress`**, so the contribution reads person-to-person rather
+  than org-to-person. GitHub redirects the old path indefinitely (git, releases,
+  API), so shipped DMGs whose updater still resolves the old repo keep working —
+  but ghcr.io does NOT redirect, which is why the tor image was republished as
+  `ghcr.io/guoliu/onionpress-tor` and repinned.
+
 ## The four PRs
 
 | PR | Branch | Content | Depends on |
@@ -37,9 +44,9 @@ branches and PRs move.
 ## Never upstream (any PR)
 
 - Self-updater repoint: `updater.py:114`, `menubar.py:4349,4413`, `cli.py:339` point at
-  `Symbiosis-Lab/onionpress` releases. Sending that upstream is a supply-chain change.
+  `guoliu/onionpress` releases. Sending that upstream is a supply-chain change.
   Revert to `brewsterkahle` in every upstream branch.
-- `ghcr.io/symbiosis-lab/onionpress-tor` image pins (`docker-compose.yml:3,135`,
+- `ghcr.io/guoliu/onionpress-tor` image pins (`docker-compose.yml:3,135`,
   `tools/diagnose-tor-bootstrap.sh:30`) and `.github/workflows/fork-tor-image.yml`.
   The fork image exists only because upstream's image lacks obfs4proxy/snowflake-client;
   PR 2's Dockerfile change makes it unnecessary. Upstream must rebuild + repin its own
@@ -133,7 +140,7 @@ posted without sign-off):
 2. **Umbrella issue** = the single entrance point:
    "Static-site publishing for OnionPress — working demo + PR series".
    Contents in order: the demo recording at the top (≤10 MB attaches inline;
-   else a Symbiosis-Lab/onionpress release asset + GIF teaser; NEVER a
+   else a guoliu/onionpress release asset + GIF teaser; NEVER a
    moss-repo link — private, 404s for him), a **"try it yourself in ~5
    minutes"** section (fork release + `./test-receiver.sh` +
    `docs/static-publish-protocol.md`), the 4-PR table smallest-first, a

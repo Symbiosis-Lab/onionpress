@@ -4347,7 +4347,7 @@ class OnionPressApp(rumps.App):
             self.log(traceback.format_exc())
             rumps.alert(
                 title="Update Check Failed",
-                message=f"Could not check for app updates.\n\nPlease visit:\nhttps://github.com/Symbiosis-Lab/onionpress/releases"
+                message=f"Could not check for app updates.\n\nPlease visit:\nhttps://github.com/guoliu/onionpress/releases"
             )
 
         # Check for Docker image updates
@@ -4411,7 +4411,7 @@ class OnionPressApp(rumps.App):
 
             self.show_native_alert(
                 "Update Failed",
-                f"Could not install the update automatically.\n\n{e}\n\nYou can update manually from:\nhttps://github.com/Symbiosis-Lab/onionpress/releases",
+                f"Could not install the update automatically.\n\n{e}\n\nYou can update manually from:\nhttps://github.com/guoliu/onionpress/releases",
                 style="warning"
             )
 

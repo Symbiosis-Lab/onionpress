@@ -4,7 +4,7 @@
 > 1. Personal note to Brewster (not GitHub): ~3 sentences + the demo video +
 >    ONE link (this issue). Offer a call/live demo.
 > 2. Post this issue with the video embedded at top (≤10 MB embeds inline;
->    otherwise a Symbiosis-Lab/onionpress release asset + GIF teaser in the
+>    otherwise a guoliu/onionpress release asset + GIF teaser in the
 >    issue). Never a moss-repo link (private → 404 for him).
 > 3. Open PR 1 the same day. Open PRs 2–4 same-day-numbered or after first
 >    response — judgment call.

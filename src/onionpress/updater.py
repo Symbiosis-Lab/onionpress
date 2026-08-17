@@ -111,7 +111,7 @@ def check_for_update(current_version, log=None):
     # strip the integration. Image refs stay on Brewster's registry (we
     # reuse the published images unchanged); only the app self-update repo
     # moves to the fork.
-    url = "https://api.github.com/repos/Symbiosis-Lab/onionpress/releases/latest"
+    url = "https://api.github.com/repos/guoliu/onionpress/releases/latest"
     try:
         result = subprocess.run(
             ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",
