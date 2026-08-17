@@ -1377,16 +1377,44 @@ class TestStartRevivesTheMenubarApp(unittest.TestCase):
         helper = self.script.index("ensure_menubar_running() {")
         body = self.script[helper:self.script.index("\nmain() {", helper)]
         self.assertIn(
-            'pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress"',
-            body,
-            "Revival must be guarded by the same liveness matcher launcher.sh "
-            "and the quit arm use.",
+            "menubar_alive && return 0", body,
+            "Revival must be guarded by the shared liveness check.",
         )
         self.assertIn(
             '[ -x "$menubar_bin" ] || return 0', body,
             "A source checkout or CI has no built bundle — revival must be a "
             "no-op there rather than an error.",
         )
+
+    def test_liveness_is_never_decided_by_pgrep(self):
+        """Whether a MenubarApp is running is decided by `ps`, never pgrep.
+
+        On macOS 26.5 pgrep can fail to see a live MenubarApp that
+        `ps -x -o args=` prints in full, at the same instant and as the same
+        uid — and it fails precisely when the launcher runs as a child of
+        that app, which is when the answer matters. On 2026-08-18 that put
+        four MenubarApps on the machine in fifteen seconds, three of which
+        lost the onion proxy port to `[Errno 48]`, and the stack tore itself
+        down 78 seconds later.
+
+        Three places ask the question — revival, the quit arm, and
+        launcher.sh's already-running exit — and every one of them does
+        damage when told "no" about a running app: two launch a duplicate,
+        the third leaves an app that was asked to quit still running.
+        """
+        for name in ("app/MacOS/onionpress", "app/MacOS/launcher.sh"):
+            text = _read(name)
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue  # the comments explain why pgrep is out
+                if "pgrep" in stripped and "MenubarApp" in stripped:
+                    self.fail(
+                        f"{name} decides MenubarApp liveness with pgrep:\n"
+                        f"    {stripped}\n"
+                        "Use a `ps -x -o args=` scan instead — see "
+                        "menubar_alive() in app/MacOS/onionpress."
+                    )
 
     def test_revival_does_not_hold_the_callers_pipe_open(self):
         """moss runs the launcher as a subprocess and reads its output. A

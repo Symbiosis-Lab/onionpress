@@ -2093,24 +2093,64 @@ receiver_answering_port() {
 # Idempotent by design: the menu bar itself re-enters `onionpress start` on
 # every launch (auto_start -> start_service), so this has to be a no-op when
 # called from the very app it would otherwise spawn a second copy of.
+# Is a MenubarApp alive for this user?
+#
+# Deliberately NOT pgrep. On macOS 26.5, with the app running, `ps -x -o args=`
+# prints its full path while `pgrep -f MenubarApp/Contents/MacOS/OnionPress` —
+# run at the same instant, same uid — returns nothing. It misses the app
+# precisely when this launcher runs as a child of that app, which is the one
+# context the guard below has to be right in, because the MenubarApp re-enters
+# `onionpress start` on every launch (auto_start -> start_service).
+#
+# On 2026-08-18 one moss recovery Start produced four MenubarApps in fifteen
+# seconds that way; three lost the race for the onion proxy port with
+# `[Errno 48] Address already in use` and the stack tore itself down 78
+# seconds later. tests/test_menubar_revival.py pins the guarantee with a
+# pgrep that is blind on every platform, so the fix cannot quietly revert to
+# relying on it.
+#
+# The PID file goes first because it is also what the app's own
+# single-instance check reads (menubar.py __init__), and the two must agree.
+# `ps -x` is this user's processes only, which is what the multi-user pgrep
+# rule in CLAUDE.md was asking for.
+menubar_alive() {
+    local stored procs
+
+    stored="$(tr -d '[:space:]' < "$DATA_DIR/menubar.pid" 2>/dev/null || true)"
+    if [ -n "$stored" ] && kill -0 "$stored" 2>/dev/null; then
+        # Liveness is not identity — PIDs are recycled, and a pid file left
+        # by a SIGKILLed app can name something else entirely by now.
+        case "$(ps -p "$stored" -o args= 2>/dev/null || true)" in
+            *MenubarApp/Contents/MacOS/OnionPress*) return 0 ;;
+        esac
+    fi
+
+    # Captured into a variable rather than piped into grep: in a
+    # `ps … | grep PAT` pipeline, ps can list the grep process itself, whose
+    # own argv contains PAT, and the scan then always says yes.
+    procs="$(ps -x -o args= 2>/dev/null || true)"
+    case "$procs" in
+        *MenubarApp/Contents/MacOS/OnionPress*) return 0 ;;
+    esac
+    return 1
+}
+
 ensure_menubar_running() {
     local menubar_bin="$RESOURCES_DIR/MenubarApp/Contents/MacOS/OnionPress"
 
     # A source checkout or CI has no built bundle — nothing to revive.
     [ -x "$menubar_bin" ] || return 0
 
-    # Same matcher launcher.sh and the quit arm use: narrow enough not to
-    # collide with other OnionPress processes (launcher, shell scripts).
-    # `-u $(whoami)` keeps us to this user's processes, per the multi-user
-    # rule in CLAUDE.md.
-    if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
-        return 0
-    fi
+    menubar_alive && return 0
 
-    # A MenubarApp that died without running its cleanup (SIGKILL, crash)
-    # leaves menubar.pid pointing at a dead PID that `upload-analytics`
-    # reads as "OnionPress is running". Drop it before spawning; the app
-    # rewrites it on startup.
+    # Only now is the PID file known stale. Removing it is safe *because* of
+    # that, and unsafe without it: menubar.py reads this file to decide it is
+    # a duplicate and exit, so deleting a live incumbent's file is what let
+    # the second copy through, and the third, and the fourth.
+    #
+    # It still has to go when genuinely stale — a MenubarApp that died without
+    # running its cleanup (SIGKILL, crash) leaves a dead PID here that
+    # `upload-analytics` reads as "OnionPress is running".
     rm -f "$DATA_DIR/menubar.pid"
 
     log "start: MenubarApp is not running — launching it"
@@ -2303,12 +2343,14 @@ main() {
             FAILED_STEPS=""
 
             # Capture MenubarApp PID. Prefer the PID file
-            # (authoritative), but fall back to pgrep — the PID file
-            # can be missing after a prior unclean shutdown, manual rm,
-            # or a MenubarApp code path that never wrote it, and we
+            # (authoritative), but fall back to a process scan — the PID
+            # file can be missing after a prior unclean shutdown, manual
+            # rm, or a MenubarApp code path that never wrote it, and we
             # still need to find and stop the running MenubarApp in
-            # that case. `-u $(whoami)` restricts to this user's
-            # processes per the multi-user rule in CLAUDE.md.
+            # that case.
+            #
+            # `ps`, not pgrep, per menubar_alive() above: a fallback that
+            # cannot see the app leaves it running, and this is `quit`.
             MENUBAR_PID=""
             if [ -f "$PIDFILE" ]; then
                 MENUBAR_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
@@ -2316,8 +2358,15 @@ main() {
             if [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; then
                 # Match the py2app-frozen MenubarApp binary path — narrow
                 # enough that we don't collide with other OnionPress
-                # processes (launcher, shell scripts).
-                MENUBAR_PID=$(pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" 2>/dev/null | head -1)
+                # processes (launcher, shell scripts). `ps -x` is this
+                # user's processes only, per the multi-user rule in
+                # CLAUDE.md.
+                # ps is run to completion first: in a live `ps | awk`
+                # pipeline, ps can list the awk process, whose own argv
+                # carries the pattern, and quit would SIGTERM the awk.
+                MENUBAR_PS_SNAPSHOT="$(ps -x -o pid=,args= 2>/dev/null || true)"
+                MENUBAR_PID=$(printf '%s\n' "$MENUBAR_PS_SNAPSHOT" \
+                    | awk '/MenubarApp\/Contents\/MacOS\/OnionPress/ {print $1; exit}')
             fi
 
             if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
