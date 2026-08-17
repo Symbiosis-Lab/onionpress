@@ -34,7 +34,7 @@ try:
     from onionpress import setup_window
 except ImportError:
     setup_window = None
-from onionpress.platform import resolve_paths
+from onionpress.platform import resolve_paths, is_quiet_launch
 from onionpress.docker import Docker
 from onionpress.health import (
     HealthChecker,
@@ -205,6 +205,20 @@ class OnionPressApp(rumps.App):
         setup_marker = os.path.join(self.app_support, ".setup_complete")
         if not os.path.exists(setup_marker):
             self._is_first_run = True
+
+        # Quiet launch: the moss-staged copy (under ~/.moss/stacks/) must
+        # start with zero visible UI beyond the menu bar icon — no launch
+        # splash, no auto-opened browser, no setup wizard. moss owns the
+        # install/start experience there and is deliberately quiet.
+        self.quiet_launch = is_quiet_launch(self._paths.app_bundle)
+        if self.quiet_launch and self._is_first_run:
+            # moss provisions WordPress itself and writes .setup_complete
+            # before ever launching this app; starting without the marker
+            # means moss crashed mid-provision and will re-provision on its
+            # next bring-up. Popping our own setup wizard would fight it.
+            # FORCE_SETUP_WINDOW below still wins as an explicit request.
+            self._is_first_run = False
+
         # Check FORCE_SETUP_WINDOW in config
         config_file = os.path.join(self.app_support, "config")
         if os.path.exists(config_file):
@@ -217,10 +231,13 @@ class OnionPressApp(rumps.App):
             except Exception:
                 pass
 
-        # Always show splash first — setup window replaces it from auto_start()
+        # Show splash first — setup window replaces it from auto_start().
+        # Quiet launch (moss-managed copy) shows no splash at all: the
+        # gray menu bar icon is the only "starting" affordance.
         self.launch_splash = None
         self.launch_splash_time_field = None
-        self.show_launch_splash()
+        if not self.quiet_launch:
+            self.show_launch_splash()
 
         # Now load icon files (this does I/O but splash is already showing)
         self.icon_running = os.path.join(self.resources_dir, "menubar-icon-running.png")
@@ -405,7 +422,12 @@ class OnionPressApp(rumps.App):
         # already knows their address so opening the browser is unwanted.
         # On reinstall, _is_first_run is True even if a key was imported and
         # wrote a cached address before Python started — always open then.
-        self.auto_opened_browser = self._had_cached_address and not self._is_first_run
+        # Quiet launch (moss-managed copy) never auto-opens: the menu bar
+        # icon's "Open in Tor Browser" is the deliberate affordance.
+        self.auto_opened_browser = (
+            self.quiet_launch
+            or (self._had_cached_address and not self._is_first_run)
+        )
         self.setup_dialog_showing = False  # Track if setup dialog is currently showing
         self.setup_alert = None  # Reference to NSAlert for programmatic dismissal
         self.monitoring_tor_install = False  # Track if we're monitoring for Tor Browser installation
@@ -1471,6 +1493,14 @@ class OnionPressApp(rumps.App):
         """Handle reopen signal from launcher (user double-clicked app while running)"""
         self.log("Reopen signal received")
         if self.is_running and self.is_ready:
+            if self.quiet_launch:
+                # moss re-runs `open -a OnionPress.app` on every stack
+                # bring-up, and macOS delivers that as this same reopen
+                # event — on the managed copy it must not pop a browser
+                # window. The menu bar icon's "Open in Tor Browser" is
+                # the deliberate open affordance there.
+                self.log("Service is ready — quiet launch, not opening browser")
+                return
             self.log("Service is ready — opening browser")
             self.open_tor_browser(None)
         elif not self.is_running:
