@@ -184,6 +184,52 @@ def resolve_paths(data_dir: str = None, documents_dir: str = None,
     )
 
 
+def is_moss_managed(app_bundle: str) -> bool:
+    """True when this copy of OnionPress is the one moss stages and manages.
+
+    moss installs the stack under ``~/.moss/stacks/onionpress/OnionPress.app``
+    and drives it headlessly (provisioning via launcher subcommands, launch
+    via ``open -a``). That staged copy must start with zero user-visible UI
+    beyond the menu bar icon — no launch splash, no auto-opened browser —
+    because moss owns the install/start experience and is deliberately quiet.
+
+    Detection is by the bundle's own location: a path containing a
+    ``.moss/stacks`` segment pair is moss's staged copy. This is copy-level,
+    not launch-level, and that is the point — the same user can also install
+    OnionPress standalone in /Applications and keep its full first-run UX,
+    while the moss-managed copy stays quiet no matter who launches it.
+    """
+    if not app_bundle:
+        return False
+    parts = os.path.normpath(os.path.abspath(app_bundle)).split(os.sep)
+    return any(
+        parts[i] == ".moss" and parts[i + 1] == "stacks"
+        for i in range(len(parts) - 1)
+    )
+
+
+_QUIET_TRUTHY = {"1", "true", "yes", "on"}
+_QUIET_FALSY = {"0", "false", "no", "off"}
+
+
+def is_quiet_launch(app_bundle: str, environ=None) -> bool:
+    """Should this launch suppress all startup UI (splash, auto-browser)?
+
+    ``ONIONPRESS_QUIET`` in the environment is an explicit override in both
+    directions (for tests, and for any launcher that execs the binary
+    directly rather than through ``open``). Absent an override, the answer
+    is :func:`is_moss_managed` — the moss-staged copy is quiet by default,
+    a standalone install keeps its existing startup UX.
+    """
+    env = os.environ if environ is None else environ
+    override = (env.get("ONIONPRESS_QUIET") or "").strip().lower()
+    if override in _QUIET_TRUTHY:
+        return True
+    if override in _QUIET_FALSY:
+        return False
+    return is_moss_managed(app_bundle)
+
+
 def _is_app_bundle(path: str) -> bool:
     """Check if a directory looks like a macOS .app bundle."""
     return (
