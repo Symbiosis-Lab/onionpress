@@ -287,7 +287,8 @@ if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&
     echo "============================================================" >> "$LOG_FILE"
     log "=== Launcher restarted (app already running) ==="
     echo "============================================================" >> "$LOG_FILE"
-    # Signal the running instance to open browser
+    # Signal the running instance: standalone installs answer by opening
+    # the browser; the moss-managed copy stays quiet (menubar handle_reopen)
     touch "$DATA_DIR/.reopen"
     exit 0
 fi
