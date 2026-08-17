@@ -336,7 +336,7 @@ class OnionPressCLI:
         if result is not None:
             release_data, latest = result
             update_available = True
-            release_url = f"https://github.com/Symbiosis-Lab/onionpress/releases/tag/v{latest}"
+            release_url = f"https://github.com/guoliu/onionpress/releases/tag/v{latest}"
             release_notes = (release_data.get("body") or "").strip()
             published_at = release_data.get("published_at")
         else:
@@ -439,10 +439,10 @@ class OnionPressCLI:
         print(pw)
         return 0
 
-    # ─── Headless onionname registry (JSON on stdout, driven by moss) ────
+    # ─── Headless onionname registry (for driving by an external app) ────
     #
-    # moss drives these via execute_binary on the staged app and parses a
-    # single JSON line from stdout. All diagnostics go through self.log
+    # An external app drives these programmatically and parses a single
+    # JSON line from stdout. All diagnostics go through self.log
     # (stderr), so stdout carries exactly one JSON object per command.
 
     def _registrar(self):
@@ -529,10 +529,11 @@ class OnionPressCLI:
         JSON line: {"ok": true, "name", "address", "url"} on success, or
         {"ok": false, "error", "suggestions": [...]} on failure.
 
-        The name resolves to the address ROOT (http://<addr>.onion/) — moss
-        serves the site at the address root, so we ignore OnionPress's
-        WP-admin/subsite-path coupling; the onionname is a memorable handle
-        that maps to the address.
+        Policy: the registered name maps to the onion address ROOT
+        (http://<addr>.onion/). OnionPress's WP-admin/subsite-path coupling
+        is intentionally not applied here — a headless registration
+        addresses the whole service, not a WP subsite; the onionname is a
+        memorable handle that maps to the address.
         """
         from .onionnames_client import validate_name
 
@@ -697,11 +698,12 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("admin-password",
                    help="Print the recovery admin password (if any)")
 
-    # Headless onionname registry — moss drives these and parses one JSON
-    # line from stdout. See OnionPressCLI.cmd_onionname_*.
+    # Headless onionname registry — an external app drives these and
+    # parses one JSON line from stdout. See OnionPressCLI.cmd_onionname_*.
     p_name = sub.add_parser(
         "onionname",
-        help="Onionname registry ops for moss (one JSON line on stdout)",
+        help="Onionname registry ops for driving by an external app "
+             "(one JSON line on stdout)",
     )
     name_sub = p_name.add_subparsers(dest="name_command")
     name_sub.add_parser(
@@ -727,14 +729,14 @@ def main(argv: list[str] = None) -> int:
         help="Source directory containing mu-plugins, sunrise.php, icons")
     p_ppi.add_argument(
         "--managed", action="store_true",
-        help="This install is driven by an external app (moss), not by a "
+        help="Unattended install driven by an external app, not by a "
              "person at the OnionPress UI: skip the end-user onboarding "
              "wizard and stop WordPress phoning home. Off by default, so a "
              "standalone install is unaffected.")
     p_ppi.add_argument(
         "--apache-conf-dir",
         help="Source directory containing onionpress-static-site.conf, "
-             "injected at runtime for moss static-first serving "
+             "injected at runtime for static-first serving "
              "(optional; skipped when omitted)")
 
     # Individual post-start provisioning steps. These are the helpers

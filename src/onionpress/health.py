@@ -57,7 +57,7 @@ class HealthResult:
     wp_healthy: bool = False
     tor_bootstrapped: bool = False
     tor_internally_ready: bool = False  # Checks 1-4 passed
-    # Check 5 (dual-probe), moss#917: None until it actually runs — the
+    # Check 5 (dual-probe) is tri-state: None until it actually runs — the
     # gate below is the ONLY place that assigns it. Do not default this to
     # False: an unrun check and a check that came back negative must stay
     # distinguishable all the way out to status.json (see write_status()

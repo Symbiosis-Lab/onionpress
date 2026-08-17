@@ -15,7 +15,7 @@ name: Build DMG
 # serves both. moss reaches the DMG by exact pinned URL from
 # plugins/onionpress/stack-manifest.json, so it does not care — but the app's
 # own updater (src/onionpress/updater.py) resolves
-# api.github.com/repos/Symbiosis-Lab/onionpress/releases/latest, which SKIPS
+# api.github.com/repos/guoliu/onionpress/releases/latest, which SKIPS
 # prereleases. Publishing these as prereleases therefore froze "Check for
 # Updates" on v2.4.107-moss.2 (2026-07-27) while six newer builds shipped
 # behind it, and moss re-pins only on a first install — so a stranded install
@@ -34,7 +34,7 @@ permissions:
 jobs:
   build-dmg:
     # Fork-only workflow: never run on the upstream repo.
-    if: github.repository == 'Symbiosis-Lab/onionpress'
+    if: github.repository == 'guoliu/onionpress'
     runs-on: macos-15
     timeout-minutes: 90
     steps:

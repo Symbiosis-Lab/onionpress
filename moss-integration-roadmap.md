@@ -6,7 +6,7 @@
 
 ## Locked decisions (2026-07-21)
 
-- **Fork:** `Symbiosis-Lab/onionpress` (public — correct for the eventual upstream PR to Brewster).
+- **Fork:** `guoliu/onionpress` (public — correct for the eventual upstream PR to Brewster).
 - **Apache static-first conf → RUNTIME-INJECT**, not baked into the WordPress image. Provision-time `docker cp` + `a2enconf` (like the mu-plugin already does). ⇒ **no image rebuild, no registry, reuse Brewster's images unchanged.** This erases the biggest infra cost.
 - **Arch:** arm64-only DMG for the demo (moss is a Mac app; buildable locally, no self-hosted runner).
 - **Self-updater:** repoint `updater.py` to the fork so forked installs don't silently update back to Brewster's receiver-less upstream.
@@ -35,7 +35,7 @@ Track PARITY calls these from the name picker (build against these signatures; A
 
 ### Release manifest (produced by Track OP; consumed by Track ACQ)
 The moss side pins a per-release artifact. For the demo:
-- `dmg_url`: `https://github.com/Symbiosis-Lab/onionpress/releases/latest/download/onionpress.dmg`
+- `dmg_url`: `https://github.com/guoliu/onionpress/releases/latest/download/onionpress.dmg`
 - `sha256`: the pinned hash of that DMG (Track OP emits it at release; ACQ reads it from a small JSON committed in the onionpress plugin, `plugins/onionpress/stack-manifest.json`, updated per release).
 - `version`: the fork release tag.
 

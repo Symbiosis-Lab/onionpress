@@ -37,7 +37,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/symbiosis-lab/onionpress-tor
+  IMAGE: ghcr.io/guoliu/onionpress-tor
 
 jobs:
   build:

@@ -1629,7 +1629,7 @@ wait_for_services() {
     # snowflake-client cycled through three proxies ("timeout waiting for
     # DataChannel.OnOpen") before one held. At a flat 120s this reported
     # failure on a bootstrap that was succeeding, and everything downstream —
-    # including moss's publish flow — inherited that false negative. The wait
+    # including a publisher's publish flow — inherited that false negative. The wait
     # is therefore keyed to whether a bridge is configured, not to a single
     # guess about how fast the network is.
     local max_wait=120
@@ -2047,7 +2047,7 @@ restore_backup() {
 # Echoes the port and returns 0 on the first hit, returns 1 when nothing
 # answers.
 #
-# Discovery mirrors the moss plugin and ./test-receiver.sh (receiver-contract.md):
+# Discovery mirrors publisher clients and ./test-receiver.sh (docs/static-publish-protocol.md):
 # probe GET /wp-json/onionpress/v1/status on 8080 and the multi-user +10000
 # offsets; the first port whose body carries `receiver_version` wins. Readiness
 # is judged by the receiver ANSWERING, never by an exit code — that is this
@@ -2059,7 +2059,7 @@ restore_backup() {
 # exit (refused/timeout) from tripping `set -e`.
 #
 # The ladder is deliberately the shared discovery idiom, which means it
-# inherits the ambiguity moss and test-receiver.sh already have: on a
+# inherits the ambiguity publisher clients and test-receiver.sh already have: on a
 # multi-user Mac, another user's receiver answering on a lower port reads as
 # "a stack is up". Distinguishing owners needs an identity the /status body
 # does not yet carry; if that is ever added, this is the place to use it.
@@ -2081,8 +2081,8 @@ main() {
         start)
             # Starting an already-running stack is a no-op, not a conflict.
             #
-            # Two callers drive this stack: moss owns its lifecycle (install
-            # and start), while the menu-bar app is the power-user surface —
+            # Two callers drive this stack: a managing app owns its lifecycle
+            # (install and start), while the menu-bar app is the power-user surface —
             # and the menu bar re-enters `start` on every launch (auto_start
             # -> start_service -> `onionpress start`). Without this check,
             # merely LAUNCHING the menu bar next to a healthy stack re-ran the
@@ -2108,7 +2108,7 @@ main() {
                 # a volume. This early exit is precisely the path such a stack
                 # takes on every later `start`, so without a check here the
                 # onion serves the WordPress theme instead of the published
-                # moss site indefinitely — and silently, since publishes and
+                # static site indefinitely — and silently, since publishes and
                 # the receiver both go on reporting success. Cheap: a single
                 # `test -e` in the container unless the conf is really gone.
                 #
@@ -2126,7 +2126,7 @@ main() {
                 # The same recreate drops the PHP limits overlay from
                 # /usr/local/etc/php/conf.d, restoring the image's lower
                 # memory_limit. That failure is loud rather than silent —
-                # the next moss publish dies on a PHP fatal-error page —
+                # the next publish dies on a PHP fatal-error page —
                 # but nothing else on this path would ever put it back.
                 # Same cost and same trap safety as the check above.
                 bundled_python -m onionpress.cli ensure-uploads-ini \
@@ -2157,7 +2157,7 @@ main() {
                         # The dialog survives because the usual way to reach
                         # this is double-clicking the app, where stderr is
                         # invisible. It is now bounded, though: `start` also
-                        # runs unattended (moss's stack installer runs it
+                        # runs unattended (a managing app's stack installer runs it
                         # headless), and an un-dismissed modal would hang that
                         # caller forever instead of failing.
                         osascript -e 'display dialog "OnionPress is already starting up." buttons {"OK"} default button "OK" with icon caution with title "OnionPress" giving up after 10' 2>/dev/null || true
@@ -2174,7 +2174,7 @@ main() {
             # fails when the jobs table is empty or only holds already-finished
             # jobs — so a fully successful `start` exited 1 whenever its
             # background children happened to finish first (race), which any
-            # caller that checks the exit code (moss's stack installer) read
+            # caller that checks the exit code (a managing app's stack installer) read
             # as a start failure.
             trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null || true' EXIT INT TERM HUP
 
@@ -2371,10 +2371,10 @@ main() {
             ;;
 
         onionname)
-            # Headless onionname registry, driven by moss via execute_binary.
+            # Headless onionname registry, for driving by an external app.
             # Delegates to the Python CLI, which wraps the already-built
             # Registrar client and prints exactly ONE JSON line to stdout
-            # (moss parses it). All launcher/CLI diagnostics go to the log
+            # (the caller parses it). All launcher/CLI diagnostics go to the log
             # file / stderr, so stdout stays clean for the JSON.
             #   onionname suggest            -> {"name":"…"}
             #   onionname check   <name>     -> {"available",…}
@@ -2443,7 +2443,7 @@ main() {
             # etc.) still exist below and are still called by start_
             # containers — only this subcommand entry point goes through
             # Python for now.
-            # "$@" forwards caller flags (e.g. --managed, which moss passes
+            # "$@" forwards caller flags (e.g. --managed, which a managing app passes
             # so the end-user onboarding wizard is skipped); shift drops the
             # subcommand name itself.
             shift
@@ -2839,7 +2839,8 @@ Advanced / internal (used by the menubar app or scripts):
   start-tor, launch, upload-analytics, validate-oh-address,
   reset, scrub
   onionname {suggest|check <name>|register <name>}
-                (onionname registry ops; one JSON line on stdout, for moss)
+                (onionname registry ops; one JSON line on stdout, for
+                driving by an external app)
 
 Examples:
   $0 status

@@ -20,8 +20,8 @@ COPY onionpress-xmlrpc-block.conf /etc/apache2/conf-available/
 COPY onionpress-log-format.conf /etc/apache2/conf-available/
 RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format
 
-# NOTE: onionpress-static-site.conf (static-first serving of moss
-# generations) is deliberately NOT baked in here. It is injected at
+# NOTE: onionpress-static-site.conf (static-first serving of published
+# site generations) is deliberately NOT baked in here. It is injected at
 # provision time via `docker cp` + `a2enconf` — see
 # src/onionpress/multisite.py:install_static_site_conf. This keeps the
 # published WordPress image (which docker-compose.yml pulls by digest,

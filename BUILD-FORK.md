@@ -1,6 +1,6 @@
 # Building the OnionPress fork (arm64 DMG) for the moss demo
 
-This fork (`Symbiosis-Lab/onionpress`) ships the moss integration: a static-first
+This fork (`guoliu/onionpress`) ships the moss integration: a static-first
 Apache conf and the moss-receiver mu-plugin injected at **provision time** (no
 WordPress image rebuild — Brewster's published images are reused unchanged), a
 headless `onionname` CLI moss drives, and a self-updater repointed at this fork.
@@ -115,7 +115,7 @@ lands wherever `origin` points. To release to the fork, make sure `origin` is th
 fork:
 
 ```sh
-git remote set-url origin git@github.com:Symbiosis-Lab/onionpress.git
+git remote set-url origin git@github.com:guoliu/onionpress.git
 # (or push this branch to the fork so origin resolves there)
 ```
 
@@ -123,7 +123,7 @@ No change to `release.sh` is needed — it is remote-agnostic by design.
 
 The demo target URL the moss side pins (roadmap "Release manifest"):
 
-- `dmg_url`: `https://github.com/Symbiosis-Lab/onionpress/releases/latest/download/onionpress.dmg`
+- `dmg_url`: `https://github.com/guoliu/onionpress/releases/latest/download/onionpress.dmg`
 - `sha256`:  the value from `shasum -a 256 build/onionpress.dmg` above
 - `version`: the fork release tag (e.g. `v2.4.107`)
 

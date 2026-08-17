@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Behavioural tests for `onionpress start` idempotence (app/MacOS/onionpress).
 
-Starting an already-running stack must be a no-op, not a conflict: moss owns
-the stack's lifecycle (install + start) while the menu-bar app is the
+Starting an already-running stack must be a no-op, not a conflict: a managing
+publisher app owns the stack's lifecycle (install + start) while the menu-bar
+app is the
 power-user surface, and the menu bar re-enters `start` on every launch
 (auto_start -> start_service). Before the fix that meant re-running the
 up-to-120s wait_for_services and a blocking GUI dialog over a healthy site.
@@ -10,8 +11,8 @@ up-to-120s wait_for_services and a blocking GUI dialog over a healthy site.
 These run the REAL bash launcher, but inside a throwaway .app layout, a
 throwaway $HOME and a sanitised $PATH, so they never touch the developer's
 containers, Colima VM or ~/.onionpress. The stack is stubbed by a local HTTP
-server answering the receiver's /status route — the same signal moss and
-./test-receiver.sh use (receiver-contract.md).
+server answering the receiver's /status route — the same signal publisher
+clients and ./test-receiver.sh use (docs/static-publish-protocol.md).
 
 macOS-only: this is the macOS launcher (PlistBuddy, `stat -f`, `arch -arm64`,
 osascript). The ubuntu CI job covers the ordering invariant statically, in
@@ -32,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LAUNCHER_SRC = os.path.join(PROJECT_ROOT, "app", "MacOS", "onionpress")
 
-# Same ladder as the launcher, moss's RECEIVER_PORTS and test-receiver.sh:
+# Same ladder as the launcher, publisher clients and test-receiver.sh:
 # OnionPress offsets each additional macOS user by +10000.
 CANDIDATE_PORTS = (8080, 18080, 28080, 38080, 48080)
 STATUS_PATH = "/wp-json/onionpress/v1/status"
@@ -53,7 +54,7 @@ def _receiver_answering(port, timeout=1.0):
 
 
 class _StubReceiver(BaseHTTPRequestHandler):
-    """Minimal stand-in for the onionpress-moss-receiver mu-plugin."""
+    """Minimal stand-in for the onionpress-static-receiver mu-plugin."""
 
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path != STATUS_PATH:
