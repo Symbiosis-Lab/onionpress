@@ -44,6 +44,7 @@ from onionpress.health import (
     decode_curl_reason,
 )
 from onionpress import config as op_config
+from onionpress import self_heal
 from onionpress.reachability_stats import ReachabilityStats
 from onionpress.system_metrics import host_metrics, container_metrics
 from onionpress.ui_helpers import (
@@ -57,6 +58,7 @@ from onionpress.ui_helpers import (
 )
 from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog
+from onionpress.log_capture import CaptureCursor
 from onionpress import analytics_sharing
 from onionpress import redact
 from onionpress.power import CaffeineManager
@@ -456,6 +458,15 @@ class OnionPressApp(rumps.App):
         self._last_reachability = (None, None)  # tri-state (reachable, http_code); None = never checked
         self._last_snapshot_ts = time.time()
         self._snapshot_interval_seconds = 12 * 3600
+
+        # Host-side self-healing supervisor (self-healing-design.md §3.2
+        # Actor 2): consumes the tor-watchdog's escalate_to_host handoff
+        # and owns the launcher-restart rung. Lazily constructed on first
+        # cycle so a broken app_support dir can't break __init__.
+        self._self_heal = None                 # SelfHealSupervisor
+        self._unreachable_cycles = 0           # consecutive onion_reachable=False cycles
+        self._healing = None                   # last §3.3 healing object for status.json
+        self._self_heal_restart_in_flight = False
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -994,7 +1005,7 @@ class OnionPressApp(rumps.App):
 
     def _launch_capture_worker(self, container_name, rotating_log,
                                 docker_bin, docker_env):
-        entry = {"thread": None, "proc": None, "last_ts": None}
+        entry = {"thread": None, "proc": None, "cursor": CaptureCursor()}
         self._container_log_processes[container_name] = entry
         worker = threading.Thread(
             target=self._capture_worker,
@@ -1016,13 +1027,15 @@ class OnionPressApp(rumps.App):
             entry = self._container_log_processes.get(container_name)
             if entry is None:  # supervisor asked us to stop
                 return
-            last_ts = entry.get("last_ts")
-            cmd = [docker_bin, "logs", "-f"]
-            if last_ts:
-                cmd += ["--since", last_ts]
-            else:
-                cmd += ["--tail", "100"]
-            cmd.append(container_name)
+            # Cursor keyed on docker's own --timestamps token: the old
+            # wall-clock --since at second granularity re-read the whole
+            # boundary second on every reattach (the doubled LAST RESORT
+            # blocks of 2026-08-16). See onionpress.log_capture.
+            cursor = entry.get("cursor")
+            if cursor is None:
+                cursor = entry["cursor"] = CaptureCursor()
+            cmd = ([docker_bin, "logs", "-f"]
+                   + cursor.attach_args() + [container_name])
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1035,10 +1048,9 @@ class OnionPressApp(rumps.App):
             entry["proc"] = proc
             try:
                 for line in proc.stdout:
-                    rotating_log.write(line)
-                    entry["last_ts"] = datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    )
+                    text = cursor.accept(line)
+                    if text is not None:
+                        rotating_log.write(text)
             except Exception:
                 pass
             try:
@@ -1910,6 +1922,10 @@ class OnionPressApp(rumps.App):
                         target=self._manual_analytics_upload, daemon=True
                     ).start()
 
+                # Self-healing supervisor: consume the watchdog handoff,
+                # decide/execute host rungs (see _run_self_heal_cycle).
+                self._run_self_heal_cycle()
+
                 # Write status, poll for config updates & action requests from WordPress settings page
                 self.write_status_to_volume()
                 self.poll_config_updates()
@@ -2702,6 +2718,149 @@ class OnionPressApp(rumps.App):
                     pass
 
         threading.Thread(target=watchdog, daemon=True).start()
+
+    # --- Self-healing supervisor (Actor 2) ------------------------------
+    #
+    # The tor container's watchdog climbs its own ladder and, when its
+    # restarts change nothing, writes escalate_to_host into
+    # watchdog-state.json. This is the reader of that handoff: it runs
+    # once per check_status cycle and owns the one fix the container can
+    # never perform — a full `launcher restart` (the action that ended
+    # the 2026-08-16 nine-hour outage in 22 seconds). All gating,
+    # budgets and anti-flap live in onionpress.self_heal.
+
+    def _run_self_heal_cycle(self):
+        try:
+            reachable, http_code = self._last_reachability
+            if reachable is False:
+                self._unreachable_cycles += 1
+            else:
+                self._unreachable_cycles = 0
+
+            if self._self_heal is None:
+                self._self_heal = self_heal.SelfHealSupervisor(
+                    self.app_support, log_func=self.log)
+            sup = self._self_heal
+
+            # Green/unknown: no docker execs — just keep the healing
+            # object honest (and let a probe-confirmed green clear any
+            # give-up state).
+            if reachable is not False:
+                decision = sup.evaluate(reachable=reachable,
+                                        unreachable_streak=0,
+                                        http_code=http_code)
+                self._healing = sup.healing_status(decision, None)
+                return
+
+            if self._self_heal_restart_in_flight:
+                return  # our own restart is running; keep last state
+
+            view = self_heal.read_watchdog_state(self._docker)
+            busy = False
+            if self._unreachable_cycles >= self_heal.AGREE_CYCLES:
+                busy = self_heal.publish_in_flight(self._docker)
+
+            decision = sup.evaluate(
+                reachable=reachable,
+                unreachable_streak=self._unreachable_cycles,
+                http_code=http_code,
+                stack_running=self.is_running,
+                stopping=(self._stopping or self._quitting),
+                publish_in_flight=busy,
+                watchdog=view,
+                tunnel=self._self_heal_tunnel(),
+            )
+            self._healing = sup.healing_status(decision, view)
+
+            if decision.notify:
+                self.log(decision.notify)
+            if decision.action == "tunnel_kick":
+                self.log(f"SELF-HEAL: kicking the tunnel daemon — "
+                         f"{decision.reason}")
+                sup.record_kick()
+                threading.Thread(target=self._self_heal_kick_tunnel,
+                                 daemon=True).start()
+            elif decision.action == "restart_stack":
+                self.log(f"SELF-HEAL: launcher restart — {decision.reason} "
+                         f"(verdict={decision.verdict})")
+                sup.record_restart(verdict=decision.verdict)
+                self._self_heal_restart_in_flight = True
+                threading.Thread(target=self._self_heal_restart,
+                                 daemon=True).start()
+        except Exception as e:
+            self.log(f"Self-heal cycle error: {e}")
+
+    def _self_heal_tunnel(self):
+        """Fork-only tunnel triage provider; None = rung silently skipped.
+
+        Activated only by the TUNNEL_LAUNCHD_LABEL / TUNNEL_PROXY_ADDR
+        config keys (design §3.4). Guarded import so a build without the
+        fork module (the upstream shape) simply loses the rung.
+        """
+        if getattr(self, "_self_heal_tunnel_loaded", False):
+            return self._self_heal_tunnel_obj
+        self._self_heal_tunnel_loaded = True
+        self._self_heal_tunnel_obj = None
+        try:
+            from onionpress import tunnel_fork
+            self._self_heal_tunnel_obj = tunnel_fork.TunnelTriage.from_config(
+                os.path.join(self.app_support, "config"), self._docker,
+                log_func=self.log)
+            if self._self_heal_tunnel_obj is not None:
+                self.log("Self-heal: tunnel triage rung active "
+                         f"({self._self_heal_tunnel_obj.label})")
+        except ImportError:
+            pass
+        except Exception as e:
+            self.log(f"Self-heal: tunnel module unavailable: {e}")
+        return self._self_heal_tunnel_obj
+
+    def _self_heal_kick_tunnel(self):
+        """Execute a decided tunnel kick, then re-probe after settling."""
+        tunnel = self._self_heal_tunnel()
+        if tunnel is None:
+            return
+        try:
+            from onionpress.tunnel_fork import KICK_SETTLE_SECONDS
+            if not tunnel.kick():
+                return
+            time.sleep(KICK_SETTLE_SECONDS)
+            ok = tunnel.probe_container_leg()
+            self.log("SELF-HEAL: tunnel kicked; container leg now "
+                     + ("OK" if ok else "still dead"))
+        except Exception as e:
+            self.log(f"SELF-HEAL: tunnel kick failed: {e}")
+
+    def _self_heal_restart(self):
+        """Unattended `launcher restart` (H2) — the proven fix.
+
+        Mirrors restart_service()'s worker minus the menu/user-interactive
+        parts (no address-prefix dialog: nothing about the config changed,
+        the onion is just dark).
+        """
+        try:
+            self.is_ready = False
+            self._was_ready = False
+            self._last_bootstrap_pct = 0
+            self._bootstrap_stall_count = 0
+            self._yellow_since = None
+            self._wedge_warning_fired = False
+            subprocess.run([self.launcher_script, "restart"])
+            self._resync_ports()
+            max_wait = 60
+            waited = 0
+            while waited < max_wait:
+                if self._health_checker.check_wordpress_external(
+                        self.wp_port, log=False):
+                    self.log(f"SELF-HEAL: WordPress responding after "
+                             f"restart ({waited}s)")
+                    break
+                time.sleep(2)
+                waited += 2
+        except Exception as e:
+            self.log(f"SELF-HEAL: restart failed: {e}")
+        finally:
+            self._self_heal_restart_in_flight = False
 
     def start_thumbnail_generator(self):
         """Background thread to generate thumbnails for Creations files using qlmanage.
@@ -4893,6 +5052,10 @@ License: AGPL v3"""
                 'bootstrap_pct': bootstrap_pct,
                 'onion_reachable': onion_reachable,
                 'onion_http_code': onion_http_code,
+                # §3.3 healing object from the self-heal supervisor —
+                # null until the first supervisor cycle (tri-state-null
+                # friendly for old readers, like onion_reachable).
+                'healing': getattr(self, '_healing', None),
                 'containers': containers,
                 'updated_at': datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 'platform': 'macos',

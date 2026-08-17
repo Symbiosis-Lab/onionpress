@@ -59,7 +59,7 @@ try:
     from onionpress.config import (
         ensure_config, ensure_secrets, read_value, resolve_port_offset,
     )
-    from onionpress import launcher_ops, system_metrics
+    from onionpress import launcher_ops, self_heal, system_metrics
     from onionpress.power import SystemdInhibitor
 except ImportError as e:
     print(f"ERROR: onionpress package not found in {_LIB_DIR}: {e}", file=sys.stderr)
@@ -186,6 +186,7 @@ def write_status(
     health_result: Optional[HealthResult],
     service_state: ServiceState,
     onion_address: str,
+    healing: Optional[dict] = None,
 ) -> None:
     """Write ~/.onionpress/status.json in the format the tray expects."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -281,6 +282,10 @@ def write_status(
         "bootstrap_pct": bootstrap_pct,
         "onion_reachable": onion_reachable,
         "onion_http_code": onion_http_code,
+        # §3.3 healing object from the self-heal supervisor — null until
+        # the first supervisor cycle (tri-state-null friendly, like
+        # onion_reachable).
+        "healing": healing,
         "containers": containers,
         "wayback_queue_count": wayback_queue,
         "updated_at": now,
@@ -418,6 +423,28 @@ def _start_sleep_wake_monitor(docker: Docker) -> None:
     threading.Thread(target=_watch, daemon=True, name="sleep-wake").start()
 
 
+def _self_heal_restart(manager: ContainerManager, docker: Docker) -> None:
+    """Unattended full-stack restart (H2) decided by the supervisor.
+
+    Linux equivalent of the Mac launcher restart: stop + full start
+    (same body as _cmd_restart), run on a worker thread so the poll loop
+    keeps writing status while the stack cycles.
+    """
+    try:
+        log("SELF-HEAL: restarting the container stack")
+        manager.stop()
+        time.sleep(2)
+        _start(manager, docker)
+        log("SELF-HEAL: stack restart complete")
+    except Exception as e:
+        log(f"SELF-HEAL: stack restart failed: {e}")
+    finally:
+        _self_heal_restarting.clear()
+
+
+_self_heal_restarting = threading.Event()
+
+
 def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
     """Background thread: health-check + write status.json on each interval.
 
@@ -427,6 +454,11 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
     """
     checker = HealthChecker(docker, log_func=log)
     monitor = HealthMonitor(log_func=log)
+    # Host-side self-healing supervisor (self-healing-design.md §3.2
+    # Actor 2): consumes the tor-watchdog's escalate_to_host handoff.
+    supervisor = self_heal.SelfHealSupervisor(DATA_DIR, log_func=log)
+    unreachable_streak = 0
+    healing: Optional[dict] = None
     onion_address = ""
     service_state = ServiceState.STARTING
     _shared_volume_written = False
@@ -501,9 +533,58 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
                     "`sudo systemctl restart docker` (system Docker)."
                 )
 
-            if monitor.should_restart_tor(checker.tor_container_unhealthy()):
+            # Host-side self-healing (design §3.2): track our own verdict,
+            # read the watchdog's handoff, and let the supervisor decide.
+            reachable = hr.tor_externally_reachable
+            if reachable is False:
+                unreachable_streak += 1
+            else:
+                unreachable_streak = 0
+
+            view = None
+            e2e_down = None
+            if reachable is False:
+                view = self_heal.read_watchdog_state(docker)
+                if view.readable and not view.stale and view.e2e_ok is not None:
+                    e2e_down = view.e2e_ok is False
+
+            # Container-level rung (pre-existing, Linux-only), now fed the
+            # measured end-to-end verdict: during the 2026-08-16 incident
+            # the "Bootstrapped 100%" log heuristic made this gate sit out
+            # the whole outage. A fresh container start also resets
+            # watchdog-state within one pass, so the supervisor's yield
+            # gate keeps the two rungs from stacking.
+            if monitor.should_restart_tor(
+                    checker.tor_container_unhealthy(e2e_down=e2e_down)):
                 log("Auto-restarting Tor container")
                 docker.run(["restart", "onionpress-tor"], timeout=30)
+
+            busy = False
+            if reachable is False and unreachable_streak >= self_heal.AGREE_CYCLES:
+                busy = self_heal.publish_in_flight(docker)
+            decision = supervisor.evaluate(
+                reachable=reachable,
+                unreachable_streak=unreachable_streak,
+                http_code=hr.external_http_code,
+                stack_running=True,
+                stopping=_stop_event.is_set(),
+                publish_in_flight=busy,
+                watchdog=view,
+                tunnel=None,  # tunnel triage is a Mac fork concern
+            )
+            healing = supervisor.healing_status(decision, view)
+            if decision.notify:
+                log(decision.notify)
+            if (decision.action == "restart_stack"
+                    and not _self_heal_restarting.is_set()):
+                log(f"SELF-HEAL: full stack restart — {decision.reason} "
+                    f"(verdict={decision.verdict})")
+                supervisor.record_restart(verdict=decision.verdict)
+                _self_heal_restarting.set()
+                threading.Thread(
+                    target=_self_heal_restart, args=(manager, docker),
+                    daemon=True,
+                ).start()
 
             write_status(
                 docker=docker,
@@ -511,6 +592,7 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
                 health_result=hr,
                 service_state=service_state,
                 onion_address=onion_address,
+                healing=healing,
             )
 
         except Exception as e:

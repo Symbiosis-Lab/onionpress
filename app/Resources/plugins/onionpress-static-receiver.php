@@ -137,33 +137,191 @@ function onionpress_static_onion_address() {
     return '';
 }
 
-/**
- * External reachability, as last observed by the health checker — a
- * tri-state: null means not yet checked, never "confirmed unreachable".
- *
- * Read straight from status.json — the same file onion_address falls back
- * to — rather than re-probing here: the reachability check is a real
- * Tor-routed curl (see health.py's check_external_reachability), too slow
- * to run inline in a REST response. `reachable` is null (not false) until
- * the checker has actually completed Check 5 at least once; a caller must
- * not read null as "confirmed unreachable".
- *
- * @return array{reachable: bool|null, http_code: string|null}
- */
-function onionpress_static_reachability() {
-    $sf = '/var/lib/onionpress/status.json';
-    if ( is_readable( $sf ) ) {
-        $data = json_decode( (string) @file_get_contents( $sf ), true );
-        if ( is_array( $data ) ) {
-            $reachable = array_key_exists( 'onion_reachable', $data ) ? $data['onion_reachable'] : null;
-            $http_code = array_key_exists( 'onion_http_code', $data ) ? $data['onion_http_code'] : null;
-            return array(
-                'reachable' => is_bool( $reachable ) ? $reachable : null,
-                'http_code' => is_string( $http_code ) ? $http_code : null,
-            );
-        }
+
+/** Decode a JSON object file, or null when absent/unreadable/not an object. */
+function onionpress_static_read_json( $path ) {
+    if ( ! is_string( $path ) || ! is_readable( $path ) ) {
+        return null;
     }
-    return array( 'reachable' => null, 'http_code' => null );
+    $data = json_decode( (string) @file_get_contents( $path ), true );
+    return is_array( $data ) ? $data : null;
+}
+
+/**
+ * Reachability as observed by the tor watchdog's end-to-end probe, or null
+ * when this watchdog carries no probe evidence (an old tor image, or a
+ * container that has not completed its first probe yet).
+ *
+ * @return array{reachable: bool|null, http_code: string|null, stamp: int}|null
+ */
+function onionpress_static_watchdog_reachability( $data ) {
+    if ( ! is_array( $data ) ) {
+        return null;
+    }
+    $stamp = isset( $data['e2e_checked_at'] ) ? $data['e2e_checked_at'] : null;
+    if ( ! is_int( $stamp ) && ! is_float( $stamp ) ) {
+        return null;   // never probed → no evidence, not "unreachable"
+    }
+    $stamp = (int) $stamp;
+    if ( $stamp <= 0 ) {
+        return null;
+    }
+    $reachable = isset( $data['e2e_ok'] ) ? $data['e2e_ok'] : null;
+    $verdict   = isset( $data['e2e_verdict'] ) ? (string) $data['e2e_verdict'] : '';
+    $code      = isset( $data['e2e_code'] ) ? $data['e2e_code'] : null;
+    $code      = ( is_string( $code ) && $code !== '' ) ? $code : null;
+    // The hub is serving our address: moss keys its takeover diagnosis off
+    // this exact sentinel, the same one health.py's probe emits.
+    if ( $verdict === 'takeover' ) {
+        $code = 'takeover';
+    }
+    return array(
+        'reachable' => is_bool( $reachable ) ? $reachable : null,
+        'http_code' => $code,
+        'stamp'     => $stamp,
+    );
+}
+
+/**
+ * Reachability as last written by the host health checker (moss#917), or
+ * null when status.json is absent/unreadable.
+ *
+ * @return array{reachable: bool|null, http_code: string|null, stamp: int|null}|null
+ */
+function onionpress_static_status_reachability( $data ) {
+    if ( ! is_array( $data ) ) {
+        return null;
+    }
+    $reachable = array_key_exists( 'onion_reachable', $data ) ? $data['onion_reachable'] : null;
+    $http_code = array_key_exists( 'onion_http_code', $data ) ? $data['onion_http_code'] : null;
+    // status.json stamps in ISO-8601; the wire format is unix seconds.
+    $stamp = null;
+    if ( isset( $data['updated_at'] ) && is_string( $data['updated_at'] ) ) {
+        $parsed = strtotime( $data['updated_at'] );
+        if ( $parsed !== false ) {
+            $stamp = (int) $parsed;
+        }
+    } elseif ( isset( $data['updated_at'] ) && is_int( $data['updated_at'] ) ) {
+        $stamp = $data['updated_at'];
+    }
+    return array(
+        'reachable' => is_bool( $reachable ) ? $reachable : null,
+        'http_code' => is_string( $http_code ) ? $http_code : null,
+        'stamp'     => $stamp,
+    );
+}
+
+/**
+ * External reachability, from the freshest evidence available (v1.3).
+ *
+ * The watchdog's end-to-end probe is preferred: it is a real SOCKS5h fetch
+ * of the actual onion through a real rendezvous — which is what "live"
+ * means — it runs inside the tor container with no GUI dependency, and it
+ * stamps its own freshness. status.json is the fallback, and it needs one:
+ * on macOS only the MenubarApp writes that file, and a moss-provisioned
+ * stack never runs the MenubarApp (moss drives the launcher directly), so
+ * status.json can sit hours stale or never appear at all. That is exactly
+ * what happened on 2026-08-16 — a healthy onion reported
+ * `onion_reachable:false, 000:rc=28` from a seven-hour-old file.
+ *
+ * Whichever source is fresher supplies ALL THREE fields, so the triple is
+ * one coherent observation rather than a splice of two files.
+ *
+ * `reachable` stays null (not false) whenever the winning source has not
+ * concluded — a caller must not read null as "confirmed unreachable".
+ *
+ * @return array{reachable: bool|null, http_code: string|null, status_updated_at: int|null}
+ */
+function onionpress_static_reachability( $watchdog_file = null, $status_file = null ) {
+    $watchdog_file = $watchdog_file ?: '/var/lib/onionpress/watchdog-state.json';
+    $status_file   = $status_file   ?: '/var/lib/onionpress/status.json';
+
+    $w = onionpress_static_watchdog_reachability( onionpress_static_read_json( $watchdog_file ) );
+    $s = onionpress_static_status_reachability( onionpress_static_read_json( $status_file ) );
+
+    $winner = null;
+    if ( $w !== null && $s !== null ) {
+        // Ties go to the watchdog: same instant, strictly better evidence.
+        $winner = ( $s['stamp'] !== null && $s['stamp'] > $w['stamp'] ) ? $s : $w;
+    } elseif ( $w !== null ) {
+        $winner = $w;
+    } elseif ( $s !== null ) {
+        $winner = $s;
+    }
+
+    if ( $winner === null ) {
+        return array( 'reachable' => null, 'http_code' => null, 'status_updated_at' => null );
+    }
+    return array(
+        'reachable'         => $winner['reachable'],
+        'http_code'         => $winner['http_code'],
+        'status_updated_at' => $winner['stamp'],
+    );
+}
+
+/**
+ * The self-healing state object (self-healing-design.md §3.3), or null.
+ *
+ * The host supervisor writes the full object into status.json. When that
+ * file has none — a moss-provisioned stack runs no MenubarApp, so nobody
+ * ever writes one — derive the observable half from the watchdog, whose
+ * ladder state is the part a publishing user actually needs to see. Host
+ * fields stay null there because no host actor has reported.
+ *
+ * @return array|null
+ */
+function onionpress_static_healing( $status_file = null, $watchdog_file = null ) {
+    $status_file   = $status_file   ?: '/var/lib/onionpress/status.json';
+    $watchdog_file = $watchdog_file ?: '/var/lib/onionpress/watchdog-state.json';
+
+    $status = onionpress_static_read_json( $status_file );
+    if ( is_array( $status ) && isset( $status['healing'] ) && is_array( $status['healing'] ) ) {
+        return $status['healing'];
+    }
+
+    $w = onionpress_static_read_json( $watchdog_file );
+    if ( ! is_array( $w ) ) {
+        return null;
+    }
+    $probe = onionpress_static_watchdog_reachability( $w );
+    if ( $probe === null ) {
+        return null;   // no e2e evidence → nothing honest to report
+    }
+
+    $verdict   = isset( $w['e2e_verdict'] ) ? (string) $w['e2e_verdict'] : '';
+    $degraded  = ! empty( $w['degraded'] ) || ! empty( $w['escalate_to_host'] );
+    $restarts  = isset( $w['restarts_this_outage'] ) ? (int) $w['restarts_this_outage'] : 0;
+    $down      = ( $probe['reachable'] === false );
+
+    if ( $verdict === 'takeover' ) {
+        $state = 'reclaiming';       // visitors are served by the hub
+    } elseif ( $degraded ) {
+        $state = 'awaiting_host';    // the watchdog yielded
+    } elseif ( $down ) {
+        $state = 'watchdog_recovering';
+    } else {
+        $state = 'ok';
+    }
+
+    if ( $degraded ) {
+        $rung = 'degraded';
+    } elseif ( $restarts > 0 ) {
+        $rung = 'restart-tor';
+    } elseif ( $down ) {
+        $rung = 'recovering';
+    } else {
+        $rung = 'idle';
+    }
+
+    return array(
+        'state'            => $state,
+        'verdict'          => $verdict !== '' ? $verdict : null,
+        'watchdog_rung'    => $rung,
+        'host_attempts_6h' => null,
+        'last_action'      => null,
+        'last_action_at'   => null,
+        'next_eligible_at' => null,
+    );
 }
 
 /**
@@ -452,9 +610,16 @@ function onionpress_static_route_status() {
     return new WP_REST_Response( array(
         'onion_address'      => onionpress_static_onion_address(),
         'current_generation' => onionpress_static_current_generation(),
-        'receiver_version'   => '2.0',
+        'receiver_version'   => '2.1',
         'onion_reachable'    => $reachability['reachable'],
         'onion_http_code'    => $reachability['http_code'],
+        // Freshness of the reachability verdict above, unix seconds. A
+        // caller ages out reachable/http_code with it (never
+        // current_generation, which does not go stale) and treats absent
+        // as "no freshness gate", never as stale.
+        'status_updated_at'  => $reachability['status_updated_at'],
+        // Self-healing state (self-healing-design.md §3.3), or null.
+        'healing'            => onionpress_static_healing(),
     ), 200 );
 }
 
