@@ -2076,9 +2076,68 @@ receiver_answering_port() {
     return 1
 }
 
+# Bring the menu-bar app back if it is gone, so that `start` restores the
+# whole stack rather than only its containers.
+#
+# `quit` takes the MenubarApp down (SIGTERM, in the quit arm below) but
+# `start` never brought it back, so any caller that scripts quit+start left
+# it off permanently. moss's Restart recovery is exactly that pair, which
+# meant moss's own recovery stranded the site it was recovering.
+#
+# The MenubarApp is not cosmetic on macOS. It is the only writer of
+# /var/lib/onionpress/status.json (menubar.py:write_status_to_volume) and the
+# only sender of OnionHeaven's /online heartbeat (onionheaven.py), so while it
+# is dead the published reachability verdict is frozen at whatever it last
+# said and an OnionHeaven takeover can never be released.
+#
+# Idempotent by design: the menu bar itself re-enters `onionpress start` on
+# every launch (auto_start -> start_service), so this has to be a no-op when
+# called from the very app it would otherwise spawn a second copy of.
+ensure_menubar_running() {
+    local menubar_bin="$RESOURCES_DIR/MenubarApp/Contents/MacOS/OnionPress"
+
+    # A source checkout or CI has no built bundle — nothing to revive.
+    [ -x "$menubar_bin" ] || return 0
+
+    # Same matcher launcher.sh and the quit arm use: narrow enough not to
+    # collide with other OnionPress processes (launcher, shell scripts).
+    # `-u $(whoami)` keeps us to this user's processes, per the multi-user
+    # rule in CLAUDE.md.
+    if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # A MenubarApp that died without running its cleanup (SIGKILL, crash)
+    # leaves menubar.pid pointing at a dead PID that `upload-analytics`
+    # reads as "OnionPress is running". Drop it before spawning; the app
+    # rewrites it on startup.
+    rm -f "$DATA_DIR/menubar.pid"
+
+    log "start: MenubarApp is not running — launching it"
+    # stdout/stderr go to the log, never to the caller's pipe: a backgrounded
+    # child holding an inherited pipe open would hang any caller that reads
+    # our output to EOF (moss runs this launcher exactly that way). nohup and
+    # </dev/null keep it alive and non-blocking once this script exits.
+    # Architecture needs no `arch -` prefix here — the re-exec at the top of
+    # this script already dropped us out of Rosetta and the child inherits it.
+    PYTHONDONTWRITEBYTECODE=1 nohup "$menubar_bin" >> "$LOG_FILE" 2>&1 </dev/null &
+    log "start: MenubarApp launched (PID: $!)"
+}
+
 main() {
     case "${1:-start}" in
         start)
+            # Revive the menu-bar app first of all. This has to run BEFORE the
+            # already-running probe below, not after it: the stranded state
+            # this fixes is "containers up, MenubarApp dead", which takes that
+            # probe's early exit — so a revival placed below it would never
+            # fire in precisely the case that needs it.
+            #
+            # TRAP SAFETY (see the probe's note below): this writes no PID
+            # file and installs no trap, so it cannot strip a lock belonging
+            # to another, still-running invocation.
+            ensure_menubar_running
+
             # Starting an already-running stack is a no-op, not a conflict.
             #
             # Two callers drive this stack: a managing app owns its lifecycle
@@ -2099,8 +2158,10 @@ main() {
             # TRAP SAFETY: this runs BEFORE the PID file is written and BEFORE
             # the EXIT trap is installed, so this exit can never remove a PID
             # file belonging to a different, still-running invocation. Any
-            # future work added to `start` must stay below this block for the
-            # same reason.
+            # future work added to `start` that writes the PID file or takes
+            # the lock must stay below this block for the same reason; work
+            # that does neither (ensure_menubar_running, above) may precede
+            # it, and must when the early exit would otherwise skip it.
             if _receiver_port=$(receiver_answering_port); then
                 # A container recreate behind the launcher's back (compose
                 # recreate, image change, stack update) wipes the static-first
@@ -2316,6 +2377,20 @@ main() {
                 STORED_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
                 if [ -z "$MENUBAR_PID" ] || [ "$STORED_PID" = "$MENUBAR_PID" ]; then
                     rm -f "$PIDFILE"
+                fi
+            fi
+
+            # Same for the MenubarApp's own PID file. The app normally
+            # removes this itself (menubar.py:_remove_pid_file), but the
+            # SIGKILL escalation above bypasses that cleanup — and a stale
+            # menubar.pid is not inert: `upload-analytics` reads it and
+            # reports "OnionPress is running" over a dead app. Guarded the
+            # same way, so a MenubarApp that raced in behind us keeps its.
+            MENUBAR_PIDFILE="$DATA_DIR/menubar.pid"
+            if [ -f "$MENUBAR_PIDFILE" ]; then
+                STORED_PID=$(cat "$MENUBAR_PIDFILE" 2>/dev/null | tr -d '[:space:]')
+                if [ -z "$MENUBAR_PID" ] || [ "$STORED_PID" = "$MENUBAR_PID" ]; then
+                    rm -f "$MENUBAR_PIDFILE"
                 fi
             fi
 
