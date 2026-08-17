@@ -740,8 +740,8 @@ class TestWaybackCommentResnapshot(unittest.TestCase):
 class TestWaybackKickAndInvalidate(unittest.TestCase):
     """`onionpress_wayback_kick_now()` / `_invalidate_sitewide()` are the
     shared mechanism behind every "archive right now" trigger: the
-    save_post hook, the admin "kick" button, and (via the moss receiver)
-    a moss publish. Covers the mechanism itself, not each caller."""
+    save_post hook, the admin "kick" button, and (via the static receiver)
+    a static-site publish. Covers the mechanism itself, not each caller."""
 
     @classmethod
     def setUpClass(cls):

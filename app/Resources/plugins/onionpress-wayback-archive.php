@@ -1506,7 +1506,7 @@ function onionpress_wayback_schedule_sweep_now( $reason ) {
 
 /**
  * Clear the sweep back-off and start a sweep immediately. Used by the
- * admin "kick" button and by the moss commit route.
+ * admin "kick" button and by the static receiver's commit route.
  */
 function onionpress_wayback_kick_now() {
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );

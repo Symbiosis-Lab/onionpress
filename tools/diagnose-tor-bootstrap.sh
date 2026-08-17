@@ -27,7 +27,7 @@ set -euo pipefail
 
 RUN_LABEL="${1:?usage: $0 <run-label> [timeout-seconds]}"
 TIMEOUT="${2:-300}"
-IMAGE="${DIAGNOSE_TOR_IMAGE:-ghcr.io/symbiosis-lab/onionpress-tor:latest}"
+IMAGE="${DIAGNOSE_TOR_IMAGE:-ghcr.io/guoliu/onionpress-tor:latest}"
 CONTAINER="diag-tor-${RUN_LABEL}"
 DOCKER="${DOCKER_CMD:-docker}"
 

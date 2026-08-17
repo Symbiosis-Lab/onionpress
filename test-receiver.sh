@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# test-receiver.sh — end-to-end smoke test for the OnionPress moss receiver.
+# test-receiver.sh — end-to-end smoke test for the OnionPress static receiver.
 #
-# Exercises the v1 wire contract (receiver-contract.md) exactly as the moss
-# plugin does: probe GET /status, tar a fixture with `tar -cf x -C dir .`,
+# Exercises the wire contract (docs/static-publish-protocol.md) exactly as a publisher
+# client does: probe GET /status, tar a fixture with `tar -cf x -C dir .`,
 # POST /generation, POST /commit, then confirm the static file is served at
 # the site root ahead of WordPress.
 #
 # PREREQUISITE: OnionPress must already be running locally with a provisioned
-# WordPress (the onionpress-moss-receiver mu-plugin installed). Start the app,
+# WordPress (the onionpress-static-receiver mu-plugin installed). Start the app,
 # wait for the site to come up, then run this script. It talks to the receiver
 # over the host loopback port map — no Tor required.
 #
@@ -21,8 +21,8 @@
 set -u
 
 # Candidate ports: OnionPress offsets each additional macOS user by +10000
-# (see the multi-user notes in CLAUDE.md). Port discovery mirrors the moss
-# plugin: first port whose /status returns a body containing receiver_version
+# (see the multi-user notes in CLAUDE.md). Port discovery mirrors publisher
+# clients: first port whose /status returns a body containing receiver_version
 # wins.
 CANDIDATE_PORTS=(8080 18080 28080 38080 48080)
 
@@ -89,16 +89,18 @@ printf '<!doctype html><title>e2e</title><h1>%s</h1>' "$MARKER" > "$WORK/fixture
 printf '<!doctype html><p>%s about</p>' "$MARKER"           > "$WORK/fixture/about.html"
 printf 'body{color:#0a0}' > "$WORK/fixture/assets/site.css"
 
-# Exactly the command the moss plugin uses (receiver.ts): the leading "."
+# Exactly the command a publisher client uses: the leading "."
 # emits a `.` self-entry that PharData cannot extract — the receiver's own
 # streaming tar reader must handle it.
 TAR="$WORK/gen.tar"
 ( cd "$WORK/fixture" && tar -cf "$TAR" -C . . )
 
-GENID="moss-$(date +%s)"
+# Multipart carrier, exactly as the contract mandates (receiver_version 2.0
+# dropped the raw application/x-tar body). No manual Content-Type: curl
+# generates the multipart boundary itself.
+GENID="gen-$(date +%s)"
 gen_resp="$(curl -s --max-time 30 -X POST \
-  -H 'Content-Type: application/x-tar' \
-  --data-binary "@${TAR}" \
+  -F "tar=@${TAR}" \
   "${API}/generation?id=${GENID}")"
 info "generation: ${gen_resp}"
 if json_has_true "$gen_resp" ok; then

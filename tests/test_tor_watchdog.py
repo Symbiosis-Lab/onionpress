@@ -815,7 +815,7 @@ class TestStateFilePath(unittest.TestCase):
 
 
 class TestStateFile(unittest.TestCase):
-    def test_publishes_a_serving_verdict_moss_can_read(self):
+    def test_publishes_a_serving_verdict_for_external_consumers(self):
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, "nested", "watchdog-state.json")
             tw.write_state_file(_serving_state(), circuit_established=True, path=path, now=1234)

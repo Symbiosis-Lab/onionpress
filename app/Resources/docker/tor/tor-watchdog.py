@@ -121,9 +121,9 @@ TOR_RESTART_COOLDOWN = 900    # at most 4 process restarts an hour
 DEGRADED_AFTER_RESTARTS = 3
 DEGRADED_WINDOW = 3600
 
-# Where the ladder publishes what it knows, for moss to read (the shared
-# volume the content address already lives on). Never sit silent: if we have
-# stopped trying, the file says so.
+# Where the ladder publishes what it knows, for the launcher and any external
+# status consumer to read (the shared volume the content address already lives
+# on). Never sit silent: if we have stopped trying, the file says so.
 #
 # The path is role-scoped because this watchdog runs in more than one
 # container off ONE shared volume: `onionpress-tor` and `onionheaven` both
@@ -1168,7 +1168,9 @@ def do_degrade(state, reason):
     against our 9 hours), so the state file now carries an explicit
     escalation request for the host supervisor. We stay quiescent until
     either a probe-confirmed serving clears the ledger or a fresh container
-    start gives the situation a new chance.
+    start gives the situation a new chance. Either way the state file carries
+    the answer, so the launcher and any external status consumer can still
+    tell whether the site is live.
     """
     if state.degraded:
         return
@@ -1532,8 +1534,8 @@ def check_stalls(cmd_sock, state):
         # container is about to die, and for the handoff the host reads it.
         state.last_state_write = 0
 
-    # Publish what we know, whether or not we acted. moss has to be able to
-    # answer "is my site live" at any moment, not only after a failure.
+    # Publish what we know, whether or not we acted. The launcher has to be
+    # able to answer "is my site live" at any moment, not only after a failure.
     if now - state.last_state_write > 15:
         write_state_file(state, circuits_up, now=now)
         state.last_state_write = now

@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: OnionPress moss Receiver
- * Description: Loopback REST endpoints that let the moss editor publish a
- *              pre-rendered static site into OnionPress. moss uploads a tar
- *              of a generated site, the receiver extracts it under
+ * Plugin Name: OnionPress Static Receiver
+ * Description: Loopback REST endpoints that let a static-site publisher
+ *              deliver a pre-rendered site into OnionPress. The publisher
+ *              uploads a tar of a generated site, the receiver extracts it under
  *              /var/www/html/site-generations/<id>/, and an atomic symlink
  *              flip of /var/www/html/site/current makes it live. Apache then
  *              serves those files ahead of WordPress (see
@@ -19,36 +19,83 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * Filesystem layout shared by the three endpoints.
  *
- *   GENERATIONS/<id>/   — one extracted moss generation (static files)
+ *   GENERATIONS/<id>/   — one extracted site generation (static files)
  *   SITE/current        — symlink to the live generation
  *
  * `current` lives next to (not inside) the generations dir so a generation
  * can never contain a name that collides with the `current` symlink.
  */
-define( 'ONIONPRESS_MOSS_WEB_ROOT',    '/var/www/html' );
-define( 'ONIONPRESS_MOSS_SITE_DIR',    '/var/www/html/site' );
-define( 'ONIONPRESS_MOSS_CURRENT',     '/var/www/html/site/current' );
-define( 'ONIONPRESS_MOSS_GENERATIONS', '/var/www/html/site-generations' );
-define( 'ONIONPRESS_MOSS_KEEP',        3 );
+define( 'ONIONPRESS_STATIC_WEB_ROOT',    '/var/www/html' );
+define( 'ONIONPRESS_STATIC_SITE_DIR',    '/var/www/html/site' );
+define( 'ONIONPRESS_STATIC_CURRENT',     '/var/www/html/site/current' );
+define( 'ONIONPRESS_STATIC_GENERATIONS', '/var/www/html/site-generations' );
+define( 'ONIONPRESS_STATIC_KEEP',        3 );
 
 /**
- * Localhost trust, shared by every route.
+ * The default gateway of this container's network namespace, or null when it
+ * cannot be determined. Cached for the request lifetime.
  *
- * The receiver is only ever driven by the moss app on the same machine,
- * reaching Apache over the host's loopback port map. It must never be
- * reachable by a public onion visitor. Two independent checks:
+ * Traffic that enters through Docker's host port map is NATed, so inside the
+ * container its source address is the bridge gateway — never 127.0.0.1. This
+ * is the one address that means "came in through the published port" rather
+ * than "came from some other container on the bridge".
+ */
+function onionpress_static_gateway_ip() {
+    static $gateway = false; // false = not computed yet; null = unknown
+    if ( $gateway !== false ) {
+        return $gateway;
+    }
+    $gateway = null;
+    $route = @file_get_contents( '/proc/net/route' );
+    if ( is_string( $route ) ) {
+        foreach ( explode( "\n", $route ) as $line ) {
+            $cols = preg_split( '/\s+/', trim( $line ) );
+            // Destination 00000000 is the default route; column 2 is the
+            // gateway as little-endian hex.
+            if ( count( $cols ) >= 3 && $cols[1] === '00000000' ) {
+                $ip = long2ip( (int) hexdec( implode( '', array_reverse(
+                    str_split( $cols[2], 2 ) ) ) ) );
+                if ( $ip !== false && $ip !== '0.0.0.0' ) {
+                    $gateway = $ip;
+                }
+                break;
+            }
+        }
+    }
+    return $gateway;
+}
+
+/**
+ * Localhost trust, shared by every route: allow only requests that provably
+ * arrived through the host's port map, deny everything else.
+ *
+ * The receiver is driven by a publisher on the same machine, reaching Apache
+ * over the host's loopback port map. It must never be reachable by a public
+ * onion visitor. This is a positive allowlist, not a denylist:
  *
  *   1. Any `X-Forwarded-*` header means the request was relayed by a proxy.
- *      The onion serving path (tor -> apache) sets none, so their presence
- *      is a spoof or a misconfiguration — deny.
- *   2. If REMOTE_ADDR is the tor or onionheaven container, the request
- *      arrived over the onion service rather than the local port map — deny.
+ *      Neither the onion serving path (tor -> apache) nor the host port map
+ *      sets one, so their presence is a spoof or misconfiguration — deny.
+ *   2. REMOTE_ADDR must be loopback (php-served directly) or this
+ *      container's default gateway. A bare `REMOTE_ADDR === '127.0.0.1'`
+ *      check does not work under Docker: the host port publish NATs the
+ *      connection, so a request from the host's loopback arrives with the
+ *      bridge gateway as its source. Conversely the tor and onionheaven
+ *      containers reach Apache by their own bridge addresses, which are
+ *      never the gateway — so onion-side traffic is denied without having
+ *      to enumerate container names.
  *
- * Precedent: onionpress-auto-login.php treats the local machine as trusted.
+ * The gateway cannot distinguish host-loopback from LAN clients when the
+ * port map is bound to 0.0.0.0 — NAT erases that. The compose file binds
+ * the publish to 127.0.0.1 by default (ONIONPRESS_BIND_HOST); overriding
+ * that to a public interface deliberately widens who can publish.
+ *
+ * Fails closed: no REMOTE_ADDR, or an undeterminable gateway on a
+ * non-loopback source, means deny.
  *
  * @return bool True when the request may proceed.
  */
-function onionpress_moss_is_local_request() {
+function onionpress_static_is_local_request() {
     // 1. Reject anything carrying proxy-forwarding headers.
     foreach ( array_keys( $_SERVER ) as $key ) {
         if ( strpos( $key, 'HTTP_X_FORWARDED_' ) === 0 ) {
@@ -56,28 +103,23 @@ function onionpress_moss_is_local_request() {
         }
     }
 
-    // 2. Reject requests whose source is the tor / onionheaven container.
+    // 2. Positive source check: loopback, or the NAT gateway.
     $remote = isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '';
     if ( $remote === '' ) {
         return false;
     }
-    foreach ( array( 'onionpress-tor', 'onionheaven' ) as $host ) {
-        $ip = gethostbyname( $host );
-        // gethostbyname() returns its input unchanged when resolution fails;
-        // only a real, differing result is a container IP worth matching.
-        if ( $ip !== $host && $remote === $ip ) {
-            return false;
-        }
+    if ( $remote === '::1' || strpos( $remote, '127.' ) === 0 ) {
+        return true;
     }
-
-    return true;
+    $gateway = onionpress_static_gateway_ip();
+    return $gateway !== null && $remote === $gateway;
 }
 
 /**
  * Read the current onion address, or '' if not known yet.
  * Primary source is the flat address file; status.json is the fallback.
  */
-function onionpress_moss_onion_address() {
+function onionpress_static_onion_address() {
     $f = '/var/lib/onionpress/onion_address';
     if ( is_readable( $f ) ) {
         $addr = trim( (string) @file_get_contents( $f ) );
@@ -95,8 +137,9 @@ function onionpress_moss_onion_address() {
     return '';
 }
 
+
 /** Decode a JSON object file, or null when absent/unreadable/not an object. */
-function onionpress_moss_read_json( $path ) {
+function onionpress_static_read_json( $path ) {
     if ( ! is_string( $path ) || ! is_readable( $path ) ) {
         return null;
     }
@@ -111,7 +154,7 @@ function onionpress_moss_read_json( $path ) {
  *
  * @return array{reachable: bool|null, http_code: string|null, stamp: int}|null
  */
-function onionpress_moss_watchdog_reachability( $data ) {
+function onionpress_static_watchdog_reachability( $data ) {
     if ( ! is_array( $data ) ) {
         return null;
     }
@@ -145,7 +188,7 @@ function onionpress_moss_watchdog_reachability( $data ) {
  *
  * @return array{reachable: bool|null, http_code: string|null, stamp: int|null}|null
  */
-function onionpress_moss_status_reachability( $data ) {
+function onionpress_static_status_reachability( $data ) {
     if ( ! is_array( $data ) ) {
         return null;
     }
@@ -189,12 +232,12 @@ function onionpress_moss_status_reachability( $data ) {
  *
  * @return array{reachable: bool|null, http_code: string|null, status_updated_at: int|null}
  */
-function onionpress_moss_reachability( $watchdog_file = null, $status_file = null ) {
+function onionpress_static_reachability( $watchdog_file = null, $status_file = null ) {
     $watchdog_file = $watchdog_file ?: '/var/lib/onionpress/watchdog-state.json';
     $status_file   = $status_file   ?: '/var/lib/onionpress/status.json';
 
-    $w = onionpress_moss_watchdog_reachability( onionpress_moss_read_json( $watchdog_file ) );
-    $s = onionpress_moss_status_reachability( onionpress_moss_read_json( $status_file ) );
+    $w = onionpress_static_watchdog_reachability( onionpress_static_read_json( $watchdog_file ) );
+    $s = onionpress_static_status_reachability( onionpress_static_read_json( $status_file ) );
 
     $winner = null;
     if ( $w !== null && $s !== null ) {
@@ -227,20 +270,20 @@ function onionpress_moss_reachability( $watchdog_file = null, $status_file = nul
  *
  * @return array|null
  */
-function onionpress_moss_healing( $status_file = null, $watchdog_file = null ) {
+function onionpress_static_healing( $status_file = null, $watchdog_file = null ) {
     $status_file   = $status_file   ?: '/var/lib/onionpress/status.json';
     $watchdog_file = $watchdog_file ?: '/var/lib/onionpress/watchdog-state.json';
 
-    $status = onionpress_moss_read_json( $status_file );
+    $status = onionpress_static_read_json( $status_file );
     if ( is_array( $status ) && isset( $status['healing'] ) && is_array( $status['healing'] ) ) {
         return $status['healing'];
     }
 
-    $w = onionpress_moss_read_json( $watchdog_file );
+    $w = onionpress_static_read_json( $watchdog_file );
     if ( ! is_array( $w ) ) {
         return null;
     }
-    $probe = onionpress_moss_watchdog_reachability( $w );
+    $probe = onionpress_static_watchdog_reachability( $w );
     if ( $probe === null ) {
         return null;   // no e2e evidence → nothing honest to report
     }
@@ -285,9 +328,9 @@ function onionpress_moss_healing( $status_file = null, $watchdog_file = null ) {
  * The id of the live generation (basename of the `current` symlink target),
  * or null when nothing has been committed yet.
  */
-function onionpress_moss_current_generation() {
-    if ( is_link( ONIONPRESS_MOSS_CURRENT ) ) {
-        $target = @readlink( ONIONPRESS_MOSS_CURRENT );
+function onionpress_static_current_generation() {
+    if ( is_link( ONIONPRESS_STATIC_CURRENT ) ) {
+        $target = @readlink( ONIONPRESS_STATIC_CURRENT );
         if ( is_string( $target ) && $target !== '' ) {
             return basename( $target );
         }
@@ -297,9 +340,10 @@ function onionpress_moss_current_generation() {
 
 /**
  * A generation id is an opaque directory name. Reject anything that could
- * escape the generations dir. moss sends `moss-<unix_seconds>`.
+ * escape the generations dir. Publishers send an opaque id such as
+ * `gen-<unix_seconds>`.
  */
-function onionpress_moss_valid_id( $id ) {
+function onionpress_static_valid_id( $id ) {
     return is_string( $id )
         && $id !== ''
         && strpos( $id, "\0" ) === false
@@ -309,7 +353,7 @@ function onionpress_moss_valid_id( $id ) {
 }
 
 /** Uniform error response: 4xx/5xx JSON `{ ok:false, error:… }`. */
-function onionpress_moss_error( $message, $status ) {
+function onionpress_static_error( $message, $status ) {
     return new WP_REST_Response(
         array( 'ok' => false, 'error' => $message ),
         $status
@@ -320,7 +364,7 @@ function onionpress_moss_error( $message, $status ) {
  * Recursively delete a path. Never follows symlinks (a symlink is unlinked,
  * not descended into).
  */
-function onionpress_moss_rmrf( $path ) {
+function onionpress_static_rmrf( $path ) {
     if ( is_link( $path ) || ! file_exists( $path ) ) {
         @unlink( $path );
         return;
@@ -347,7 +391,7 @@ function onionpress_moss_rmrf( $path ) {
  * Read exactly $size bytes of tar payload, then consume padding up to the
  * next 512-byte boundary ($padded). Returns the bytes read.
  */
-function onionpress_moss_read_n( $fh, $size, $padded ) {
+function onionpress_static_read_n( $fh, $size, $padded ) {
     $buf       = '';
     $remaining = $size;
     while ( $remaining > 0 ) {
@@ -370,7 +414,8 @@ function onionpress_moss_read_n( $fh, $size, $padded ) {
  *
  * Why not PharData: the contract's `tar -cf x.tar -C <gendir> .` emits a `.`
  * self-entry that PharData::extractTo cannot handle ("Cannot extract '.'"),
- * so it fails on every real moss upload. This reader also lets the traversal
+ * so it fails on every real publisher upload. This reader also lets the
+ * traversal
  * and link guards run inline, in one pass, failing closed on anything it does
  * not positively recognise as a regular file or directory.
  *
@@ -379,7 +424,7 @@ function onionpress_moss_read_n( $fh, $size, $padded ) {
  *
  * @return array{0:bool,1:?string} [ok, error message]
  */
-function onionpress_moss_extract_tar( $tar_path, $dest_dir ) {
+function onionpress_static_extract_tar( $tar_path, $dest_dir ) {
     $fh = @fopen( $tar_path, 'rb' );
     if ( ! $fh ) {
         return array( false, 'cannot open tar' );
@@ -435,16 +480,16 @@ function onionpress_moss_extract_tar( $tar_path, $dest_dir ) {
         // entry. Links are rejected below, so a long link name is discarded.
         if ( $typeflag === 'L' ) {
             $pending_longname = rtrim(
-                onionpress_moss_read_n( $fh, $size, $data_padded ), "\0" );
+                onionpress_static_read_n( $fh, $size, $data_padded ), "\0" );
             continue;
         }
         if ( $typeflag === 'K' ) {
-            onionpress_moss_read_n( $fh, $size, $data_padded );
+            onionpress_static_read_n( $fh, $size, $data_padded );
             continue;
         }
         // pax extended header: pull a `path=` record if present.
         if ( $typeflag === 'x' || $typeflag === 'g' ) {
-            $paxdata = onionpress_moss_read_n( $fh, $size, $data_padded );
+            $paxdata = onionpress_static_read_n( $fh, $size, $data_padded );
             if ( preg_match( '/^\d+ path=([^\n]*)\n/m', $paxdata, $m ) ) {
                 $pending_paxpath = $m[1];
             }
@@ -500,7 +545,7 @@ function onionpress_moss_extract_tar( $tar_path, $dest_dir ) {
         // The `.` self-entry from `tar -C <dir> .` normalises to empty.
         if ( $rel === '' ) {
             if ( ! $is_dir && $size > 0 ) {
-                onionpress_moss_read_n( $fh, $size, $data_padded );
+                onionpress_static_read_n( $fh, $size, $data_padded );
             }
             continue;
         }
@@ -558,14 +603,14 @@ function onionpress_moss_extract_tar( $tar_path, $dest_dir ) {
 }
 
 /**
- * GET /status — advertise the receiver so moss can find the right port.
+ * GET /status — advertise the receiver so a publisher can discover its port.
  */
-function onionpress_moss_route_status() {
-    $reachability = onionpress_moss_reachability();
+function onionpress_static_route_status() {
+    $reachability = onionpress_static_reachability();
     return new WP_REST_Response( array(
-        'onion_address'      => onionpress_moss_onion_address(),
-        'current_generation' => onionpress_moss_current_generation(),
-        'receiver_version'   => '1.3',
+        'onion_address'      => onionpress_static_onion_address(),
+        'current_generation' => onionpress_static_current_generation(),
+        'receiver_version'   => '2.1',
         'onion_reachable'    => $reachability['reachable'],
         'onion_http_code'    => $reachability['http_code'],
         // Freshness of the reachability verdict above, unix seconds. A
@@ -574,7 +619,7 @@ function onionpress_moss_route_status() {
         // as "no freshness gate", never as stale.
         'status_updated_at'  => $reachability['status_updated_at'],
         // Self-healing state (self-healing-design.md §3.3), or null.
-        'healing'            => onionpress_moss_healing(),
+        'healing'            => onionpress_static_healing(),
     ), 200 );
 }
 
@@ -585,7 +630,7 @@ function onionpress_moss_route_status() {
  * check must run before is_uploaded_file() -- otherwise a truncated tar
  * is silently accepted as if it were complete.
  */
-function onionpress_moss_upload_error_message( $code ) {
+function onionpress_static_upload_error_message( $code ) {
     switch ( $code ) {
         case UPLOAD_ERR_INI_SIZE:
             return array( 'upload exceeds upload_max_filesize', 413 );
@@ -612,7 +657,7 @@ function onionpress_moss_upload_error_message( $code ) {
  *
  * @return array{0:bool,1:?string} [ok, error message]
  */
-function onionpress_moss_save_uploaded_part( $tmp_name, $dest ) {
+function onionpress_static_save_uploaded_part( $tmp_name, $dest ) {
     if ( @move_uploaded_file( $tmp_name, $dest ) ) {
         return array( true, null );
     }
@@ -637,93 +682,80 @@ function onionpress_moss_save_uploaded_part( $tmp_name, $dest ) {
 }
 
 /**
- * POST /generation?id=<id> — accept a tar of one moss generation.
+ * POST /generation?id=<id> — accept a tar of one site generation.
  *
- * Preferred carrier (receiver_version >= 1.2) is a multipart/form-data
- * upload with the tar in a part named `tar`: PHP's rfc1867.c streams that
- * straight to upload_tmp_dir and get_raw_data() never buffers it into a
- * PHP string. The raw-body path below is kept for older moss clients that
- * still POST `Content-Type: application/x-tar` directly -- WordPress's
- * REST server calls set_body(get_raw_data()) *before* our permission
- * callback runs, so by the time we could reject an oversize raw body the
- * memory has already been spent. See app/Resources/docker/wordpress/
- * onionpress-uploads.ini for the memory_limit that exists solely to give
- * that legacy path headroom -- do not remove either until the raw-body
- * branch itself is removed.
+ * The only carrier is a multipart/form-data upload with the tar in a part
+ * named `tar`: PHP's rfc1867.c streams that straight to upload_tmp_dir, so
+ * a large site never transits PHP memory. A raw `application/x-tar` body
+ * is NOT accepted (removed at receiver_version 2.0): WordPress's REST
+ * server buffers a raw body into a PHP string *before* the permission
+ * callback runs, so an oversize upload spent its memory before the route
+ * could reject it — the multipart carrier is what makes the upload safe,
+ * not just faster.
  *
- * Either way, the body/part is written to <id>.tar, extracted into
- * <id>.tmp/, then atomically renamed to <id>/.
+ * The part is written to <id>.tar, extracted into <id>.tmp/, then
+ * atomically renamed to <id>/.
  */
-function onionpress_moss_route_generation( $request ) {
+function onionpress_static_route_generation( $request ) {
     $id = $request->get_param( 'id' );
-    if ( ! onionpress_moss_valid_id( $id ) ) {
-        return onionpress_moss_error( 'invalid generation id', 400 );
+    if ( ! onionpress_static_valid_id( $id ) ) {
+        return onionpress_static_error( 'invalid generation id', 400 );
     }
 
-    if ( ! is_dir( ONIONPRESS_MOSS_GENERATIONS )
-        && ! @mkdir( ONIONPRESS_MOSS_GENERATIONS, 0755, true ) ) {
-        return onionpress_moss_error( 'cannot create generations dir', 500 );
+    if ( ! is_dir( ONIONPRESS_STATIC_GENERATIONS )
+        && ! @mkdir( ONIONPRESS_STATIC_GENERATIONS, 0755, true ) ) {
+        return onionpress_static_error( 'cannot create generations dir', 500 );
     }
 
-    $tar_path  = ONIONPRESS_MOSS_GENERATIONS . '/' . $id . '.tar';
-    $tmp_dir   = ONIONPRESS_MOSS_GENERATIONS . '/' . $id . '.tmp';
-    $final_dir = ONIONPRESS_MOSS_GENERATIONS . '/' . $id;
+    $tar_path  = ONIONPRESS_STATIC_GENERATIONS . '/' . $id . '.tar';
+    $tmp_dir   = ONIONPRESS_STATIC_GENERATIONS . '/' . $id . '.tmp';
+    $final_dir = ONIONPRESS_STATIC_GENERATIONS . '/' . $id;
 
     $files = $request->get_file_params();
-    if ( isset( $files['tar'] ) ) {
-        $f = $files['tar'];
+    if ( ! isset( $files['tar'] ) ) {
+        return onionpress_static_error(
+            'expected a multipart/form-data upload with the tar in a part named "tar"',
+            400 );
+    }
+    $f = $files['tar'];
 
-        // Check the upload error first and explicitly -- see the docblock
-        // above onionpress_moss_upload_error_message().
-        if ( ! isset( $f['error'] ) || $f['error'] !== UPLOAD_ERR_OK ) {
-            list( $msg, $status ) = onionpress_moss_upload_error_message(
-                isset( $f['error'] ) ? $f['error'] : -1 );
-            return onionpress_moss_error( $msg, $status );
-        }
-        if ( empty( $f['tmp_name'] ) || ! is_uploaded_file( $f['tmp_name'] ) ) {
-            return onionpress_moss_error( 'upload did not arrive via HTTP POST', 400 );
-        }
+    // Check the upload error first and explicitly -- see the docblock
+    // above onionpress_static_upload_error_message().
+    if ( ! isset( $f['error'] ) || $f['error'] !== UPLOAD_ERR_OK ) {
+        list( $msg, $status ) = onionpress_static_upload_error_message(
+            isset( $f['error'] ) ? $f['error'] : -1 );
+        return onionpress_static_error( $msg, $status );
+    }
+    if ( empty( $f['tmp_name'] ) || ! is_uploaded_file( $f['tmp_name'] ) ) {
+        return onionpress_static_error( 'upload did not arrive via HTTP POST', 400 );
+    }
 
-        list( $ok, $err ) = onionpress_moss_save_uploaded_part( $f['tmp_name'], $tar_path );
-        if ( ! $ok ) {
-            return onionpress_moss_error( $err, 500 );
-        }
-    } else {
-        // Legacy raw-body path. WordPress has already consumed php://input
-        // into the request body, so we read it back via get_body(); by
-        // this point a too-large body has already either been rejected by
-        // post_max_size (empty body here) or has already cost the memory
-        // that onionpress-uploads.ini's memory_limit exists to cover.
-        $body = $request->get_body();
-        if ( $body === '' || $body === null ) {
-            return onionpress_moss_error( 'empty request body', 400 );
-        }
-        if ( @file_put_contents( $tar_path, $body ) === false ) {
-            return onionpress_moss_error( 'cannot write upload', 500 );
-        }
+    list( $ok, $err ) = onionpress_static_save_uploaded_part( $f['tmp_name'], $tar_path );
+    if ( ! $ok ) {
+        return onionpress_static_error( $err, 500 );
     }
 
     // Fresh extraction target.
-    onionpress_moss_rmrf( $tmp_dir );
+    onionpress_static_rmrf( $tmp_dir );
 
-    list( $ok, $err ) = onionpress_moss_extract_tar( $tar_path, $tmp_dir );
+    list( $ok, $err ) = onionpress_static_extract_tar( $tar_path, $tmp_dir );
     if ( ! $ok ) {
-        onionpress_moss_rmrf( $tmp_dir );
+        onionpress_static_rmrf( $tmp_dir );
         @unlink( $tar_path );
-        return onionpress_moss_error( 'extract failed: ' . $err, 400 );
+        return onionpress_static_error( 'extract failed: ' . $err, 400 );
     }
 
     // A generation id is single-use; refuse to clobber an existing one.
     if ( file_exists( $final_dir ) ) {
-        onionpress_moss_rmrf( $tmp_dir );
+        onionpress_static_rmrf( $tmp_dir );
         @unlink( $tar_path );
-        return onionpress_moss_error( 'generation already exists', 409 );
+        return onionpress_static_error( 'generation already exists', 409 );
     }
 
     if ( ! @rename( $tmp_dir, $final_dir ) ) {
-        onionpress_moss_rmrf( $tmp_dir );
+        onionpress_static_rmrf( $tmp_dir );
         @unlink( $tar_path );
-        return onionpress_moss_error( 'cannot finalise generation', 500 );
+        return onionpress_static_error( 'cannot finalise generation', 500 );
     }
 
     @unlink( $tar_path );
@@ -739,15 +771,15 @@ function onionpress_moss_route_generation( $request ) {
  * itself or an existing subsite, flips `site/current` atomically, then GCs
  * old generations (keeping the newest few and always the live one).
  */
-function onionpress_moss_route_commit( $request ) {
+function onionpress_static_route_commit( $request ) {
     $id = $request->get_param( 'generation' );
-    if ( ! onionpress_moss_valid_id( $id ) ) {
-        return onionpress_moss_error( 'invalid generation id', 400 );
+    if ( ! onionpress_static_valid_id( $id ) ) {
+        return onionpress_static_error( 'invalid generation id', 400 );
     }
 
-    $gen_dir = ONIONPRESS_MOSS_GENERATIONS . '/' . $id;
+    $gen_dir = ONIONPRESS_STATIC_GENERATIONS . '/' . $id;
     if ( ! is_dir( $gen_dir ) ) {
-        return onionpress_moss_error( 'unknown generation', 404 );
+        return onionpress_static_error( 'unknown generation', 404 );
     }
 
     // Collision guard: a static file served at the site root must never
@@ -774,30 +806,30 @@ function onionpress_moss_route_commit( $request ) {
             continue;
         }
         if ( in_array( $entry, $reserved, true ) ) {
-            return onionpress_moss_error(
+            return onionpress_static_error(
                 'generation collides with reserved path: ' . $entry, 409 );
         }
     }
 
     // Atomic flip: build the new symlink beside `current`, then rename over
     // it. rename() of a symlink is atomic on the same filesystem.
-    if ( ! is_dir( ONIONPRESS_MOSS_SITE_DIR )
-        && ! @mkdir( ONIONPRESS_MOSS_SITE_DIR, 0755, true ) ) {
-        return onionpress_moss_error( 'cannot create site dir', 500 );
+    if ( ! is_dir( ONIONPRESS_STATIC_SITE_DIR )
+        && ! @mkdir( ONIONPRESS_STATIC_SITE_DIR, 0755, true ) ) {
+        return onionpress_static_error( 'cannot create site dir', 500 );
     }
-    $tmp_link = ONIONPRESS_MOSS_SITE_DIR . '/current.tmp-' . uniqid( '', true );
+    $tmp_link = ONIONPRESS_STATIC_SITE_DIR . '/current.tmp-' . uniqid( '', true );
     @unlink( $tmp_link );
     if ( ! @symlink( $gen_dir, $tmp_link ) ) {
-        return onionpress_moss_error( 'cannot create symlink', 500 );
+        return onionpress_static_error( 'cannot create symlink', 500 );
     }
-    if ( ! @rename( $tmp_link, ONIONPRESS_MOSS_CURRENT ) ) {
+    if ( ! @rename( $tmp_link, ONIONPRESS_STATIC_CURRENT ) ) {
         @unlink( $tmp_link );
-        return onionpress_moss_error( 'cannot activate generation', 500 );
+        return onionpress_static_error( 'cannot activate generation', 500 );
     }
 
-    onionpress_moss_gc_generations();
+    onionpress_static_gc_generations();
 
-    // A commit is moss's whole publish — it replaces the entire static
+    // A commit is the publisher's whole publish — it replaces the entire static
     // site in one atomic flip rather than creating/updating individual
     // WordPress posts, so the wayback archiver's post-level save_post
     // hook never fires for it. Re-archive home + feed the same way
@@ -810,24 +842,24 @@ function onionpress_moss_route_commit( $request ) {
         onionpress_wayback_kick_now();
     }
 
-    $addr = onionpress_moss_onion_address();
+    $addr = onionpress_static_onion_address();
     $url  = $addr !== '' ? 'http://' . $addr . '/' : '';
     return new WP_REST_Response(
         array( 'ok' => true, 'url' => $url ), 200 );
 }
 
 /**
- * Keep only the newest ONIONPRESS_MOSS_KEEP generations, never deleting the
+ * Keep only the newest ONIONPRESS_STATIC_KEEP generations, never deleting the
  * one `current` points at.
  */
-function onionpress_moss_gc_generations() {
-    $current = onionpress_moss_current_generation();
+function onionpress_static_gc_generations() {
+    $current = onionpress_static_current_generation();
     $dirs    = array();
-    foreach ( scandir( ONIONPRESS_MOSS_GENERATIONS ) as $entry ) {
+    foreach ( scandir( ONIONPRESS_STATIC_GENERATIONS ) as $entry ) {
         if ( $entry === '.' || $entry === '..' ) {
             continue;
         }
-        $p = ONIONPRESS_MOSS_GENERATIONS . '/' . $entry;
+        $p = ONIONPRESS_STATIC_GENERATIONS . '/' . $entry;
         if ( is_dir( $p ) && ! is_link( $p ) ) {
             $dirs[ $entry ] = @filemtime( $p );
         }
@@ -837,13 +869,13 @@ function onionpress_moss_gc_generations() {
     $i = 0;
     foreach ( $dirs as $name => $mtime ) {
         $i++;
-        if ( $i <= ONIONPRESS_MOSS_KEEP ) {
+        if ( $i <= ONIONPRESS_STATIC_KEEP ) {
             continue;
         }
         if ( $name === $current ) {
             continue; // never GC the live generation
         }
-        onionpress_moss_rmrf( ONIONPRESS_MOSS_GENERATIONS . '/' . $name );
+        onionpress_static_rmrf( ONIONPRESS_STATIC_GENERATIONS . '/' . $name );
     }
 }
 
@@ -852,23 +884,23 @@ function onionpress_moss_gc_generations() {
  * localhost-trust permission callback.
  */
 add_action( 'rest_api_init', function () {
-    $local = 'onionpress_moss_is_local_request';
+    $local = 'onionpress_static_is_local_request';
 
     register_rest_route( 'onionpress/v1', '/status', array(
         'methods'             => 'GET',
         'permission_callback' => $local,
-        'callback'            => 'onionpress_moss_route_status',
+        'callback'            => 'onionpress_static_route_status',
     ) );
 
     register_rest_route( 'onionpress/v1', '/generation', array(
         'methods'             => 'POST',
         'permission_callback' => $local,
-        'callback'            => 'onionpress_moss_route_generation',
+        'callback'            => 'onionpress_static_route_generation',
     ) );
 
     register_rest_route( 'onionpress/v1', '/commit', array(
         'methods'             => 'POST',
         'permission_callback' => $local,
-        'callback'            => 'onionpress_moss_route_commit',
+        'callback'            => 'onionpress_static_route_commit',
     ) );
 } );

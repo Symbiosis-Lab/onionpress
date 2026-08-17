@@ -156,12 +156,13 @@ class TestOnionnameArgParsing(unittest.TestCase):
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_bare_onionname_is_error(self, MockCLI):
-        # No subcommand → help + non-zero (moss always passes a subcommand).
+        # No subcommand → help + non-zero (a driving app always passes one).
         self.assertEqual(main(["onionname"]), 1)
 
 
 class TestOnionnameCommands(unittest.TestCase):
-    """The JSON shapes moss parses from stdout, with the Registrar mocked."""
+    """The JSON shapes an external app parses from stdout, with the
+    Registrar mocked."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -191,7 +192,7 @@ class TestOnionnameCommands(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             rc = fn(*args)
         out = buf.getvalue().strip()
-        # Exactly one JSON line on stdout — the contract moss relies on.
+        # Exactly one JSON line on stdout — the contract callers rely on.
         assert "\n" not in out, f"expected one line, got: {out!r}"
         return rc, json.loads(out)
 

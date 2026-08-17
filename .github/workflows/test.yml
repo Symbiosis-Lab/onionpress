@@ -34,11 +34,15 @@ jobs:
       # WordPress dependency, so they run standalone (each script defines
       # ABSPATH and stubs add_action, then requires the plugin). They had
       # no CI job at all, which is how the v1.2 upload guards and now the
-      # v1.3 status-source selection could only be checked by hand.
+      # v2.1 status-source selection could only be checked by hand.
+      #
+      # The glob covers every receiver test, not just the status one: the
+      # v2.0 hardening landed tests/test-static-receiver-upload.php on main
+      # with no job to run it, so it had never executed in CI either.
       - name: Run receiver unit tests
         run: |
           set -e
-          for t in tests/test-moss-receiver-*.php; do
+          for t in tests/test-static-receiver-*.php; do
             echo "== $t"
             php "$t"
           done
