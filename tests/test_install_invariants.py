@@ -772,14 +772,22 @@ class TestLinuxReinstallBrowserOpen(unittest.TestCase):
 
     def test_auto_opened_browser_respects_first_run(self):
         src = _read("src/menubar.py")
-        # The assignment must include the _is_first_run guard.
+        # The assignment must include the _is_first_run guard. The
+        # quiet_launch term (moss-managed copy never auto-opens) wraps it
+        # with `or`, which preserves this invariant: on a loud copy the
+        # first-run-opens-browser behavior is unchanged.
         self.assertRegex(
             src,
-            r'self\.auto_opened_browser\s*=\s*self\._had_cached_address\s+and\s+not\s+self\._is_first_run',
+            r'self\.auto_opened_browser\s*=\s*\(\s*'
+            r'self\.quiet_launch\s*'
+            r'or\s*\(self\._had_cached_address\s+and\s+not\s+self\._is_first_run\)\s*'
+            r'\)',
             "auto_opened_browser must be False when _is_first_run is True, "
             "regardless of _had_cached_address — a reinstall imports the "
             "existing key before Python starts, making _had_cached_address "
-            "True even on a fresh install, which suppressed the browser open.",
+            "True even on a fresh install, which suppressed the browser open. "
+            "The only term allowed to force it True is quiet_launch (the "
+            "moss-managed copy never auto-opens a browser).",
         )
 
 
@@ -1568,6 +1576,76 @@ class TestGenerationUploadCarrier(unittest.TestCase):
             "raw-body carrier was removed at receiver_version 2.0 because "
             "WP buffers it into PHP memory before the route can reject it. "
             "Uploads must stay multipart-only (get_file_params).",
+        )
+
+
+class TestMossManagedQuietLaunch(unittest.TestCase):
+    """Guard the quiet-launch wiring for the moss-staged copy.
+
+    Incident: moss installs the stack under ~/.moss/stacks/onionpress/ and
+    launches it with `open -a` after a quiet, headless provision — but the
+    MenubarApp unconditionally popped a floating "Launching OnionPress..."
+    splash on every start, auto-opened a browser on first ready, and
+    answered every later `open -a` (macOS reopen event) by popping the Tor
+    browser. Product requirement: the moss-managed copy starts with zero
+    visible UI beyond the menu bar icon. The decision lives in
+    onionpress.platform.is_quiet_launch (behaviorally tested in
+    test_onionpress_platform.py); these checks pin the menubar.py wiring.
+    """
+
+    def test_launch_splash_is_guarded_by_quiet_launch(self):
+        src = _read("src/menubar.py")
+        self.assertRegex(
+            src,
+            r'if\s+not\s+self\.quiet_launch:\s*\n\s*self\.show_launch_splash\(\)',
+            "show_launch_splash() must only run when quiet_launch is False "
+            "— an unconditional splash is exactly the window moss's quiet "
+            "install must not pop.",
+        )
+        # And there must be no other, unguarded call site.
+        calls = re.findall(r'self\.show_launch_splash\(\)', src)
+        self.assertEqual(
+            len(calls), 1,
+            "Exactly one show_launch_splash() call site is expected (the "
+            "quiet_launch-guarded one in __init__). A second call site "
+            "would need its own quiet_launch guard.",
+        )
+
+    def test_reopen_does_not_open_browser_on_quiet_copy(self):
+        src = _read("src/menubar.py")
+        m = re.search(
+            r'def\s+handle_reopen\(self\):(.*?)(?=\n    def\s)',
+            src, re.DOTALL)
+        self.assertIsNotNone(m, "handle_reopen must exist in src/menubar.py")
+        body = m.group(1)
+        browser_call = body.find("open_tor_browser")
+        quiet_guard = body.find("quiet_launch")
+        self.assertNotEqual(browser_call, -1,
+                            "handle_reopen should still open the browser "
+                            "on a loud (standalone) copy.")
+        self.assertNotEqual(
+            quiet_guard, -1,
+            "handle_reopen must consult quiet_launch — moss re-runs "
+            "`open -a OnionPress.app` on every stack bring-up and macOS "
+            "delivers it as a reopen event, which must not pop a browser "
+            "on the managed copy.",
+        )
+        self.assertLess(
+            quiet_guard, browser_call,
+            "The quiet_launch guard must come before the open_tor_browser "
+            "call, so the managed copy returns without opening anything.",
+        )
+
+    def test_quiet_copy_never_runs_own_setup_wizard(self):
+        src = _read("src/menubar.py")
+        self.assertRegex(
+            src,
+            r'if\s+self\.quiet_launch\s+and\s+self\._is_first_run:'
+            r'(?:\n\s*#[^\n]*)*\n\s*self\._is_first_run\s*=\s*False',
+            "On the quiet (moss-managed) copy a missing .setup_complete "
+            "marker means moss crashed mid-provision and will re-provision "
+            "on its next bring-up — OnionPress popping its own setup wizard "
+            "would fight moss for the same WordPress.",
         )
 
 

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from onionpress.platform import (
     OS, Arch, OnionPressPaths,
     detect_os, detect_arch, detect_timezone, resolve_paths, find_app_bundle,
+    is_moss_managed, is_quiet_launch,
 )
 
 
@@ -144,6 +145,76 @@ class TestFindAppBundle(unittest.TestCase):
     def test_returns_string_or_none(self):
         result = find_app_bundle()
         self.assertTrue(result is None or isinstance(result, str))
+
+
+class TestIsMossManaged(unittest.TestCase):
+    """is_moss_managed: the moss-staged copy is recognized by its location."""
+
+    def test_moss_staged_bundle_is_managed(self):
+        self.assertTrue(is_moss_managed(
+            "/Users/alice/.moss/stacks/onionpress/OnionPress.app"))
+
+    def test_applications_install_is_not_managed(self):
+        self.assertFalse(is_moss_managed("/Applications/OnionPress.app"))
+
+    def test_renamed_bundle_under_stacks_is_still_managed(self):
+        # Detection is by location, not bundle name — the user may have
+        # renamed the app in Finder.
+        self.assertTrue(is_moss_managed(
+            "/Users/alice/.moss/stacks/onionpress/MyOnion.app"))
+
+    def test_moss_without_stacks_segment_is_not_managed(self):
+        # ".moss" alone (e.g. a site folder's .moss build dir) is not the
+        # stack staging area.
+        self.assertFalse(is_moss_managed(
+            "/Users/alice/Sites/blog/.moss/OnionPress.app"))
+
+    def test_stacks_dir_not_under_dot_moss_is_not_managed(self):
+        self.assertFalse(is_moss_managed(
+            "/Users/alice/stacks/onionpress/OnionPress.app"))
+
+    def test_empty_and_none_are_not_managed(self):
+        self.assertFalse(is_moss_managed(""))
+        self.assertFalse(is_moss_managed(None))
+
+    def test_trailing_slash_and_dot_segments_are_normalized(self):
+        self.assertTrue(is_moss_managed(
+            "/Users/alice/.moss/stacks/onionpress/./OnionPress.app/"))
+
+
+class TestIsQuietLaunch(unittest.TestCase):
+    """is_quiet_launch: env override wins; else moss-managed decides."""
+
+    MOSS_BUNDLE = "/Users/alice/.moss/stacks/onionpress/OnionPress.app"
+    STANDALONE_BUNDLE = "/Applications/OnionPress.app"
+
+    def test_moss_staged_copy_is_quiet_by_default(self):
+        self.assertTrue(is_quiet_launch(self.MOSS_BUNDLE, environ={}))
+
+    def test_standalone_copy_is_loud_by_default(self):
+        self.assertFalse(is_quiet_launch(self.STANDALONE_BUNDLE, environ={}))
+
+    def test_env_forces_quiet_on_standalone_copy(self):
+        for value in ("1", "true", "YES", " on "):
+            self.assertTrue(is_quiet_launch(
+                self.STANDALONE_BUNDLE, environ={"ONIONPRESS_QUIET": value}),
+                msg=f"ONIONPRESS_QUIET={value!r} should force quiet")
+
+    def test_env_forces_loud_on_moss_copy(self):
+        for value in ("0", "false", "NO", "off"):
+            self.assertFalse(is_quiet_launch(
+                self.MOSS_BUNDLE, environ={"ONIONPRESS_QUIET": value}),
+                msg=f"ONIONPRESS_QUIET={value!r} should force loud")
+
+    def test_unrecognized_env_value_falls_back_to_location(self):
+        self.assertTrue(is_quiet_launch(
+            self.MOSS_BUNDLE, environ={"ONIONPRESS_QUIET": "banana"}))
+        self.assertFalse(is_quiet_launch(
+            self.STANDALONE_BUNDLE, environ={"ONIONPRESS_QUIET": "banana"}))
+
+    def test_default_environ_is_process_environment(self):
+        with mock.patch.dict(os.environ, {"ONIONPRESS_QUIET": "1"}):
+            self.assertTrue(is_quiet_launch(self.STANDALONE_BUNDLE))
 
 
 if __name__ == "__main__":
