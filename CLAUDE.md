@@ -28,6 +28,7 @@
 
 ## Key Architecture
 - macOS menubar app (py2app built from `src/menubar.py`)
+- **Quiet launch on the moss-staged copy**: when the bundle lives under `~/.moss/stacks/` (`onionpress.platform.is_quiet_launch`, override `ONIONPRESS_QUIET=1/0`), the MenubarApp shows no launch splash, never auto-opens a browser, ignores the browser-open half of reopen events, and never runs its own setup wizard — moss owns install/start there and the menu bar icon is the only affordance. A standalone `/Applications` install keeps the full startup UX. Wiring is pinned by `tests/test_install_invariants.py::TestMossManagedQuietLaunch`; don't add a new startup window or auto-open path without routing it through `self.quiet_launch`.
 - Launcher shell script at `app/MacOS/onionpress` (assembled into `OnionPress.app/Contents/MacOS/` at build time)
 - Docker containers (tor, wordpress, mariadb) run inside Colima VM
 - Logs at `~/.onionpress/onionpress.log` and `~/.onionpress/launcher.log`
