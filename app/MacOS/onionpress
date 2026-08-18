@@ -2194,6 +2194,30 @@ ensure_menubar_running() {
     # this script already dropped us out of Rosetta and the child inherits it.
     PYTHONDONTWRITEBYTECODE=1 nohup "$menubar_bin" >> "$LOG_FILE" 2>&1 </dev/null &
     log "start: MenubarApp launched (PID: $!)"
+    # `nohup` only makes the child ignore SIGHUP. It does NOT take the job out
+    # of this shell's job table — and `start` installs
+    #
+    #     trap 'rm -f "$PIDFILE"; kill $(jobs -p) …' EXIT INT TERM HUP
+    #
+    # further down, so without this line the very `start` that revives the
+    # MenubarApp SIGTERMs it again the moment it finishes. That is the
+    # 2026-08-18 report: the app came up, the install completed, and ~35s
+    # later OnionPress tore the whole stack down with nothing in any log to
+    # say why — the trap does not log, and moss (long suspected) never
+    # touched it.
+    #
+    # It looked intermittent for two reasons, and neither is randomness. A
+    # `start` that finds the app already alive returns above and backgrounds
+    # nothing. And a `start` that finds the receiver already answering exits
+    # at the early-exit branch, which is *before* the trap is installed. So
+    # only a cold start — the install — both revives the app and installs the
+    # trap that kills it.
+    #
+    # `disown` and not a narrower trap: the trap's job — reaping this script's
+    # sleeping poll loops — is right, and this launch is the one child that
+    # was always meant to outlive us. The comment above already claimed it
+    # did; this makes the claim true.
+    disown
 }
 
 main() {

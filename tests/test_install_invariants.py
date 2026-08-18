@@ -1296,9 +1296,18 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
             re.escape(probe_call),
             "start must call the receiver probe before anything else.",
         )
-        probe = self.script.index(probe_call)
-        pid_write = self.script.index('echo $$ > "$PIDFILE"')
-        trap_install = self.script.index("trap 'rm -f \"$PIDFILE\"")
+        # Offsets are taken against the script with comment lines removed.
+        # This is an ordering invariant about code, and the launcher's
+        # comments quote the trap verbatim where they explain why a launch
+        # has to be disowned — a plain search finds the quotation first and
+        # the test then compares a comment against a code line.
+        code = "\n".join(
+            line for line in self.script.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        probe = code.index(probe_call)
+        pid_write = code.index('echo $$ > "$PIDFILE"')
+        trap_install = code.index("trap 'rm -f \"$PIDFILE\"")
 
         self.assertLess(
             probe, pid_write,
@@ -1311,7 +1320,7 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
             "PID file on the way out.",
         )
         self.assertIn(
-            "exit 0", self.script[probe:pid_write],
+            "exit 0", code[probe:pid_write],
             "An already-running stack must exit 0 — it is a no-op, not a "
             "conflict.",
         )
