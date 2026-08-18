@@ -53,6 +53,19 @@ def _extract_function(name):
     return match.group(0)
 
 
+def _extract_start_trap():
+    """Return the `trap … EXIT INT TERM HUP` line the `start` arm installs."""
+    with open(LAUNCHER_SRC, "r", encoding="utf-8") as f:
+        src = f.read()
+    matches = re.findall(r"^\s*(trap .*EXIT INT TERM HUP)\s*$", src, re.M)
+    if len(matches) != 1:
+        raise AssertionError(
+            "expected exactly one EXIT INT TERM HUP trap in %s, found %d"
+            % (LAUNCHER_SRC, len(matches))
+        )
+    return matches[0]
+
+
 class TestEnsureMenubarRunning(unittest.TestCase):
 
     def setUp(self):
@@ -110,7 +123,23 @@ class TestEnsureMenubarRunning(unittest.TestCase):
         os.chmod(stub, 0o755)
         return d
 
-    def _run_helper(self, path_prefix=None):
+    def _live_stub_pids(self):
+        """PIDs of our stub MenubarApps that are still running.
+
+        Scoped to this test's temp dir so a developer's real app — which
+        setUp already skips on — could never be counted, and `ps` rather
+        than `pgrep` for the reason the helper itself no longer uses pgrep.
+        """
+        procs = subprocess.run(
+            ["ps", "-x", "-o", "pid=,args="], capture_output=True, text=True,
+        ).stdout.splitlines()
+        return [
+            line.split(None, 1)[0]
+            for line in procs
+            if MENUBAR_MATCH in line and self.tmp in line
+        ]
+
+    def _run_helper(self, path_prefix=None, trap_and_exit=False):
         """Source the real helper with the launcher's globals defined.
 
         Run from a FILE, not `bash -c`: the matcher string would otherwise sit
@@ -118,20 +147,34 @@ class TestEnsureMenubarRunning(unittest.TestCase):
         would find it and no-op. Production runs `bash /…/onionpress start`,
         whose command line carries no such string, so a file keeps the test
         faithful as well as correct.
+
+        With `trap_and_exit`, the script goes on to install the real trap the
+        `start` arm installs and then finish, which is the rest of what a
+        production `start` does after reviving the app.
         """
         env = dict(os.environ)
         if path_prefix:
             env["PATH"] = path_prefix + os.pathsep + env.get("PATH", "")
+        tail = ""
+        if trap_and_exit:
+            # The trap goes in AFTER the revival, as it does in the launcher,
+            # and `start` then runs for a long time before exiting — ~80s in
+            # the reported incident. One second is enough to let the stub get
+            # going so that a dead stub afterwards means the trap killed it,
+            # not that it never ran.
+            tail = f"{_extract_start_trap()}\nsleep 1\nexit 0\n"
         script = textwrap.dedent(f"""\
             set -e
             RESOURCES_DIR={self.resources!r}
             DATA_DIR={self.data_dir!r}
             LOG_FILE={self.log_file!r}
+            PIDFILE={os.path.join(self.data_dir, "onionpress.pid")!r}
             log() {{ echo "[log] $1" >> "$LOG_FILE"; }}
 
             {self.helper}
 
             ensure_menubar_running
+            {tail}
         """)
         runner = os.path.join(self.tmp, "run-helper.sh")
         with open(runner, "w") as f:
@@ -219,7 +262,12 @@ class TestEnsureMenubarRunning(unittest.TestCase):
         app's OWN single-instance check reads (menubar.py __init__), so each
         new copy also sailed past that second line of defence. Three of the
         four lost the race for the onion proxy port with `[Errno 48] Address
-        already in use` and the stack tore itself down 78 seconds later.
+        already in use`.
+
+        The teardown 78 seconds later was blamed on that race for two days
+        and did not belong to it — see
+        test_the_app_survives_the_start_arm_finishing. Both bugs are real and
+        this one is still worth the guard; only the teardown was misattributed.
 
         The stub pgrep here is blind on every platform, so this test asserts
         the guarantee rather than the macOS symptom: a live app is found, and
@@ -319,6 +367,41 @@ class TestEnsureMenubarRunning(unittest.TestCase):
         with open(self.log_file) as f:
             self.assertIn("noise", f.read(),
                           "the MenubarApp's output should land in the log")
+
+    def test_the_app_survives_the_start_arm_finishing(self):
+        """The `start` that revives the app must not then kill it.
+
+        `nohup` makes the child ignore SIGHUP; it does NOT take the job out
+        of the shell's job table. `start` installs
+
+            trap 'rm -f "$PIDFILE"; kill $(jobs -p) …' EXIT INT TERM HUP
+
+        *after* calling ensure_menubar_running, so `jobs -p` still listed the
+        MenubarApp and the trap SIGTERMed it the moment `start` finished.
+        That is the 2026-08-18 report: install completed green, and ~35s
+        later OnionPress tore the whole stack down. Nothing logged it — the
+        trap is silent — and moss, which never touched the app, was suspected
+        for a day.
+
+        It looked intermittent because it is not: it fires only on the
+        `start` that actually spawns the app, since every later one returns
+        early above and creates no job at all.
+
+        The trap is extracted from the launcher rather than retyped here, so
+        a change to it is a change to this test.
+        """
+        self._install_stub(f"#!/bin/sh\ntouch {self.marker!r}\nsleep 30\n")
+        self.addCleanup(self._kill_stubs)
+
+        proc = self._run_helper(trap_and_exit=True)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(self._wait_for_marker(), "stub never started")
+        self.assertTrue(
+            self._live_stub_pids(),
+            "the MenubarApp was killed by `start`'s own EXIT trap — the "
+            "launch must be disowned so the trap cannot reach it",
+        )
 
 
 if __name__ == "__main__":
