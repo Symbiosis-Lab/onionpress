@@ -1676,6 +1676,33 @@ class TestMossManagedQuietLaunch(unittest.TestCase):
             "would fight moss for the same WordPress.",
         )
 
+    def test_launcher_raises_no_ungated_dialog(self):
+        """The Python half was never the whole story.
+
+        `onionpress start` is a shell script and moss runs it directly. On
+        2026-08-18 it raised "OnionPress is already starting up" as an
+        osascript modal in the middle of a moss install — a window moss did
+        not design, in front of someone who had asked moss for something,
+        with nobody at the keyboard to dismiss it. Every dialog the launcher
+        can raise must be gated the same way the MenubarApp's are; what the
+        managed copy has to say goes to stderr and the log, which moss
+        already drains and narrates.
+
+        The shell helper's own behaviour, and its parity with
+        onionpress.platform.is_quiet_launch, live in
+        tests/test_launcher_quiet_launch.py.
+        """
+        lines = _read("app/MacOS/onionpress").splitlines()
+        for i, line in enumerate(lines):
+            if "osascript" not in line or line.lstrip().startswith("#"):
+                continue
+            preceding = "\n".join(lines[max(0, i - 6):i])
+            self.assertIn(
+                "is_quiet_launch", preceding,
+                "app/MacOS/onionpress:%d raises an osascript dialog with no "
+                "is_quiet_launch guard above it." % (i + 1),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

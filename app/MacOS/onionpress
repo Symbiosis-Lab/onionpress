@@ -42,6 +42,38 @@ _BUNDLED_PYTHON_BIN="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
 _BUNDLED_PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
 bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" "$_BUNDLED_PYTHON_BIN" "$@"; }
 
+# Quiet launch — the shell half of onionpress.platform.is_quiet_launch().
+#
+# The moss-staged copy of this bundle lives under ~/.moss/stacks/, and moss
+# drives it headlessly: it owns the install/start experience and narrates
+# every step in its own advisory UI. A dialog raised from here is a window
+# moss did not design appearing in front of someone who asked moss for
+# something — and when the caller is moss's headless installer, there is
+# nobody at the keyboard to dismiss it at all, so an un-dismissed modal
+# stalls the caller instead of failing it. Anything this copy wants to say
+# goes to stderr and the log, which moss already drains.
+#
+# Same rule as the Python, so the two cannot drift: an adjacent
+# `.moss`/`stacks` segment pair in the bundle's own path, with
+# ONIONPRESS_QUIET overriding in both directions. Copy-level rather than
+# launch-level, deliberately — a standalone /Applications install keeps its
+# full first-run UX no matter who starts it.
+APP_BUNDLE="$(dirname "$APP_DIR")"
+is_quiet_launch() {
+    local override
+    override=$(printf '%s' "${ONIONPRESS_QUIET:-}" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    case "$override" in
+        1|true|yes|on) return 0 ;;
+        0|false|no|off) return 1 ;;
+    esac
+    case "$APP_BUNDLE/" in
+        */.moss/stacks/*) return 0 ;;
+    esac
+    return 1
+}
+
 mkdir -p "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/OnionPress → ~/OnionPress.
@@ -2254,14 +2286,19 @@ main() {
                         # answer above, so this is a genuine collision with a
                         # `start` that is still booting, not a double-start
                         # over a healthy stack.
+                        log "start: refused — PID $old_pid is already starting this stack"
                         echo "OnionPress is already starting up (PID $old_pid)." >&2
-                        # The dialog survives because the usual way to reach
-                        # this is double-clicking the app, where stderr is
-                        # invisible. It is now bounded, though: `start` also
-                        # runs unattended (a managing app's stack installer runs it
-                        # headless), and an un-dismissed modal would hang that
-                        # caller forever instead of failing.
-                        osascript -e 'display dialog "OnionPress is already starting up." buttons {"OK"} default button "OK" with icon caution with title "OnionPress" giving up after 10' 2>/dev/null || true
+                        # The dialog is for the standalone install, where the
+                        # usual way to reach this is double-clicking the app and
+                        # stderr is invisible. On the managed copy it must not
+                        # appear at all: moss ran this `start`, so moss is the
+                        # one that should say so, in its own advisory UI, from
+                        # the stderr line above — which it already drains. The
+                        # `giving up after 10` remains as a second line of
+                        # defence for any other unattended caller.
+                        if ! is_quiet_launch; then
+                            osascript -e 'display dialog "OnionPress is already starting up." buttons {"OK"} default button "OK" with icon caution with title "OnionPress" giving up after 10' 2>/dev/null || true
+                        fi
                         exit 1
                     fi
                     # Stale pid file — process no longer running
@@ -2533,7 +2570,6 @@ main() {
             # Full app launch — opens the OnionPress.app bundle, which runs the
             # launcher script (boots Colima VM, starts MenubarApp, starts containers).
             # Safe to call when already running (launcher detects and exits).
-            APP_BUNDLE="$(dirname "$APP_DIR")"
             open "$APP_BUNDLE"
             ;;
 
